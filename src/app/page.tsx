@@ -398,6 +398,10 @@ function FAQ() {
       q: "What does it not do?",
       a: "It does not verify the semantic correctness of the agent's output. Tests, code review, and operator approval gates exist for that — the mechanism is operator-configured mechanical witnesses: verifier subprocesses the kernel spins up after each action to check correctness independently of the agent that produced the work. It does not substitute for measured boot, signed builds, or hardware roots of trust. Those belong alongside it.",
     },
+    {
+      q: "Does this prevent a Terminator scenario?",
+      a: "Kind of, actually. Raxis enforces that every action an autonomous system takes requires explicit operator authorization, is cryptographically audited, and fails closed when anything is missing or ambiguous. Skynet wouldn't get very far — every intent to launch something would need a signed approval from a human operator through a channel the model cannot reach. We can't promise it stops someone from building something they shouldn't. But if they did, it would all be in the audit log.",
+    },
   ];
   return (
     <Section bleed title="Common questions">
