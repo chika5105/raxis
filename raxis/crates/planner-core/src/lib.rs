@@ -98,8 +98,7 @@ pub use custom_tools::{
 pub use dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
 pub use driver::{
     park_on_signal, run_role_session, run_role_session_with_model, DriverError, DriverOutcome,
-    DEFAULT_PLANNER_BASE_URL, DEFAULT_PLANNER_MAX_TOKENS, DEFAULT_PLANNER_MAX_TURNS,
-    DEFAULT_WORKSPACE_PATH,
+    DEFAULT_PLANNER_MAX_TOKENS, DEFAULT_PLANNER_MAX_TURNS, DEFAULT_WORKSPACE_PATH,
 };
 pub use error::PlannerError;
 pub use intent::{
