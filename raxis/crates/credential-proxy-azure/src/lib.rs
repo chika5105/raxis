@@ -57,9 +57,9 @@
 //! drives a real `client_credentials`-grant exchange against
 //! the closed-allowlist `login.microsoftonline.com` endpoint
 //! and serves the upstream-issued short-lived access token
-//! to the in-VM SDK. The form-encoder + AAD response parser
-//! + IMDS-shape adapter + cache + audit emission lives in
-//! `forwarding.rs`. See
+//! to the in-VM SDK. The form encoder, AAD response parser,
+//! IMDS-shape adapter, token cache, and audit emission all
+//! live in `forwarding.rs`. See
 //! `specs/v3/cloud-proxy-forwarding.md §2.3, §5, §6.3`.
 //!
 //! The `tenant_id` / `client_id` / `client_secret` come from

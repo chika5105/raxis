@@ -59,9 +59,9 @@
 //! drives a real JWT-bearer-grant exchange against the
 //! closed-allowlist `oauth2.googleapis.com` endpoint and
 //! serves the upstream-issued short-lived access token to
-//! the in-VM SDK. The RS256 JWT signer + form encoder + cache
-//! + audit emission lives in `forwarding.rs`. See
-//! `specs/v3/cloud-proxy-forwarding.md §2.2, §5, §6.2`.
+//! the in-VM SDK. The RS256 JWT signer, form encoder, token
+//! cache, and audit emission all live in `forwarding.rs`.
+//! See `specs/v3/cloud-proxy-forwarding.md §2.2, §5, §6.2`.
 //!
 //! The non-`/token` endpoints (`/email`, `/project-id`, etc.)
 //! keep their V2 behaviour even with forwarding enabled —
