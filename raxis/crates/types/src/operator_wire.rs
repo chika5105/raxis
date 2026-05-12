@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// `Clone` is intentional — both the dispatcher and the audit emit may
 /// hold references; cloning costs are dominated by the embedded plan
-/// blob (`CreateInitiative.plan_toml`), which the dispatcher already
-/// owns by the time the cost matters.
+/// blob (`CreateInitiative.plan_bundle_hex`), which the dispatcher
+/// already owns by the time the cost matters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", content = "payload")]
 pub enum OperatorRequest {
@@ -69,17 +69,21 @@ pub enum OperatorRequest {
     },
 
     // ── initiative lifecycle ──────────────────────────────────────────
-    CreateInitiative {
-        plan_toml:    String,
-        plan_sig_hex: String,
-        submitted_by: String,
-    },
-    /// V2.1 plan-bundle-sealed initiative creation.
+    /// Plan-bundle-sealed initiative creation. Normative reference:
+    /// `specs/v2/plan-bundle-sealing.md` §3.4 (IPC envelope) and §4.2
+    /// step 10 (CLI submit phase).
     ///
-    /// Normative reference: `specs/v2/plan-bundle-sealing.md` §3.4 (IPC
-    /// envelope) and §4.2 step 10 (CLI submit phase).
+    /// Historical note: an earlier, V1 path-based variant carried
+    /// `{plan_toml, plan_sig_hex, submitted_by}` and shared the
+    /// `CreateInitiative` discriminant on the wire. V2.5 deletes
+    /// that variant outright — the only `CreateInitiative` shape on
+    /// the operator socket is the sealed plan-bundle envelope below.
+    /// CLI builds older than V2.5 emitting the V1 payload now fail
+    /// at decode with `FAIL_PLAN_BUNDLE_DECODE_FAILED` (serde
+    /// rejects the unknown fields), which is the intended forcing
+    /// function for the upgrade.
     ///
-    /// The wire fields differ structurally from V1:
+    /// The wire fields:
     ///
     /// * `initiative_id` is **CLI-chosen** (UUIDv7). V1 had the kernel
     ///   assign one server-side; V2 hands authority for the id to the
@@ -108,17 +112,15 @@ pub enum OperatorRequest {
     /// **Hex-encoding choice (best-judgment, documented in spec):**
     /// the V2 spec lists raw Rust types (`Vec<u8>`, `[u8; 32]`,
     /// `[u8; 64]`, `OperatorFingerprint`). The actual JSON wire format
-    /// uses lowercase hex strings for byte-array fields because the
-    /// V1 envelope (`plan_sig_hex`, fingerprints in `policy.operators`)
-    /// is also hex-on-the-wire — keeping the encoding consistent across
-    /// V1 and V2 wire variants means the operator socket has a single
-    /// "what does a bytes field look like" answer and the JSON-frame
-    /// contract test in `tests::create_initiative_v2_pinned` can pin
-    /// the byte shape with a regular string literal. The hex values
-    /// are decoded back into the typed bundle structures
-    /// (`BundleSha256` / `BundleNonce` / `OperatorFingerprint`) by
-    /// the kernel admission decoder.
-    CreateInitiativeV2 {
+    /// uses lowercase hex strings for byte-array fields so the
+    /// operator socket has a single "what does a bytes field look
+    /// like" answer and the JSON-frame contract test in
+    /// `tests::create_initiative_wire_shape` can pin the byte shape
+    /// with a regular string literal. The hex values are decoded back
+    /// into the typed bundle structures (`BundleSha256` /
+    /// `BundleNonce` / `OperatorFingerprint`) by the kernel admission
+    /// decoder.
+    CreateInitiative {
         /// CLI-chosen UUIDv7. Rejected with
         /// `FAIL_INITIATIVE_ID_COLLISION` on collision.
         initiative_id:    String,
@@ -624,34 +626,22 @@ mod tests {
 
     #[test]
     fn create_initiative_wire_shape() {
-        round_trip(
-            &OperatorRequest::CreateInitiative {
-                plan_toml:    "[[tasks]]\ntask_id = \"t1\"".into(),
-                plan_sig_hex: "00ff".into(),
-                submitted_by: "op-prime".into(),
-            },
-            json!({
-                "op": "CreateInitiative",
-                "payload": {
-                    "plan_toml": "[[tasks]]\ntask_id = \"t1\"",
-                    "plan_sig_hex": "00ff",
-                    "submitted_by": "op-prime"
-                }
-            }),
-        );
-    }
-
-    #[test]
-    fn create_initiative_v2_wire_shape() {
-        // Pin the V2.1 envelope hex-encoded byte shape exactly. If
-        // this test fails, every released CLI/kernel pair stops
-        // talking — treat the field set/order/encoding as a
+        // Pin the plan-bundle-sealed envelope hex-encoded byte shape
+        // exactly. If this test fails, every released CLI/kernel pair
+        // stops talking — treat the field set/order/encoding as a
         // forever-stable wire contract. Spec: plan-bundle-sealing.md
         // §3.4 + §11.1 "CLI workflow" landing.
+        //
+        // V2.5 collapses the previous V1 `{plan_toml, plan_sig_hex,
+        // submitted_by}` shape under the same `CreateInitiative`
+        // discriminant — the V1 byte shape is now a hard decode
+        // failure, intentionally. There is no separate V2 wire-shape
+        // test because there is only one `CreateInitiative` shape
+        // left.
         let sig_hex = "02".repeat(64);
         let bundle_sha_hex = "01".repeat(32);
         round_trip(
-            &OperatorRequest::CreateInitiativeV2 {
+            &OperatorRequest::CreateInitiative {
                 initiative_id:     "0192a8f0-1234-7abc-9000-000000000001".into(),
                 plan_bundle_hex:   "deadbeef".into(),
                 bundle_sha256_hex: bundle_sha_hex.clone(),
@@ -659,7 +649,7 @@ mod tests {
                 signed_by_hex:     "0303030303030303".into(),
             },
             json!({
-                "op": "CreateInitiativeV2",
+                "op": "CreateInitiative",
                 "payload": {
                     "initiative_id":     "0192a8f0-1234-7abc-9000-000000000001",
                     "plan_bundle_hex":   "deadbeef",

@@ -375,8 +375,10 @@ pub enum AuditEventKind {
     /// kernel's audit-rate-limit table; the wire shape below is
     /// forward-compatible.
     DryRunAdmitted {
-        /// Operator-supplied submitter id (mirrors
-        /// `CreateInitiative::submitted_by`).
+        /// Operator-supplied submitter id (mirrors the
+        /// `OperatorRequest::DryRunAdmit::submitted_by` wire field;
+        /// historical V1 `CreateInitiative` carried the same field
+        /// pre-V2.5).
         submitted_by:   String,
         /// Active policy epoch at the moment of dry-run; lets a
         /// later forensic query line dry-run results up against

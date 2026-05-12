@@ -68,7 +68,7 @@
 //!     wraps it in a V2.1 plan-bundle (signed_at + nonce + ed25519
 //!     signature with the same operator key the cert advertised), and
 //!     submits it via the real operator UDS handshake +
-//!     `OperatorRequest::CreateInitiativeV2` JSON IPC frame.
+//!     `OperatorRequest::CreateInitiative` JSON IPC frame.
 //!
 //!   * **Approval**: submits `OperatorRequest::ApprovePlan` over the
 //!     same authenticated connection. The kernel's
@@ -500,14 +500,12 @@ fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
     let cert = ephemeral_cert_with_key(signing_key, CertOpts {
         now_unix_secs,
         permitted_ops: vec![
-            // V2.1 IPC: the test wraps the plan in a signed
-            // PlanBundle and goes through `CreateInitiativeV2`.
-            // The legacy `CreateInitiative` op is still listed so
-            // the same cert can drive any V1-compatibility surface
-            // (e.g. fallback paths inside the kernel that still
-            // resolve through `intent::handle_create_initiative`).
+            // V2.5 IPC: the test wraps the plan in a signed
+            // PlanBundle and goes through the sole
+            // `CreateInitiative` discriminant on the wire (the V1
+            // path-based variant + the V2-named `CreateInitiativeV2`
+            // alias were collapsed in V2.5).
             "CreateInitiative".to_owned(),
-            "CreateInitiativeV2".to_owned(),
             "ApprovePlan".to_owned(),
             "AbortInitiative".to_owned(),
         ],
@@ -799,7 +797,7 @@ impl OperatorIpc {
         Self { stream }
     }
 
-    /// Submit a `CreateInitiativeV2` request carrying a freshly-
+    /// Submit a `CreateInitiative` request carrying a freshly-
     /// signed plan bundle. The plan TOML body is the spec's §4
     /// example, modulo the verifier section (deferred — V2 verifier
     /// dispatch is a separate slice; the test asserts the
@@ -816,7 +814,7 @@ impl OperatorIpc {
         let fingerprint = fingerprint_8(&pubkey);
 
         let req = serde_json::json!({
-            "op": "CreateInitiativeV2",
+            "op": "CreateInitiative",
             "payload": {
                 "initiative_id":     initiative_id,
                 "plan_bundle_hex":   hex::encode(&canonical),
@@ -825,7 +823,7 @@ impl OperatorIpc {
                 "signed_by_hex":     hex::encode(fingerprint.as_bytes()),
             },
         });
-        write_json_frame(&mut self.stream, &req).expect("write CreateInitiativeV2");
+        write_json_frame(&mut self.stream, &req).expect("write CreateInitiative");
         let resp = read_json_blocking(&mut self.stream);
         // Wire shape per `raxis_types::operator_wire::OperatorResponse`
         // (`#[serde(tag = "status", content = "payload")]`):
@@ -833,7 +831,7 @@ impl OperatorIpc {
         //     "payload": { "initiative_id": "<uuid>", "status": "Draft" } }
         assert_eq!(
             resp["status"].as_str(), Some("InitiativeCreated"),
-            "CreateInitiativeV2 must succeed; got: {resp:#}",
+            "CreateInitiative must succeed; got: {resp:#}",
         );
         let returned_id = resp["payload"]["initiative_id"]
             .as_str()
