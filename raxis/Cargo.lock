@@ -3150,6 +3150,8 @@ dependencies = [
  "bytes",
  "hex",
  "httparse",
+ "raxis-audit-tools",
+ "raxis-credential-proxy-cloud-shared",
  "raxis-credentials",
  "serde",
  "serde_json",

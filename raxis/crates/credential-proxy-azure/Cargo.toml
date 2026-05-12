@@ -9,7 +9,9 @@ description = "Azure IMDS-compatible credential proxy. Emits /metadata/identity/
 path = "src/lib.rs"
 
 [dependencies]
-raxis-credentials = { workspace = true }
+raxis-credentials                     = { workspace = true }
+raxis-credential-proxy-cloud-shared   = { workspace = true }
+raxis-audit-tools                     = { workspace = true }
 
 tokio     = { workspace = true }
 httparse  = "1"

@@ -83,13 +83,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use raxis_audit_tools::AuditSink;
+use raxis_credential_proxy_cloud_shared::{CloudHttpClient, TokenCache};
 use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+pub mod forwarding;
 pub mod restriction;
 
+use crate::forwarding::AzureCacheValue;
+
+pub use forwarding::{AZURE_JSON_CONTENT_TYPE, ForwardOutcome, ForwardingConfig};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------
@@ -146,6 +152,12 @@ pub struct ProxyConfig {
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
     pub restrictions:    Restrictions,
+    /// V3 forwarding configuration. When `Some`, the IMDS
+    /// `/metadata/identity/oauth2/token` endpoint drives a
+    /// real `client_credentials`-grant OAuth2 exchange
+    /// against the closed-allowlist `login.microsoftonline.com`
+    /// endpoint. See `specs/v3/cloud-proxy-forwarding.md`.
+    pub forwarding:      Option<ForwardingConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -329,15 +341,20 @@ fn pick_str<'a>(
 
 /// Azure IMDS-compatible credential proxy.
 pub struct AzureProxy {
-    listener: TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    stats:    Arc<ProxyStats>,
-    audit:    Arc<dyn AuditChannel>,
+    listener:    TcpListener,
+    backend:     Arc<dyn CredentialBackend>,
+    config:      ProxyConfig,
+    stats:       Arc<ProxyStats>,
+    audit:       Arc<dyn AuditChannel>,
+    audit_sink:  Option<Arc<dyn AuditSink>>,
+    http_client: Option<Arc<CloudHttpClient>>,
+    token_cache: Option<Arc<TokenCache<AzureCacheValue>>>,
 }
 
 impl AzureProxy {
-    /// Bind a listener and return an owned proxy.
+    /// Bind a listener and return an owned proxy. V2-only
+    /// constructor — see [`Self::bind_v3`] for the
+    /// V3-cloud-forwarding-aware constructor.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
         config:  ProxyConfig,
@@ -354,6 +371,35 @@ impl AzureProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
+            audit_sink:  None,
+            http_client: None,
+            token_cache: None,
+        })
+    }
+
+    /// Bind a listener with V3 forwarding plumbing.
+    pub async fn bind_v3(
+        backend:     Arc<dyn CredentialBackend>,
+        config:      ProxyConfig,
+        audit:       Arc<dyn AuditChannel>,
+        audit_sink:  Arc<dyn AuditSink>,
+        http_client: Arc<CloudHttpClient>,
+        token_cache: Arc<TokenCache<AzureCacheValue>>,
+    ) -> Result<Self, ProxyError> {
+        let listener = TcpListener::bind(&config.listen_addr).await
+            .map_err(|source| ProxyError::Bind {
+                addr:   config.listen_addr.clone(),
+                source,
+            })?;
+        Ok(Self {
+            listener,
+            backend,
+            config,
+            stats: Arc::new(ProxyStats::default()),
+            audit,
+            audit_sink:  Some(audit_sink),
+            http_client: Some(http_client),
+            token_cache: Some(token_cache),
         })
     }
 
@@ -374,12 +420,18 @@ impl AzureProxy {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
                     self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend = Arc::clone(&self.backend);
-                    let config  = self.config.clone();
-                    let stats   = Arc::clone(&self.stats);
-                    let audit   = Arc::clone(&self.audit);
+                    let backend     = Arc::clone(&self.backend);
+                    let config      = self.config.clone();
+                    let stats       = Arc::clone(&self.stats);
+                    let audit       = Arc::clone(&self.audit);
+                    let audit_sink  = self.audit_sink.clone();
+                    let http_client = self.http_client.clone();
+                    let token_cache = self.token_cache.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
+                        if let Err(e) = serve_one(
+                            stream, backend, config, stats, audit,
+                            audit_sink, http_client, token_cache,
+                        ).await {
                             tracing::warn!(error = %e, "azure proxy connection ended with error");
                         }
                     });
@@ -397,12 +449,16 @@ impl AzureProxy {
 // Per-connection driver. One inbound HTTP/1.1 request per connection.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_one(
-    mut stream: TcpStream,
-    backend:    Arc<dyn CredentialBackend>,
-    config:     ProxyConfig,
-    stats:      Arc<ProxyStats>,
-    audit:      Arc<dyn AuditChannel>,
+    mut stream:  TcpStream,
+    backend:     Arc<dyn CredentialBackend>,
+    config:      ProxyConfig,
+    stats:       Arc<ProxyStats>,
+    audit:       Arc<dyn AuditChannel>,
+    audit_sink:  Option<Arc<dyn AuditSink>>,
+    http_client: Option<Arc<CloudHttpClient>>,
+    token_cache: Option<Arc<TokenCache<AzureCacheValue>>>,
 ) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 1024];
@@ -469,7 +525,98 @@ async fn serve_one(
         return Ok(());
     }
 
-    // Resolve and emit token.
+    // V3 branch — drive a real client_credentials-grant exchange.
+    if let (Some(fwd), Some(sink), Some(http), Some(cache)) = (
+        config.forwarding.as_ref(),
+        audit_sink.as_ref(),
+        http_client.as_ref(),
+        token_cache.as_ref(),
+    ) {
+        let resolved_bytes = match backend.resolve(
+            &config.credential_name, config.consumer.as_ref(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "azure proxy credential resolve failed");
+                write_imds_error(&mut stream, 502, "credential resolve failed").await?;
+                return Ok(());
+            }
+        };
+        let body_str = match resolved_bytes.as_utf8() {
+            Some(s) => s.to_owned(),
+            None    => {
+                tracing::warn!("azure proxy credential body is not UTF-8");
+                write_imds_error(&mut stream, 502, "credential body is not UTF-8").await?;
+                return Ok(());
+            }
+        };
+        let sp = match forwarding::parse_service_principal(&body_str) {
+            Ok(s) => s,
+            Err(_) => {
+                write_imds_error(&mut stream, 502, "service-principal credential malformed").await?;
+                return Ok(());
+            }
+        };
+        let session_id = format!("{}:{}", config.consumer.kind, config.consumer.id);
+        let outcome = forwarding::forward_or_serve_from_cache(
+            fwd, http, cache, sink,
+            &session_id,
+            config.credential_name.as_str(),
+            &sp,
+            &resource,
+        ).await;
+        let allowed_actions_header = match config.restrictions.actions_for(&resource) {
+            Some(actions) if !actions.is_empty() => {
+                let json = serde_json::to_string(actions)
+                    .map_err(|e| std::io::Error::other(format!("json serialise actions: {e}")))?;
+                format!("x-ms-allowed-actions: {json}\r\n")
+            }
+            _ => String::new(),
+        };
+        match outcome {
+            ForwardOutcome::Ok(body) => {
+                let body_len = body.len();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: {ct}\r\n\
+                     Content-Length: {len}\r\n\
+                     Cache-Control: no-store\r\n\
+                     {allowed_actions_header}\
+                     Connection: close\r\n\
+                     \r\n",
+                    ct  = AZURE_JSON_CONTENT_TYPE,
+                    len = body_len,
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(&body).await?;
+                stream.flush().await?;
+                stats.tokens_served.fetch_add(1, Ordering::Relaxed);
+                stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+                audit.emit(audit_event(&config, &method, &path, &resource, false));
+            }
+            ForwardOutcome::UpstreamEnvelope { status, body } => {
+                let body_len = body.len();
+                let header = format!(
+                    "HTTP/1.1 {status} {reason}\r\n\
+                     Content-Type: {ct}\r\n\
+                     Content-Length: {len}\r\n\
+                     Cache-Control: no-store\r\n\
+                     Connection: close\r\n\
+                     \r\n",
+                    reason = code_to_reason(status),
+                    ct     = AZURE_JSON_CONTENT_TYPE,
+                    len    = body_len,
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(&body).await?;
+                stream.flush().await?;
+                stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+            }
+        }
+        return Ok(());
+    }
+
+    // V2 emulator path (forwarding disabled).
     let resolved = match backend.resolve(&config.credential_name, config.consumer.as_ref()) {
         Ok(v) => v,
         Err(e) => {
@@ -639,9 +786,20 @@ async fn write_imds_error(
 
 fn code_to_reason(code: u16) -> &'static str {
     match code {
+        200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
         502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ if (200..300).contains(&code) => "OK",
+        _ if (400..500).contains(&code) => "Client Error",
+        _ if (500..600).contains(&code) => "Server Error",
         _   => "Error",
     }
 }
