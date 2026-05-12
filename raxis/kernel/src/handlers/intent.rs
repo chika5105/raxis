@@ -2014,6 +2014,65 @@ fn increment_executor_review_reject_count(
     Ok(())
 }
 
+/// V2.3 §12.1 / Step 25 push wiring — resolve an `initiative_id` to
+/// the live Orchestrator session that should receive the push.
+///
+/// The mapping closes the V2_GAPS §12.1 gap: every kernel-side push
+/// carries a `SessionId` envelope, but the call sites that fire
+/// pushes (Step 25 review aggregation, Step 21 sub-task admit, etc.)
+/// only know the `initiative_id` of the executor / reviewer they
+/// just touched. The Orchestrator session itself is uniquely
+/// determined by `(initiative_id, session_agent_type='Orchestrator',
+/// revoked=0, expires_at>now)` per Migration 18 + the
+/// `auto_spawn_orchestrator_session_in_tx` invariant in
+/// `initiatives::lifecycle` — so this query is O(1) against the
+/// supporting index and never returns more than one row.
+///
+/// Returns `None` when:
+///   * the initiative is not currently in `Executing` (no live
+///     orchestrator to receive the push);
+///   * the orchestrator session was already revoked / expired (the
+///     re-spawn path in `session_spawn_orchestrator::respawn_
+///     orchestrator_for_initiative` will mint a new one when the
+///     next intent flows; the missed push is harmless because the
+///     audit chain is the canonical record per `push::mod` §V2.3
+///     scope);
+///   * the SQLite read fails — fail-soft, log + continue at the
+///     call site so a transient DB error cannot stall the
+///     post-commit audit emission.
+///
+/// The query mirrors the active-orchestrator preflight in
+/// `session_spawn_orchestrator::respawn_orchestrator_for_initiative`
+/// (same `(initiative_id, session_agent_type, revoked, expires_at)`
+/// predicate) so both code paths agree on what counts as "live"
+/// — diverging that contract would let a push fire to a session
+/// the spawn-side considered dead.
+fn active_orchestrator_session_id_for_initiative(
+    initiative_id: &str,
+    store:         &Store,
+) -> Option<String> {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    conn.query_row(
+        &format!(
+            "SELECT session_id FROM {sessions}
+              WHERE initiative_id     = ?1
+                AND session_agent_type = ?2
+                AND revoked            = 0
+                AND expires_at         > ?3
+              ORDER BY created_at DESC
+              LIMIT 1",
+            sessions = Table::Sessions.as_str(),
+        ),
+        rusqlite::params![
+            initiative_id,
+            raxis_types::SessionAgentType::Orchestrator.as_sql_str(),
+            now,
+        ],
+        |r| r.get::<_, String>(0),
+    ).ok()
+}
+
 fn handle_submit_review(
     req: IntentRequest,
     task_state: TaskState,
@@ -2200,26 +2259,38 @@ fn handle_submit_review(
     //                         sibling Reviewer; emitting now would
     //                         flood the audit chain with N-1
     //                         partial-state rows.
-    //   * `AllPassed`       → emit `ReviewAggregationCompleted`. The
-    //                         V2.3 push dispatcher (`push::mod`) is
-    //                         shipped; once the kernel persists an
-    //                         initiative→Orchestrator-session
-    //                         mapping (gap §12.1 — schema migration
-    //                         pending) the call site here will also
-    //                         fire `push_dispatcher.enqueue(orch,
-    //                         KernelPush::AllReviewersPassed{..})`.
-    //                         Until then the audit row is the
-    //                         canonical signal — the Orchestrator
-    //                         polls the audit chain via
-    //                         `OperatorRequest::ListInitiativeEvents`.
+    //   * `AllPassed`       → emit `ReviewAggregationCompleted` AND
+    //                         enqueue `KernelPush::AllReviewersPassed`
+    //                         on the live Orchestrator session
+    //                         resolved via
+    //                         `active_orchestrator_session_id_for_
+    //                         initiative` (V2_GAPS §12.1). When no
+    //                         live orchestrator is bound the audit
+    //                         row remains the canonical signal —
+    //                         the Orchestrator picks up the verdict
+    //                         on its next admission via
+    //                         `OperatorRequest::ListInitiativeEvents`
+    //                         or via the post-respawn replay path.
     //   * `AtLeastOneRejected` → emit `ReviewAggregationCompleted`
     //                         AND bump `subtask_activations.
     //                         review_reject_count` for the Executor
     //                         predecessor (Step 25 counter — see
-    //                         `increment_executor_review_reject_count`).
-    //                         Push enqueue (`KernelPush::ReviewRejected`)
-    //                         follows the same migration as
-    //                         `AllPassed` above.
+    //                         `increment_executor_review_reject_count`)
+    //                         AND, when the *current* submission is
+    //                         the rejecting verdict (`approved=
+    //                         false`), enqueue
+    //                         `KernelPush::ReviewRejected` carrying
+    //                         the freshly-formatted critique + this
+    //                         reviewer's session_id. Best-judgment
+    //                         scope (documented inline below): the
+    //                         rare race where this submission
+    //                         `approved=true` but a prior sibling
+    //                         already rejected does NOT fire the
+    //                         push — looking up the rejecting
+    //                         sibling's session_id requires a
+    //                         secondary join into
+    //                         `subtask_activations` and is deferred;
+    //                         the audit row covers it.
     //   * `NoSuccessors`    → emit `ReviewAggregationCompleted` for
     //                         defense in depth (a malformed plan
     //                         this kernel let in must surface in
@@ -2235,6 +2306,21 @@ fn handle_submit_review(
         .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Completed))?;
     let session_id_str    = session_id.as_str().to_owned();
     let initiative_id_str = task.initiative_id.clone();
+
+    // Resolve the live Orchestrator session for this initiative
+    // exactly once per SubmitReview admission. Predecessors share
+    // the initiative — the lookup result is identical for every
+    // iteration of the loop below, so a single read is correct.
+    // `None` is the common "no live orchestrator" path (initiative
+    // already terminated, mid-respawn window, etc.) — the audit
+    // emission below still fires; only the in-memory push fan-out
+    // is skipped per the V2.3 audit-canonical contract.
+    let orchestrator_session_id =
+        active_orchestrator_session_id_for_initiative(&initiative_id_str, store)
+            .and_then(|s| SessionId::parse(&s).ok());
+    let initiative_id_obj =
+        raxis_types::InitiativeId::parse(&initiative_id_str).ok();
+    let push_now_unix = unix_now_secs() as i64;
     for predecessor in &predecessors {
         let outcome = match crate::initiatives::review_aggregation
             ::compute_aggregate_review_outcome(predecessor.as_str(), store)
@@ -2311,6 +2397,80 @@ fn handle_submit_review(
                  \"audit_emit_failed\":\"{e}\",\
                  \"executor_task_id\":\"{predecessor}\",\
                  \"reviewer_task_id\":\"{reviewer_task_id}\"}}",
+            );
+        }
+
+        // ── V2_GAPS §12.1 — Step 25 push fan-out ─────────────────────────────
+        //
+        // Audit row is durable; now best-effort enqueue the matching
+        // `KernelPush` on the live Orchestrator session. The push
+        // dispatcher mirrors every enqueue to the audit chain a
+        // second time (see `KernelPushDispatcher::enqueue_with_
+        // context`), but the verdict-canonical
+        // `ReviewAggregationCompleted` row is the source of truth
+        // for the Orchestrator's poll path — so a no-orchestrator
+        // / parse-failure / unsupported-verdict outcome here is a
+        // soft-skip with a log, never an error.
+        if let (Some(orch_sid), Some(executor_task_id_obj)) = (
+            orchestrator_session_id.clone(),
+            raxis_types::TaskId::parse(predecessor.as_str()).ok(),
+        ) {
+            let push_opt = match outcome.verdict {
+                crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed => {
+                    Some(raxis_types::push::KernelPush::AllReviewersPassed {
+                        task_id: executor_task_id_obj,
+                    })
+                }
+                crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected
+                    if !approved =>
+                {
+                    // Best-judgment scope (per the loop preamble):
+                    // surface this submission's critique + session
+                    // when the current reviewer is the cause of the
+                    // terminal-rejected verdict. The rare "this
+                    // reviewer approved, a sibling rejected"
+                    // race-window case does not fire the push —
+                    // selecting the historical rejecting sibling
+                    // requires a secondary join into
+                    // `subtask_activations` that is the next
+                    // increment of work; the audit row covers
+                    // forensic recovery in the meantime.
+                    formatted_critique.as_ref().map(|c| {
+                        raxis_types::push::KernelPush::ReviewRejected {
+                            task_id:             executor_task_id_obj,
+                            critique:            c.clone(),
+                            reviewer_session_id: session_id.clone(),
+                        }
+                    })
+                }
+                _ => None,
+            };
+
+            if let Some(push) = push_opt {
+                let _frame = ctx.push_dispatcher.enqueue_with_context(
+                    orch_sid,
+                    push,
+                    push_now_unix,
+                    initiative_id_obj.clone(),
+                );
+            }
+        } else if matches!(
+            outcome.verdict,
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed
+                | crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected,
+        ) {
+            // Push opportunistically dropped because the orchestrator
+            // session is not currently live (initiative already
+            // terminated, post-revoke window before the next re-spawn,
+            // etc.). The audit row is the canonical record per
+            // V2.3 push-dispatcher scope; structured log here makes
+            // the skip grep-friendly for forensic replay.
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"ReviewAggregationPushSkipped\",\
+                 \"executor_task_id\":\"{predecessor}\",\
+                 \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                 \"verdict\":\"{verdict_str}\",\
+                 \"reason\":\"no_live_orchestrator_session\"}}",
             );
         }
     }
