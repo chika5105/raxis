@@ -7,11 +7,98 @@
  *
  * Spec: raxis/specs/v2/v2_extended_gaps.md §4.4 — UI design
  * principle #1 (dark mode default), #2 (information density).
+ *
+ * Theming model — see dashboard-fe/README.md §"Theme system":
+ *
+ *   * Colors are stored as RGB triplets in CSS custom properties
+ *     (e.g. `--c-ink: 230 232 235`). Tailwind utilities reference
+ *     them via `rgb(var(--c-ink) / <alpha-value>)` so opacity
+ *     suffixes like `bg-panel/30` continue to work unchanged.
+ *
+ *   * `:root` defines the LIGHT palette (default canvas).
+ *   * `:root.dark` overrides with the DARK palette.
+ *   * <html> ships with `class="dark"` so dark mode is the default
+ *     in the HTML, then a small inline script in index.html applies
+ *     the operator's persisted preference before first paint to
+ *     avoid a FOUC.
+ *
+ *   * Operator can toggle via the header toggle (see
+ *     `components/ThemeToggle.tsx`). Preference is persisted to
+ *     `localStorage.theme`; when no explicit preference is stored,
+ *     the system `prefers-color-scheme` media query wins on first
+ *     load and live updates are honoured.
  */
 
 @layer base {
   :root {
+    color-scheme: light;
+
+    /* ── Light palette ─────────────────────────────────────── */
+
+    --c-ink:          23  23  23;   /* neutral-900 — body text  */
+    --c-ink-muted:    82  82  82;   /* neutral-600 — secondary  */
+    --c-ink-subtle:  115 115 115;   /* neutral-500 — tertiary   */
+
+    --c-panel:       250 250 249;   /* warm off-white canvas    */
+    --c-panel-raised: 255 255 255;  /* card surface             */
+    --c-panel-high:  244 244 245;   /* hover / active row       */
+
+    --c-edge:        229 229 229;   /* default border           */
+    --c-edge-strong: 212 212 212;   /* hairline strong          */
+
+    --c-accent:       10 114 137;   /* aegis cyan-deep          */
+    --c-accent-strong:  7  95 115;
+
+    --c-ok:           21 128  61;   /* green-700                */
+    --c-ok-muted:    220 252 231;   /* green-100                */
+    --c-warn:        161  98   7;   /* amber-700                */
+    --c-warn-muted:  254 243 199;   /* amber-100                */
+    --c-bad:         185  28  28;   /* red-700                  */
+    --c-bad-muted:   254 226 226;   /* red-100                  */
+    --c-info:         29  78 216;   /* blue-700                 */
+    --c-info-muted:  219 234 254;   /* blue-100                 */
+    --c-block:       109  40 217;   /* violet-700               */
+    --c-block-muted: 237 233 254;   /* violet-100               */
+
+    /* Tone-agnostic helpers (scrollbar thumb, grid overlay). */
+    --c-scroll-thumb: 212 212 212;
+    --c-grid-line:      0   0   0;
+    --grid-line-alpha: 0.04;
+  }
+
+  :root.dark {
     color-scheme: dark;
+
+    /* ── Dark palette (operator default) ───────────────────── */
+
+    --c-ink:         230 232 235;
+    --c-ink-muted:   168 177 188;
+    --c-ink-subtle:  125 136 146;
+
+    --c-panel:        13  17  23;
+    --c-panel-raised:  22  27  34;
+    --c-panel-high:   31  39  51;
+
+    --c-edge:         34  42  54;
+    --c-edge-strong:  46  56  73;
+
+    --c-accent:       58 134 255;
+    --c-accent-strong: 31 111 235;
+
+    --c-ok:           46 160  67;
+    --c-ok-muted:     28  91  44;
+    --c-warn:        210 153  34;
+    --c-warn-muted:  107  77  16;
+    --c-bad:         248  81  73;
+    --c-bad-muted:   125  29  29;
+    --c-info:         88 166 255;
+    --c-info-muted:   31  77 128;
+    --c-block:       163 113 247;
+    --c-block-muted:  58  39  98;
+
+    --c-scroll-thumb: 46 56 73;
+    --c-grid-line:   255 255 255;
+    --grid-line-alpha: 0.02;
   }
 
   html, body, #root {
@@ -39,11 +126,11 @@
     background: transparent;
   }
   .scroll-thin::-webkit-scrollbar-thumb {
-    background: #2e3849;
+    background: rgb(var(--c-scroll-thumb));
     border-radius: 4px;
   }
   .scroll-thin::-webkit-scrollbar-thumb:hover {
-    background: #3a86ff;
+    background: rgb(var(--c-accent));
   }
 }
 
@@ -97,8 +184,15 @@
   }
   .grid-overlay {
     background-image:
-      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+      linear-gradient(
+        rgb(var(--c-grid-line) / var(--grid-line-alpha)) 1px,
+        transparent 1px
+      ),
+      linear-gradient(
+        90deg,
+        rgb(var(--c-grid-line) / var(--grid-line-alpha)) 1px,
+        transparent 1px
+      );
     background-size: 16px 16px;
   }
 }

@@ -8,6 +8,57 @@
     <meta http-equiv="X-Content-Type-Options" content="nosniff" />
     <title>Raxis Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/raxis-logo.svg" />
+    <!--
+      Theme bootstrap — runs before first paint so the operator's
+      persisted preference (or system preference, on a virgin
+      first visit) wins over the default `class="dark"` shipped
+      in the HTML. Without this script the user would see a flash
+      of dark UI before React mounts and React's ThemeProvider
+      swaps to the chosen mode.
+
+      Behaviour mirrors `lib/theme.tsx`:
+        1. If `localStorage.theme` is "light" or "dark", honour it.
+        2. Otherwise, respect `prefers-color-scheme: light`.
+        3. Default to dark.
+
+      Errors (e.g. `localStorage` blocked in private mode) fall
+      through silently — the document already ships dark.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("theme");
+          var theme;
+          if (stored === "light" || stored === "dark") {
+            theme = stored;
+          } else if (
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: light)").matches
+          ) {
+            theme = "light";
+          } else {
+            theme = "dark";
+          }
+          var root = document.documentElement;
+          if (theme === "dark") {
+            root.classList.add("dark");
+            root.classList.remove("light");
+          } else {
+            root.classList.remove("dark");
+            root.classList.add("light");
+          }
+          var metaTheme = document.querySelector('meta[name="theme-color"]');
+          if (metaTheme) {
+            metaTheme.setAttribute(
+              "content",
+              theme === "dark" ? "#0d1117" : "#fafaf9"
+            );
+          }
+        } catch (_e) {
+          // Bootstrap is best-effort; default markup is dark.
+        }
+      })();
+    </script>
   </head>
   <body class="bg-panel text-ink antialiased">
     <div id="root"></div>
