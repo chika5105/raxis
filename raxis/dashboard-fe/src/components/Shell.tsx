@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 
@@ -223,28 +223,93 @@ export function Shell({ children }: ShellProps) {
   );
 }
 
+// Friendly labels for top-level route segments. Anything not
+// in this map is rendered as-is (e.g. raw IDs / hashes).
+const SEGMENT_LABELS: Record<string, string> = {
+  health: "Health",
+  inbox: "Inbox",
+  notifications: "Notifications",
+  initiatives: "Initiatives",
+  tasks: "Tasks",
+  sessions: "Sessions",
+  escalations: "Escalations",
+  audit: "Audit",
+  git: "Git Worktrees",
+  policy: "Policy",
+};
+
 function Breadcrumb() {
-  const segments =
-    typeof window !== "undefined"
-      ? window.location.pathname.split("/").filter(Boolean)
-      : [];
+  // useLocation makes the breadcrumb update on every SPA
+  // navigation. The previous implementation read
+  // `window.location.pathname` directly, which is correct on
+  // the first render but only re-runs because Shell happens
+  // to re-render on route change — fragile, and broke entirely
+  // when the parent didn't re-render (e.g. nav inside a tab).
+  const location = useLocation();
+  const segments = location.pathname.split("/").filter(Boolean);
+
   if (segments.length === 0) {
     return (
-      <span className="text-sm text-ink-muted">
+      <nav aria-label="Breadcrumb" className="text-sm text-ink-muted">
         <span className="text-ink">Home</span>
-      </span>
+      </nav>
     );
   }
+
   return (
-    <span className="text-sm text-ink-muted">
-      {segments.map((s, i) => (
-        <span key={i}>
-          {i > 0 && <span className="mx-1.5 text-ink-subtle">/</span>}
-          <span className={i === segments.length - 1 ? "text-ink" : ""}>
-            {s}
+    <nav aria-label="Breadcrumb" className="text-sm text-ink-muted">
+      <Link to="/" className="hover:text-accent">
+        Home
+      </Link>
+      {segments.map((seg, i) => {
+        // Truncate long IDs / hashes so the chrome doesn't
+        // overflow when the operator drills into something
+        // like `/sessions/01HXYZ…64hex`. Keep `Mono`-ish
+        // styling for raw IDs (no friendly label match).
+        const isLast = i === segments.length - 1;
+        const friendly = SEGMENT_LABELS[seg];
+        const decoded = (() => {
+          try {
+            return decodeURIComponent(seg);
+          } catch {
+            return seg;
+          }
+        })();
+        const display = friendly
+          ? friendly
+          : decoded.length > 18
+          ? `${decoded.slice(0, 8)}…${decoded.slice(-4)}`
+          : decoded;
+        const path = "/" + segments.slice(0, i + 1).join("/");
+        return (
+          <span key={`${seg}-${i}`}>
+            <span className="mx-1.5 text-ink-subtle">/</span>
+            {isLast ? (
+              <span
+                className={
+                  friendly
+                    ? "text-ink"
+                    : "text-ink font-mono text-[0.78rem]"
+                }
+                title={decoded}
+              >
+                {display}
+              </span>
+            ) : (
+              <Link
+                to={path}
+                className={clsx(
+                  "hover:text-accent",
+                  !friendly && "font-mono text-[0.78rem]",
+                )}
+                title={decoded}
+              >
+                {display}
+              </Link>
+            )}
           </span>
-        </span>
-      ))}
-    </span>
+        );
+      })}
+    </nav>
   );
 }
