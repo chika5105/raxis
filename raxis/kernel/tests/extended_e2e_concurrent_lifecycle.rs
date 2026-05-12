@@ -41,6 +41,96 @@
 //! ```bash
 //! docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait
 //! ```
+//!
+//! ## Future work — richer repo fixture
+//!
+//! The current materializer + fan-out tasks operate on an
+//! essentially empty worktree: the materializer writes one JSON
+//! file per seeded record into `out/postgres/` and `out/mongo/`
+//! and commits; the fan-out tasks each write one or two README/
+//! manifest files. That's enough to exercise the audit chain
+//! (`AuditChainWitness`), the concurrency oracle, and the
+//! enforcement-layer denials, but it does NOT exercise the
+//! harder real-world behaviours raxis needs to be correct on.
+//!
+//! A future iteration should seed a deliberately-rich repo
+//! fixture under `live-e2e/seed/repo/` that the executor must
+//! navigate. Important core functionalities to cover:
+//!
+//!   * **Multi-language source tree** (Rust + TS/JS + Python)
+//!     so the executor must invoke language-specific build/test
+//!     tooling and the egress allowlist is exercised against
+//!     real package registries (`crates.io`,
+//!     `registry.npmjs.org`, `pypi.org`).
+//!   * **Cross-file edits with import graphs** (rename a
+//!     function and update every caller across files; add a
+//!     struct field and update every constructor) so the
+//!     planner's context-window management and the executor's
+//!     multi-file edit discipline are tested under realistic
+//!     load — not just "create new file".
+//!   * **Pre-existing tests and lint config** (rustfmt + clippy
+//!     + eslint + prettier + ruff configs at the root) so the
+//!     executor must respect formatting/lint rules and the
+//!     reviewer must catch violations — exercising the
+//!     review-rejection → re-spawn loop on a real defect, not a
+//!     synthetic "reviewer-A always rejects" disagreement.
+//!   * **Non-trivial git history** (10+ commits with meaningful
+//!     diffs, at least one merge commit, at least one rename
+//!     detected by `git log --follow`) so worktree provisioning,
+//!     gix history walks, and the `IntegrationMerge` intent are
+//!     exercised against realistic ancestry rather than the
+//!     two-commit fixture the current scenario produces.
+//!   * **Mixed file modes**: large binary fixtures (so virtiofs
+//!     / vsock-RPC throughput on the workspace mount is
+//!     exercised), `LICENSE`/`README`/`CONTRIBUTING.md` (so the
+//!     executor's "respect repo conventions" behaviour is
+//!     tested), executable shell scripts (so file-mode
+//!     preservation through worktree provision + commit is
+//!     verified end-to-end).
+//!   * **Credential-proxy diversity in one task**: a single
+//!     task that legitimately needs Postgres + S3 + an HTTP API
+//!     in one execution, so the credential proxy lifecycle
+//!     interleaving and per-credential audit attribution are
+//!     exercised. The proxies are well-tested in isolation by
+//!     `live-e2e` slices, but their composition under one
+//!     session is not.
+//!   * **Path-allowlist edge cases**: a task that legitimately
+//!     needs to write outside the obvious workdir (e.g. write a
+//!     generated file into `target/codegen/`) so the path
+//!     allowlist's POSITIVE cases are exercised, not just the
+//!     deny cases the prompt-injection scenario already covers.
+//!   * **Workspace files designed to surface secrets-handling
+//!     regressions**: a `.env.example` (allowed to read), a
+//!     `.env` (must be denied), a `secrets/` directory (must be
+//!     denied) — so the secret-redaction and write-path
+//!     allowlist are exercised against realistic patterns, not
+//!     just a malicious injection prompt.
+//!   * **Multi-initiative concurrency**: the current scenario
+//!     runs ONE initiative with N subtasks. A future scenario
+//!     should run two or three initiatives in parallel against
+//!     the same kernel instance to exercise lane scheduling,
+//!     budget enforcement, and audit attribution across
+//!     initiative boundaries. Worker D's report explicitly
+//!     called this out as out-of-scope for the V2 PR; this
+//!     comment is the canonical pointer.
+//!   * **Reviewer panel diversity**: a scenario where reviewers
+//!     genuinely disagree on substance (one approves, one
+//!     rejects with a real critique that the executor must then
+//!     address), not just the synthetic "reviewer A always
+//!     rejects" pattern. Exercises the multi-reviewer
+//!     aggregation logic against realistic dissent.
+//!   * **Resume / crash recovery**: a scenario where the kernel
+//!     is intentionally killed mid-task (e.g. `SIGKILL` between
+//!     `SessionVmSpawned` and the first `IntentAccepted`) and
+//!     restarted; assert the audit chain remains valid (via
+//!     `AuditChainWitness::walk_structural`), the in-flight
+//!     session is reaped, and the initiative can resume.
+//!     Exercises the kernel's startup-recovery path and the
+//!     `git_apply_pending` invariant against realistic failure
+//!     modes.
+//!
+//! Tracked separately; this PR's mechanical witness coverage
+//! assumes the minimal seeded worktree.
 
 #![allow(dead_code)]
 
