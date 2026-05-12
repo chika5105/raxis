@@ -202,6 +202,18 @@ pub struct OrchestratorSpawnContext {
     /// both spawn contexts so e.g. an Executor activation can
     /// read its own history alongside the orchestrator's.
     pub scale_down_history: Arc<crate::elastic::ScaleDownHistory>,
+    /// V2 `elastic-vm-scaling.md §5` — sliding 60-second window
+    /// of admitted scaling events. Consulted before a scale-down
+    /// bias or a scale-up respawn lands; on overflow the
+    /// decision is deferred via
+    /// `SessionVmScaleDeferred { reason: "RateLimit" }`
+    /// (INV-ELASTIC-04 — soft event).
+    ///
+    /// Default is a fresh empty limiter; production wires a
+    /// shared `Arc` across both spawn contexts via
+    /// `with_rate_limiter` so up- and down-events on the same
+    /// host share the same budget.
+    pub rate_limiter: Arc<crate::elastic::ScalingRateLimiter>,
 }
 
 impl OrchestratorSpawnContext {
@@ -229,6 +241,7 @@ impl OrchestratorSpawnContext {
             mem_mib:    1024,
             data_dir:   None,
             scale_down_history: Arc::new(crate::elastic::ScaleDownHistory::new()),
+            rate_limiter:       Arc::new(crate::elastic::ScalingRateLimiter::new()),
         }
     }
 
@@ -251,6 +264,16 @@ impl OrchestratorSpawnContext {
         history: Arc<crate::elastic::ScaleDownHistory>,
     ) -> Self {
         self.scale_down_history = history;
+        self
+    }
+
+    /// Builder: share an externally-owned rate limiter. See
+    /// [`with_scale_down_history`](Self::with_scale_down_history).
+    pub fn with_rate_limiter(
+        mut self,
+        rl: Arc<crate::elastic::ScalingRateLimiter>,
+    ) -> Self {
+        self.rate_limiter = rl;
         self
     }
 }
@@ -923,12 +946,20 @@ async fn spawn_orchestrator_for_initiative(
     // V2 `elastic-vm-scaling.md §4.4` — when the recent rolling
     // window of orchestrator sessions all reported low utilisation,
     // bias this spawn smaller. Allowed even when `elastic = false`
-    // (`§6` — never raises capacity).
+    // (`§6` — never raises capacity). The §5 rate limiter is
+    // consulted INSIDE `maybe_apply_scale_down`; on overflow the
+    // bias is silently skipped and `SessionVmScaleDeferred`
+    // lands instead (INV-ELASTIC-04 — soft event).
     let (vm_spec, scale_down_decision) = maybe_apply_scale_down(
         vm_spec,
         crate::elastic::RoleKey::Orchestrator,
         &spawn_ctx.scale_down_history,
+        &spawn_ctx.rate_limiter,
         policy.elastic(),
+        service.audit(),
+        session_id,
+        None,
+        initiative_id,
         &crate::elastic::PlanElasticOverrides::default(),
     );
 
@@ -992,33 +1023,71 @@ async fn spawn_orchestrator_for_initiative(
 
 /// Apply the §4.4 next-spawn down-bias to `vm_spec` when the
 /// rolling window for `role` says the recent N sessions were
-/// under-used.
+/// under-used AND the §5 rate limiter admits the new event.
 ///
 /// Returns `(vm_spec_after_bias, Some((prev_vcpus, prev_mb,
 /// new_vcpus, new_mb, reason)))` when the bias was applied, or
 /// `(vm_spec_unchanged, None)` when the history did not justify
-/// a bias.
+/// a bias OR the rate limiter deferred. In the rate-limit-defer
+/// case the helper itself emits `SessionVmScaleDeferred { reason:
+/// "RateLimit" }` so callers do not have to track the deferral
+/// path separately (INV-ELASTIC-04 — soft event, no hard
+/// failure).
 ///
 /// **Why a free function** (rather than inlined): the orchestrator
 /// and executor spawn paths share the exact same shape — consult,
 /// rebuild, return + capture for the post-spawn audit emit. The
 /// helper keeps both spawn paths aligned without duplicating the
 /// logic.
+#[allow(clippy::too_many_arguments)]
 fn maybe_apply_scale_down(
     vm_spec:          VmSpec,
     role:             crate::elastic::RoleKey,
     history:          &Arc<crate::elastic::ScaleDownHistory>,
+    rate_limiter:     &Arc<crate::elastic::ScalingRateLimiter>,
     elastic:          &raxis_policy::ElasticConfig,
+    audit:            &Arc<dyn raxis_audit_tools::AuditSink>,
+    session_id:       &str,
+    task_id:          Option<&str>,
+    initiative_id:    &str,
     plan:             &crate::elastic::PlanElasticOverrides,
 ) -> (VmSpec, Option<(u32, u32, u32, u32, String)>) {
     match crate::elastic::decide_scale_down(&vm_spec, elastic, plan, history.as_ref(), role) {
         crate::elastic::ScaleDecision::Apply {
             new_spec, prev_vcpus, new_vcpus,
             prev_memory_mb, new_memory_mb, reason, ..
-        } => (
-            new_spec,
-            Some((prev_vcpus, prev_memory_mb, new_vcpus, new_memory_mb, reason)),
-        ),
+        } => {
+            // §5 rate-limit gate — INV-ELASTIC-04 soft deferral.
+            let now = unix_now_secs();
+            match rate_limiter.try_admit(
+                now,
+                elastic.max_concurrent_scaling_events_per_minute,
+            ) {
+                crate::elastic::RateLimitDecision::Admit => (
+                    new_spec,
+                    Some((prev_vcpus, prev_memory_mb, new_vcpus, new_memory_mb, reason)),
+                ),
+                crate::elastic::RateLimitDecision::Defer => {
+                    if let Err(e) = crate::elastic::emit_scale_deferred_audit(
+                        audit,
+                        session_id,
+                        task_id,
+                        initiative_id,
+                        crate::elastic::ScaleDirection::Down,
+                        "RateLimit",
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"scale_deferred_audit_emit_failed\",\
+                             \"session_id\":\"{session_id}\",\"direction\":\"Down\",\
+                             \"error\":\"{e}\"}}",
+                        );
+                    }
+                    // Skip the bias for this spawn; the next tick
+                    // re-evaluates the trigger.
+                    (vm_spec, None)
+                }
+            }
+        }
         crate::elastic::ScaleDecision::Skip { .. } => (vm_spec, None),
     }
 }
@@ -1998,9 +2067,22 @@ pub enum RespawnWithLargerOutcome {
 /// The helper is intentionally **public** so the future signal
 /// observer (`ScalingDecisionEngine::tick`) can call it without
 /// re-implementing the audit-emit ordering.
+///
+/// **§5 rate-limit gate.** The function consults `rate_limiter`
+/// FIRST. On `Defer`, it emits
+/// `SessionVmScaleDeferred { reason: "RateLimit" }` and returns
+/// `RespawnWithLargerOutcome::DrainFailed` with a synthetic
+/// `SpawnError::Audit("rate-limited")` so the caller surfaces
+/// the deferral to its observer loop the same way it surfaces
+/// any other deferred decision. The previous session is **NOT**
+/// drained (the kernel never starts the respawn ceremony when
+/// the budget is full); the next signal-observer tick
+/// re-evaluates the trigger.
+#[allow(clippy::too_many_arguments)]
 pub async fn respawn_with_larger_resources(
     service:           Arc<SessionSpawnService>,
     elastic:           &raxis_policy::ElasticConfig,
+    rate_limiter:      &Arc<crate::elastic::ScalingRateLimiter>,
     prev_session_id:   &str,
     drain_grace:       std::time::Duration,
     new_proto:         SpawnRequestProto,
@@ -2011,6 +2093,38 @@ pub async fn respawn_with_larger_resources(
     new_memory_mb:     u32,
     reason:            &str,
 ) -> RespawnWithLargerOutcome {
+    // ── Step 0: §5 rate-limit gate. INV-ELASTIC-04 soft event. ──
+    let now = unix_now_secs();
+    match rate_limiter.try_admit(
+        now,
+        elastic.max_concurrent_scaling_events_per_minute,
+    ) {
+        crate::elastic::RateLimitDecision::Admit => {}
+        crate::elastic::RateLimitDecision::Defer => {
+            if let Err(e) = crate::elastic::emit_scale_deferred_audit(
+                service.audit(),
+                &new_proto.session_id,
+                new_proto.task_id.as_deref(),
+                &new_proto.initiative_id,
+                direction,
+                "RateLimit",
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"respawn_with_larger_deferred_audit_failed\",\
+                     \"session_id\":\"{sid}\",\"error\":\"{err}\"}}",
+                    sid = new_proto.session_id,
+                    err = e,
+                );
+            }
+            // The caller distinguishes deferral from a real
+            // drain-failure via a synthetic `SpawnError::Audit`.
+            return RespawnWithLargerOutcome::DrainFailed(SpawnError::Audit(format!(
+                "scale event deferred: rate limit ({max}/min) exceeded",
+                max = elastic.max_concurrent_scaling_events_per_minute,
+            )));
+        }
+    }
+
     // ── Step 1: drain + terminate the previous session. ──────────
     //
     // `terminate_session` emits `SessionVmExited` internally; the
@@ -2187,6 +2301,10 @@ pub struct ExecutorSpawnContext {
     /// wires the same `Arc` through both contexts so executor and
     /// reviewer activations consult the shared tracker.
     pub scale_down_history: Arc<crate::elastic::ScaleDownHistory>,
+    /// V2 `elastic-vm-scaling.md §5` — sliding 60-second rate
+    /// limiter for admitted scaling events. See
+    /// [`OrchestratorSpawnContext::rate_limiter`].
+    pub rate_limiter: Arc<crate::elastic::ScalingRateLimiter>,
 }
 
 impl ExecutorSpawnContext {
@@ -2223,6 +2341,7 @@ impl ExecutorSpawnContext {
             reviewer_mem_mib:    1024,
             data_dir:            None,
             scale_down_history:  Arc::new(crate::elastic::ScaleDownHistory::new()),
+            rate_limiter:        Arc::new(crate::elastic::ScalingRateLimiter::new()),
         }
     }
 
@@ -2240,6 +2359,16 @@ impl ExecutorSpawnContext {
         history: Arc<crate::elastic::ScaleDownHistory>,
     ) -> Self {
         self.scale_down_history = history;
+        self
+    }
+
+    /// Builder: share an externally-owned rate limiter. See
+    /// [`OrchestratorSpawnContext::with_rate_limiter`].
+    pub fn with_rate_limiter(
+        mut self,
+        rl: Arc<crate::elastic::ScalingRateLimiter>,
+    ) -> Self {
+        self.rate_limiter = rl;
         self
     }
 }
@@ -2658,7 +2787,12 @@ pub async fn spawn_executor_for_task(
         vm_spec,
         role,
         &spawn_ctx.scale_down_history,
+        &spawn_ctx.rate_limiter,
         policy.elastic(),
+        service.audit(),
+        session_id,
+        Some(task_id),
+        initiative_id,
         &plan_overrides,
     );
 

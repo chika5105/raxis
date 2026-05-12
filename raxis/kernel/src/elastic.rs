@@ -738,6 +738,124 @@ pub fn decide_scale_down(
 }
 
 // ---------------------------------------------------------------------------
+// ScalingRateLimiter — V2 `elastic-vm-scaling.md §5`
+// ---------------------------------------------------------------------------
+
+/// Sliding 60-second rate limiter over admitted scaling
+/// decisions. Both `direction = Up` and `direction = Down` events
+/// consume budget — they share the `SessionVmScaleEvent` audit
+/// channel so a hot loop of down-biases on a busy initiative is
+/// just as visible as a hot loop of scale-ups.
+///
+/// **INV-ELASTIC-04** — exceeding the budget is a SOFT event.
+/// The kernel emits `SessionVmScaleDeferred { reason: "RateLimit" }`
+/// and continues running against the un-scaled `VmSpec`. The next
+/// scheduling tick re-evaluates whether the signal still warrants
+/// scaling.
+pub struct ScalingRateLimiter {
+    /// Append-ordered Unix-second timestamps of admitted scaling
+    /// decisions. Pruned on every `try_admit` call (entries older
+    /// than the 60-second window are dropped from the front).
+    inner: Mutex<VecDeque<u64>>,
+}
+
+/// Outcome of a single rate-limit admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitDecision {
+    /// The decision was admitted; the rate-limiter recorded the
+    /// timestamp and the caller should proceed with the scaling.
+    Admit,
+    /// The window is full. Caller should emit
+    /// `SessionVmScaleDeferred { reason: "RateLimit" }` and skip
+    /// the scaling action this tick.
+    Defer,
+}
+
+impl ScalingRateLimiter {
+    /// Construct an empty rate limiter. The capacity is supplied
+    /// per-call to `try_admit` because the policy snapshot is the
+    /// authoritative source — hot-reloading the policy bundle is
+    /// reflected on the very next scaling decision without the
+    /// limiter having to re-read state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { inner: Mutex::new(VecDeque::new()) }
+    }
+
+    /// Try to admit a scaling decision at `now_secs` against the
+    /// `max_per_minute` budget.
+    ///
+    /// **Pruning.** Every call drops timestamps older than
+    /// `now_secs - 60`. This keeps the queue from growing
+    /// unboundedly under operator-pathological churn (e.g. a
+    /// signal observer that calls `try_admit` once per second
+    /// for every session).
+    ///
+    /// **`max_per_minute = 0` semantics.** The policy validator
+    /// already rejects `max_concurrent_scaling_events_per_minute
+    /// = 0` with `FAIL_ELASTIC_INVALID`; the limiter returns
+    /// `Defer` defensively if it ever sees a zero budget so a
+    /// misconfigured policy cannot accidentally scale.
+    #[must_use]
+    pub fn try_admit(&self, now_secs: u64, max_per_minute: u32) -> RateLimitDecision {
+        let mut q = self.inner.lock();
+        let cutoff = now_secs.saturating_sub(60);
+        while let Some(front) = q.front() {
+            if *front < cutoff {
+                q.pop_front();
+            } else {
+                break;
+            }
+        }
+        if max_per_minute == 0 || (q.len() as u64) >= max_per_minute as u64 {
+            return RateLimitDecision::Defer;
+        }
+        q.push_back(now_secs);
+        RateLimitDecision::Admit
+    }
+
+    /// Snapshot the current admitted-event timestamps. Test-only
+    /// observability.
+    #[cfg(test)]
+    fn timestamps(&self) -> Vec<u64> {
+        self.inner.lock().iter().copied().collect()
+    }
+}
+
+impl Default for ScalingRateLimiter {
+    fn default() -> Self { Self::new() }
+}
+
+/// Emit `SessionVmScaleDeferred` per `elastic-vm-scaling.md §5`.
+///
+/// **INV-ELASTIC-04 helper.** `reason` is one of the closed-set
+/// reason tags documented on the audit-event variant
+/// (`"RateLimit"` is the only one in V2 GA; new reasons land in
+/// lockstep with this kernel-side decision engine).
+pub fn emit_scale_deferred_audit(
+    audit:           &Arc<dyn AuditSink>,
+    session_id:      &str,
+    task_id:         Option<&str>,
+    initiative_id:   &str,
+    direction:       ScaleDirection,
+    reason:          &str,
+) -> Result<(), raxis_audit_tools::AuditWriterError> {
+    audit.emit(
+        AuditEventKind::SessionVmScaleDeferred {
+            session_id:    session_id.to_owned(),
+            task_id:       task_id.map(str::to_owned),
+            initiative_id: initiative_id.to_owned(),
+            direction:     direction.as_str().to_owned(),
+            reason:        reason.to_owned(),
+        },
+        Some(session_id),
+        task_id,
+        Some(initiative_id),
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // emit_scale_event_audit — INV-ELASTIC-03 helper
 // ---------------------------------------------------------------------------
 
@@ -1324,5 +1442,68 @@ mod tests {
         assert_eq!(RoleKey::Orchestrator.as_str(), "Orchestrator");
         assert_eq!(RoleKey::Executor.as_str(),     "Executor");
         assert_eq!(RoleKey::Reviewer.as_str(),     "Reviewer");
+    }
+
+    // -----------------------------------------------------------------
+    // ScalingRateLimiter — §5 sliding-window pinning
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rate_limiter_admits_under_budget() {
+        let rl = ScalingRateLimiter::new();
+        let now = 1_000_000;
+        for _ in 0..6 {
+            assert_eq!(rl.try_admit(now, 6), RateLimitDecision::Admit);
+        }
+    }
+
+    #[test]
+    fn rate_limiter_defers_at_budget() {
+        let rl = ScalingRateLimiter::new();
+        let now = 1_000_000;
+        for _ in 0..6 {
+            let _ = rl.try_admit(now, 6);
+        }
+        // 7th attempt within the same window: defer.
+        assert_eq!(rl.try_admit(now, 6), RateLimitDecision::Defer);
+        assert_eq!(rl.try_admit(now + 30, 6), RateLimitDecision::Defer);
+    }
+
+    #[test]
+    fn rate_limiter_prunes_stale_entries() {
+        let rl = ScalingRateLimiter::new();
+        let now = 1_000_000;
+        for _ in 0..6 {
+            let _ = rl.try_admit(now, 6);
+        }
+        assert_eq!(rl.try_admit(now, 6), RateLimitDecision::Defer);
+        // After 61 seconds, the stale entries should be pruned and
+        // the budget refills.
+        assert_eq!(rl.try_admit(now + 61, 6), RateLimitDecision::Admit);
+        // The pruned queue should now hold one entry (the just-
+        // admitted now+61 timestamp).
+        assert_eq!(rl.timestamps().len(), 1);
+    }
+
+    #[test]
+    fn rate_limiter_zero_budget_defers_unconditionally() {
+        let rl = ScalingRateLimiter::new();
+        // The policy validator rejects max=0, but the limiter
+        // defends defensively.
+        assert_eq!(rl.try_admit(1_000_000, 0), RateLimitDecision::Defer);
+    }
+
+    #[test]
+    fn rate_limiter_partial_window_admits_at_boundary() {
+        let rl = ScalingRateLimiter::new();
+        let now = 1_000_000;
+        for i in 0..6 {
+            // Spread out evenly: t, t+10, t+20, ..., t+50.
+            let _ = rl.try_admit(now + i * 10, 6);
+        }
+        // At now+59 the oldest is t (59s ago, within window) → Defer.
+        assert_eq!(rl.try_admit(now + 59, 6), RateLimitDecision::Defer);
+        // At now+61 the oldest (t) is pruned → Admit.
+        assert_eq!(rl.try_admit(now + 61, 6), RateLimitDecision::Admit);
     }
 }

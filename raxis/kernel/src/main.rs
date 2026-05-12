@@ -968,15 +968,21 @@ async fn main() {
                     Arc::clone(&audit),
                 ),
             );
-            // V2 `elastic-vm-scaling.md §4.4` — single tracker
-            // shared across the orchestrator + executor / reviewer
-            // spawn contexts so per-role rolling windows live in
-            // one in-memory location. Operators see the bias
-            // through `SessionVmScaleEvent { direction: "Down" }`
-            // events; the tracker itself is per-process state and
-            // resets on kernel restart by design.
+            // V2 `elastic-vm-scaling.md §4.4` / §5 — fresh
+            // tracker + rate limiter for the orchestrator-spawn
+            // context. The Executor / Reviewer spawn context
+            // owns its own pair (see below); the trackers key by
+            // `RoleKey` and the rate limiters by direction-
+            // independent global budget, so two instances are
+            // semantically equivalent to one shared instance for
+            // the orchestrator's role. Two separate `Arc`s keep
+            // boot ordering simple — neither closure needs to
+            // observe the other's state.
             let scale_down_history = Arc::new(
                 crate::elastic::ScaleDownHistory::new(),
+            );
+            let rate_limiter = Arc::new(
+                crate::elastic::ScalingRateLimiter::new(),
             );
             Arc::new(
                 crate::session_spawn_orchestrator::LiveOrchestratorSpawn::new(
@@ -990,7 +996,8 @@ async fn main() {
                     // has no transport to dial back to the kernel
                     // and falls through to scaffold/park mode).
                     .with_data_dir(data_dir.clone())
-                    .with_scale_down_history(Arc::clone(&scale_down_history)),
+                    .with_scale_down_history(Arc::clone(&scale_down_history))
+                    .with_rate_limiter(Arc::clone(&rate_limiter)),
                     session_spawn_for_orch,
                     Arc::clone(&store),
                     Arc::clone(&plan_registry),
@@ -1021,18 +1028,15 @@ async fn main() {
             // planner UDS env stamp without each IPC handler having
             // to thread the path itself.
             .with_data_dir(data_dir.clone())
-            // V2 `elastic-vm-scaling.md §4.4` — own tracker for
-            // the executor / reviewer spawn context. The
-            // orchestrator-spawn block above owns its own
-            // tracker; both are keyed by `RoleKey` so they would
-            // not actually share state even if we threaded the
-            // same `Arc` through (the orchestrator window would
-            // ignore Executor / Reviewer samples and vice versa).
-            // Splitting the tracker per-context keeps the boot
-            // ordering simple — neither closure depends on the
-            // other.
+            // V2 `elastic-vm-scaling.md §4.4` / §5 — own tracker
+            // + rate limiter for the executor / reviewer spawn
+            // context. See the orchestrator-spawn block above
+            // for the boot-ordering rationale.
             .with_scale_down_history(Arc::new(
                 crate::elastic::ScaleDownHistory::new(),
+            ))
+            .with_rate_limiter(Arc::new(
+                crate::elastic::ScalingRateLimiter::new(),
             )),
         ),
         Arc::clone(&domain),
