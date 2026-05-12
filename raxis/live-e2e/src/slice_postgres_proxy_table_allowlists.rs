@@ -8,12 +8,14 @@
 //! `slice_postgres_proxy_restrictions.rs`):
 //!
 //!   1. StartupMessage → … → ReadyForQuery.
-//!   2. `SELECT * FROM public.orders` — admitted by walker; in
-//!      hermetic mode the upstream is unreachable so the SELECT
-//!      surfaces sqlstate `08*` (connection_exception) instead of
-//!      CommandComplete. The assertion is that the proxy did NOT
-//!      reject this with `42501` — that would mean the walker
-//!      misclassified an allowlisted table.
+//!   2. `SELECT * FROM public.orders WHERE id = 1` — admitted by
+//!      walker. The compose Postgres has no `public.orders` table,
+//!      so the upstream returns sqlstate `42P01` (undefined_table).
+//!      The assertion is that the proxy did NOT reject this with
+//!      `42501`: that would mean the walker misclassified an
+//!      allowlisted table. Any non-42501 sqlstate (or
+//!      CommandComplete, on a deployment that does have the table)
+//!      proves admit.
 //!   3. `SELECT * FROM public.users` — NOT in `allowed_tables`;
 //!      the proxy MUST reject with sqlstate `42501` and the audit
 //!      `restriction_reason` MUST be `"table_not_in_allowed_list"`.
@@ -28,10 +30,20 @@
 //! The slice also drives a second proxy bound with `enforce =
 //! false` to verify that audit-only mode admits the query but
 //! still records `restriction_reason` in the audit channel.
+//!
+//! ## Active by default
+//!
+//! Mirrors the post-fix MySQL / MSSQL slices: the upstream is the
+//! `postgres:16-alpine` container published by
+//! `live-e2e/docker-compose.e2e.yml` on `127.0.0.1:54399`. The
+//! slice TCP-preflights that endpoint and fails fast with an
+//! actionable error message if the container is not running. Set
+//! `RAXIS_LIVE_POSTGRES_URL` to override.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use raxis_credential_proxy_postgres::{
@@ -44,6 +56,14 @@ use raxis_credentials::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+/// Loopback host:port the docker-compose Postgres publishes.
+const POSTGRES_HOST_PORT: &str = "127.0.0.1:54399";
+
+/// Default upstream URL for the docker-compose Postgres 16 container.
+/// Operators can override via `RAXIS_LIVE_POSTGRES_URL`.
+const DEFAULT_UPSTREAM_URL: &str =
+    "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e";
 
 struct LiveBackend {
     value:    Vec<u8>,
@@ -97,15 +117,21 @@ impl CapturingAudit {
 }
 
 pub(crate) async fn run() -> Result<()> {
-    // No real upstream needed — the wire-side assertions only
-    // require the proxy to enforce restrictions at its boundary.
-    let upstream_url = b"postgresql://demo:demo@127.0.0.1:1/demo".to_vec();
+    require_postgres_container().await?;
+    let env_override = std::env::var("RAXIS_LIVE_POSTGRES_URL").ok();
+    let upstream_url: Vec<u8> = match env_override.as_deref() {
+        Some(u) if !u.is_empty() => u.as_bytes().to_vec(),
+        _ => DEFAULT_UPSTREAM_URL.as_bytes().to_vec(),
+    };
     let backend = Arc::new(LiveBackend {
         value:    upstream_url,
         resolves: AtomicU32::new(0),
     });
 
-    tracing::info!("slice postgres-proxy-table-allowlists: starting");
+    tracing::info!(
+        host_port = POSTGRES_HOST_PORT,
+        "slice postgres-proxy-table-allowlists: starting (real upstream)",
+    );
 
     // ── Phase 1: enforce = true (default) ─────────────────────────
     let audit = Arc::new(CapturingAudit::default());
@@ -134,6 +160,14 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     // ── Case A: allowlisted table — walker resolves cleanly. ──
+    //   The compose Postgres has no `public.orders` table, so the
+    //   upstream typically returns sqlstate `42P01`
+    //   (undefined_table). The proxy MUST NOT reject with `42501`
+    //   (insufficient_privilege); that would prove the walker
+    //   misclassified an allowlisted table. Any other outcome
+    //   (CommandComplete on a deployment that does have the table,
+    //   `42P01` undefined_table on a fresh compose, or any other
+    //   non-`42501` sqlstate) confirms the proxy admitted upstream.
     write_query(&mut s, "SELECT * FROM public.orders WHERE id = 1").await?;
     let msgs = drain_until_ready(&mut s).await?;
     let err_state = first_error_sqlstate(&msgs);
@@ -143,16 +177,19 @@ pub(crate) async fn run() -> Result<()> {
              — walker failed to resolve an allowlisted table",
         ));
     }
-    // Either CommandComplete or sqlstate 08* (upstream unreachable)
-    // is acceptable.
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    let connection_exc = err_state
-        .as_deref()
-        .map(|s| s.starts_with("08"))
-        .unwrap_or(false);
-    if !tags.contains(&b'C') && !connection_exc {
+    if tags.last() != Some(&b'Z') {
         return Err(anyhow!(
-            "case A: expected CommandComplete or sqlstate 08*; tags={tags:?}, sqlstate={err_state:?}",
+            "case A: response did not end at ReadyForQuery; tags={tags:?}",
+        ));
+    }
+    // The upstream MUST have been reached: either CommandComplete
+    // ('C') or an ErrorResponse ('E') with a sqlstate. The proxy
+    // would have returned no 'C' AND no 'E' if the request was
+    // dropped without forwarding (which would be a regression).
+    if !tags.contains(&b'C') && !tags.contains(&b'E') {
+        return Err(anyhow!(
+            "case A: response had neither CommandComplete nor ErrorResponse; tags={tags:?}",
         ));
     }
 
@@ -262,10 +299,10 @@ pub(crate) async fn run() -> Result<()> {
 
     // Audit-only: this query is NOT in the allowlist. Under
     // `enforce = false` the proxy MUST admit it (forward to
-    // upstream) and surface `restriction_reason` in audit. In
-    // hermetic mode the upstream connect fails with `08*` —
-    // but the key assertion is that the proxy did NOT reject
-    // with `42501`.
+    // upstream) and surface `restriction_reason` in audit. The
+    // compose Postgres has no `public.users` table either, so the
+    // upstream returns `42P01` — but the key assertion is that
+    // the proxy did NOT reject with `42501`.
     write_query(&mut s2, "SELECT * FROM public.users").await?;
     let msgs2 = drain_until_ready(&mut s2).await?;
     let state2 = first_error_sqlstate(&msgs2);
@@ -306,6 +343,23 @@ pub(crate) async fn run() -> Result<()> {
         snap.queries_blocked_by_ambiguous_sql,
     );
     Ok(())
+}
+
+async fn require_postgres_container() -> Result<()> {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        TcpStream::connect(POSTGRES_HOST_PORT),
+    ).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(anyhow!(
+            "postgres container not reachable at {POSTGRES_HOST_PORT}: {e}\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d postgres --wait",
+        )),
+        Err(_) => Err(anyhow!(
+            "postgres container not reachable at {POSTGRES_HOST_PORT}: timed out after 2s\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d postgres --wait",
+        )),
+    }
 }
 
 fn first_error_sqlstate(msgs: &[(u8, Vec<u8>)]) -> Option<String> {

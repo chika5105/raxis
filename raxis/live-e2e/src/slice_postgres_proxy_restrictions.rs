@@ -27,9 +27,19 @@
 //!   4. `UPDATE … SET` → `ErrorResponse` ('E') + `ReadyForQuery`.
 //!   5. `DELETE FROM`  → `ErrorResponse` ('E') + `ReadyForQuery`.
 //!   6. Terminate ('X').
+//!
+//! ## Active by default
+//!
+//! Mirrors the post-fix MySQL / MSSQL slices: the upstream is the
+//! `postgres:16-alpine` container published by
+//! `live-e2e/docker-compose.e2e.yml` on `127.0.0.1:54399`. The
+//! slice TCP-preflights that endpoint and fails fast with an
+//! actionable error message if the container is not running. Set
+//! `RAXIS_LIVE_POSTGRES_URL` to override (non-CI debugging).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use raxis_credential_proxy_postgres::{
@@ -41,6 +51,14 @@ use raxis_credentials::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+/// Loopback host:port the docker-compose Postgres publishes.
+const POSTGRES_HOST_PORT: &str = "127.0.0.1:54399";
+
+/// Default upstream URL for the docker-compose Postgres 16 container.
+/// Operators can override via `RAXIS_LIVE_POSTGRES_URL`.
+const DEFAULT_UPSTREAM_URL: &str =
+    "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e";
 
 struct LiveBackend {
     value:    Vec<u8>,
@@ -73,15 +91,15 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub(crate) async fn run() -> Result<()> {
-    let real_upstream = std::env::var("RAXIS_LIVE_POSTGRES_URL").ok();
-    let upstream_url: Vec<u8> = match real_upstream.as_deref() {
+    require_postgres_container().await?;
+    let env_override = std::env::var("RAXIS_LIVE_POSTGRES_URL").ok();
+    let upstream_url: Vec<u8> = match env_override.as_deref() {
         Some(u) if !u.is_empty() => u.as_bytes().to_vec(),
-        _ => b"postgresql://demo:demo@127.0.0.1:1/demo".to_vec(),
+        _ => DEFAULT_UPSTREAM_URL.as_bytes().to_vec(),
     };
-    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
     tracing::info!(
-        mode = if hermetic { "hermetic" } else { "real-upstream" },
-        "slice postgres-proxy-restrictions: starting",
+        host_port = POSTGRES_HOST_PORT,
+        "slice postgres-proxy-restrictions: starting (real upstream)",
     );
 
     let backend = Arc::new(LiveBackend {
@@ -112,44 +130,22 @@ pub(crate) async fn run() -> Result<()> {
         return Err(anyhow!("handshake did not end at ReadyForQuery"));
     }
 
-    // ── Allow path: SELECT 1 — reaches upstream (real or unreachable). ──
-    //   In hermetic mode the upstream is unreachable so the SELECT
-    //   surfaces an ErrorResponse with sqlstate `08006` instead of
-    //   reaching CommandComplete. The deny-path assertions below are
-    //   what this slice actually validates; the SELECT is bookkeeping
-    //   to prove the SELECT class is NOT blocked at the proxy layer
-    //   (i.e. the proxy made it past the restriction check and tried
-    //   to forward — which is exactly what `08006` proves).
+    // ── Allow path: SELECT 1 — reaches real upstream and yields
+    //    CommandComplete. The proxy MUST NOT reject SELECT with
+    //    sqlstate 42501; that would prove the restriction layer
+    //    misclassified SELECT as DML. ──
     write_query(&mut s, "SELECT 1").await?;
     let msgs = drain_until_ready(&mut s).await?;
-    if hermetic {
-        // The proxy must NOT have rejected this with 42501 — that
-        // would mean SELECT was wrongly classified as DML.
-        let err_state = first_error_sqlstate(&msgs);
-        if err_state.as_deref() == Some("42501") {
-            return Err(anyhow!(
-                "allow path: SELECT was misclassified as DML (sqlstate 42501) — \
-                 the restriction layer must let SELECT pass through to upstream",
-            ));
-        }
-        // Either CommandComplete (if some test-mode upstream answers)
-        // or an `08`-class connection-exception sqlstate (upstream
-        // unreachable / handshake failed in hermetic mode) is
-        // acceptable. Postgres `08000`/`08006`/`08001`/`08004` all
-        // map to `connection_exception`.
-        let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-        let connection_exc = err_state
-            .as_deref()
-            .map(|s| s.starts_with("08"))
-            .unwrap_or(false);
-        if !tags.contains(&b'C') && !connection_exc {
-            return Err(anyhow!(
-                "allow path: expected CommandComplete or sqlstate 08*, got tags={tags:?}, sqlstate={err_state:?}",
-            ));
-        }
-    } else if !msgs.iter().any(|(t, _)| *t == b'C') {
+    let err_state = first_error_sqlstate(&msgs);
+    if err_state.as_deref() == Some("42501") {
         return Err(anyhow!(
-            "allow path (real upstream): SELECT did not reach CommandComplete; tags={:?}",
+            "allow path: SELECT was misclassified as DML (sqlstate 42501) — \
+             the restriction layer must let SELECT pass through to upstream",
+        ));
+    }
+    if !msgs.iter().any(|(t, _)| *t == b'C') {
+        return Err(anyhow!(
+            "allow path: SELECT did not reach CommandComplete; tags={:?}, sqlstate={err_state:?}",
             msgs.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
         ));
     }
@@ -186,8 +182,8 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     // ── Persistence: another SELECT after rejections — proxy must
-    //    keep the session alive even when upstream is unreachable
-    //    (the audit chain depends on session continuity).
+    //    keep the session alive across deny verdicts (the audit
+    //    chain depends on session continuity).
     write_query(&mut s, "SELECT 2").await?;
     let msgs = drain_until_ready(&mut s).await?;
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
@@ -196,13 +192,9 @@ pub(crate) async fn run() -> Result<()> {
             "post-rejection SELECT did not end at ReadyForQuery: tags={tags:?}",
         ));
     }
-    if hermetic {
-        // Upstream unreachable → ErrorResponse, but the session
-        // stayed open (we got 'Z') — that's the persistence
-        // assertion.
-    } else if !msgs.iter().any(|(t, _)| *t == b'C') {
+    if !msgs.iter().any(|(t, _)| *t == b'C') {
         return Err(anyhow!(
-            "post-rejection SELECT (real upstream) failed to reach CommandComplete; tags={tags:?}",
+            "post-rejection SELECT failed to reach CommandComplete; tags={tags:?}",
         ));
     }
 
@@ -220,6 +212,23 @@ pub(crate) async fn run() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+async fn require_postgres_container() -> Result<()> {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        TcpStream::connect(POSTGRES_HOST_PORT),
+    ).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(anyhow!(
+            "postgres container not reachable at {POSTGRES_HOST_PORT}: {e}\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d postgres --wait",
+        )),
+        Err(_) => Err(anyhow!(
+            "postgres container not reachable at {POSTGRES_HOST_PORT}: timed out after 2s\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d postgres --wait",
+        )),
+    }
 }
 
 /// Returns the SQLSTATE field of the first `ErrorResponse` in

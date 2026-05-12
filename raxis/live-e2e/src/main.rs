@@ -152,6 +152,7 @@ mod slice_mongodb_proxy_collection_allowlists;
 mod slice_mssql_proxy;
 mod slice_mysql_proxy;
 mod slice_postgres_proxy;
+mod slice_postgres_proxy_max_result_rows;
 mod slice_postgres_proxy_restrictions;
 mod slice_postgres_proxy_table_allowlists;
 mod slice_redis_proxy;
@@ -196,6 +197,16 @@ enum Slice {
     /// the closed-enum `restriction_reason` strings reach the audit
     /// channel per `proxy-table-allowlists.md §8`.
     PostgresProxyTableAllowlists,
+    /// Real `PostgresProxy` with `max_result_rows = 5` against the
+    /// docker-compose Postgres 16 container. Drives the V2.2
+    /// streaming row-cap end-to-end: a `SELECT generate_series(1,
+    /// 100)` is admitted, the proxy relays
+    /// `RowDescription` + first 5 `DataRow`s, then truncates with
+    /// `ErrorResponse` sqlstate `54000` and increments
+    /// `queries_capped_by_max_result_rows`. Pairs with the
+    /// `DatabaseQueryCompleted.upstream_error =
+    /// "max_result_rows_exceeded"` audit assertion.
+    PostgresProxyMaxResultRows,
     /// Real `HttpProxy` + real `https://httpbin.org/` — bearer
     /// injection on the allow path.
     HttpProxyBearer,
@@ -326,6 +337,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::PostgresProxyRestrictions  => slice_postgres_proxy_restrictions::run().await,
         Slice::PostgresProxyTableAllowlists =>
             slice_postgres_proxy_table_allowlists::run().await,
+        Slice::PostgresProxyMaxResultRows =>
+            slice_postgres_proxy_max_result_rows::run().await,
         Slice::HttpProxyBearer            => slice_http_proxy_bearer::run(env).await,
         Slice::HttpProxyRestrictions      => slice_http_proxy_restrictions::run(env).await,
         Slice::SessionSpawn               => slice_session_spawn::run().await,
@@ -350,6 +363,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice postgres-proxy-restrictions")?;
             slice_postgres_proxy_table_allowlists::run().await
                 .context("slice postgres-proxy-table-allowlists")?;
+            slice_postgres_proxy_max_result_rows::run().await
+                .context("slice postgres-proxy-max-result-rows")?;
             slice_http_proxy_bearer::run(env).await
                 .context("slice http-proxy-bearer")?;
             slice_http_proxy_restrictions::run(env).await

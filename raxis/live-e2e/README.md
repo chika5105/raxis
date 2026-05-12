@@ -16,7 +16,7 @@ The slices' docstrings carry the per-slice contract.
 
 | Slice                                        | Real upstream                   | Status      | Notes                                                                                                            |
 | -------------------------------------------- | ------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
-| `postgres-proxy*`                            | `postgres:16-alpine`            | 🟢 active   | Original real-service slice — the pattern every other slice mirrors.                                             |
+| `postgres-proxy*`                            | `postgres:16-alpine`            | 🟢 active   | Real upstream by default against the compose container; cap-paths covered: `allow_only_select` (`postgres-proxy-restrictions`), `allowed_tables` / `forbidden_tables` / multi-statement ambiguity (`postgres-proxy-table-allowlists`), `max_result_rows` streaming cap (`postgres-proxy-max-result-rows`). `RAXIS_LIVE_POSTGRES_URL` overrides for non-CI debugging. |
 | `mongodb-proxy`                              | `mongo:7`                       | 🟢 active   | `--noauth` mode by default; `RAXIS_LIVE_MONGODB_URL` overrides.                                                  |
 | `mongodb-proxy-collection-allowlists`        | `mongo:7`                       | 🟢 active   | Auth (SCRAM-SHA-256) against `admin`. Seeds `live_e2e_cap.users` via `docker exec mongosh` and drops on cleanup. |
 | `redis-proxy`                                | `redis:7-alpine`                | 🟢 active   | `--requirepass`-protected; the slice drives a real RESP `AUTH` + round-trip.                                     |
@@ -91,29 +91,36 @@ Each slice prints `OK — all selected slices passed` on success
 and exits non-zero with an actionable error (which compose
 service to start, which env var to set) on failure.
 
-### MySQL + MSSQL — active by default
+### Postgres + MySQL + MSSQL — active by default
 
-Both slices now exercise the real upstream forwarding path by
-default against the compose stack containers. Bring the stack up
-first and the slices Just Work; no env-var dance required:
+All three SQL-database proxy slices now exercise the real
+upstream forwarding path by default against the compose stack
+containers. Bring the stack up first and the slices Just Work;
+no env-var dance required:
 
 ```bash
 docker compose -f live-e2e/docker-compose.e2e.yml \
-    up -d mysql mssql --wait
+    up -d postgres mysql mssql --wait
 
+RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- postgres-proxy
+RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- postgres-proxy-restrictions
+RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- postgres-proxy-table-allowlists
+RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- postgres-proxy-max-result-rows
 RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- mysql-proxy
 RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- mssql-proxy
 ```
 
 The slices TCP-preflight their respective host ports
-(`127.0.0.1:33099` for MySQL, `127.0.0.1:14399` for MSSQL) and
-fail fast with an actionable error message if the container
-isn't reachable.
+(`127.0.0.1:54399` for Postgres, `127.0.0.1:33099` for MySQL,
+`127.0.0.1:14399` for MSSQL) and fail fast with an actionable
+error message if the container isn't reachable.
 
-If you need to point at a non-compose upstream (e.g. an
-Aurora / Azure SQL endpoint for non-CI debugging):
+If you need to point at a non-compose upstream (e.g. an Aurora /
+RDS / Azure SQL endpoint for non-CI debugging):
 
 ```bash
+RAXIS_LIVE_POSTGRES_URL='postgresql://user:pass@host:5432/db' \
+    cargo run -p raxis-live-e2e -- postgres-proxy
 RAXIS_LIVE_MYSQL_URL='mysql://user:pass@host:3306/db' \
     cargo run -p raxis-live-e2e -- mysql-proxy
 RAXIS_LIVE_MSSQL_URL='mssql://user:pass@host:1433/db?encrypt=false' \
@@ -122,14 +129,27 @@ RAXIS_LIVE_MSSQL_URL='mssql://user:pass@host:1433/db?encrypt=false' \
 
 Note: the proxy is plaintext-only on the upstream side (V2.1
 MVP); `?encrypt=true` on the MSSQL URL fails fast at
-`UpstreamSession::connect`. TLS upstream lands in V3 alongside
-Windows / Entra ID auth.
+`UpstreamSession::connect`, as does `?sslmode=require` on the
+Postgres URL. TLS upstream lands in V3 alongside Windows /
+Entra ID auth.
 
 The slices no longer support a hermetic / no-container mode —
 the upstream-failure audit path is covered by the unit tests in
-`crates/credential-proxy-{mysql,mssql}/src/upstream.rs::tests`
-(MySQL fake-server fixtures + MSSQL `forward_sql_batch` rewrite
+`crates/credential-proxy-{postgres,mysql,mssql}/src/upstream.rs::tests`
+(Postgres `tokio-postgres` SCRAM-SHA-256 + MD5 path + MySQL
+fake-server fixtures + MSSQL `forward_sql_batch` rewrite
 fuzzers).
+
+#### Postgres cap-paths covered by real-upstream slices
+
+| Capability                                         | Slice                              | Wire-shape assertion                                                                                                                       |
+| -------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `allow_only_select` (V2.1 verb-class)              | `postgres-proxy-restrictions`      | `INSERT` / `UPDATE` / `DELETE` ⇒ `ErrorResponse(42501)`; `SELECT` reaches `CommandComplete` against real upstream.                         |
+| `allowed_tables` + `forbidden_tables`              | `postgres-proxy-table-allowlists`  | Walker resolves `public.users` → `42501` (`table_not_in_allowed_list`); `public.audit_log` → `42501` (`table_in_forbidden_list`).          |
+| Ambiguous SQL (multi-statement) + `enforce=false`  | `postgres-proxy-table-allowlists`  | `SELECT ...; DROP ...` fail-closes with `ambiguous_sql_multi_statement`; audit-only mode admits and surfaces `restriction_reason`.         |
+| `max_result_rows` (V2.2 streaming cap)             | `postgres-proxy-max-result-rows`   | `SELECT generate_series(1, 100)` capped at 5: wire shape `T + 5×D + E(54000) + Z`; `queries_capped_by_max_result_rows = 1`; audit carries `upstream_error = "max_result_rows_exceeded"`. |
+| SCRAM-SHA-256 / MD5 password auth (Postgres 14+)   | all four slices                    | `tokio-postgres` performs the SASL exchange against the real `raxis_test` user (compose Postgres 16 default = SCRAM).                      |
+| TLS upstream (`sslmode=require`)                   | unit test `upstream::tests`        | V2.1 MVP rejects `sslmode=require` at parse time with `FAIL_PROXY_TLS_NOT_SUPPORTED`; V3 lands TLS.                                        |
 
 ---
 
