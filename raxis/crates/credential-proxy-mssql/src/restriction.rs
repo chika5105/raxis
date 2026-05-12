@@ -77,7 +77,10 @@ impl Restrictions {
         Self { allow_only_select: true, ..Self::default() }
     }
 
-    /// Verb-class block check; back-compat with V2.1 callers.
+    /// Verb-class block check used by [`Self::check`] as the first
+    /// guard before the T-SQL walker runs. Tests in this crate
+    /// exercise it directly to pin the `allow_only_select`
+    /// semantics in isolation from the walker.
     pub fn is_blocked(&self, op: &OperationKind) -> bool {
         self.allow_only_select && !matches!(op, OperationKind::Select)
     }
