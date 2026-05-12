@@ -146,6 +146,7 @@ export function Shell({ children }: ShellProps) {
                       className={({ isActive }) =>
                         clsx(
                           "flex items-center gap-2.5 px-4 py-1.5 text-sm border-l-2 transition-colors",
+                          "focus:outline-none focus-visible:bg-panel-high focus-visible:text-ink",
                           isActive
                             ? "border-accent text-ink bg-panel-high"
                             : "border-transparent text-ink-muted hover:text-ink hover:bg-panel-high/50",

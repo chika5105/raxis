@@ -48,10 +48,20 @@
 }
 
 @layer components {
+  /*
+   * Buttons. focus-visible (not focus) keeps the ring out of
+   * mouse-only flows but ALWAYS shows it for keyboard users —
+   * non-negotiable for an operator dashboard whose target users
+   * regularly tab through the chrome with both hands on the
+   * keyboard. The ring uses the existing `accent` color token
+   * so it adapts automatically when the theming worker swaps
+   * dark/light palettes.
+   */
   .btn {
     @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
            text-sm font-medium border border-edge-strong bg-panel-raised
            text-ink hover:bg-panel-high hover:border-accent
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-panel
            transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-primary {
