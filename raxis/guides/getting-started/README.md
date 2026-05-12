@@ -1,0 +1,45 @@
+# Getting Started with RAXIS
+
+> **Audience.** A fresh operator on a clean macOS or Linux box who wants
+> to run their first RAXIS initiative end-to-end.
+>
+> **Time budget.** 30 minutes from `git clone` to "the kernel ran my
+> plan, my file landed on `main`, the audit chain verifies".
+
+Five short pages, in order. Each one is self-contained — finish it,
+verify the checks at the end, move to the next.
+
+| #   | Page                                               | What you do                                                                         | Time      |
+| --- | -------------------------------------------------- | ----------------------------------------------------------------------------------- | --------- |
+| 00  | [`00-overview.md`](00-overview.md)                 | Build the mental model: what RAXIS does, what it doesn't. Skim — no commands.       | 5 min     |
+| 01  | [`01-prereqs.md`](01-prereqs.md)                   | One `cargo xtask` command installs everything. Verify the host with `raxis doctor`. | 5–10 min  |
+| 02  | [`02-first-initiative.md`](02-first-initiative.md) | Genesis → start the kernel → submit a one-task plan → watch it complete.            | 10 min    |
+| 03  | [`03-dashboard-tour.md`](03-dashboard-tour.md)     | Open the operator dashboard, walk the five views you'll use daily.                  | 5 min     |
+| 04  | [`04-troubleshooting.md`](04-troubleshooting.md)   | The first ten things that go wrong, and the exact command to fix each.              | reference |
+
+> **Already set up?** Jump straight to
+> [`02-first-initiative.md`](02-first-initiative.md). The prereqs page
+> ends with a single `raxis doctor` check; if it exits green you're
+> ready.
+
+---
+
+## Beyond getting started
+
+Once your first initiative completes:
+
+- The fifty runnable end-to-end **scenarios** under
+  [`../scenarios/`](../scenarios/) cover every shape of multi-task
+  initiative (panel review, parallel decomposition, credential
+  proxies, egress allowlists, crash recovery, …).
+- The **recipe book** at [`../recipes/`](../recipes/) is the
+  scope-one-concept-at-a-time reference: every CLI subcommand, every
+  `policy.toml` section, every `plan.toml` field, every operational
+  task.
+- The **concepts** primer at [`../CONCEPTS.md`](../CONCEPTS.md) is the
+  10-minute deep-dive on path allowlists, lane budgets, the agent-type
+  model, and how agents talk through the kernel rather than to each
+  other.
+- The **specs** under [`../../specs/`](../../specs/) are normative —
+  every claim a recipe makes is reproducible from a named section in
+  the V1 or V2 spec set.

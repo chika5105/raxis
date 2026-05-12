@@ -1,0 +1,186 @@
+# 03 · Dashboard Tour
+
+> **Goal.** Open the operator dashboard, sign in once, and learn the
+> five views you will use every day.
+
+When `raxis-kernel` boots it prints a clickable line:
+
+```text
+{"level":"info","event":"DashboardListening","url":"http://127.0.0.1:9820"}
+```
+
+That URL is your dashboard. The default bind is `127.0.0.1:9820`
+(loopback only); change it via the `[dashboard]` block in
+`policy.toml`. Reference:
+[`raxis/crates/dashboard/src/lib.rs`](../../crates/dashboard/src/lib.rs).
+
+---
+
+## Sign in
+
+The dashboard authenticates with the **same** Ed25519 challenge-response
+protocol the CLI uses — no passwords, no shared secrets. On first
+visit:
+
+1. The login page asks for your operator pubkey fingerprint or
+   display name.
+2. The kernel issues a short-lived challenge (32 random bytes).
+3. You sign the challenge with the operator private key. The
+   recommended path is the kernel-host helper:
+
+   ```bash
+   raxis auth sign setup
+   ```
+
+   Once configured, the login page can call out to this helper from
+   the CLI; copy the resulting `auth_signature` into the dashboard
+   field and submit.
+
+4. The kernel verifies the signature against
+   `policy.operator_entry(pubkey).cert`, mints a 1-hour HS256 JWT,
+   and drops it in a same-origin cookie. The JWT secret is a 32-byte
+   `OsRng` value generated at kernel boot — restarting the kernel
+   invalidates every active session (deliberate).
+
+Reference: [`raxis/crates/dashboard/src/auth.rs`](../../crates/dashboard/src/auth.rs).
+
+---
+
+## The five views
+
+The left-side navigation organises pages by what an operator needs
+_now_. The defaults below are sized for a single initiative; everything
+scales to a hundred without pagination breakage.
+
+### 1 · Overview — health rollup
+
+The landing page after sign-in. One row per top-level subsystem
+(kernel uptime, audit chain status, gateway, isolation backend) plus
+recent activity. Use this as your "is anything red?" check before
+diving deeper. The same data is available headless via
+`raxis status --json` and the dashboard's `/api/health` route.
+
+### 2 · Initiatives — the DAG
+
+Lists every initiative grouped by state (Draft, Executing, Completed,
+Failed, Quarantined). Clicking an initiative opens its task DAG:
+
+- **DAG graph.** Nodes are tasks; edges are `predecessors`. Node
+  colour reflects FSM state (`Pending`, `Admitted`, `GatesPending`,
+  `Running`, `Completed`, `Failed`, `Aborted`).
+- **Task detail panel.** Per-task `path_allowlist`, `clone_strategy`,
+  `evaluation_sha`, latest verifier verdicts, retry counters.
+- **Session detail.** Each task that spawned a VM gets a session row
+  with the live status of its credential proxies, egress decisions,
+  and the linked git worktree on the host.
+
+Reference: [`raxis/dashboard-fe/src/pages/Initiatives.tsx`](../../dashboard-fe/src/pages/Initiatives.tsx),
+[`InitiativeDetail.tsx`](../../dashboard-fe/src/pages/InitiativeDetail.tsx),
+[`TaskDetail.tsx`](../../dashboard-fe/src/pages/TaskDetail.tsx).
+
+### 3 · Sessions — what the agents are doing live
+
+The Sessions page shows every active VM-backed planner session. Each
+session detail page has the **session stream** — the per-session
+ring-buffered transcript of LLM turns + tool calls captured from the
+kernel's IPC stream. The capture file lives at
+`<data_dir>/sessions/<session_id>/stream.jsonl` and is bounded; see
+[`raxis/crates/dashboard-kernel/src/stream_capture.rs`](../../crates/dashboard-kernel/src/stream_capture.rs).
+
+Use Sessions when a task is stuck. Live tool calls + intent rejections
+tell you within seconds whether the agent is mis-using its allowlist,
+the model is rate-limited, or a credential proxy is refusing a query.
+
+### 4 · Repo / Git — the worktrees
+
+Each session binds to a `git worktree` on the host. The Git page
+walks the worktree tree, lets you diff any file against `HEAD`, and
+shows the commit log for the active branch. This is read-only; the
+dashboard never writes into a worktree.
+
+The hardened endpoints bound the request body, cap the audit-chain
+walk per call, and recover gracefully from worktree mutation
+mid-walk; see [`raxis/crates/dashboard/src/routes/git.rs`](../../crates/dashboard/src/routes/git.rs).
+
+### 5 · Audit — the chain itself
+
+A live tail of the audit chain with kind/initiative/task/session
+filters. The dashboard reads the same JSONL files
+`raxis log` does (under `<data_dir>/audit/`) through a `ChainReader`
+that verifies the hash link between every record. The page surfaces
+chain breaks with a red banner; a healthy chain prints "verified
+through seq=NN" in the header.
+
+For machine-readable scraping use `raxis log --json` from the CLI;
+the dashboard exists to make the same records easy to scan visually.
+
+---
+
+## Other panels worth knowing
+
+| Page              | What it shows                                                                                                                                                                                     | When to use it                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **Escalations**   | Pending operator decisions surfaced by agents (`SubmitEscalation` intents).                                                                                                                       | When an Executor or Reviewer can't make progress without a human nudge.    |
+| **Inbox**         | Kernel-pushed notifications + per-operator unread state.                                                                                                                                          | Daily glance — catches policy violations, expiring certs, budget overruns. |
+| **Notifications** | The kernel-owned notifications table; the route surface that backs `[[notifications]]` in policy.                                                                                                 | Configuring email / Slack / webhook fan-out.                               |
+| **Policy**        | Read the live `policy.toml`, diff it against the prior epoch, edit + re-sign + epoch-advance from the UI. The signed `PUT /api/policy/toml` route emits `PolicyUpdatedViaDashboard` audit events. | When you want a policy change to feel less ceremonial than the CLI loop.   |
+| **Health**        | The same data as Overview but as a wide raw-fields table — useful when scraping or screenshotting.                                                                                                | Incidents.                                                                 |
+
+---
+
+## Light mode
+
+The top-right theme toggle flips the entire UI between dark (default)
+and light mode. Preference is persisted in `localStorage`; no kernel
+state changes.
+
+---
+
+## Where the data comes from
+
+The dashboard backend is `raxis-dashboard` (Axum HTTP server, default
+port 9820). Every route except `PUT /api/policy/toml` is a pure read
+against:
+
+| Source                      | Reader                             |
+| --------------------------- | ---------------------------------- |
+| `kernel.db` (SQLite)        | `raxis_store::views`               |
+| `audit/segment-NNN.jsonl`   | `raxis_audit_tools::ChainReader`   |
+| Per-session stream captures | `dashboard_kernel::stream_capture` |
+| Live kernel state           | `InitiativeEventBus` push channel  |
+
+The crate is glued into the kernel binary by
+[`raxis/crates/dashboard-kernel`](../../crates/dashboard-kernel/);
+tests wire `InMemoryDashboardData` so the HTTP surface is exercisable
+without booting a real kernel.
+
+---
+
+## Headless equivalents
+
+Every view has a CLI equivalent. Useful for scripts and for
+incident-response from a shell.
+
+| Dashboard view | CLI equivalent                                                     |
+| -------------- | ------------------------------------------------------------------ | ----- |
+| Overview       | `raxis status`, `raxis doctor`                                     |
+| Initiatives    | `raxis initiative list`, `raxis initiative show <id> --with-tasks` |
+| Sessions       | `raxis sessions`, `raxis session show <id>`                        |
+| Audit          | `raxis log <id> [-f]`, `raxis verify-chain`                        |
+| Escalations    | `raxis escalations inbox`, `raxis escalation approve               | deny` |
+| Policy         | `raxis policy show`, `raxis policy diff`, `raxis policy sign`      |
+
+---
+
+## Cross-references
+
+- [`raxis/crates/dashboard/src/lib.rs`](../../crates/dashboard/src/lib.rs) —
+  the route surface + auth model.
+- [`raxis/crates/dashboard-kernel/src/lib.rs`](../../crates/dashboard-kernel/src/lib.rs) —
+  the kernel-side glue that the binary wires into the `DashboardData`
+  trait.
+- [`recipes/cli/27-sessions-escalations-inbox.md`](../recipes/cli/27-sessions-escalations-inbox.md) —
+  CLI-side counterparts to the Sessions, Escalations, and Inbox pages.
+
+Continue to [`04-troubleshooting.md`](04-troubleshooting.md) for the
+top failure modes and their fixes.

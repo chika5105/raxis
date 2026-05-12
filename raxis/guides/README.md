@@ -17,15 +17,20 @@ placeholders, run the setup commands, and watch RAXIS drive the work.
 
 ## How to read this catalogue
 
-1. Run the **one-time genesis ceremony** documented in
-   [`SETUP.md`](SETUP.md). Every guide assumes that ceremony has run
-   exactly once on your machine; the SETUP doc shows you how to confirm.
-2. Pick a scenario. Each guide is rated by complexity (⭐ – ⭐⭐⭐⭐⭐) and
+1. **First time on RAXIS?** Walk the five-page
+   [`getting-started/`](getting-started/) cluster before anything
+   here. Thirty minutes from `git clone` to "kernel ran my plan,
+   audit chain verifies". It supersedes the older `SETUP.md` long-form
+   walkthrough, which remains as the inspect-every-step variant.
+2. Returning to a machine that already ran genesis? Use the
+   "Confirming an existing install" check at the bottom of
+   [`SETUP.md`](SETUP.md), then jump straight into a scenario below.
+3. Pick a scenario. Each guide is rated by complexity (⭐ – ⭐⭐⭐⭐⭐) and
    estimated wall-clock time.
-3. `cd` into the scenario folder and follow its `README.md`. The `plan.toml`
+4. `cd` into the scenario folder and follow its `README.md`. The `plan.toml`
    in each folder has already passed `raxis plan validate`; you can re-run
    the validator at any time to confirm.
-4. Iterate. Most scenarios end with a "Variations" section — knobs you can
+5. Iterate. Most scenarios end with a "Variations" section — knobs you can
    change to explore further.
 
 ---
@@ -132,7 +137,9 @@ The reading order in the previous version of this README has been promoted
 to a dedicated [`CONCEPTS.md`](CONCEPTS.md) — a single page that introduces
 path allowlists, clone strategies, lane budgets, agent types, dependency
 rules, and inter-agent communication. New operators should read that page
-before diving into the scenarios.
+(or the [`getting-started/`](getting-started/) cluster, which folds the
+same material into a runnable end-to-end walk) before diving into the
+scenarios.
 
 ## Pattern library
 
