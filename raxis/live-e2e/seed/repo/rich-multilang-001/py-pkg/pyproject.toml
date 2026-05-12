@@ -2,7 +2,6 @@
 name            = "sample-py"
 version         = "0.1.0"
 description     = "Python workspace member for the rich-multilang-001 e2e fixture."
-license         = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 
 [project.scripts]

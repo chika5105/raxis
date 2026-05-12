@@ -93,16 +93,17 @@ copy_tree() {
   cp "$src" "$dst/"
 }
 
-# ── Commit 0: initial scaffolding (LICENSE, README, CONTRIBUTING,
-#   .gitignore). Establishes the baseline that subsequent commits
-#   build on.
+# ── Commit 0: initial scaffolding (README, .gitignore). Establishes
+#   the baseline that subsequent commits build on. (No LICENSE /
+#   CONTRIBUTING / governance files are committed into the seeded
+#   repo: the parent raxis repository's policy forbids generating
+#   those even in test fixtures, and a "Recent changes" section in
+#   the seeded README plays the role CONTRIBUTING played previously.)
 _set_date_for_tick 0
-cp "$fixture_root/LICENSE" .
 cp "$fixture_root/README.template.md" README.md
-cp "$fixture_root/CONTRIBUTING.md" .
 cp "$fixture_root/.gitignore" .
-git add LICENSE README.md CONTRIBUTING.md .gitignore
-git commit --quiet -m "chore: initial scaffolding (LICENSE, README, CONTRIBUTING, .gitignore)"
+git add README.md .gitignore
+git commit --quiet -m "chore: initial scaffolding (README, .gitignore)"
 
 # ── Commit 1: rust workspace root + crate skeleton.
 _set_date_for_tick 1
@@ -318,11 +319,11 @@ git add ts-pkg/src py-pkg/src
 git commit --quiet -m "refactor(ts,py): rename \`formatHello\`/\`format_hello\` -> \`greet\`/\`render_greeting\`"
 
 # ── Commit 10: docs polish — append a "Recent changes" section to
-#   CONTRIBUTING.md. Gives `git log --follow` a non-rename diff to
-#   navigate AFTER the rename chain (so a follower walking from
+#   the seeded repo's README.md. Gives `git log` a non-rename diff
+#   to navigate AFTER the rename chain (so a walker from
 #   greet.{rs,ts,py} sees more than two commits of context).
 _set_date_for_tick 10
-cat >> CONTRIBUTING.md <<'MD'
+cat >> README.md <<'MD'
 
 ## Recent changes
 
@@ -331,7 +332,7 @@ cat >> CONTRIBUTING.md <<'MD'
   consistency across the language tree. Old call sites referring
   to the previous name MUST be updated.
 MD
-git add CONTRIBUTING.md
-git commit --quiet -m "docs(contributing): record cross-lang rename in 'Recent changes'"
+git add README.md
+git commit --quiet -m "docs(readme): record cross-lang rename in 'Recent changes'"
 
 echo "rich-multilang-001 seeded at $target (HEAD=$(git rev-parse HEAD))"

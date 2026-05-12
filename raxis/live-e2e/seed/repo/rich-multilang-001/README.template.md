@@ -25,7 +25,3 @@ cargo test -p rust-crate     # Rust unit tests
 ( cd ts-pkg && npm test )    # TS unit tests
 python -m sample_py.cli      # Python CLI
 ```
-
-## Contributing
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md).

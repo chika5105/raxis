@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "description": "TypeScript workspace member for the rich-multilang-001 e2e fixture.",
-  "license": "Apache-2.0",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {

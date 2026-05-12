@@ -14,11 +14,11 @@ not:
   * Multi-language source tree (Rust workspace member, TS/JS
     package, Python module) — exercises language-specific
     formatters/linters in cross-file edits.
-  * Mixed file modes — `LICENSE`, `README.md`, `CONTRIBUTING.md`,
-    an executable shell script under `scripts/`, and a small binary
-    fixture under `fixtures/` (~1 KiB) so virtio-fs / vsock-RPC
-    workspace mount throughput and file-mode preservation through
-    `worktree-provision` are exercised end-to-end.
+  * Mixed file modes — `README.md`, an executable shell script
+    under `scripts/`, and a small binary fixture under `fixtures/`
+    (~1 KiB) so virtio-fs / vsock-RPC workspace mount throughput
+    and file-mode preservation through `worktree-provision` are
+    exercised end-to-end.
   * Non-trivial git history — 10+ commits, including one merge
     commit from a feature branch and one rename detected by
     `git log --follow`.
@@ -45,9 +45,7 @@ first; the resulting `HEAD` sha matches the first run byte-for-byte.
 ```
 rich-multilang-001/
 ├── README.md                  (this file)
-├── LICENSE                    (Apache-2.0, full text)
 ├── README.template.md         (becomes README.md in the seeded repo)
-├── CONTRIBUTING.md
 ├── .gitignore
 ├── Cargo.toml                 (workspace root for the rust crate)
 ├── rust-crate/                (workspace member)
