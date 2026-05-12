@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
-    "//tanstack-advisory": "CVE-2026-45321 – supply-chain attack on @tanstack/* (2026-05-11). Do NOT update these packages until TanStack publishes verified-clean releases. See: https://tanstack.com",
+    "//": "tanstack advisory CVE-2026-45321 – supply-chain attack on @tanstack/* (2026-05-11). Do NOT update these packages until TanStack publishes verified-clean releases. See: https://tanstack.com",
     "@tanstack/react-query": "^5.51.1",
     "@tanstack/react-query-devtools": "^5.51.1",
     "@tweenjs/tween.js": "^21.0.0",
