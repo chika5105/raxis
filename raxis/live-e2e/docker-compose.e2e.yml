@@ -22,6 +22,15 @@
 #     an HTTP capture API), but it is the team-wide preferred image
 #     and the harness inspects deliveries by `docker exec`-ing into
 #     the container's `Maildir/new`.
+#   * `mysql`   (3306 → 33099) — `mysql-proxy` slice's real-upstream
+#     mode. Replaces the historical "hermetic / unreachable URL"
+#     default with an actual MySQL 8.0 server so the proxy's
+#     handshake AND the upstream forwarding path both run against
+#     real `mysql_native_password` SASL.
+#   * `mssql`   (1433 → 14399) — `mssql-proxy` slice's real-upstream
+#     mode. Replaces the same hermetic-URL default with a real
+#     SQL Server 2022 (Developer edition; `MSSQL_PID=Developer` is
+#     the supported test/dev licensing path).
 #
 # Ports are deliberately offset from defaults to avoid colliding
 # with any operator-side databases the developer may already be
@@ -187,3 +196,69 @@ services:
       - /var/mail-state
       - /var/log/mail
       - /tmp
+
+  mysql:
+    image: mysql:8.0.36
+    container_name: raxis-e2e-mysql
+    command:
+      # The proxy's V2 MVP authenticates with
+      # `mysql_native_password`; pin the server to this default
+      # so a future `caching_sha2_password` flip in MySQL 8.4+
+      # cannot break the slice silently.
+      - "--default-authentication-plugin=mysql_native_password"
+      - "--bind-address=0.0.0.0"
+      - "--skip-name-resolve"
+    ports:
+      - "127.0.0.1:33099:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: raxis_test_pass
+      MYSQL_DATABASE: raxis_e2e
+      MYSQL_USER: raxis_test
+      MYSQL_PASSWORD: raxis_test_pass
+    healthcheck:
+      test:
+        - CMD
+        - mysqladmin
+        - ping
+        - "-h"
+        - "127.0.0.1"
+        - "-u"
+        - "raxis_test"
+        - "-praxis_test_pass"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    tmpfs:
+      - /var/lib/mysql
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04
+    container_name: raxis-e2e-mssql
+    # The 2022 image runs as `mssql` (UID 10001) by default; root
+    # is required for the tmpfs mount under /var/opt/mssql to be
+    # writeable when docker mounts it on macOS / podman.
+    user: root
+    ports:
+      - "127.0.0.1:14399:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      # Microsoft licenses the `Developer` edition for free use in
+      # dev/test only. Production traffic requires a different
+      # PID — the live-e2e harness is explicitly dev/test only.
+      MSSQL_PID: Developer
+      # Password must satisfy SQL Server's "strong" policy: ≥ 8
+      # chars, mixed case, digit, symbol.
+      MSSQL_SA_PASSWORD: "raxis_Test_Pass1!"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "/opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P 'raxis_Test_Pass1!' -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P 'raxis_Test_Pass1!' -Q 'SELECT 1'"
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 25s
+    tmpfs:
+      - /var/opt/mssql/data
+      - /var/opt/mssql/log
+      - /var/opt/mssql/secrets

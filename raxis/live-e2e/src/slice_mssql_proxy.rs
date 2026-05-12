@@ -3,16 +3,17 @@
 //!
 //! ## Two modes
 //!
-//! 1. **Hermetic (default)** — no real SQL Server required. The
-//!    proxy is configured with an unreachable upstream URL
-//!    (`mssql://demo:demo@127.0.0.1:1/demo`) so the V2.1 upstream
-//!    forwarding path can be exercised without an external service:
+//! 1. **Hermetic (default)** — the proxy is configured with an
+//!    unreachable upstream URL (`mssql://demo:demo@127.0.0.1:1/demo`)
+//!    so the V2.1 upstream forwarding path can be exercised
+//!    without an external service:
 //!      * The agent's PRELOGIN ↔ LOGIN7 ↔ LOGINACK+DONE succeeds
 //!        (the proxy answers locally — these are NOT forwarded).
 //!      * `SQLBatch "SELECT 1"` triggers an upstream connect to
 //!        127.0.0.1:1, which fails — the agent receives an
 //!        ERROR + DONE_ERROR token sequence. We assert on the
-//!        ERROR token's presence.
+//!        ERROR token's presence AND
+//!        `upstream_connects_failed ≥ 1`.
 //!      * `SQLBatch "INSERT INTO t VALUES (1)"` short-circuits at
 //!        the restriction layer (BEFORE upstream) with an
 //!        ERROR + DONE_ERROR.
@@ -21,7 +22,15 @@
 //!    the env var is set, the SELECT round-trips real result-set
 //!    tokens (COLMETADATA / ROW / DONE) from a live SQL Server.
 //!    Plaintext TDS only — `?encrypt=true` is rejected at
-//!    `connect()`.
+//!    `connect()`.  The docker-compose SQL Server service
+//!    published in `live-e2e/docker-compose.e2e.yml` is the
+//!    recommended target for the fast-path; set:
+//!
+//!    ```sh
+//!    docker compose -f live-e2e/docker-compose.e2e.yml up -d mssql --wait
+//!    export RAXIS_LIVE_MSSQL_URL='mssql://sa:raxis_Test_Pass1!@127.0.0.1:14399/master'
+//!    cargo run -p raxis-live-e2e -- mssql-proxy
+//!    ```
 //!
 //! Either mode validates the proxy's local handshake, restriction
 //! enforcement, audit emission, and credential resolution.
@@ -247,6 +256,19 @@ pub async fn run() -> Result<()> {
             "expected ≥1 CredentialBackend::resolve call, got 0",
         ));
     }
+    if hermetic {
+        if snap.upstream_connects_failed < 1 {
+            return Err(anyhow!(
+                "hermetic mode: expected upstream_connects_failed≥1, got {}",
+                snap.upstream_connects_failed,
+            ));
+        }
+    } else if snap.upstream_connects_succeeded < 1 {
+        return Err(anyhow!(
+            "real-upstream mode: expected upstream_connects_succeeded≥1, got {}",
+            snap.upstream_connects_succeeded,
+        ));
+    }
 
     proxy_handle.abort();
     let _ = proxy_handle.await;
@@ -255,6 +277,8 @@ pub async fn run() -> Result<()> {
         connections_served = snap.connections_served,
         queries_audited    = snap.queries_audited,
         queries_blocked    = snap.queries_blocked,
+        upstream_succeeded = snap.upstream_connects_succeeded,
+        upstream_failed    = snap.upstream_connects_failed,
         backend_resolves   = backend.resolves.load(Ordering::Relaxed),
         "mssql-proxy slice OK",
     );
@@ -338,3 +362,4 @@ async fn read_packet(sock: &mut TcpStream) -> Result<Option<(PacketHeader, Vec<u
         .context("read TDS body")?;
     Ok(Some((h, body)))
 }
+

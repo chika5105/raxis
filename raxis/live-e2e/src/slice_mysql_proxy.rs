@@ -3,17 +3,18 @@
 //!
 //! ## Two modes
 //!
-//! 1. **Hermetic (default)** — no real MySQL required. The proxy
-//!    is configured with an unreachable upstream URL
-//!    (`mysql://demo:demo@127.0.0.1:1/demo`) so the V2.1 upstream
-//!    forwarding path can be exercised without an external service:
+//! 1. **Hermetic (default)** — the proxy is configured with an
+//!    unreachable upstream URL (`mysql://demo:demo@127.0.0.1:1/demo`)
+//!    so the V2.1 upstream-forwarding path can be exercised
+//!    without an external service:
 //!      * The agent's `HandshakeV10` ↔ `HandshakeResponse41` ↔
 //!        `OK_Packet` succeeds (the proxy answers locally).
 //!      * `COM_PING` succeeds (still local).
 //!      * `SELECT 1` triggers the proxy to attempt an upstream
 //!        connection — which fails — and the agent receives an
 //!        `ERR_Packet`. We assert the failure path emitted
-//!        `CredentialProxyUpstreamFailed`.
+//!        `CredentialProxyUpstreamFailed` and the
+//!        `upstream_connects_failed` counter incremented.
 //!      * `INSERT INTO t VALUES (1)` short-circuits at the
 //!        restriction layer (BEFORE upstream) with
 //!        `ERR_Packet { sqlstate = "42501" }`.
@@ -22,14 +23,21 @@
 //! 2. **Real upstream (`RAXIS_LIVE_MYSQL_URL=mysql://...`)** — when
 //!    the env var is set, the SELECT round-trips a real result set
 //!    from a live MySQL server through `mysql_native_password`.
+//!    The docker-compose MySQL service published in
+//!    `live-e2e/docker-compose.e2e.yml` is the recommended
+//!    target for the fast-path; set:
+//!
+//!    ```sh
+//!    docker compose -f live-e2e/docker-compose.e2e.yml up -d mysql --wait
+//!    export RAXIS_LIVE_MYSQL_URL=mysql://raxis_test:raxis_test_pass@127.0.0.1:33099
+//!    cargo run -p raxis-live-e2e -- mysql-proxy
+//!    ```
 //!
 //! Either mode validates the proxy's local handshake, restriction
 //! enforcement, audit emission, and credential-resolution
-//! invariants.
-//!
-//! The client side speaks the wire protocol directly (no third-
-//! party MySQL crate) so the slice has zero external dependencies
-//! beyond the proxy crate itself.
+//! invariants. The client side speaks the wire protocol directly
+//! (no third-party MySQL crate) so the slice has zero external
+//! dependencies beyond the proxy crate itself.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -296,6 +304,27 @@ pub async fn run() -> Result<()> {
             "expected ≥1 CredentialBackend::resolve call, got 0",
         ));
     }
+    if hermetic {
+        // The unreachable-upstream connect MUST have been
+        // attempted and MUST have failed — otherwise the proxy
+        // skipped the upstream-forwarding code path entirely
+        // (regression).
+        if snap.upstream_connects_failed < 1 {
+            return Err(anyhow!(
+                "hermetic mode: expected upstream_connects_failed≥1, got {}",
+                snap.upstream_connects_failed,
+            ));
+        }
+    } else if snap.upstream_connects_succeeded < 1 {
+        // Real-upstream mode: the SELECT must have driven a
+        // successful upstream connect. A regression that bypassed
+        // upstream and answered the SELECT locally would surface
+        // here.
+        return Err(anyhow!(
+            "real-upstream mode: expected upstream_connects_succeeded≥1, got {}",
+            snap.upstream_connects_succeeded,
+        ));
+    }
 
     proxy_handle.abort();
     let _ = proxy_handle.await;
@@ -304,6 +333,8 @@ pub async fn run() -> Result<()> {
         connections_served = snap.connections_served,
         queries_audited    = snap.queries_audited,
         queries_blocked    = snap.queries_blocked,
+        upstream_succeeded = snap.upstream_connects_succeeded,
+        upstream_failed    = snap.upstream_connects_failed,
         backend_resolves   = backend.resolves.load(Ordering::Relaxed),
         "mysql-proxy slice OK",
     );
@@ -324,3 +355,4 @@ async fn read_packet(sock: &mut TcpStream) -> Result<Option<(PacketHeader, Vec<u
         .context("read MySQL packet payload")?;
     Ok(Some((h, payload)))
 }
+

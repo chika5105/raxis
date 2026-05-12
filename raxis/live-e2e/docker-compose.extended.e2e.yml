@@ -149,3 +149,57 @@ services:
       - /var/mail-state
       - /var/log/mail
       - /tmp
+
+  mysql:
+    image: mysql:8.0.36
+    container_name: raxis-e2e-mysql
+    command:
+      - "--default-authentication-plugin=mysql_native_password"
+      - "--bind-address=0.0.0.0"
+      - "--skip-name-resolve"
+    ports:
+      - "127.0.0.1:33099:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: raxis_test_pass
+      MYSQL_DATABASE: raxis_e2e
+      MYSQL_USER: raxis_test
+      MYSQL_PASSWORD: raxis_test_pass
+    healthcheck:
+      test:
+        - CMD
+        - mysqladmin
+        - ping
+        - "-h"
+        - "127.0.0.1"
+        - "-u"
+        - "raxis_test"
+        - "-praxis_test_pass"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    tmpfs:
+      - /var/lib/mysql
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04
+    container_name: raxis-e2e-mssql
+    user: root
+    ports:
+      - "127.0.0.1:14399:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: "raxis_Test_Pass1!"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "/opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P 'raxis_Test_Pass1!' -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P 'raxis_Test_Pass1!' -Q 'SELECT 1'"
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 25s
+    tmpfs:
+      - /var/opt/mssql/data
+      - /var/opt/mssql/log
+      - /var/opt/mssql/secrets
