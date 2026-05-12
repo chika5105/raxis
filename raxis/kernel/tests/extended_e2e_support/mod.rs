@@ -10,6 +10,7 @@
 
 #![allow(dead_code)]
 
+pub mod audit_chain;
 pub mod concurrency;
 pub mod injection;
 pub mod plan;
