@@ -4866,6 +4866,49 @@ mod tests {
         ).unwrap();
     }
 
+    /// V2.5+ §Step 25 test fixture — register the agent kind for
+    /// each `(initiative_id, task_id)` pair in the kernel's
+    /// `PlanRegistry` so the Step 25 aggregator's
+    /// [`crate::initiatives::review_aggregation::AgentTypeFilter`]
+    /// finds the entry instead of falling through the missing-
+    /// entry arm.
+    ///
+    /// **Why a separate helper rather than folding into
+    /// `seed_reviewer_with_executor_predecessor`.** The DB-row
+    /// seed is a pure-`Store` operation (used by ~30 tests across
+    /// `SubmitReview`, `StructuredOutput`, and a few read-path
+    /// tests). The plan-registry seed needs a `PlanRegistry`
+    /// reference, which only the SubmitReview-aggregator success
+    /// path actually consumes. Splitting them keeps the
+    /// `Store`-only tests (StructuredOutput, list-task-outputs)
+    /// from having to thread a registry handle they never touch.
+    ///
+    /// Production V2.5+ admission (`approve_plan` →
+    /// `parse_plan_tasks` → `PlanRegistry::insert`) populates the
+    /// registry atomically with the sealed plan bundle; these
+    /// integration tests skip the admission path and seed `tasks`
+    /// / `task_dag_edges` directly, so they MUST mirror the
+    /// registry seeding here. Forgetting the call would surface
+    /// as a `NoSuccessors` aggregator outcome under fail-closed
+    /// semantics (see commit "kernel/initiatives: fail closed on
+    /// missing plan-registry entry in AgentTypeFilter").
+    fn seed_plan_registry_for_tasks(
+        registry:      &crate::initiatives::PlanRegistry,
+        initiative_id: &str,
+        tasks:         &[(&str, raxis_types::SessionAgentType)],
+    ) {
+        use crate::initiatives::plan_registry::{TaskKey, TaskPlanFields};
+        for (task_id, agent_type) in tasks {
+            registry.insert(
+                TaskKey::new(initiative_id, *task_id),
+                TaskPlanFields {
+                    session_agent_type: *agent_type,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     fn read_last_critique(store: &Store, task_id: &str) -> Option<String> {
         let conn = store.lock_sync();
         conn.query_row(
@@ -4973,6 +5016,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request("rev1", Some(true), None);
         let resp = handle_submit_review(
@@ -4998,6 +5049,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request(
             "rev1",
@@ -5022,6 +5081,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request(
             "rev1",
@@ -5086,6 +5153,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // First reviewer rejects.
         let req_a = make_submit_review_request(
@@ -5204,6 +5280,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let at_cap = "y".repeat(raxis_types::MAX_CRITIQUE_BYTES);
         let req = make_submit_review_request("rev1", Some(false), Some(&at_cap));
@@ -5328,6 +5412,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // First reviewer approves — aggregator must still be Pending,
         // NO audit emission expected.
@@ -5382,6 +5475,14 @@ mod tests {
         let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev-only", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1",     raxis_types::SessionAgentType::Executor),
+                ("rev-only", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request("rev-only", Some(true), None);
         handle_submit_review(
@@ -5445,6 +5546,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // revA approves → still Pending, no audit row.
         let req_a = make_submit_review_request("revA", Some(true), None);
@@ -5534,6 +5644,14 @@ mod tests {
 
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
         seed_executor_activation_row(&store, "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         assert_eq!(read_review_reject_count(&store, "exe1"), 0,
             "freshly-seeded activation row starts at zero");
@@ -5558,6 +5676,14 @@ mod tests {
 
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
         seed_executor_activation_row(&store, "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request("rev1", Some(true), None);
         handle_submit_review(
@@ -5608,6 +5734,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // revA rejects first → still Pending (revB hasn't voted) → no bump.
         let req_a = make_submit_review_request("revA", Some(false), Some("first"));
