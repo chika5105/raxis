@@ -5,8 +5,7 @@ export function ThemeScript() {
     (function () {
       try {
         var stored = localStorage.getItem('raxis-theme');
-        var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        var dark = stored ? stored === 'dark' : prefersDark;
+        var dark = stored ? stored === 'dark' : false;
         if (dark) document.documentElement.classList.add('dark');
         else document.documentElement.classList.remove('dark');
       } catch (e) {}

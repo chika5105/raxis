@@ -7,9 +7,7 @@ export function ThemeToggle() {
 
   useEffect(() => {
     const stored = localStorage.getItem("raxis-theme");
-    const dark = stored
-      ? stored === "dark"
-      : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const dark = stored ? stored === "dark" : false;
     setTheme(dark ? "dark" : "light");
   }, []);
 
