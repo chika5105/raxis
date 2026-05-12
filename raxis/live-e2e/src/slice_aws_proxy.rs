@@ -86,6 +86,7 @@ pub async fn run() -> Result<()> {
         consumer:        OwnedConsumer::new("live-e2e-aws-slice", "session-1"),
         lease_seconds:   900,
         role_arn:        Some("arn:aws:iam::123456789:role/raxis-live-e2e".to_owned()),
+        forwarding:      None,
         restrictions:    Restrictions::default(),
     };
     let proxy = AwsProxy::bind(

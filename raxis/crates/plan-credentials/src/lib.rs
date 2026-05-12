@@ -162,7 +162,9 @@ pub enum ProxyDecl {
     Aws {
         /// Optional IAM role ARN echoed in the SDK response body.
         /// V2 does NOT call `sts:AssumeRole`; this field is
-        /// audit/observability only.
+        /// audit/observability only. V3 with `forwarding.enabled
+        /// = true` makes this the role ARN the proxy actually
+        /// assumes.
         #[serde(default)]
         role_arn: Option<String>,
         /// Lease length the proxy advertises in the SDK response's
@@ -171,6 +173,15 @@ pub enum ProxyDecl {
         /// matching the AWS SDK default.
         #[serde(default = "default_aws_lease_seconds")]
         lease_seconds: u64,
+        /// V3 cloud-forwarding configuration. When omitted or
+        /// `enabled = false`, the proxy runs the V2 emulator
+        /// path that mirrors the long-lived IAM key from the
+        /// credential backend. When `enabled = true`, the
+        /// proxy drives a real `sts:AssumeRole` against the
+        /// closed-allowlist STS endpoint. See
+        /// `specs/v3/cloud-proxy-forwarding.md §7.1`.
+        #[serde(default)]
+        forwarding: Option<AwsForwardingDecl>,
         /// Restrictions clause (`[tasks.credentials.restrictions]`).
         #[serde(default)]
         restrictions: AwsRestrictions,
@@ -196,6 +207,12 @@ pub enum ProxyDecl {
         /// default.
         #[serde(default = "default_gcp_lease_seconds")]
         lease_seconds: u64,
+        /// V3 cloud-forwarding configuration. When `enabled =
+        /// true`, the proxy drives a real JWT-bearer-grant
+        /// OAuth2 exchange against `oauth2.googleapis.com`.
+        /// See `specs/v3/cloud-proxy-forwarding.md §7.2`.
+        #[serde(default)]
+        forwarding: Option<GcpForwardingDecl>,
         /// Restrictions clause (`[tasks.credentials.restrictions]`).
         #[serde(default)]
         restrictions: GcpRestrictions,
@@ -219,6 +236,16 @@ pub enum ProxyDecl {
         /// 3600 seconds (1 hour) matching the Azure IMDS default.
         #[serde(default = "default_azure_lease_seconds")]
         lease_seconds: u64,
+        /// V3 cloud-forwarding configuration. When `enabled =
+        /// true`, the proxy drives a real
+        /// `client_credentials`-grant OAuth2 exchange against
+        /// `login.microsoftonline.com`. The `tenant_id` /
+        /// `client_id` / `client_secret` come from the
+        /// service-principal credential body resolved through
+        /// `CredentialBackend`. See
+        /// `specs/v3/cloud-proxy-forwarding.md §7.3`.
+        #[serde(default)]
+        forwarding: Option<AzureForwardingDecl>,
         /// Resource URI allowlist
         /// (`[tasks.credentials.restrictions].allowed_resources`).
         /// REQUIRED — empty allowlist blocks every request.
@@ -265,6 +292,100 @@ fn default_aws_lease_seconds() -> u64 { 900 }
 fn default_gcp_lease_seconds() -> u64 { 3600 }
 
 fn default_azure_lease_seconds() -> u64 { 3600 }
+
+// ---------------------------------------------------------------------------
+// V3 cloud-forwarding decls (one per cloud provider)
+// ---------------------------------------------------------------------------
+
+fn default_true() -> bool { true }
+
+fn default_aws_duration_seconds() -> u64 { 900 }
+
+fn default_cache_safety_window_seconds() -> u64 { 300 }
+
+fn default_jwt_lifetime_seconds() -> u64 { 3600 }
+
+fn default_aws_endpoint_kind() -> String { "global".to_owned() }
+
+/// `[tasks.credentials.forwarding]` block for an AWS proxy. When
+/// declared and `enabled = true`, the proxy drives a real
+/// `sts:AssumeRole` against the closed-allowlist STS endpoint
+/// instead of mirroring the long-lived IAM key.
+///
+/// Spec: `specs/v3/cloud-proxy-forwarding.md §7.1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwsForwardingDecl {
+    /// Whether the forwarding path is live. Defaults to `true`
+    /// so a plan that declares the `[forwarding]` block at all
+    /// opts into V3 — operators do not have to also flip a
+    /// flag.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// AWS region for SigV4 credential scope AND, when
+    /// `endpoint_kind = "regional"`, the regional STS host
+    /// (`sts.{region}.amazonaws.com`). Required when forwarding
+    /// is enabled.
+    pub region: String,
+    /// Which STS endpoint to dial: `"global"` →
+    /// `sts.amazonaws.com` (region is still used for SigV4
+    /// scope), `"regional"` → `sts.{region}.amazonaws.com`.
+    /// Defaults to `"global"`.
+    #[serde(default = "default_aws_endpoint_kind")]
+    pub endpoint_kind: String,
+    /// Optional `ExternalId` mirrored to `AssumeRole`. Pinned
+    /// when the role's trust policy requires it.
+    #[serde(default)]
+    pub external_id: Option<String>,
+    /// `DurationSeconds` for the AssumeRole request. Clamped to
+    /// `900..=43_200` per AWS spec.
+    #[serde(default = "default_aws_duration_seconds")]
+    pub duration_seconds: u64,
+    /// Token-cache safety window in seconds. Clamped to a
+    /// 60-second minimum by the cache layer.
+    #[serde(default = "default_cache_safety_window_seconds")]
+    pub cache_safety_window_seconds: u64,
+}
+
+/// `[tasks.credentials.forwarding]` block for a GCP proxy.
+///
+/// Spec: `specs/v3/cloud-proxy-forwarding.md §7.2`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcpForwardingDecl {
+    /// Whether the forwarding path is live.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional explicit scope list. When `None`, the proxy
+    /// falls back to `Restrictions::allowed_scopes`. The proxy
+    /// refuses to bind if both this field and
+    /// `allowed_scopes` are empty.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    /// JWT lifetime in seconds. The Google OAuth2 service
+    /// accepts up to 3600.
+    #[serde(default = "default_jwt_lifetime_seconds")]
+    pub jwt_lifetime_seconds: u64,
+    /// Token-cache safety window in seconds.
+    #[serde(default = "default_cache_safety_window_seconds")]
+    pub cache_safety_window_seconds: u64,
+}
+
+/// `[tasks.credentials.forwarding]` block for an Azure proxy.
+///
+/// The `tenant_id`, `client_id`, `client_secret` come from the
+/// service-principal credential body resolved through
+/// `CredentialBackend` — they are NEVER declared in the plan
+/// TOML.
+///
+/// Spec: `specs/v3/cloud-proxy-forwarding.md §7.3`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AzureForwardingDecl {
+    /// Whether the forwarding path is live.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Token-cache safety window in seconds.
+    #[serde(default = "default_cache_safety_window_seconds")]
+    pub cache_safety_window_seconds: u64,
+}
 
 /// HTTP-proxy authentication mode (mirrors
 /// `raxis_credential_proxy_http::AuthMode`).
@@ -1048,10 +1169,11 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Aws { role_arn, lease_seconds, restrictions } => {
+            ProxyDecl::Aws { role_arn, lease_seconds, forwarding, restrictions } => {
                 assert_eq!(role_arn.as_deref(),
                     Some("arn:aws:iam::123456789:role/raxis-staging-agent"));
                 assert_eq!(*lease_seconds, 900);
+                assert_eq!(*forwarding, None);
                 assert_eq!(restrictions, &AwsRestrictions::default());
             }
             other => panic!("expected Aws, got {other:?}"),
@@ -1150,10 +1272,11 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions } => {
+            ProxyDecl::Gcp { project, numeric_project, lease_seconds, forwarding, restrictions } => {
                 assert_eq!(project, "my-staging-project");
                 assert_eq!(*numeric_project, None);
                 assert_eq!(*lease_seconds, 3600);
+                assert_eq!(*forwarding, None);
                 assert_eq!(restrictions, &GcpRestrictions::default());
             }
             other => panic!("expected Gcp, got {other:?}"),
@@ -1181,7 +1304,7 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions } => {
+            ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions, .. } => {
                 assert_eq!(project, "my-prod-project");
                 assert_eq!(*numeric_project, Some(1234567890));
                 assert_eq!(*lease_seconds, 1800);
@@ -1214,10 +1337,11 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Azure { tenant_id, client_id, lease_seconds, restrictions } => {
+            ProxyDecl::Azure { tenant_id, client_id, lease_seconds, forwarding, restrictions } => {
                 assert_eq!(tenant_id, "aaaa-bbbb-cccc-dddd");
                 assert_eq!(*client_id, None);
                 assert_eq!(*lease_seconds, 3600);
+                assert_eq!(*forwarding, None);
                 assert_eq!(
                     restrictions.allowed_resources,
                     vec![

@@ -97,7 +97,6 @@ use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{CloudHttpClient, TokenCache};
 use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
 
-use crate::forwarding::StsCacheValue;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -105,7 +104,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub mod forwarding;
 pub mod restriction;
 
-pub use forwarding::{AWS_XML_CONTENT_TYPE, ForwardOutcome, ForwardingConfig};
+pub use forwarding::{AWS_XML_CONTENT_TYPE, ForwardOutcome, ForwardingConfig, StsCacheValue};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------

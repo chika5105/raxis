@@ -91,9 +91,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub mod forwarding;
 pub mod restriction;
 
-use crate::forwarding::GcpCacheValue;
-
-pub use forwarding::{ForwardOutcome, ForwardingConfig, GCP_JSON_CONTENT_TYPE};
+pub use forwarding::{ForwardOutcome, ForwardingConfig, GCP_JSON_CONTENT_TYPE, GcpCacheValue};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------

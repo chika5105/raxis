@@ -35,6 +35,8 @@ raxis-credential-proxy-azure    = { path = "../credential-proxy-azure" }
 raxis-credential-proxy-mysql    = { path = "../credential-proxy-mysql" }
 raxis-credential-proxy-mongodb  = { path = "../credential-proxy-mongodb" }
 raxis-credential-proxy-mssql    = { path = "../credential-proxy-mssql" }
+# Shared infrastructure for V3 cloud-forwarding (AWS / GCP / Azure).
+raxis-credential-proxy-cloud-shared = { workspace = true }
 
 [dev-dependencies]
 raxis-credentials-file = { workspace = true }

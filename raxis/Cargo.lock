@@ -3229,6 +3229,7 @@ dependencies = [
  "raxis-audit-tools",
  "raxis-credential-proxy-aws",
  "raxis-credential-proxy-azure",
+ "raxis-credential-proxy-cloud-shared",
  "raxis-credential-proxy-gcp",
  "raxis-credential-proxy-http",
  "raxis-credential-proxy-mongodb",

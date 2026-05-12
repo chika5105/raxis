@@ -93,9 +93,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub mod forwarding;
 pub mod restriction;
 
-use crate::forwarding::AzureCacheValue;
-
-pub use forwarding::{AZURE_JSON_CONTENT_TYPE, ForwardOutcome, ForwardingConfig};
+pub use forwarding::{AZURE_JSON_CONTENT_TYPE, AzureCacheValue, ForwardOutcome, ForwardingConfig};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------

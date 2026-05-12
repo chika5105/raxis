@@ -82,6 +82,7 @@ pub async fn run() -> Result<()> {
         lease_seconds:      3600,
         project_id:         "my-live-e2e-proj".to_owned(),
         numeric_project_id: Some(123456789),
+        forwarding:         None,
         restrictions:       Restrictions::default(),
     };
     let proxy = GcpProxy::bind(

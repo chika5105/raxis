@@ -78,6 +78,7 @@ pub async fn run() -> Result<()> {
         lease_seconds:   3600,
         tenant_id:       "live-e2e-tenant".to_owned(),
         client_id:       Some("live-e2e-client".to_owned()),
+        forwarding:      None,
         restrictions: Restrictions {
             allowed_resources: vec!["https://management.azure.com/".to_owned()],
             allowed_actions:   Vec::new(),

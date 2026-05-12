@@ -95,9 +95,10 @@ use std::sync::Arc;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::CredentialBackend;
 use raxis_plan_credentials::{
-    AwsRestrictions, AzureRestrictions, GcpRestrictions, HttpAuthMode, HttpRestrictions,
-    MongodbRestrictions, MssqlRestrictions, MysqlRestrictions, PostgresRestrictions, ProxyDecl,
-    RedisRestrictions, SmtpAuthMode, SmtpRestrictions, TaskCredentialDecl,
+    AwsForwardingDecl, AwsRestrictions, AzureForwardingDecl, AzureRestrictions, GcpForwardingDecl,
+    GcpRestrictions, HttpAuthMode, HttpRestrictions, MongodbRestrictions, MssqlRestrictions,
+    MysqlRestrictions, PostgresRestrictions, ProxyDecl, RedisRestrictions, SmtpAuthMode,
+    SmtpRestrictions, TaskCredentialDecl,
 };
 
 use raxis_credential_proxy_http::{
@@ -114,22 +115,24 @@ use raxis_credential_proxy_postgres::{
 };
 use raxis_credential_proxy_aws::{
     AuditChannel as AwsAuditChannel, AuditEvent as AwsAuditEvent, AwsProxy,
-    OwnedConsumer as AwsOwnedConsumer, ProxyConfig as AwsProxyConfig,
-    ProxyError as AwsProxyError, ProxyStats as AwsProxyStats,
-    Restrictions as AwsProxyRestrictions,
+    ForwardingConfig as AwsForwardingConfig, OwnedConsumer as AwsOwnedConsumer,
+    ProxyConfig as AwsProxyConfig, ProxyError as AwsProxyError, ProxyStats as AwsProxyStats,
+    Restrictions as AwsProxyRestrictions, StsCacheValue as AwsStsCacheValue,
 };
 use raxis_credential_proxy_gcp::{
-    AuditChannel as GcpAuditChannel, AuditEvent as GcpAuditEvent, GcpProxy,
+    AuditChannel as GcpAuditChannel, AuditEvent as GcpAuditEvent,
+    ForwardingConfig as GcpForwardingConfig, GcpCacheValue, GcpProxy,
     OwnedConsumer as GcpOwnedConsumer, ProxyConfig as GcpProxyConfig,
     ProxyError as GcpProxyError, ProxyStats as GcpProxyStats,
     Restrictions as GcpProxyRestrictions,
 };
 use raxis_credential_proxy_azure::{
-    AuditChannel as AzureAuditChannel, AuditEvent as AzureAuditEvent, AzureProxy,
-    OwnedConsumer as AzureOwnedConsumer, ProxyConfig as AzureProxyConfig,
-    ProxyError as AzureProxyError, ProxyStats as AzureProxyStats,
-    Restrictions as AzureProxyRestrictions,
+    AuditChannel as AzureAuditChannel, AuditEvent as AzureAuditEvent, AzureCacheValue, AzureProxy,
+    ForwardingConfig as AzureForwardingConfig, OwnedConsumer as AzureOwnedConsumer,
+    ProxyConfig as AzureProxyConfig, ProxyError as AzureProxyError,
+    ProxyStats as AzureProxyStats, Restrictions as AzureProxyRestrictions,
 };
+use raxis_credential_proxy_cloud_shared::{CloudHttpClient, CloudUpstreamHost, TokenCache};
 use raxis_credential_proxy_mysql::{
     AuditChannel as MysqlAuditChannel, AuditEvent as MysqlAuditEvent, MysqlProxy,
     OwnedConsumer as MysqlOwnedConsumer, ProxyConfig as MysqlProxyConfig,
@@ -318,6 +321,20 @@ pub enum ManagerError {
     /// rather than continue with an unaudited proxy.
     #[error("audit emission failed: {0}")]
     Audit(String),
+
+    /// V3 cloud-forwarding declaration is malformed (e.g. AWS
+    /// region missing, GCP scope set empty, Azure
+    /// `cache_safety_window_seconds` below 60). Surfaced at
+    /// bind time so misconfigured plans fail closed before any
+    /// upstream credential is minted.
+    #[error("cloud-forwarding misconfigured for `{credential_name}`: {detail}")]
+    CloudForwardingConfig {
+        /// Credential name whose forwarding decl is malformed.
+        credential_name: String,
+        /// Free-form diagnostic. NEVER includes credential
+        /// bytes.
+        detail:          String,
+    },
 }
 
 /// String name of the proxy type — embedded into the audit events.
@@ -1774,7 +1791,7 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
-                ProxyDecl::Aws { role_arn, lease_seconds, restrictions } => {
+                ProxyDecl::Aws { role_arn, lease_seconds, forwarding, restrictions } => {
                     self.bind_aws(
                         session_id,
                         task_id,
@@ -1782,11 +1799,12 @@ impl CredentialProxyManager {
                         &decl.mount_as,
                         role_arn.as_deref(),
                         *lease_seconds,
+                        forwarding.as_ref(),
                         restrictions,
                     )
                     .await?
                 }
-                ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions } => {
+                ProxyDecl::Gcp { project, numeric_project, lease_seconds, forwarding, restrictions } => {
                     self.bind_gcp(
                         session_id,
                         task_id,
@@ -1795,11 +1813,12 @@ impl CredentialProxyManager {
                         project,
                         *numeric_project,
                         *lease_seconds,
+                        forwarding.as_ref(),
                         restrictions,
                     )
                     .await?
                 }
-                ProxyDecl::Azure { tenant_id, client_id, lease_seconds, restrictions } => {
+                ProxyDecl::Azure { tenant_id, client_id, lease_seconds, forwarding, restrictions } => {
                     self.bind_azure(
                         session_id,
                         task_id,
@@ -1808,6 +1827,7 @@ impl CredentialProxyManager {
                         tenant_id,
                         client_id.as_deref(),
                         *lease_seconds,
+                        forwarding.as_ref(),
                         restrictions,
                     )
                     .await?
@@ -2166,8 +2186,18 @@ impl CredentialProxyManager {
         mount_as:      &str,
         role_arn:      Option<&str>,
         lease_seconds: u64,
+        forwarding:    Option<&AwsForwardingDecl>,
         restrictions:  &AwsRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
+        // V3 forwarding plumbing — only constructed when the plan
+        // declares `[forwarding] enabled = true`. The shared
+        // CloudHttpClient is bound to the allowlisted STS upstream
+        // at construction so a misconfigured `region` /
+        // `endpoint_kind` fails closed before any token is minted.
+        let v3 = match forwarding {
+            Some(f) if f.enabled => Some(build_aws_forwarding(name.as_str(), f, role_arn)?),
+            _ => None,
+        };
         let cfg = AwsProxyConfig {
             listen_addr:     "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
@@ -2177,6 +2207,7 @@ impl CredentialProxyManager {
             ),
             lease_seconds,
             role_arn:        role_arn.map(|s| s.to_owned()),
+            forwarding:      v3.as_ref().map(|x| x.fwd.clone()),
             restrictions: AwsProxyRestrictions {
                 allowed_paths:    restrictions.allowed_paths.clone(),
                 allowed_services: restrictions.allowed_services.clone(),
@@ -2188,12 +2219,21 @@ impl CredentialProxyManager {
             session_id: session_id.to_owned(),
             task_id:    task_id.to_owned(),
         });
-        let proxy = AwsProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
-            .await
-            .map_err(|source| ManagerError::AwsBind {
-                credential_name: name.as_str().to_owned(),
-                source,
-            })?;
+        let proxy = match v3 {
+            Some(v3) => AwsProxy::bind_v3(
+                Arc::clone(&self.backend),
+                cfg,
+                audit_channel,
+                Arc::clone(&self.audit),
+                Arc::new(v3.http),
+                Arc::new(v3.cache),
+            ).await,
+            None => AwsProxy::bind(Arc::clone(&self.backend), cfg, audit_channel).await,
+        }
+        .map_err(|source| ManagerError::AwsBind {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
         let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
             credential_name: name.as_str().to_owned(),
             source,
@@ -2222,8 +2262,15 @@ impl CredentialProxyManager {
         project:         &str,
         numeric_project: Option<u64>,
         lease_seconds:   u64,
+        forwarding:      Option<&GcpForwardingDecl>,
         restrictions:    &GcpRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
+        let v3 = match forwarding {
+            Some(f) if f.enabled => Some(build_gcp_forwarding(
+                name.as_str(), f, &restrictions.allowed_scopes,
+            )?),
+            _ => None,
+        };
         let cfg = GcpProxyConfig {
             listen_addr:        "127.0.0.1:0".to_owned(),
             credential_name:    name.clone(),
@@ -2234,6 +2281,7 @@ impl CredentialProxyManager {
             lease_seconds,
             project_id:         project.to_owned(),
             numeric_project_id: numeric_project,
+            forwarding:         v3.as_ref().map(|x| x.fwd.clone()),
             restrictions:       GcpProxyRestrictions {
                 allowed_paths:  restrictions.allowed_paths.clone(),
                 allowed_scopes: restrictions.allowed_scopes.clone(),
@@ -2245,12 +2293,21 @@ impl CredentialProxyManager {
             session_id: session_id.to_owned(),
             task_id:    task_id.to_owned(),
         });
-        let proxy = GcpProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
-            .await
-            .map_err(|source| ManagerError::GcpBind {
-                credential_name: name.as_str().to_owned(),
-                source,
-            })?;
+        let proxy = match v3 {
+            Some(v3) => GcpProxy::bind_v3(
+                Arc::clone(&self.backend),
+                cfg,
+                audit_channel,
+                Arc::clone(&self.audit),
+                Arc::new(v3.http),
+                Arc::new(v3.cache),
+            ).await,
+            None => GcpProxy::bind(Arc::clone(&self.backend), cfg, audit_channel).await,
+        }
+        .map_err(|source| ManagerError::GcpBind {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
         let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
             credential_name: name.as_str().to_owned(),
             source,
@@ -2279,8 +2336,13 @@ impl CredentialProxyManager {
         tenant_id:     &str,
         client_id:     Option<&str>,
         lease_seconds: u64,
+        forwarding:    Option<&AzureForwardingDecl>,
         restrictions:  &AzureRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
+        let v3 = match forwarding {
+            Some(f) if f.enabled => Some(build_azure_forwarding(name.as_str(), f)?),
+            _ => None,
+        };
         let cfg = AzureProxyConfig {
             listen_addr:     "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
@@ -2291,6 +2353,7 @@ impl CredentialProxyManager {
             lease_seconds,
             tenant_id:       tenant_id.to_owned(),
             client_id:       client_id.map(|s| s.to_owned()),
+            forwarding:      v3.as_ref().map(|x| x.fwd.clone()),
             restrictions:    AzureProxyRestrictions {
                 allowed_resources: restrictions.allowed_resources.clone(),
                 allowed_actions:   restrictions
@@ -2308,12 +2371,21 @@ impl CredentialProxyManager {
             session_id: session_id.to_owned(),
             task_id:    task_id.to_owned(),
         });
-        let proxy = AzureProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
-            .await
-            .map_err(|source| ManagerError::AzureBind {
-                credential_name: name.as_str().to_owned(),
-                source,
-            })?;
+        let proxy = match v3 {
+            Some(v3) => AzureProxy::bind_v3(
+                Arc::clone(&self.backend),
+                cfg,
+                audit_channel,
+                Arc::clone(&self.audit),
+                Arc::new(v3.http),
+                Arc::new(v3.cache),
+            ).await,
+            None => AzureProxy::bind(Arc::clone(&self.backend), cfg, audit_channel).await,
+        }
+        .map_err(|source| ManagerError::AzureBind {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
         let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
             credential_name: name.as_str().to_owned(),
             source,
@@ -2491,6 +2563,154 @@ impl CredentialProxyManager {
             join,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// V3 cloud-forwarding plumbing.
+//
+// Each `build_*_forwarding` helper turns the plan-credentials
+// decl into the proxy-crate-shaped `ForwardingConfig` plus the
+// matching `CloudHttpClient` + `TokenCache<T>` instances. The
+// CloudHttpClient is bound to the upstream allowlist at
+// construction so any future call that hits a different host
+// fails closed.
+// ---------------------------------------------------------------------------
+
+struct AwsV3 {
+    fwd:   AwsForwardingConfig,
+    http:  CloudHttpClient,
+    cache: TokenCache<AwsStsCacheValue>,
+}
+
+fn build_aws_forwarding(
+    credential_name: &str,
+    decl:            &AwsForwardingDecl,
+    role_arn:        Option<&str>,
+) -> Result<AwsV3, ManagerError> {
+    let role_arn = role_arn.ok_or_else(|| ManagerError::CloudForwardingConfig {
+        credential_name: credential_name.to_owned(),
+        detail:          "aws forwarding requires `role_arn` on the ProxyDecl".to_owned(),
+    })?.to_owned();
+    if decl.region.is_empty() {
+        return Err(ManagerError::CloudForwardingConfig {
+            credential_name: credential_name.to_owned(),
+            detail:          "aws forwarding requires `region`".to_owned(),
+        });
+    }
+    // Spec §7.1 clamp.
+    if !(900..=43_200).contains(&decl.duration_seconds) {
+        return Err(ManagerError::CloudForwardingConfig {
+            credential_name: credential_name.to_owned(),
+            detail: format!(
+                "aws forwarding duration_seconds={} out of range 900..=43200",
+                decl.duration_seconds,
+            ),
+        });
+    }
+    let upstream = match decl.endpoint_kind.as_str() {
+        "global"   => CloudUpstreamHost::aws_global(),
+        "regional" => CloudUpstreamHost::aws_regional(&decl.region)
+            .map_err(|e| ManagerError::CloudForwardingConfig {
+                credential_name: credential_name.to_owned(),
+                detail: format!("aws regional STS endpoint failed: {e}"),
+            })?,
+        other => return Err(ManagerError::CloudForwardingConfig {
+            credential_name: credential_name.to_owned(),
+            detail: format!("aws endpoint_kind={other:?} not in {{global, regional}}"),
+        }),
+    };
+    let http = CloudHttpClient::new(upstream.clone()).map_err(|e| {
+        ManagerError::CloudForwardingConfig {
+            credential_name: credential_name.to_owned(),
+            detail: format!("aws CloudHttpClient construction failed: {e}"),
+        }
+    })?;
+    let safety_window = std::time::Duration::from_secs(
+        decl.cache_safety_window_seconds.max(60),
+    );
+    let cache = TokenCache::<AwsStsCacheValue>::new(safety_window);
+    let fwd = AwsForwardingConfig {
+        upstream,
+        region:              decl.region.clone(),
+        role_arn,
+        external_id:         decl.external_id.clone(),
+        duration_seconds:    decl.duration_seconds,
+        cache_safety_window: safety_window,
+    };
+    Ok(AwsV3 { fwd, http, cache })
+}
+
+struct GcpV3 {
+    fwd:   GcpForwardingConfig,
+    http:  CloudHttpClient,
+    cache: TokenCache<GcpCacheValue>,
+}
+
+fn build_gcp_forwarding(
+    credential_name: &str,
+    decl:            &GcpForwardingDecl,
+    fallback_scopes: &[String],
+) -> Result<GcpV3, ManagerError> {
+    let scopes: Vec<String> = match decl.scopes.as_ref() {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => {
+            if fallback_scopes.is_empty() {
+                return Err(ManagerError::CloudForwardingConfig {
+                    credential_name: credential_name.to_owned(),
+                    detail: "gcp forwarding requires `scopes` \
+                             or `restrictions.allowed_scopes` to be non-empty".to_owned(),
+                });
+            }
+            fallback_scopes.to_vec()
+        }
+    };
+    let lifetime = decl.jwt_lifetime_seconds.clamp(60, 3_600);
+    let upstream = CloudUpstreamHost::gcp_oauth2();
+    let http = CloudHttpClient::new(upstream.clone()).map_err(|e| {
+        ManagerError::CloudForwardingConfig {
+            credential_name: credential_name.to_owned(),
+            detail: format!("gcp CloudHttpClient construction failed: {e}"),
+        }
+    })?;
+    let safety_window = std::time::Duration::from_secs(
+        decl.cache_safety_window_seconds.max(60),
+    );
+    let cache = TokenCache::<GcpCacheValue>::new(safety_window);
+    let fwd = GcpForwardingConfig {
+        upstream,
+        scopes,
+        jwt_lifetime:        std::time::Duration::from_secs(lifetime),
+        cache_safety_window: safety_window,
+    };
+    Ok(GcpV3 { fwd, http, cache })
+}
+
+struct AzureV3 {
+    fwd:   AzureForwardingConfig,
+    http:  CloudHttpClient,
+    cache: TokenCache<AzureCacheValue>,
+}
+
+fn build_azure_forwarding(
+    credential_name: &str,
+    decl:            &AzureForwardingDecl,
+) -> Result<AzureV3, ManagerError> {
+    let upstream = CloudUpstreamHost::azure_login();
+    let http = CloudHttpClient::new(upstream.clone()).map_err(|e| {
+        ManagerError::CloudForwardingConfig {
+            credential_name: credential_name.to_owned(),
+            detail: format!("azure CloudHttpClient construction failed: {e}"),
+        }
+    })?;
+    let safety_window = std::time::Duration::from_secs(
+        decl.cache_safety_window_seconds.max(60),
+    );
+    let cache = TokenCache::<AzureCacheValue>::new(safety_window);
+    let fwd = AzureForwardingConfig {
+        upstream,
+        cache_safety_window: safety_window,
+    };
+    Ok(AzureV3 { fwd, http, cache })
 }
 
 // ---------------------------------------------------------------------------
