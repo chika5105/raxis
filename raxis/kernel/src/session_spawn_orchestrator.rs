@@ -1553,15 +1553,32 @@ fn populate_sleep_cap_env_or_insert(
 /// assembly, env stamping). All fields except `egress_allowlist` are
 /// `Clone`-derived in their owning crates; `egress_allowlist` is
 /// declared `#[derive(Clone)]` in `raxis-egress-admission`.
-struct SpawnRequestProto {
-    session_id:        String,
-    task_id:           Option<String>,
-    initiative_id:     String,
-    image:             VerifiedImage,
-    workspace_mounts:  Vec<raxis_isolation::WorkspaceMount>,
-    vm_spec:           VmSpec,
-    credentials:       Vec<raxis_plan_credentials::TaskCredentialDecl>,
-    egress_allowlist:  EgressAllowlist,
+///
+/// **Public** so the dynamic-resource-adjustment respawn helper
+/// (`respawn_with_larger_resources`) can be called from a future
+/// signal-observer / scaling decision engine module without
+/// duplicating the spawn-request construction shape.
+pub struct SpawnRequestProto {
+    /// Stable per-session identifier minted by the kernel.
+    pub session_id:        String,
+    /// Owning task id (`None` for the canonical Orchestrator
+    /// session, which has no `[[tasks]]` row).
+    pub task_id:           Option<String>,
+    /// Owning initiative id.
+    pub initiative_id:     String,
+    /// Verified image bytes the substrate boots.
+    pub image:             VerifiedImage,
+    /// Mounts the substrate exposes to the guest.
+    pub workspace_mounts:  Vec<raxis_isolation::WorkspaceMount>,
+    /// Resource envelope + boot args. The dynamic-resource-
+    /// adjustment path mutates `vcpu_count` / `mem_mib` via the
+    /// `crate::elastic::build_scaled_vm_spec` chokepoint.
+    pub vm_spec:           VmSpec,
+    /// Credential decls the spawn service rehydrates per attempt.
+    pub credentials:       Vec<raxis_plan_credentials::TaskCredentialDecl>,
+    /// Egress allowlist — cloned per attempt to construct a fresh
+    /// per-spawn `PolicyAdmissionService`.
+    pub egress_allowlist:  EgressAllowlist,
 }
 
 impl SpawnRequestProto {
@@ -1569,7 +1586,7 @@ impl SpawnRequestProto {
     /// new per-attempt [`PolicyAdmissionService`] — admission
     /// services hold per-session listener state and are not reusable
     /// across attempts.
-    fn build_request(&self) -> SpawnRequest {
+    pub fn build_request(&self) -> SpawnRequest {
         SpawnRequest {
             session_id:        self.session_id.clone(),
             task_id:           self.task_id.clone(),
@@ -1789,6 +1806,153 @@ async fn spawn_with_transient_retry(
                 retry_attempt = next_attempt;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic resource adjustment — `respawn_with_larger_resources`.
+// ---------------------------------------------------------------------------
+//
+// V2 `elastic-vm-scaling.md §4.2` — the scale-up event flow. The
+// signal observer (future wiring; see `crate::elastic::ScaleSignal`)
+// produces a `ScaleDecision::Apply` from
+// `crate::elastic::decide_scale_up`; this helper consumes that
+// decision and orchestrates the audit-and-respawn dance:
+//
+//   terminate_session(prev)               (emits SessionVmExited)
+//     → emit SessionVmScaleEvent          (INV-ELASTIC-03 write-then-emit
+//                                           ordering: between Exit and Spawn)
+//     → spawn_with_transient_retry(new)   (emits SessionVmSpawned)
+//
+// The new `VmSpec` is already produced by `build_scaled_vm_spec`,
+// which is the **single mechanical chokepoint** that honours
+// INV-ELASTIC-05 (no upward scaling when `elastic = false`).
+// Callers MUST NOT post-process the spec returned by the chokepoint
+// — doing so would route around the INV-ELASTIC-05 guarantee.
+
+/// Outcome of a [`respawn_with_larger_resources`] call.
+///
+/// Pre-existing `OrchestratorSpawnError` does not cleanly express
+/// the "old session terminated but new spawn failed" case; this
+/// dedicated enum surfaces it as `Respawn { drain_ok: true,
+/// spawn_err }` so the caller can decide whether to retry the
+/// scaling decision next tick or surface the failure verbatim.
+#[derive(Debug)]
+pub enum RespawnWithLargerOutcome {
+    /// Successful respawn. The new session is bound; the audit
+    /// chain shows `SessionVmExited` → `SessionVmScaleEvent` →
+    /// `SessionVmSpawned`.
+    Ok(SpawnHandle),
+
+    /// Failed to terminate the previous session before the
+    /// respawn. The new session was NOT bound; the previous
+    /// session is in an unknown state (the substrate may still
+    /// have a live VM). The caller should surface the error to
+    /// the operator and avoid re-entering the scaling loop until
+    /// the old session is reconciled.
+    DrainFailed(SpawnError),
+
+    /// Terminated the previous session but the new spawn failed
+    /// (after the §3.2 retry loop exhausted). The kernel is now
+    /// without a live session for this `(initiative_id, task_id)`
+    /// pair; the caller is responsible for the operator-visible
+    /// recovery (typically: surface a structured log + let the
+    /// next signal-observer tick request a fresh scale decision
+    /// against the baseline spec).
+    SpawnFailed(SpawnError),
+}
+
+/// Drain the previous session, emit `SessionVmScaleEvent`, and
+/// spawn the new session with the scaled-up `VmSpec`.
+///
+/// **Audit ordering** (`elastic-vm-scaling.md §4.2`,
+/// INV-ELASTIC-03):
+///
+///   1. `service.terminate_session(prev_session_id)` ⇒
+///      `SessionVmExited` lands.
+///   2. `emit_scale_event_audit(direction = Up, ...)` ⇒
+///      `SessionVmScaleEvent` lands BEFORE the new spawn so
+///      audit-replay attributes the new VM to the scaling
+///      decision (write-then-emit).
+///   3. `spawn_with_transient_retry(new_proto)` ⇒
+///      `SessionVmSpawned` lands.
+///
+/// **`elastic = false` semantics.** The chokepoint
+/// (`crate::elastic::build_scaled_vm_spec`) clamps the new spec
+/// to the baseline when `elastic = false`, so this function
+/// *cannot* admit an upward scale even if a buggy caller
+/// constructs a `proto` with a bumped `vm_spec`. This is the
+/// "mechanically enforced" leg of INV-ELASTIC-05.
+///
+/// The helper is intentionally **public** so the future signal
+/// observer (`ScalingDecisionEngine::tick`) can call it without
+/// re-implementing the audit-emit ordering.
+pub async fn respawn_with_larger_resources(
+    service:           Arc<SessionSpawnService>,
+    elastic:           &raxis_policy::ElasticConfig,
+    prev_session_id:   &str,
+    drain_grace:       std::time::Duration,
+    new_proto:         SpawnRequestProto,
+    direction:         crate::elastic::ScaleDirection,
+    prev_vcpus:        u32,
+    new_vcpus:         u32,
+    prev_memory_mb:    u32,
+    new_memory_mb:     u32,
+    reason:            &str,
+) -> RespawnWithLargerOutcome {
+    // ── Step 1: drain + terminate the previous session. ──────────
+    //
+    // `terminate_session` emits `SessionVmExited` internally; the
+    // helper here just propagates the outcome so a drain-failure
+    // can be surfaced distinctly from a spawn-failure.
+    if let Err(err) = service
+        .terminate_session(prev_session_id, drain_grace)
+        .await
+    {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"respawn_with_larger_drain_failed\",\
+             \"prev_session_id\":\"{sid}\",\"error\":\"{err}\"}}",
+            sid = prev_session_id,
+            err = err,
+        );
+        return RespawnWithLargerOutcome::DrainFailed(err);
+    }
+
+    // ── Step 2: emit `SessionVmScaleEvent`. ───────────────────────
+    //
+    // INV-ELASTIC-03: the scale event is emitted AFTER the
+    // `SessionVmExited` (terminate) and BEFORE the new
+    // `SessionVmSpawned` (the spawn helper below). Audit-emit
+    // failure is logged but never aborts the scaling flow — the
+    // VM lifecycle continues against the new VmSpec.
+    if let Err(e) = crate::elastic::emit_scale_event_audit(
+        service.audit(),
+        &new_proto.session_id,
+        new_proto.task_id.as_deref(),
+        &new_proto.initiative_id,
+        direction,
+        prev_vcpus,
+        new_vcpus,
+        prev_memory_mb,
+        new_memory_mb,
+        reason,
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"session_vm_scale_event_audit_emit_failed\",\
+             \"session_id\":\"{sid}\",\"direction\":\"{dir}\",\"error\":\"{err}\"}}",
+            sid = new_proto.session_id,
+            dir = direction.as_str(),
+            err = e,
+        );
+    }
+
+    // ── Step 3: spawn the new session with the scaled-up spec.
+    //    Wraps in the §3.2 bounded-retry loop so transient
+    //    substrate noise on the new spawn does not abandon the
+    //    scaling decision.
+    match spawn_with_transient_retry(&service, elastic, new_proto).await {
+        Ok(handle) => RespawnWithLargerOutcome::Ok(handle),
+        Err(err)   => RespawnWithLargerOutcome::SpawnFailed(err),
     }
 }
 

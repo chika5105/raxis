@@ -30,6 +30,7 @@ mod authority;
 mod canonical_images_preflight;
 mod capacity;
 mod dashboard_glue;
+mod elastic;
 mod ipc;
 mod recovery;
 mod initiatives;
