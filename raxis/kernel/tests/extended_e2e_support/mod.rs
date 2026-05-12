@@ -18,6 +18,7 @@ pub mod path_allowlist;
 pub mod plan;
 pub mod plan_realistic;
 pub mod prompts;
+pub mod reviewer_substantive_disagreement;
 pub mod secrets;
 pub mod seeds;
 pub mod witnesses;

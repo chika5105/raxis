@@ -66,6 +66,15 @@ pub const TASK_ALLOWLIST_POSITIVE: &str =
 pub const TASK_SECRETS_HANDLING: &str =
     super::secrets::TASK_SECRETS_HANDLING;
 
+/// Lint-defect reviewer task ids (P3-7). Plain-prompted reviewers
+/// (no directive) whose substantive critique must name one of the
+/// lint-defect target files. Witness:
+/// [`super::reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness`].
+pub const TASK_REVIEW_LINT_A: &str =
+    super::reviewer_substantive_disagreement::TASK_REVIEW_LINT_A;
+pub const TASK_REVIEW_LINT_B: &str =
+    super::reviewer_substantive_disagreement::TASK_REVIEW_LINT_B;
+
 /// Lane id for the realistic scenario. Distinct from
 /// `super::plan::LANE_ID` so the realistic-scenario test and the
 /// existing extended-scenario test can co-exist in a single kernel
@@ -146,6 +155,8 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(lint);
     s.push_str("\n\"\"\"\n");
     s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_LINT_REVIEWERS);
+    s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD);
     s.push_str(allowlist);
     s.push_str("\n\"\"\"\n");
@@ -215,6 +226,49 @@ path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 "#;
 
+const REALISTIC_PLAN_LINT_REVIEWERS: &str = r#"# ── Lint-defect substantive Reviewers (P3-7) ────────────
+[[tasks]]
+task_id            = "review-lint-defect-A"
+name               = "Reviewer A — substantive review of lint-defect diff"
+session_agent_type = "Reviewer"
+predecessors       = ["lint-defect"]
+description = """
+You are the FIRST Reviewer for the `lint-defect` Executor's diff
+on the rich-multilang-001 repo. The repo configures strict
+language-specific linters:
+  * Rust:   `cargo clippy -- -D warnings`
+  * TS:     `npx eslint --max-warnings 0`
+  * Python: `python -m ruff check`
+A single `scripts/check.sh` runs all three.
+
+Your job is mechanical: run `scripts/check.sh`, observe the output,
+and rule on the diff. If `check.sh` exits non-zero, submit
+`SubmitReview` with `approved = false` and a critique whose text
+NAMES the file that produced the failing lint diagnostic (one of
+`rust-crate/src/greeting.rs`, `ts-pkg/src/greet.ts`,
+`py-pkg/src/sample_py/greet.py`). If `check.sh` exits zero,
+approve.
+
+Do NOT invent defects, do NOT reject for vibes, do NOT cite a
+file that did not appear in the linter output. The witness
+verifies the critique mentions one of the three filenames
+verbatim.
+"""
+
+[[tasks]]
+task_id            = "review-lint-defect-B"
+name               = "Reviewer B — substantive review of lint-defect diff"
+session_agent_type = "Reviewer"
+predecessors       = ["lint-defect"]
+description = """
+You are the SECOND Reviewer for the `lint-defect` Executor's
+diff. Same protocol as Reviewer A — run `scripts/check.sh` and
+rule mechanically. The aggregator will only mark the executor
+`AllPassed` after both Reviewers approve, which requires the
+Executor to first land a corrected diff in response to the
+Round-1 rejection.
+""""#;
+
 const REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD: &str = r#"# ── Positive path-allowlist Executor (P3-4) ─────────────
 [[tasks]]
 task_id            = "allowlist-positive-codegen"
@@ -258,6 +312,8 @@ mod tests {
             TASK_MATERIALIZE,
             TASK_XFILE_REFACTOR,
             TASK_LINT_DEFECT,
+            TASK_REVIEW_LINT_A,
+            TASK_REVIEW_LINT_B,
             TASK_ALLOWLIST_POSITIVE,
             TASK_SECRETS_HANDLING,
         ] {
