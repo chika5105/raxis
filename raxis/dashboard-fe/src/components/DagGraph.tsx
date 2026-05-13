@@ -58,6 +58,17 @@ interface DagGraphProps {
   /// preferred for tall fan-out plans. Mirrors the dagre option
   /// vocabulary.
   rankdir?: "LR" | "TB";
+  /// When non-empty, nodes whose `state` is NOT in this list are
+  /// rendered at low opacity ("dim mode" — the operator keeps
+  /// situational awareness of the full graph while a status
+  /// filter narrows attention to one or more states). The legend
+  /// at the bottom of the graph is suppressed when the caller is
+  /// driving a richer external `StatusLegend` upstream.
+  activeStates?: string[];
+  /// Suppress the small built-in status reference legend at the
+  /// bottom of the graph (use when the caller renders a richer
+  /// interactive `<StatusLegend>` above the DAG).
+  hideLegend?: boolean;
 }
 
 const NODE_W = 200;
@@ -75,9 +86,17 @@ export function DagGraph({
   selected,
   height = 360,
   rankdir = "LR",
+  activeStates,
+  hideLegend = false,
 }: DagGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<string | null>(null);
+
+  const activeSet = useMemo(
+    () => (activeStates && activeStates.length > 0 ? new Set(activeStates) : null),
+    [activeStates],
+  );
+  const dimNode = (state: string) => activeSet !== null && !activeSet.has(state);
 
   const layout = useMemo(() => {
     const g = new dagre.graphlib.Graph({ multigraph: false, compound: false });
@@ -171,6 +190,22 @@ export function DagGraph({
           const d = e.points
             .map((p, j) => `${j === 0 ? "M" : "L"} ${p.x},${p.y}`)
             .join(" ");
+          // When the operator has activated a status filter, fade
+          // edges whose BOTH endpoints are out of the active set —
+          // matching nodes still pull their wiring forward. Hover
+          // de-emphasis still wins when the operator is mousing
+          // over a specific node.
+          const fromNode = nodes.find((n) => n.task_id === e.from);
+          const toNode = nodes.find((n) => n.task_id === e.to);
+          const edgeDim =
+            activeSet !== null &&
+            fromNode !== undefined &&
+            toNode !== undefined &&
+            !activeSet.has(fromNode.state) &&
+            !activeSet.has(toNode.state);
+          const hoverDim =
+            hover !== null && hover !== e.from && hover !== e.to;
+          const opacity = edgeDim ? 0.15 : hoverDim ? 0.25 : 0.85;
           return (
             <path
               key={`${e.from}-${e.to}-${i}`}
@@ -179,9 +214,7 @@ export function DagGraph({
               stroke="rgb(var(--c-ink-subtle))"
               strokeWidth={1.4}
               markerEnd="url(#arrow)"
-              opacity={
-                hover && hover !== e.from && hover !== e.to ? 0.25 : 0.85
-              }
+              opacity={opacity}
             />
           );
         })}
@@ -192,6 +225,12 @@ export function DagGraph({
           const fill = NODE_FILL_VAR[tone];
           const stroke = NODE_STROKE_VAR[tone];
           const isSelected = selected === n.task_id;
+          const dim = dimNode(n.state);
+          const hoverDim = hover !== null && hover !== n.task_id;
+          // Filter-dim wins over hover-dim because it's the
+          // explicit operator intent ("I want to see Running") vs.
+          // an incidental mouseover.
+          const nodeOpacity = dim ? 0.25 : hoverDim ? 0.8 : 1;
           return (
             <g
               key={n.task_id}
@@ -204,6 +243,8 @@ export function DagGraph({
               role="button"
               tabIndex={0}
               aria-label={`Task ${n.title} (state ${n.state}). Click to focus, double-click to open task page.`}
+              data-status={n.state}
+              data-dimmed={dim || undefined}
               onKeyDown={(ev) => {
                 if (ev.key === "Enter" || ev.key === " ") {
                   ev.preventDefault();
@@ -225,7 +266,7 @@ export function DagGraph({
                 fill={fill}
                 stroke={isSelected ? "rgb(var(--c-accent))" : stroke}
                 strokeWidth={isSelected ? 2 : 1}
-                opacity={hover && hover !== n.task_id ? 0.8 : 1}
+                opacity={nodeOpacity}
               />
               <title>
                 {n.title}
@@ -271,21 +312,26 @@ export function DagGraph({
         })}
       </svg>
 
-      {/* Legend */}
-      <div className="flex flex-wrap gap-1.5 mt-2 text-[11px]">
-        {[
-          "Pending",
-          "Running",
-          "Completed",
-          "Failed",
-          "Blocked",
-          "Reviewing",
-        ].map((s) => (
-          <span key={s} className={`badge ${toneClasses(stateTone(s))}`}>
-            {s}
-          </span>
-        ))}
-      </div>
+      {/* Legend — color reference only; the interactive click-to-
+       * filter legend lives upstream in `<StatusLegend>` when the
+       * caller wires one. We suppress this fallback when
+       * `hideLegend` is set to avoid two side-by-side legends. */}
+      {!hideLegend && (
+        <div className="flex flex-wrap gap-1.5 mt-2 text-[11px]">
+          {[
+            "Pending",
+            "Running",
+            "Completed",
+            "Failed",
+            "Blocked",
+            "Reviewing",
+          ].map((s) => (
+            <span key={s} className={`badge ${toneClasses(stateTone(s))}`}>
+              {s}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
