@@ -67,8 +67,100 @@ fn run_all(tail: &[String]) -> Result<()> {
     eprintln!("==> perf all: running every harness sequentially");
     run_vm_cold_boot(tail)?;
     run_audit_throughput(tail)?;
+    // Per spec (`specs/v3/observability-prometheus.md` §6 + the
+    // `cargo xtask perf` quickstart in `live-e2e/README.md`), `all`
+    // emits a single consolidated report in addition to the
+    // per-subcommand reports each child harness already wrote. The
+    // consolidated file gives reviewers one path to link into PRs and
+    // CI artefacts; the per-subcommand files stay around so an
+    // operator who runs only one subcommand still gets a focused report.
+    write_consolidated_report()?;
     eprintln!("==> perf all: complete");
     Ok(())
+}
+
+/// Read the per-subcommand markdown reports the just-finished
+/// `vm-cold-boot` and `audit-throughput` runs wrote (today's date,
+/// `measurements/<prefix>-YYYY-MM-DD.md`) and concatenate them with
+/// section headers into `perf-report-<DATE>.md`. If a per-subcommand
+/// report is missing — only happens when the upstream harness errored
+/// out before writing — the consolidated report still lands with a
+/// loud `MISSING` note for that section so the operator can see at
+/// a glance which sub-run failed.
+fn write_consolidated_report() -> Result<()> {
+    let dir = measurements_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let consolidated_path = dir.join(format!("perf-report-{date}.md"));
+
+    let vm_section  = read_subreport_or_placeholder(&dir, "vm-cold-boot",     &date);
+    let aud_section = read_subreport_or_placeholder(&dir, "audit-throughput", &date);
+
+    let body = format!(
+        "# Raxis perf report — {date}\n\n\
+         > Consolidated `cargo xtask perf all` output. Each section\n\
+         > below is the verbatim per-subcommand markdown report\n\
+         > (`{vm_name}-{date}.md`, `{aud_name}-{date}.md`) the child\n\
+         > harness wrote; the source files remain on disk so reviewers\n\
+         > who only care about one harness can link directly to the\n\
+         > narrower file.\n\n\
+         - **harness**: `cargo xtask perf all`\n\
+         - **timestamp**: {ts} UTC\n\n\
+         ---\n\n\
+         ## vm-cold-boot\n\n\
+         {vm_section}\n\n\
+         ---\n\n\
+         ## audit-throughput\n\n\
+         {aud_section}\n",
+        vm_name  = "vm-cold-boot",
+        aud_name = "audit-throughput",
+        ts       = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
+    );
+
+    std::fs::write(&consolidated_path, body)
+        .with_context(|| format!("write {}", consolidated_path.display()))?;
+    eprintln!("    wrote consolidated report: {}", consolidated_path.display());
+    Ok(())
+}
+
+/// Read `<dir>/<prefix>-<date>.md` and strip its `# ` H1 (we re-frame
+/// each subreport under a `## <prefix>` heading inside the
+/// consolidated file, so its own H1 would create a duplicate).
+/// Returns a clearly-marked placeholder string when the file is
+/// missing or unreadable rather than failing the whole `perf all`
+/// invocation — the report is best-effort observability output, not
+/// an invariant.
+fn read_subreport_or_placeholder(dir: &Path, prefix: &str, date: &str) -> String {
+    let path = dir.join(format!("{prefix}-{date}.md"));
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => strip_leading_h1(&raw),
+        Err(e) => format!(
+            "_**MISSING**_: could not read `{}` ({e}). \
+             The `{prefix}` subcommand likely failed before it could \
+             write its per-subcommand report; check the `cargo xtask \
+             perf {prefix}` stderr from this invocation.",
+            path.display(),
+        ),
+    }
+}
+
+/// Strip the first `# ...\n` heading line + a single trailing blank
+/// line if present. Leaves all subsequent content (sub-bullets,
+/// tables, follow-on H2s) untouched.
+fn strip_leading_h1(raw: &str) -> String {
+    let mut iter = raw.lines();
+    let first = iter.next();
+    if matches!(first, Some(line) if line.starts_with("# ")) {
+        // Skip the H1 + the blank line that conventionally follows it
+        // (only one — never collapse multi-line content).
+        let mut peek = iter.clone();
+        if matches!(peek.next(), Some(l) if l.is_empty()) {
+            iter.next();
+        }
+        iter.collect::<Vec<_>>().join("\n")
+    } else {
+        raw.to_owned()
+    }
 }
 
 // ── VM cold-boot ────────────────────────────────────────────────────
@@ -444,4 +536,57 @@ fn parse_backend(args: &[String]) -> BackendChoice {
         }
     }
     BackendChoice::Subprocess
+}
+
+// ---------------------------------------------------------------------------
+// Tests — consolidated-report shape only. The full vm-cold-boot /
+// audit-throughput drivers are tested end-to-end via `cargo xtask perf`
+// invocations on CI (out-of-tree).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_leading_h1_drops_first_heading_and_blank() {
+        let raw = "# perf report\n\n- iterations: 10\n- p99: 42 ms\n";
+        let got = strip_leading_h1(raw);
+        assert_eq!(got, "- iterations: 10\n- p99: 42 ms");
+    }
+
+    #[test]
+    fn strip_leading_h1_is_idempotent_on_no_heading() {
+        let raw = "no heading here\nbody\n";
+        let got = strip_leading_h1(raw);
+        // No H1 → returned verbatim (we trust the source file).
+        assert_eq!(got, "no heading here\nbody\n");
+    }
+
+    #[test]
+    fn read_subreport_or_placeholder_emits_loud_marker_on_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = read_subreport_or_placeholder(tmp.path(), "vm-cold-boot", "2026-05-12");
+        assert!(got.contains("MISSING"), "missing-report placeholder, got: {got:?}");
+        assert!(got.contains("vm-cold-boot"), "placeholder names the failing subcommand");
+    }
+
+    #[test]
+    fn read_subreport_or_placeholder_inlines_existing_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let date = "2026-05-12";
+        std::fs::write(
+            tmp.path().join(format!("vm-cold-boot-{date}.md")),
+            "# VM cold-boot perf report\n\n- backend: subprocess\n- p99: 99 ms\n",
+        )
+        .unwrap();
+        let got = read_subreport_or_placeholder(tmp.path(), "vm-cold-boot", date);
+        assert!(!got.contains("MISSING"));
+        assert!(got.contains("backend: subprocess"));
+        assert!(got.contains("p99: 99 ms"));
+        // The H1 of the inner file is stripped so it can be re-framed
+        // under the consolidated report's `## vm-cold-boot` heading.
+        assert!(!got.contains("# VM cold-boot perf report"),
+            "inner H1 must be stripped; got {got:?}");
+    }
 }
