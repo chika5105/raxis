@@ -3184,8 +3184,8 @@ appear in `policy-plan-authority.md §3b`). They are visible on
 | Proxy | Upstream protocol surface | New code (~ lines) | Status (V2.1) | Reference |
 |---|---|---|---|---|
 | `postgres` | StartupMessage + AuthenticationCleartextPassword/SCRAM-SHA-256 + simple-query relay (Q → RowDescription* + DataRow* + CommandComplete + RFQ) | ~600 (incl. tests + fake-pg fixture) | **shipped** (`tokio-postgres`-driven) | §14.8.1 |
-| `mysql` | HandshakeV10 → HandshakeResponse41 → mysql_native_password reply → COM_QUERY relay (ResultSetHeader + ColumnDef* + EOF + Row* + EOF) | ~900 (incl. tests + fake-mysql fixture) | **shipped** (hand-rolled `mysql_native_password`; `caching_sha2_password` + TLS upstream deferred to V3) | §14.8.2 |
-| `mssql` | PRELOGIN with TLS handshake → LOGIN7 with cleartext password (or ADAL/Entra token) → SQLBatch relay (COLMETADATA + ROW* + DONE) | ~1100 (incl. tests + fake-mssql fixture) | **shipped** (plaintext TDS only — `?encrypt=true` rejected; SQL Authentication only — Windows Auth + Entra ID deferred to V3; `LOGIN7` uses the documented `[MS-TDS] 2.2.6.4` nibble-swap+XOR(0xA5) password obfuscation; `TABULAR_RESULT` packets are relayed verbatim until the EOM status bit so COLMETADATA + ROW + DONE flow through unmodified) | §14.8.3 |
+| `mysql` | HandshakeV10 → HandshakeResponse41 (proxy→upstream caps mask MUST clear `CLIENT_SSL` / `CLIENT_COMPRESS` / `CLIENT_ODBC` / `CLIENT_LOCAL_FILES`) → `mysql_native_password` reply → `COM_QUERY` relay (ResultSetHeader + ColumnDef* + EOF + Row* + EOF) | ~900 (incl. tests + fake-mysql fixture) | **shipped** (hand-rolled `mysql_native_password`; `caching_sha2_password` + TLS upstream deferred to V3) | §14.8.2 |
+| `mssql` | PRELOGIN with TLS handshake → LOGIN7 with cleartext password (or ADAL/Entra token) → SQLBatch (proxy MUST **rewrite** the agent's `ALL_HEADERS` preamble to a TDS 7.4-compliant 22-byte Transaction-Descriptor block before forwarding) → relay COLMETADATA + ROW* + DONE | ~1100 (incl. tests + fake-mssql fixture) | **shipped** (plaintext TDS only — `?encrypt=true` rejected; SQL Authentication only — Windows Auth + Entra ID deferred to V3; `LOGIN7` uses the documented `[MS-TDS] 2.2.6.4` nibble-swap+XOR(0xA5) password obfuscation; `TABULAR_RESULT` packets are relayed verbatim until the EOM status bit so COLMETADATA + ROW + DONE flow through unmodified) | §14.8.3 |
 | `mongodb` | OP_MSG `hello` → SCRAM-SHA-256 saslStart/saslContinue → OP_MSG command relay | ~750 (incl. tests + fake-mongo fixture) | **shipped (no-auth)** (SCRAM-SHA-256 + TLS upstream deferred to V2.2; URLs with `user:pass@` userinfo fail fast with a clear migration message pointing at `--noauth`) | §14.8.4 |
 | `redis` | RESP2 AUTH (or HELLO 2 AUTH user pass) → command relay (response framing follows `+OK` / `$<n>` / `*<n>` / `:<n>` / `-ERR`) | ~150 | **shipped** (V2.0 base; V2.1 audit envelope upgrade) | §14.8.5 |
 | `smtp` | EHLO → STARTTLS (per `smtps:` scheme) → AUTH PLAIN → MAIL/RCPT/DATA relay | ~220 | **shipped** (V2.0 base; protocol-specific `SmtpProxyConnected`/`SmtpProxyDisconnected` lifecycle audit kept rather than migrating to the generic §14.5 envelope) | §14.8.6 |
@@ -3194,6 +3194,86 @@ Each entry is treated as an independent merge in the implementation
 checklist; landing one proxy at a time is the V2.1 phasing strategy
 (small, mergeable PRs that each ship a green live-e2e slice
 exercising real rows).
+
+#### 14.8.2.a — MySQL HandshakeResponse41 capability mask (normative)
+
+The proxy's upstream-side `HandshakeResponse41` capability mask
+(`CLIENT_CAPS`) MUST clear the following bits before forwarding, even
+if the agent advertised them:
+
+| Bit | Flag                  | Why the proxy MUST NOT advertise it                                                                                                                                                                                                                          |
+| --- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 5   | `CLIENT_COMPRESS`     | The proxy never zlib-frames packets to the upstream. Advertising it commits the proxy to compressed packet framing it does not implement.                                                                                                                    |
+| 6   | `CLIENT_ODBC`         | ODBC-style behaviour change the proxy does not honour. Server-side tolerance varies.                                                                                                                                                                         |
+| 7   | `CLIENT_LOCAL_FILES`  | The proxy does not implement `LOAD DATA LOCAL` round-trips and would dead-lock at the first such request.                                                                                                                                                    |
+| 11  | `CLIENT_SSL`          | Commits the proxy to negotiating TLS on the same TCP stream after the 32-byte truncated `HandshakeResponse41`. The proxy never sends a TLS Client Hello, so the server's `net_read_timeout` waits and the connection hangs until the proxy's connect timeout. This is the **load-bearing bit** — MySQL 8.0.36 surfaced the regression by enforcing it where 5.7 / 8.0.x < 8.0.30 tolerated the malformed sequence. |
+
+The set bits the proxy MUST advertise are `CLIENT_PROTOCOL_41` (bit 9)
+and `CLIENT_PLUGIN_AUTH` (bit 19), plus the standard legacy bits
+(`CLIENT_LONG_PASSWORD`, `CLIENT_FOUND_ROWS`, `CLIENT_LONG_FLAG`,
+`CLIENT_CONNECT_WITH_DB`, `CLIENT_TRANSACTIONS`, `CLIENT_SECURE_CONNECTION`,
+`CLIENT_MULTI_RESULTS`) the server expects from any modern client.
+`CLIENT_DEPRECATE_EOF` (bit 24) is deliberately **not** advertised so
+the upstream's EOF packets remain available as result-set boundaries
+the proxy can audit.
+
+Regression pin: a `const _: () = { assert!(CLIENT_CAPS &
+(CLIENT_SSL | CLIENT_COMPRESS | CLIENT_ODBC | CLIENT_LOCAL_FILES) ==
+0) };` build-time guard plus the
+`client_caps_does_not_advertise_ssl_or_compress` unit test
+(both halves: `crates/credential-proxy-mysql/src/upstream.rs` for the
+proxy→upstream mask and `crates/credential-proxy-mysql/src/wire.rs`
+for the proxy→agent `CAPABILITIES` advertisement). Per-arch parity is
+guaranteed by the same unit test; no live-e2e gating is required for
+this invariant.
+
+#### 14.8.3.a — MSSQL SQLBatch ALL_HEADERS rewrite (normative)
+
+When forwarding an agent `SQLBatch` packet to the upstream, the
+proxy MUST **rewrite** the `ALL_HEADERS` preamble to a TDS 7.4-
+compliant 22-byte Transaction-Descriptor block, regardless of what
+the agent emitted (degenerate `TotalLength = 4`, missing entirely,
+or fully-formed). Forwarded body layout:
+
+```
+ALL_HEADERS (22 bytes):
+  TotalLength             = 22         (u32 LE)
+  HeaderLength            = 18         (u32 LE)
+  HeaderType              = 0x0002     (u16 LE — MARS Transaction Descriptor)
+  TransactionDescriptor   = 0u64       (u64 LE — proxy-side transaction)
+  OutstandingRequestCount = 1          (u32 LE)
+SQL text bytes (UTF-16 LE — preserved verbatim from the agent)
+```
+
+Why the rewrite is normative, not best-effort:
+
+* The proxy advertises TDS 7.4 in its LOGIN7 (`0x74000004`), so the
+  upstream parses every SQLBatch body under TDS 7.4 rules that
+  require a well-formed `ALL_HEADERS` containing **at least** the
+  MARS Transaction Descriptor header (`HeaderType = 0x0002`).
+* SQL Server 2022 rejects a degenerate `TotalLength = 4` body with
+  `ERROR` token number 4002 ("The incoming tabular data stream (TDS)
+  protocol stream is incorrect. The multiple active result sets
+  (MARS) TDS header is missing."). SQL Server 2017 / 2019 tolerated
+  it; SQL Server 2022 does not.
+* The upstream connection is owned by the proxy, not by the agent —
+  the proxy's `TransactionDescriptor` is always `0u64` because the
+  proxy never opens a multi-statement transaction it would need to
+  carry across packets. Discarding the agent's transaction descriptor
+  is therefore semantics-preserving for V2.1.
+* The SQL text is preserved verbatim so `DatabaseQueryExecuted.
+  sql_sha256` is unchanged across the rewrite (the audit chain
+  remains stable).
+
+The rewrite happens in
+`crates/credential-proxy-mssql/src/upstream.rs::
+rewrite_sql_batch_for_upstream` and is pinned by four unit tests
+(ALL_HEADERS injection on degenerate input, fall-through when the
+agent omits ALL_HEADERS entirely, rejection of truncated packets,
+rejection of non-SQLBatch packet headers). Any future change that
+removes or weakens the rewrite MUST be paired with a regression
+proving the proxy still works against the SQL Server 2022 live-e2e
+upstream.
 
 ### 14.9 — Live-e2e harness extensions
 
