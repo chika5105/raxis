@@ -1946,8 +1946,26 @@ async fn handle_approve_escalation(
     approval_scope:   raxis_types::operator_wire::ApprovalScopeWire,
     operator_sig_hex: String,
     operator:         &AuthenticatedOperator,
-    ctx:              &HandlerContext,
+    ctx:              &Arc<HandlerContext>,
 ) -> OperatorResponse {
+    // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — pre-classify
+    // the escalation by class + initiator. The kernel-initiated
+    // `LogicalDeadlock` class follows a separate path: no
+    // capability-class signature verification (the operator's
+    // approval IS the action; nothing is bound for downstream
+    // intent consumption), no `approval_tokens` row mint. Routed
+    // to `approve_logical_deadlock_escalation_in_tx` and an
+    // `OperatorApprovedRespawnEscalation` audit event in lieu of
+    // the standard `EscalationApproved`.
+    let class_lookup = lookup_escalation_class_initiator(&ctx.store, &escalation_id).await;
+    if let Ok(Some((class, initiator))) = &class_lookup {
+        if class == "LogicalDeadlock" && initiator == "Kernel" {
+            return handle_approve_logical_deadlock(
+                escalation_id, operator, ctx,
+            ).await;
+        }
+    }
+
     let signature = match hex::decode(&operator_sig_hex) {
         Ok(b) => b,
         Err(e) => return OperatorResponse::Error {
@@ -1955,6 +1973,132 @@ async fn handle_approve_escalation(
             detail: format!("operator_sig_hex is not valid hex: {e}"),
         },
     };
+    handle_approve_escalation_standard_path(
+        escalation_id, approval_scope, signature, operator, ctx,
+    ).await
+}
+
+/// One-shot lookup of `(class, initiator)` for an `escalations`
+/// row. Returns `Ok(None)` on missing-row so the caller can decide
+/// whether to fall through to the standard not-found path; returns
+/// `Err` on SQL failure (caller logs + falls through).
+async fn lookup_escalation_class_initiator(
+    store:         &Arc<raxis_store::Store>,
+    escalation_id: &str,
+) -> Result<Option<(String, String)>, rusqlite::Error> {
+    use rusqlite::OptionalExtension;
+    let store_for_blocking = Arc::clone(store);
+    let escalation_id_for_blocking = escalation_id.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<Option<(String, String)>, rusqlite::Error> {
+        let conn = store_for_blocking.lock_sync();
+        let row: Option<(String, String)> = conn.query_row(
+            &format!(
+                "SELECT class, initiator FROM {ESCALATIONS}
+                  WHERE escalation_id = ?1",
+                ESCALATIONS = raxis_store::Table::Escalations.as_str(),
+            ),
+            rusqlite::params![&escalation_id_for_blocking],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ).optional()?;
+        Ok(row)
+    }).await
+    .unwrap_or_else(|join_err| Err(rusqlite::Error::ToSqlConversionFailure(
+        Box::new(std::io::Error::other(format!("join failed: {join_err}"))),
+    )))
+}
+
+/// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — kernel-initiated
+/// `LogicalDeadlock` approval path. Resets the orch-respawn
+/// counter, transitions the initiative back to `Executing`, and
+/// emits `OperatorApprovedRespawnEscalation` post-commit. The
+/// caller (`handle_approve_escalation`) pre-classified the
+/// escalation as LogicalDeadlock + initiator='Kernel' before
+/// dispatching here.
+async fn handle_approve_logical_deadlock(
+    escalation_id: String,
+    operator:      &AuthenticatedOperator,
+    ctx:           &Arc<HandlerContext>,
+) -> OperatorResponse {
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let escalation_id_blocking = escalation_id.clone();
+    let join_result = tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+        let mut conn = store_for_blocking.lock_sync();
+        let tx = conn.transaction()?;
+        let initiative_id =
+            crate::orch_respawn_ceiling::approve_logical_deadlock_escalation_in_tx(
+                &tx, &escalation_id_blocking, raxis_types::unix_now_secs(),
+            )?;
+        tx.commit()?;
+        Ok(initiative_id)
+    }).await;
+
+    let initiative_id = match join_result {
+        Ok(Ok(Some(id))) => id,
+        Ok(Ok(None)) => {
+            return OperatorResponse::Error {
+                code:   "FAIL_APPROVE_ESCALATION".to_owned(),
+                detail: format!(
+                    "escalation {escalation_id} is not a Pending kernel-initiated LogicalDeadlock row"
+                ),
+            };
+        }
+        Ok(Err(e)) => {
+            return OperatorResponse::Error {
+                code:   "FAIL_APPROVE_ESCALATION".to_owned(),
+                detail: format!("approve_logical_deadlock SQL error: {e}"),
+            };
+        }
+        Err(join_err) => {
+            return OperatorResponse::Error {
+                code:   "FAIL_APPROVE_ESCALATION".to_owned(),
+                detail: format!("approve_logical_deadlock join failed: {join_err}"),
+            };
+        }
+    };
+
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::OperatorApprovedRespawnEscalation {
+            initiative_id: initiative_id.clone(),
+            escalation_id: escalation_id.clone(),
+            operator_id:   operator.fingerprint.clone(),
+        },
+        None,
+        None,
+        Some(&initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"OperatorApprovedRespawnEscalation\",\
+             \"audit_emit_failed\":\"{e}\",\"escalation_id\":\"{escalation_id}\"}}",
+        );
+    }
+
+    // Schedule the orchestrator respawn so the operator's "approve
+    // = retry" semantic actually fires a new orchestrator session.
+    // The respawn driver's own ceiling check will run again on
+    // entry, but starts fresh because we just reset the counter.
+    let ctx_for_respawn  = Arc::clone(ctx);
+    let init_for_respawn = initiative_id.clone();
+    tokio::spawn(async move {
+        let _ = crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
+            &init_for_respawn, ctx_for_respawn,
+        ).await;
+    });
+
+    OperatorResponse::EscalationApproved {
+        escalation_id,
+        approval_token_id:  String::new(),
+        approval_token_raw: String::new(),
+        expires_at:         0,
+    }
+}
+
+async fn handle_approve_escalation_standard_path(
+    escalation_id:    String,
+    approval_scope:   raxis_types::operator_wire::ApprovalScopeWire,
+    signature:        Vec<u8>,
+    operator:         &AuthenticatedOperator,
+    ctx:              &Arc<HandlerContext>,
+) -> OperatorResponse {
 
     // Pin one snapshot of the bundle: the FSM call below must run
     // against the same epoch we recorded in the audit metadata.
@@ -2035,6 +2179,93 @@ async fn handle_approve_escalation(
     }
 }
 
+/// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — kernel-initiated
+/// `LogicalDeadlock` deny path. Flips
+/// `escalations.status = 'Denied'`, leaves the initiative `Failed`,
+/// leaves the orch-respawn counter at its post-ceiling value, and
+/// emits `OperatorDeniedRespawnEscalation` post-commit.
+async fn handle_deny_logical_deadlock(
+    escalation_id: String,
+    reason:        Option<String>,
+    operator:      &AuthenticatedOperator,
+    ctx:           &Arc<HandlerContext>,
+) -> OperatorResponse {
+    if let Some(r) = reason.as_ref() {
+        if r.chars().count() > 512 {
+            return OperatorResponse::Error {
+                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                detail: format!(
+                    "reason exceeds 512-character limit (was {} chars)",
+                    r.chars().count()
+                ),
+            };
+        }
+    }
+
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let escalation_id_blocking = escalation_id.clone();
+    let reason_for_blocking = reason.clone();
+    let join_result = tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+        let mut conn = store_for_blocking.lock_sync();
+        let tx = conn.transaction()?;
+        let initiative_id =
+            crate::orch_respawn_ceiling::deny_logical_deadlock_escalation_in_tx(
+                &tx,
+                &escalation_id_blocking,
+                raxis_types::unix_now_secs(),
+                reason_for_blocking.as_deref(),
+            )?;
+        tx.commit()?;
+        Ok(initiative_id)
+    }).await;
+
+    let initiative_id = match join_result {
+        Ok(Ok(Some(id))) => id,
+        Ok(Ok(None)) => {
+            return OperatorResponse::Error {
+                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                detail: format!(
+                    "escalation {escalation_id} is not a Pending kernel-initiated LogicalDeadlock row"
+                ),
+            };
+        }
+        Ok(Err(e)) => {
+            return OperatorResponse::Error {
+                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                detail: format!("deny_logical_deadlock SQL error: {e}"),
+            };
+        }
+        Err(join_err) => {
+            return OperatorResponse::Error {
+                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                detail: format!("deny_logical_deadlock join failed: {join_err}"),
+            };
+        }
+    };
+
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::OperatorDeniedRespawnEscalation {
+            initiative_id: initiative_id.clone(),
+            escalation_id: escalation_id.clone(),
+            operator_id:   operator.fingerprint.clone(),
+        },
+        None,
+        None,
+        Some(&initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"OperatorDeniedRespawnEscalation\",\
+             \"audit_emit_failed\":\"{e}\",\"escalation_id\":\"{escalation_id}\"}}",
+        );
+    }
+
+    let _ = operator;
+    OperatorResponse::EscalationDenied {
+        escalation_id,
+        denied_at:  raxis_types::unix_now_secs(),
+    }
+}
+
 /// `DenyEscalation` — flips a `Pending` escalation to `Denied`. No
 /// approval artifact is created (no `approval_tokens` row); the audit
 /// event is the only durable record per kernel-store.md §2.5.5.
@@ -2042,8 +2273,22 @@ async fn handle_deny_escalation(
     escalation_id: String,
     reason:        Option<String>,
     operator:      &AuthenticatedOperator,
-    ctx:           &HandlerContext,
+    ctx:           &Arc<HandlerContext>,
 ) -> OperatorResponse {
+    // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — pre-classify
+    // and dispatch kernel-initiated `LogicalDeadlock` rows to the
+    // dedicated deny path that emits
+    // `OperatorDeniedRespawnEscalation` instead of the generic
+    // `EscalationDenied`.
+    let class_lookup = lookup_escalation_class_initiator(&ctx.store, &escalation_id).await;
+    if let Ok(Some((class, initiator))) = &class_lookup {
+        if class == "LogicalDeadlock" && initiator == "Kernel" {
+            return handle_deny_logical_deadlock(
+                escalation_id, reason, operator, ctx,
+            ).await;
+        }
+    }
+
     if let Some(r) = reason.as_ref() {
         if r.chars().count() > 512 {
             return OperatorResponse::Error {

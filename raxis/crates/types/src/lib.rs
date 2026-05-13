@@ -37,7 +37,8 @@ pub use error::{OperatorErrorCode, PlannerErrorCode};
 pub use host_preflight::{DiskVolumeReport, HostPreflightError};
 pub use escalation::{
     EscalationClass, EscalationRejectionReason, EscalationRequest, EscalationResponse,
-    EscalationStatus, RequestedEscalationScope,
+    EscalationStatus, RequestedEscalationScope, MAX_LOGICAL_DEADLOCK_REASON_LEN,
+    MAX_MERGE_CONFLICT_PATHS, MAX_MERGE_CONFLICT_PATH_LEN,
 };
 pub use fsm::{
     BlockReason, CircuitBreakerState, CloneStrategy, InitiativeState,

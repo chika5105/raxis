@@ -48,6 +48,33 @@ pub enum EscalationClass {
     ///
     /// `requested_scope` discriminant: [`RequestedEscalationScope::MergeConflict`].
     MergeConflict,
+
+    /// **V2.5b — Kernel-initiated.** The kernel observed an
+    /// orchestrator-respawn no-progress loop on this initiative
+    /// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`): the per-
+    /// initiative `orchestrator_no_progress_respawn_count`
+    /// crossed `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3) without
+    /// any task FSM transition resetting it. The kernel has
+    /// already (a) marked the initiative `Failed`, (b) emitted
+    /// `AuditEventKind::OrchestratorRespawnCeilingExceeded`, and
+    /// (c) inserted this `LogicalDeadlock` escalations row so the
+    /// operator can either approve a counter-reset + retry
+    /// (transitioning the initiative back to `Executing` and
+    /// scheduling a fresh orchestrator respawn) or deny and
+    /// preserve the `Failed` terminal state.
+    ///
+    /// **Initiator.** This class is the FIRST `EscalationClass`
+    /// whose `escalations.initiator` column is `'Kernel'` (every
+    /// other class is `'Planner'`). The discriminant comes from
+    /// Migration 20's `initiator` column added in the same slice
+    /// as this enum variant. The auto-create path lives in
+    /// `kernel/src/orch_respawn_ceiling.rs::insert_logical_deadlock_escalation_in_tx`
+    /// and runs inside the same SQLite transaction as the
+    /// initiative-Failed flip per
+    /// `audit-paired-writes.md §4` paired-write contract.
+    ///
+    /// `requested_scope` discriminant: [`RequestedEscalationScope::LogicalDeadlock`].
+    LogicalDeadlock,
 }
 
 impl EscalationClass {
@@ -58,6 +85,7 @@ impl EscalationClass {
             Self::BudgetException => "BudgetException",
             Self::QualityGateException => "QualityGateException",
             Self::MergeConflict => "MergeConflict",
+            Self::LogicalDeadlock => "LogicalDeadlock",
         }
     }
 
@@ -68,6 +96,7 @@ impl EscalationClass {
             "BudgetException" => Some(Self::BudgetException),
             "QualityGateException" => Some(Self::QualityGateException),
             "MergeConflict" => Some(Self::MergeConflict),
+            "LogicalDeadlock" => Some(Self::LogicalDeadlock),
             _ => None,
         }
     }
@@ -121,6 +150,51 @@ pub enum RequestedEscalationScope {
     MergeConflict {
         conflicts: Vec<String>,
     },
+
+    /// **V2.5b — Kernel-initiated.** Scope payload for the
+    /// auto-created `LogicalDeadlock` escalation. Fields:
+    ///
+    ///   * `initiative_id` — the initiative whose orchestrator
+    ///     respawn-no-progress counter exceeded the ceiling. The
+    ///     escalation row's `initiative_id` column carries the
+    ///     same value; we duplicate it inside the scope JSON so
+    ///     audit-replay readers can reconstruct the full failure
+    ///     surface from one column.
+    ///   * `attempts` — the post-increment respawn count that
+    ///     tripped the ceiling. Always strictly greater than the
+    ///     kernel constant
+    ///     `orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS`.
+    ///   * `window_secs` — the wall-clock window from the FIRST
+    ///     no-progress respawn (counter == 1) through the
+    ///     ceiling-exceedance respawn. Operators read this to
+    ///     decide whether the loop was tight (suggesting a fast
+    ///     hot path the orchestrator hammered) versus drawn-out
+    ///     (suggesting a slow upstream regression).
+    ///   * `last_intent_kind` — the most recent kernel-rejected
+    ///     intent the orchestrator submitted (e.g.
+    ///     `"RetrySubTask"`). The operator UI surfaces this
+    ///     literally so the rejection class is visible in the
+    ///     escalation card without a separate API call.
+    ///   * `last_rejection_reason` — the kernel's textual
+    ///     rejection rationale for the same intent (e.g.
+    ///     `"RetrySubTaskRejectedNotRetryable"` when the
+    ///     activation row was `Completed` with
+    ///     `review_reject_count = 0`). Pairs with
+    ///     `last_intent_kind` to give the operator the full
+    ///     "what-the-orchestrator-was-trying-to-do" surface.
+    ///
+    /// Bounded to `MAX_LOGICAL_DEADLOCK_REASON_LEN` per text
+    /// field (1 KiB) so audit-chain bloat is structurally
+    /// bounded — a hostile orchestrator that loops on a
+    /// pathologically long intent shape can't blow the audit row
+    /// size.
+    LogicalDeadlock {
+        initiative_id:         crate::InitiativeId,
+        attempts:              u32,
+        window_secs:           u64,
+        last_intent_kind:      String,
+        last_rejection_reason: String,
+    },
 }
 
 /// V2 (Step 30) hard cap on `RequestedEscalationScope::MergeConflict`
@@ -138,6 +212,15 @@ pub const MAX_MERGE_CONFLICT_PATHS: usize = 64;
 /// pathological single-entry payloads.
 pub const MAX_MERGE_CONFLICT_PATH_LEN: usize = 1024;
 
+/// V2.5b cap on the byte length of either `last_intent_kind` or
+/// `last_rejection_reason` inside
+/// [`RequestedEscalationScope::LogicalDeadlock`]. 1 KiB matches
+/// [`MAX_MERGE_CONFLICT_PATH_LEN`]; a hostile orchestrator that
+/// loops on a pathologically long intent shape cannot blow the
+/// audit row size past this bound. Enforced at auto-create time
+/// in `kernel/src/orch_respawn_ceiling.rs::truncate_for_scope`.
+pub const MAX_LOGICAL_DEADLOCK_REASON_LEN: usize = 1024;
+
 impl RequestedEscalationScope {
     /// The class discriminant for this scope variant.
     pub fn class(&self) -> EscalationClass {
@@ -147,6 +230,7 @@ impl RequestedEscalationScope {
             Self::BudgetException { .. } => EscalationClass::BudgetException,
             Self::QualityGateException { .. } => EscalationClass::QualityGateException,
             Self::MergeConflict { .. } => EscalationClass::MergeConflict,
+            Self::LogicalDeadlock { .. } => EscalationClass::LogicalDeadlock,
         }
     }
 }
@@ -331,6 +415,7 @@ mod tests {
             EscalationClass::BudgetException,
             EscalationClass::QualityGateException,
             EscalationClass::MergeConflict,
+            EscalationClass::LogicalDeadlock,
         ] {
             let s = class.as_sql_str();
             assert_eq!(
@@ -341,6 +426,44 @@ mod tests {
         }
         // Negative case: the parser is closed.
         assert_eq!(EscalationClass::from_sql_str("NotARealClass"), None);
+    }
+
+    /// V2.5b: `LogicalDeadlock` joins the prior five classes. The
+    /// kernel-initiated auto-escalation path
+    /// (`kernel/src/orch_respawn_ceiling.rs`) reads
+    /// `RequestedEscalationScope::LogicalDeadlock { initiative_id,
+    /// attempts, window_secs, last_intent_kind, last_rejection_reason }`
+    /// and projects to `EscalationClass::LogicalDeadlock`; the
+    /// reverse reconstruction (audit-replay readers materialising
+    /// the scope from `requested_scope_json`) round-trips through
+    /// serde JSON.
+    #[test]
+    fn logical_deadlock_scope_round_trips_through_serde_json() {
+        let scope = RequestedEscalationScope::LogicalDeadlock {
+            initiative_id:         crate::InitiativeId::new_v4(),
+            attempts:              4,
+            window_secs:           120,
+            last_intent_kind:      "RetrySubTask".into(),
+            last_rejection_reason: "RetrySubTaskRejectedNotRetryable".into(),
+        };
+        assert_eq!(scope.class(), EscalationClass::LogicalDeadlock);
+        let s    = serde_json::to_string(&scope).expect("serde encode");
+        let back = serde_json::from_str::<RequestedEscalationScope>(&s)
+            .expect("serde decode");
+        match back {
+            RequestedEscalationScope::LogicalDeadlock {
+                attempts, window_secs, last_intent_kind, last_rejection_reason, ..
+            } => {
+                assert_eq!(attempts, 4);
+                assert_eq!(window_secs, 120);
+                assert_eq!(last_intent_kind, "RetrySubTask");
+                assert_eq!(
+                    last_rejection_reason,
+                    "RetrySubTaskRejectedNotRetryable"
+                );
+            }
+            other => panic!("unexpected scope variant after round-trip: {other:?}"),
+        }
     }
 
     /// `RequestedEscalationScope::MergeConflict` discriminant must

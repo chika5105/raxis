@@ -1397,6 +1397,50 @@ pub enum AuditEventKind {
         max_attempts: u32,
     },
 
+    /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator
+    /// approved the kernel-initiated `LogicalDeadlock` escalation
+    /// auto-created by the orch-respawn ceiling exceedance branch.
+    /// The approval performed three side effects in one SQLite
+    /// transaction: (a) UPDATE `escalations.status = 'Approved'`,
+    /// (b) UPDATE `initiatives.orchestrator_no_progress_respawn_count
+    /// = 0`, (c) UPDATE `initiatives.state = 'Executing'`. After
+    /// commit the approve handler schedules a fresh orchestrator
+    /// respawn for the offending initiative.
+    ///
+    /// Distinct from `EscalationApproved`: that variant fires for any
+    /// planner-submitted escalation; this variant is kernel-initiated
+    /// `LogicalDeadlock` only and signals that the orch-respawn
+    /// counter was reset (which `EscalationApproved` alone does
+    /// not). Audit-replay tools MUST treat the two as
+    /// non-overlapping.
+    OperatorApprovedRespawnEscalation {
+        /// The initiative whose orch-respawn counter was reset and
+        /// whose state transitioned `Failed → Executing`.
+        initiative_id: String,
+        /// The kernel-initiated escalation that was approved.
+        escalation_id: String,
+        /// Operator fingerprint whose JWT authorised the approval
+        /// call. Pinned for audit-replay so the chain reader can
+        /// attribute the reset to a specific operator.
+        operator_id:   String,
+    },
+
+    /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator denied
+    /// the kernel-initiated `LogicalDeadlock` escalation. The
+    /// initiative stays `Failed`; the orch-respawn counter is NOT
+    /// reset; the matching `escalations` row is flipped to
+    /// `'Denied'`. No further respawn is scheduled. Pairs the
+    /// audit-side anchor of the deny path with `EscalationDenied`'s
+    /// structural counterpart.
+    OperatorDeniedRespawnEscalation {
+        /// The initiative that remains `Failed`.
+        initiative_id: String,
+        /// The kernel-initiated escalation that was denied.
+        escalation_id: String,
+        /// Operator fingerprint whose JWT authorised the deny call.
+        operator_id:   String,
+    },
+
     // --- Escalation ---
     EscalationSubmitted {
         escalation_id: String,
@@ -3731,6 +3775,8 @@ impl AuditEventKind {
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
             Self::OrchestratorRespawnCeilingExceeded { .. } => "OrchestratorRespawnCeilingExceeded",
+            Self::OperatorApprovedRespawnEscalation   { .. } => "OperatorApprovedRespawnEscalation",
+            Self::OperatorDeniedRespawnEscalation     { .. } => "OperatorDeniedRespawnEscalation",
             Self::EscalationSubmitted { .. } => "EscalationSubmitted",
             Self::EscalationApproved { .. } => "EscalationApproved",
             Self::EscalationDenied { .. } => "EscalationDenied",

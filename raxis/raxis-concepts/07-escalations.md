@@ -35,7 +35,7 @@ does not hold (**INV-CERT-03**).
 
 ---
 
-## The five escalation classes
+## The six escalation classes
 
 Defined in `crates/types/src/escalation.rs::EscalationClass`. Every
 escalation is exactly one class, and the class must match the
@@ -48,10 +48,16 @@ discriminant of the `requested_scope` field.
 | `BudgetException` | Budget was exhausted but the task is genuinely incomplete. | `BudgetException { additional_units: u64 }` |
 | `QualityGateException` | A specific quality gate cannot be satisfied for a justifiable reason. Distinct from pre-authorised `override_rules`. | `QualityGateException { gate_type, task_id }` |
 | `MergeConflict` | **V2, Orchestrator only.** Non-trivial git merge conflict the Orchestrator's NNSP prescribes punting to a human. Resolution path is operator-manual commit + `IntegrationMerge { resolved_via_escalation: Some(id) }`. | `MergeConflict { conflicts: Vec<String> }` (≤ 64 paths × 1 KiB each) |
+| `LogicalDeadlock` | **V2.5b, kernel-initiated only.** Auto-created when an initiative's `orchestrator_no_progress_respawn_count` exceeds `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3): the orchestrator is in a structural loop, exiting cleanly on a kernel-rejected intent without any task FSM transition. Paired with the `OrchestratorRespawnCeilingExceeded` audit event per `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01`. Approve resets the counter + transitions the initiative back from `Failed` to `Executing` + schedules a fresh orchestrator respawn; deny preserves the `Failed` terminal state. The planner-side admission path MUST reject any `EscalationRequest { class: LogicalDeadlock }` (defense-in-depth: the kernel-side approve handler additionally rejects rows whose `initiator` is not `'Kernel'`). | `LogicalDeadlock { initiative_id, attempts, window_secs, last_intent_kind, last_rejection_reason }` (text fields ≤ 1 KiB each) |
 
 The `(class, requested_scope)` pair is checked at admission — a
 mismatch is treated as a malformed request (rejected at Step 2 of the
-escalation submission pipeline below).
+escalation submission pipeline below). The
+`LogicalDeadlock` class additionally carries an `initiator = 'Kernel'`
+column on the `escalations` row (Migration 20) so the operator-side
+approve/deny handler can distinguish kernel-initiated rows from
+planner submissions and route them to the counter-reset path
+exclusively.
 
 ---
 

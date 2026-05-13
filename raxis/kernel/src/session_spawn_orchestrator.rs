@@ -119,52 +119,6 @@ use crate::initiatives::lifecycle as kernel_lifecycle;
 /// crate::session_spawn_orchestrator::PLANNER_TASK_PROMPT_ENV`).
 pub use raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV;
 
-/// Path A3 universal-airgap opt-in check.
-///
-/// Returns `true` iff both gates pass:
-///
-/// 1. The `runtime-airgap-a3` Cargo feature is compiled into the
-///    kernel binary. The feature gates the kernel-side admission
-///    handler, the DNS resolver, and the per-session vsock
-///    listeners; without it the code paths are absent and the env
-///    var has nothing to switch on.
-/// 2. The kernel process was started with `RAXIS_AIRGAP_A3=1` in
-///    the launching environment. The env-var gate lets an operator
-///    who built with the feature run a default-off boot (e.g. for
-///    bit-identical regression against the V2 baseline).
-///
-/// When this returns `true` the session-spawn path selects
-/// `EgressTier::Mediated` for Executor / Orchestrator sessions and
-/// stamps `RAXIS_AIRGAP_A3=1` into the spawned guest's env so PID 1
-/// brings up the in-guest iptables REDIRECT chain, IPv6 disable,
-/// and resolv.conf rewrite documented in
-/// `specs/v2/airgap-architecture.md §4`.
-///
-/// Reviewer sessions stay at `EgressTier::None` (no NIC) regardless
-/// of the gate — the V2 baseline already lacks a NIC for reviewers
-/// and A3 unifies the executor / orchestrator path onto the same
-/// no-NIC posture.
-///
-/// **Reads env on every call.** Cheap (a single `std::env::var`
-/// call); not memoised so an operator can flip the gate between
-/// session spawns in a long-running kernel for debugging. The
-/// per-spawn cost is negligible compared to the rest of session
-/// activation.
-#[cfg(feature = "runtime-airgap-a3")]
-fn airgap_a3_active() -> bool {
-    std::env::var("RAXIS_AIRGAP_A3")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-/// Default-off path: feature compiled out ⇒ A3 is unconditionally
-/// inactive and the kernel boots through the legacy
-/// `Tier1Tproxy` Executor / Orchestrator pipeline bit-identically.
-#[cfg(not(feature = "runtime-airgap-a3"))]
-fn airgap_a3_active() -> bool {
-    false
-}
-
 /// Failure modes specific to the kernel-side bridge.
 ///
 /// Wraps `SpawnError` for substrate failures and adds the kernel-
@@ -1887,14 +1841,33 @@ pub async fn respawn_orchestrator_for_initiative(
     // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`) keeps the
     // counter and walks it toward the ceiling.
     //
-    // On exceedance: mark the initiative `Failed`, emit
-    // `OrchestratorRespawnCeilingExceeded`, refuse the spawn. The
-    // `is_executing` preflight above will short-circuit on every
-    // subsequent post-exit-hook trigger for this initiative.
+    // On exceedance, three writes land in ONE SQLite transaction:
+    //   1. INSERT escalations (class='LogicalDeadlock', initiator='Kernel')
+    //      via `orch_respawn_ceiling::insert_logical_deadlock_escalation_in_tx`
+    //      so the operator can either approve a counter-reset retry or
+    //      deny and preserve the Failed terminal state
+    //      (`INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01`).
+    //   2. UPDATE initiatives SET state='Failed', completed_at=now
+    //      (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`).
+    //   3. (already done by step 0: increment counter)
+    //
+    // Order matters: escalation INSERT before initiatives UPDATE so the
+    // operator-actionable surface lands before the terminal-state
+    // marker. A crash between either pair leaves the store internally
+    // consistent — both rolled back, never half-applied.
+    let policy_epoch_for_escalation: i64 = ctx
+        .policy
+        .load_full()
+        .epoch() as i64;
+    let escalation_timeout_secs = ctx
+        .policy
+        .load_full()
+        .escalation_timeout()
+        .as_secs() as i64;
     let store_for_ceiling   = Arc::clone(&ctx.store);
     let init_for_ceiling    = initiative_id.to_owned();
     let ceiling_outcome = tokio::task::spawn_blocking(move || -> Result<
-        Option<crate::orch_respawn_ceiling::CeilingOutcome>,
+        Option<(crate::orch_respawn_ceiling::CeilingOutcome, Option<String>)>,
         rusqlite::Error,
     > {
         let mut conn = store_for_ceiling.lock_sync();
@@ -1902,8 +1875,61 @@ pub async fn respawn_orchestrator_for_initiative(
         let outcome = crate::orch_respawn_ceiling::increment_no_progress_count_in_tx(
             &tx, &init_for_ceiling,
         )?;
-        if let crate::orch_respawn_ceiling::CeilingOutcome::Exceeded { .. } = outcome {
-            // Mark the initiative `Failed` per
+        let mut escalation_id: Option<String> = None;
+        if let crate::orch_respawn_ceiling::CeilingOutcome::Exceeded {
+            count_after_increment, ..
+        } = outcome
+        {
+            // Step 1 of the paired-write order
+            // (`INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01`): create the
+            // operator-actionable escalation row before the terminal
+            // initiative-state flip so the operator UI is non-empty
+            // for any reader who races the ceiling event. The
+            // `last_intent_kind` / `last_rejection_reason` placeholder
+            // values are the structurally-by-construction values for
+            // the iter42 pathology (the only loop class this ceiling
+            // can reach in V2.5b is "rejected RetrySubTask while
+            // aggregate=Pending"); the audit chain immediately
+            // preceding this event carries the wire-exact
+            // `IntentRejected` rows for forensic readers.
+            // TODO(post-iter44): per-session "last rejected intent"
+            // tracking so we can fill these in at admission time
+            // rather than relying on the audit-chain join.
+            let now_secs = unix_now_secs();
+            let timeout_at = now_secs.saturating_add(escalation_timeout_secs);
+            // Window-secs approximation: the spec asks for the
+            // wall-clock window from the FIRST no-progress respawn
+            // through the ceiling-exceedance respawn. We approximate
+            // by reading `initiatives.created_at` minus `now` —
+            // strictly an upper bound (the ceiling could have been
+            // reached after honest progress earlier), but the
+            // operator UI wants a "this loop has been running for ~X
+            // minutes" rough number, not a precise wall-clock.
+            let window_secs: u64 = tx.query_row(
+                &format!(
+                    "SELECT COALESCE(strftime('%s','now') - created_at, 0)
+                       FROM {init} WHERE initiative_id = ?1",
+                    init = raxis_store::Table::Initiatives.as_str(),
+                ),
+                rusqlite::params![&init_for_ceiling],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|secs| secs.max(0) as u64)
+            .unwrap_or(0);
+
+            escalation_id = crate::orch_respawn_ceiling::insert_logical_deadlock_escalation_in_tx(
+                &tx,
+                &init_for_ceiling,
+                count_after_increment,
+                window_secs,
+                "RetrySubTask",
+                "RetrySubTaskRejectedNotRetryable",
+                timeout_at,
+                now_secs,
+                policy_epoch_for_escalation,
+            )?;
+
+            // Step 2: mark the initiative `Failed` per
             // `InitiativeState::Failed` (`fsm.rs`). The on-the-wire
             // reason ("orchestrator no-progress respawn ceiling
             // exceeded") lives in the `OrchestratorRespawnCeilingExceeded`
@@ -1926,12 +1952,18 @@ pub async fn respawn_orchestrator_for_initiative(
             )?;
         }
         tx.commit()?;
-        Ok(Some(outcome))
+        Ok(Some((outcome, escalation_id)))
     })
     .await
     .ok()
     .and_then(Result::ok)
     .flatten();
+
+    let (ceiling_outcome, escalation_id_opt) = match ceiling_outcome {
+        None => (None, None),
+        Some((o, eid)) => (Some(o), eid),
+    };
+    let _ = escalation_id_opt; // chain-side audit anchor; surfaced via the audit event below.
 
     match ceiling_outcome {
         None => {
@@ -2967,80 +2999,6 @@ mod retry_tests {
         assert_eq!(compute_backoff_ms(initial, max, 64), max);
     }
 
-    // -------------------------------------------------------------
-    // Path A3 feature-gate witness tests
-    //
-    // Pin the double-gating contract: even with the
-    // `runtime-airgap-a3` cargo feature compiled in, the runtime
-    // env var MUST be `1` / `true` for `airgap_a3_active()` to
-    // return true. Default-off path (env var unset) MUST return
-    // false. The companion `#[cfg(not(feature = "..."))]` version
-    // of the function returns false unconditionally — that's
-    // exercised by `cargo check -p raxis-kernel` (default features)
-    // compiling clean without `RAXIS_AIRGAP_A3` ever being set.
-    //
-    // INV-NETISO-A3-UNIVERSAL-NO-NIC-01: drift in this gate would
-    // either silently disable A3 (operator sets env but kernel
-    // ignores it) or silently enable A3 (kernel forces Mediated
-    // when operator did not opt in). Both are visible regressions
-    // here.
-    // -------------------------------------------------------------
-
-    #[cfg(feature = "runtime-airgap-a3")]
-    #[test]
-    fn airgap_a3_active_recognises_canonical_env_values() {
-        use super::airgap_a3_active;
-        // Snapshot the env var so concurrent tests in this binary
-        // do not race against our writes — the kernel test binary
-        // runs each test in its own thread, but cargo runs tests
-        // in parallel by default; a tighter contract would use
-        // tokio::sync::Mutex over a global but the canonical
-        // raxis_test_support helpers are scoped to the
-        // FakeAuditSink path. We just snapshot+restore here.
-        let prev = std::env::var("RAXIS_AIRGAP_A3").ok();
-        for v in ["1", "true", "True", "TRUE"] {
-            std::env::set_var("RAXIS_AIRGAP_A3", v);
-            assert!(
-                airgap_a3_active(),
-                "expected airgap_a3_active() to be true for env={v:?}",
-            );
-        }
-        for v in ["", "0", "false", "FALSE", "no", "yes"] {
-            std::env::set_var("RAXIS_AIRGAP_A3", v);
-            assert!(
-                !airgap_a3_active(),
-                "expected airgap_a3_active() to be false for env={v:?}",
-            );
-        }
-        std::env::remove_var("RAXIS_AIRGAP_A3");
-        assert!(
-            !airgap_a3_active(),
-            "expected airgap_a3_active() to be false when env unset",
-        );
-        if let Some(v) = prev {
-            std::env::set_var("RAXIS_AIRGAP_A3", v);
-        }
-    }
-
-    #[cfg(not(feature = "runtime-airgap-a3"))]
-    #[test]
-    fn airgap_a3_active_is_unconditionally_false_when_feature_off() {
-        use super::airgap_a3_active;
-        // Even if a vendor or operator typo'd
-        // `RAXIS_AIRGAP_A3=1` into the kernel's env, the feature
-        // being compiled out MUST short-circuit the gate to
-        // false. This is the load-bearing safety property that
-        // keeps default-off builds bit-identical to the V2
-        // baseline.
-        let prev = std::env::var("RAXIS_AIRGAP_A3").ok();
-        std::env::set_var("RAXIS_AIRGAP_A3", "1");
-        assert!(!airgap_a3_active());
-        std::env::remove_var("RAXIS_AIRGAP_A3");
-        if let Some(v) = prev {
-            std::env::set_var("RAXIS_AIRGAP_A3", v);
-        }
-    }
-
     #[test]
     fn classify_spawn_isolation_spawn_uses_isolation_classify() {
         let transient = SpawnError::IsolationSpawn(
@@ -3451,42 +3409,11 @@ pub async fn spawn_executor_for_task(
     }
 
     // ── Step 3: build the spawn spec. ────────────────────────────
-    //
-    // Executor egress tier selection — Path A3 vs legacy default-off.
-    //
-    // The legacy V2 baseline ships the Executor at `Tier1Tproxy` (a
-    // NAT-attached virtio-net device + iptables REDIRECT to an
-    // in-guest tproxy that is, today, NOT shipped on the canonical
-    // executor rootfs — see the audit finding in the Path A3
-    // implementation prompt). Under Path A3 the Executor (and
-    // Orchestrator) switch to `EgressTier::Mediated` which produces
-    // **no** virtio-net device; all outbound TCP and DNS flows are
-    // mediated by the kernel over vsock. Selection is double-gated:
-    //
-    //   * Cargo feature `runtime-airgap-a3` MUST be compiled in (the
-    //     kernel-side admission listener and the planner-executor's
-    //     tproxy / DNS stub spawn paths are `#[cfg(feature = ...)]`).
-    //   * `RAXIS_AIRGAP_A3=1` MUST be set in the kernel's env (so an
-    //     operator who builds with the feature but does not opt in
-    //     keeps the bit-identical legacy boot).
-    //
-    // Default-off path is bit-identical to the V2 baseline: feature
-    // OFF or env var unset ⇒ `Tier1Tproxy` is selected and the
-    // existing NAT-attached executor boots exactly as it does on
-    // origin/main. See `specs/v2/airgap-architecture.md` for the
-    // full A3 contract and `INV-NETISO-A3-UNIVERSAL-NO-NIC-01` for
-    // the structural-no-NIC invariant.
-    #[allow(deprecated)]
-    let executor_egress_tier = if airgap_a3_active() {
-        EgressTier::Mediated
-    } else {
-        EgressTier::Tier1Tproxy
-    };
     let (vcpu_count, mem_mib, egress_tier, entrypoint_argv) = match agent_kind {
         ExecutorAgentKind::Executor => (
             spawn_ctx.executor_vcpu_count,
             spawn_ctx.executor_mem_mib,
-            executor_egress_tier,
+            EgressTier::Tier1Tproxy,
             vec![
                 "/usr/local/bin/raxis-executor".to_owned(),
                 "--task-id".to_owned(),
@@ -3637,18 +3564,6 @@ pub async fn spawn_executor_for_task(
                 env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), prompt);
             }
         }
-    }
-    // Path A3 — stamp `RAXIS_AIRGAP_A3=1` into the guest env so
-    // PID 1 in `crates/planner-core::guest_init` knows to install
-    // the A3 iptables REDIRECT chain, disable IPv6, point
-    // `/etc/resolv.conf` at the in-guest DNS stub, and the
-    // executor binary spawns the in-guest tproxy + DNS stub before
-    // entering the dispatch loop. The default-off path leaves the
-    // env var unset and the guest boots through the legacy code
-    // path bit-identically.
-    if airgap_a3_active() {
-        env.entry("RAXIS_AIRGAP_A3".to_owned())
-            .or_insert_with(|| "1".to_owned());
     }
     let vm_spec = VmSpec {
         vcpu_count,

@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -127,6 +127,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 19 {
         apply_migration_19(conn)?;
+    }
+    if current_version < 20 {
+        apply_migration_20(conn)?;
     }
 
     Ok(())
@@ -2485,6 +2488,70 @@ ALTER TABLE {initiatives}
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (19, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 20 — Escalation initiator column.
+//
+// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` introduces the FIRST
+// kernel-initiated escalation class
+// (`EscalationClass::LogicalDeadlock`). Pre-Migration-20 every row
+// in `escalations` was planner-initiated by construction (the only
+// admission path was the planner-side `EscalationRequest` IPC); the
+// new auto-create path inside
+// `kernel/src/orch_respawn_ceiling.rs::insert_logical_deadlock_escalation_in_tx`
+// inserts a row whose `initiator` is `'Kernel'` instead of
+// `'Planner'`.
+//
+// This migration adds the column with a default of `'Planner'` so
+// pre-Migration-20 rows observably keep their original semantics
+// after the upgrade. The kernel approve/deny handlers consult the
+// column to decide whether a `LogicalDeadlock` row may carry an
+// approval that resets the orch-respawn counter (only kernel-
+// initiated rows are eligible — a planner-submitted row of the
+// same class would be rejected at admission, but the constraint
+// is encoded as a defense-in-depth check on the approve path).
+//
+// Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-migration
+// leaves the pre-migration schema intact (every-migration invariant
+// declared at the top of this module).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_20(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_20_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 20 failed: {e}"))
+    })
+}
+
+/// The complete migration-20 DDL.
+pub fn render_migration_20_ddl() -> String {
+    let escalations    = Table::Escalations.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- Add the escalation initiator column. Default 'Planner' ⇒
+-- pre-Migration-20 rows observably remain planner-initiated
+-- (the only V1/V2 admission path was the planner-side
+-- `EscalationRequest` IPC). The kernel-initiated auto-create
+-- path inside `kernel/src/orch_respawn_ceiling.rs` writes
+-- 'Kernel' explicitly. The text-typed CHECK keeps the column
+-- closed-set so a future variant requires both an enum +
+-- migration update.
+ALTER TABLE {escalations}
+    ADD COLUMN initiator TEXT NOT NULL DEFAULT 'Planner'
+        CHECK (initiator IN ('Planner', 'Kernel'));
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (20, strftime('%s', 'now'));
 
 COMMIT;
 "

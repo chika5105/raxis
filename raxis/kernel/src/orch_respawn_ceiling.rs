@@ -90,6 +90,10 @@
 
 use raxis_audit_tools::AuditEventKind;
 use raxis_store::Table;
+use raxis_types::{
+    EscalationClass, EscalationStatus, RequestedEscalationScope,
+    MAX_LOGICAL_DEADLOCK_REASON_LEN,
+};
 use rusqlite::{Connection, OptionalExtension};
 
 /// The structural backstop ceiling for orchestrator no-progress
@@ -233,6 +237,352 @@ pub fn lookup_initiative_id_for_task_in_tx(
         rusqlite::params![task_id],
         |r| r.get::<_, String>(0),
     ).optional()
+}
+
+/// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — auto-create a
+/// kernel-initiated `LogicalDeadlock` escalation row inside the
+/// SAME SQLite transaction as the ceiling-exceeded
+/// initiative-`Failed` flip. The escalation lets the operator
+/// decide whether to (a) approve the reset + retry path
+/// (transitioning the initiative back to `Executing`) or (b)
+/// preserve the `Failed` terminal state by denying.
+///
+/// **Paired-write order.** Per
+/// `audit-paired-writes.md §4`:
+///
+///   1. INSERT escalations row (status `'Pending'`, initiator
+///      `'Kernel'`, class `'LogicalDeadlock'`)
+///   2. UPDATE initiatives state = 'Failed'
+///   3. COMMIT
+///   4. (post-commit) emit
+///      `AuditEventKind::OrchestratorRespawnCeilingExceeded`
+///
+/// This function performs Step 1; the caller (in
+/// `session_spawn_orchestrator::respawn_orchestrator_for_initiative`)
+/// performs Steps 2–4. The two writes share one transaction so a
+/// crash between them leaves the store internally consistent
+/// (either both pending or both rolled back; never an
+/// initiative-`Failed` without an operator-actionable escalation
+/// row).
+///
+/// **FK satisfaction strategy.** The `escalations` table requires
+/// `session_id` / `task_id` / `lineage_id` to be `NOT NULL` and to
+/// reference real rows. For a kernel-initiated escalation the
+/// triple is harvested from the most recently FSM-touched task on
+/// the failing initiative whose `session_id` is non-NULL — by
+/// construction of the iter42 pathology there is always one
+/// (the orchestrator/executor session that loop-spawned). If no
+/// eligible task exists (defensive: pre-Migration-19 stores or
+/// raced operator-abort + delete), the function returns
+/// `Ok(None)` and the caller skips Step 1 but still performs
+/// Steps 2–4 so the operator at least sees the audit event.
+///
+/// **idempotency_key.** Deterministic
+/// `kernel-orch-respawn-ceiling:{initiative_id}` so the
+/// `UNIQUE (session_id, idempotency_key)` index naturally
+/// short-circuits a second attempt for the same initiative within
+/// one kernel-process lifetime. Subsequent re-tries of the same
+/// auto-create after `escalations.status` has been resolved
+/// (Approved/Denied) are blocked by the
+/// `ceiling-exceeded → state=Failed` short-circuit at the top of
+/// `respawn_orchestrator_for_initiative` (the second auto-create
+/// never runs because the first respawn refused to spawn).
+///
+/// **Field truncation.** `last_intent_kind` and
+/// `last_rejection_reason` are truncated to
+/// `MAX_LOGICAL_DEADLOCK_REASON_LEN` bytes (1 KiB) so a hostile
+/// orchestrator that loops on a pathologically long intent shape
+/// cannot blow the audit row size past the bound.
+///
+/// Returns the freshly-inserted `escalation_id` on success, or
+/// `Ok(None)` on the no-eligible-FK fallback path. Propagates
+/// `rusqlite::Error` on SQL failure; the caller MUST fail-closed
+/// (treat the error as if the insert never happened, so the
+/// initiative still transitions to `Failed`).
+#[allow(clippy::too_many_arguments)]
+pub fn insert_logical_deadlock_escalation_in_tx(
+    tx:                    &Connection,
+    initiative_id:         &str,
+    attempts:              u32,
+    window_secs:           u64,
+    last_intent_kind:      &str,
+    last_rejection_reason: &str,
+    timeout_at_unix:       i64,
+    now_unix:              i64,
+    policy_epoch:          i64,
+) -> Result<Option<String>, rusqlite::Error> {
+    let tasks       = Table::Tasks.as_str();
+    let sessions    = Table::Sessions.as_str();
+    let escalations = Table::Escalations.as_str();
+
+    // Resolve a (task_id, session_id, lineage_id) triple from the
+    // most recently FSM-touched task on the initiative whose
+    // session_id is non-NULL. The JOIN against `sessions` enforces
+    // the FK on `escalations.session_id`. If no row matches the
+    // initiative carries no live task with a session — defensive
+    // path; auto-escalation skipped.
+    let triple: Option<(String, String, String)> = tx.query_row(
+        &format!(
+            "SELECT t.task_id, s.session_id, s.lineage_id
+               FROM {tasks} t
+               JOIN {sessions} s ON s.session_id = t.session_id
+              WHERE t.initiative_id = ?1
+                AND t.session_id IS NOT NULL
+              ORDER BY t.transitioned_at DESC
+              LIMIT 1"
+        ),
+        rusqlite::params![initiative_id],
+        |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        )),
+    ).optional()?;
+
+    let Some((task_id, session_id, lineage_id)) = triple else {
+        return Ok(None);
+    };
+
+    let escalation_id = uuid::Uuid::new_v4().to_string();
+
+    let initiative_uuid = match raxis_types::InitiativeId::parse(initiative_id) {
+        Ok(id) => id,
+        Err(_) => return Ok(None),
+    };
+
+    let last_intent_kind_trunc = truncate_for_scope(last_intent_kind);
+    let last_rejection_reason_trunc = truncate_for_scope(last_rejection_reason);
+
+    let scope = RequestedEscalationScope::LogicalDeadlock {
+        initiative_id:         initiative_uuid,
+        attempts,
+        window_secs,
+        last_intent_kind:      last_intent_kind_trunc.clone(),
+        last_rejection_reason: last_rejection_reason_trunc.clone(),
+    };
+    let scope_json = serde_json::to_string(&scope)
+        .expect("RequestedEscalationScope is always JSON-serialisable");
+
+    let justification = format!(
+        "Orchestrator respawn-no-progress ceiling exceeded \
+         ({attempts} respawns within {window_secs}s with zero \
+         subtask FSM transitions). Last orchestrator intent: \
+         {last_intent_kind_trunc} rejected as \
+         {last_rejection_reason_trunc}. Operator approval required \
+         to reset the respawn counter and retry, or deny to \
+         preserve the Failed terminal state."
+    );
+
+    let idem_key = format!("kernel-orch-respawn-ceiling:{initiative_id}");
+
+    let inserted = tx.execute(
+        &format!(
+            "INSERT INTO {escalations} (
+                escalation_id, session_id, task_id, lineage_id, initiative_id,
+                class, requested_scope_json, justification, idempotency_key,
+                status, created_at, timeout_at, initiator
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'Kernel')
+             ON CONFLICT(session_id, idempotency_key) DO NOTHING"
+        ),
+        rusqlite::params![
+            escalation_id,
+            session_id,
+            task_id,
+            lineage_id,
+            initiative_id,
+            EscalationClass::LogicalDeadlock.as_sql_str(),
+            scope_json,
+            justification,
+            idem_key,
+            EscalationStatus::Pending.as_sql_str(),
+            now_unix,
+            timeout_at_unix,
+        ],
+    )?;
+    let _ = policy_epoch; // surfaced for symmetry with planner-side handler
+
+    if inserted == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(escalation_id))
+}
+
+/// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator-approval
+/// path for the kernel-initiated `LogicalDeadlock` escalation. In
+/// one SQLite transaction:
+///
+///   1. Verify the row exists, has class `'LogicalDeadlock'`,
+///      initiator `'Kernel'`, status `'Pending'`. (Defense-in-
+///      depth: a `LogicalDeadlock` row with initiator `'Planner'`
+///      would be a planner-side admission bug; we refuse to act
+///      on it here even though the planner-side admission also
+///      rejects.)
+///   2. UPDATE escalations SET status = 'Approved', resolved_at = now.
+///   3. UPDATE initiatives SET orchestrator_no_progress_respawn_count = 0.
+///   4. UPDATE initiatives SET state = 'Executing' (transition back
+///      from `Failed`).
+///
+/// Returns `Ok(initiative_id)` on success so the caller can
+/// schedule the orchestrator respawn outside the SQL transaction.
+/// Returns `Ok(None)` when the row is not in the expected state
+/// (the FSM mismatch is the operator's signal that the escalation
+/// has already been resolved or the row never existed). Propagates
+/// `rusqlite::Error` on SQL failure; the caller MUST surface as
+/// an operator-facing error.
+///
+/// **Why not via `authority::escalation::approve_escalation`.**
+/// The standard approve path mints an `approval_tokens` row whose
+/// `scope_json` carries a `CapabilityClass` the planner later
+/// presents on a downstream intent. `LogicalDeadlock` has no
+/// capability semantics — the operator's approval IS the action;
+/// no token is consumed, no scope is bound. A separate path keeps
+/// the wire shape minimal and avoids polluting the
+/// `approval_tokens` table with rows the planner can never
+/// consume.
+pub fn approve_logical_deadlock_escalation_in_tx(
+    tx:            &Connection,
+    escalation_id: &str,
+    now_unix:      i64,
+) -> Result<Option<String>, rusqlite::Error> {
+    let escalations = Table::Escalations.as_str();
+    let initiatives = Table::Initiatives.as_str();
+
+    let approved_state = EscalationStatus::Approved.as_sql_str();
+    let pending_state  = EscalationStatus::Pending.as_sql_str();
+    let class_str      = EscalationClass::LogicalDeadlock.as_sql_str();
+
+    let row: Option<(String, String, String, String)> = tx.query_row(
+        &format!(
+            "SELECT initiative_id, class, initiator, status
+               FROM {escalations} WHERE escalation_id = ?1"
+        ),
+        rusqlite::params![escalation_id],
+        |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        )),
+    ).optional()?;
+
+    let Some((initiative_id, class, initiator, status)) = row else {
+        return Ok(None);
+    };
+
+    if class != class_str || initiator != "Kernel" || status != pending_state {
+        return Ok(None);
+    }
+
+    let updated = tx.execute(
+        &format!(
+            "UPDATE {escalations}
+                SET status = ?1, resolved_at = ?2
+              WHERE escalation_id = ?3 AND status = ?4"
+        ),
+        rusqlite::params![approved_state, now_unix, escalation_id, pending_state],
+    )?;
+    if updated != 1 {
+        return Ok(None);
+    }
+
+    tx.execute(
+        &format!(
+            "UPDATE {initiatives}
+                SET orchestrator_no_progress_respawn_count = 0
+              WHERE initiative_id = ?1"
+        ),
+        rusqlite::params![&initiative_id],
+    )?;
+
+    tx.execute(
+        &format!(
+            "UPDATE {initiatives}
+                SET state = 'Executing', completed_at = NULL
+              WHERE initiative_id = ?1 AND state = 'Failed'"
+        ),
+        rusqlite::params![&initiative_id],
+    )?;
+
+    Ok(Some(initiative_id))
+}
+
+/// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator-deny path
+/// for the kernel-initiated `LogicalDeadlock` escalation. UPDATEs
+/// `escalations.status = 'Denied'`; the initiative stays `Failed`
+/// and the orch-respawn counter stays at its post-ceiling value
+/// (the operator's deny signals "do not retry; the failure mode
+/// requires manual intervention").
+///
+/// Returns `Ok(initiative_id)` on success for audit attribution,
+/// `Ok(None)` on FSM mismatch (already resolved or not found),
+/// `Err` on SQL failure.
+pub fn deny_logical_deadlock_escalation_in_tx(
+    tx:               &Connection,
+    escalation_id:    &str,
+    now_unix:         i64,
+    deny_reason_note: Option<&str>,
+) -> Result<Option<String>, rusqlite::Error> {
+    let escalations = Table::Escalations.as_str();
+
+    let denied_state  = EscalationStatus::Denied.as_sql_str();
+    let pending_state = EscalationStatus::Pending.as_sql_str();
+    let class_str     = EscalationClass::LogicalDeadlock.as_sql_str();
+
+    let row: Option<(String, String, String, String)> = tx.query_row(
+        &format!(
+            "SELECT initiative_id, class, initiator, status
+               FROM {escalations} WHERE escalation_id = ?1"
+        ),
+        rusqlite::params![escalation_id],
+        |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        )),
+    ).optional()?;
+
+    let Some((initiative_id, class, initiator, status)) = row else {
+        return Ok(None);
+    };
+
+    if class != class_str || initiator != "Kernel" || status != pending_state {
+        return Ok(None);
+    }
+
+    let updated = tx.execute(
+        &format!(
+            "UPDATE {escalations}
+                SET status = ?1, resolved_at = ?2,
+                    resolution_notes = COALESCE(?3, resolution_notes)
+              WHERE escalation_id = ?4 AND status = ?5"
+        ),
+        rusqlite::params![
+            denied_state, now_unix, deny_reason_note, escalation_id, pending_state
+        ],
+    )?;
+    if updated != 1 {
+        return Ok(None);
+    }
+
+    Ok(Some(initiative_id))
+}
+
+/// Bound either `last_intent_kind` or `last_rejection_reason` to
+/// [`MAX_LOGICAL_DEADLOCK_REASON_LEN`] bytes. Chooses a UTF-8
+/// boundary truncation so the resulting `String` is always valid
+/// UTF-8 even if the input was a multi-byte sequence near the
+/// limit.
+fn truncate_for_scope(s: &str) -> String {
+    if s.len() <= MAX_LOGICAL_DEADLOCK_REASON_LEN {
+        return s.to_owned();
+    }
+    let mut end = MAX_LOGICAL_DEADLOCK_REASON_LEN;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
 }
 
 /// Build an `OrchestratorRespawnCeilingExceeded` audit event from a

@@ -202,6 +202,8 @@ pub fn notification_priority_for_kind_str(
         | "ReviewAggregationCompleted"
         | "ExecutorRespawnFromReviewRejection"
         | "OrchestratorRespawnCeilingExceeded"
+        | "OperatorApprovedRespawnEscalation"
+        | "OperatorDeniedRespawnEscalation"
         | "GitConsistencyRepaired"
         | "DryRunAdmitted"
         | "PathScopeOverrideApplied" => Some(Medium),
@@ -388,6 +390,16 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // kernel will refuse all subsequent orchestrator respawns
         // for the offending initiative.
         K::OrchestratorRespawnCeilingExceeded { .. } => Some(Critical),
+        // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator
+        // resolution surface for a kernel-initiated logical-deadlock
+        // escalation. Routed at `Medium` priority: the operator has
+        // already responded to the upstream `Critical` ceiling event
+        // and is now closing the loop (approve resets the counter +
+        // resumes the initiative; deny preserves Failed). Both
+        // outcomes are operator-attention-noted, not paged; pairs
+        // 1:1 with the upstream `OrchestratorRespawnCeilingExceeded`.
+        K::OperatorApprovedRespawnEscalation { .. } => Some(Medium),
+        K::OperatorDeniedRespawnEscalation { .. } => Some(Medium),
         K::GitConsistencyRepaired { .. } => Some(Medium),
         K::DryRunAdmitted { .. } => Some(Medium),
         K::PathScopeOverrideApplied { .. } => Some(Medium),
