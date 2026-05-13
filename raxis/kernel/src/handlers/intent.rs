@@ -4877,6 +4877,90 @@ fn commit_task_completion(
         }
     }
 
+    // 3. Cascade-terminate the matching `subtask_activations` row.
+    //
+    // INV-ACT-01 mirror: every `tasks.state` transition into a terminal
+    // state must close out the bound `Active` activation row in the
+    // SAME transaction. `transition_task_in_tx` already enforces this
+    // for the `Failed` / `Aborted` / `Cancelled` edges (see
+    // `kernel/src/initiatives/task_transitions.rs §"INV-ACT-01"`),
+    // but `commit_task_completion` flips `Running → Completed` via raw
+    // SQL inside its own tx (kernel-store.md §2.5.8 line 2014 single-
+    // tx contract) and previously bypassed the cascade — `c986e6d`
+    // explicitly noted this gap as deferred ("Closing that gap is a
+    // separate cleanup tracked at the call-site").
+    //
+    // ## Why the gap became a hard blocker
+    //
+    // Live e2e iter 9 (artifact `.tmpP4B3jk`, 2026-05-12 22:28Z UTC)
+    // exposed the consequence end-to-end. Sequence (timestamps from
+    // the iter-9 audit chain):
+    //
+    //   1. ts=…198  `allowlist-positive-codegen` executor reports
+    //               `CompleteTask` → task transitions
+    //               `Running → Completed` via this function. Task
+    //               row is correct; activation row is left in
+    //               `Active` (the gap).
+    //   2. ts=…297  primary orchestrator submits `RetrySubTask
+    //               credential-substitution-canary` and exits cleanly.
+    //   3. ts=…306  `spawn_planner_dispatcher`'s post-exit hook runs
+    //               for the orchestrator session. Preflight reads
+    //               `(pending_exists, active_exists)` for the
+    //               primary initiative and finds `active_exists =
+    //               true` because of the stale `allowlist-positive-
+    //               codegen` row. The `aafd4f2` storm-guard
+    //               (`pending_exists && !active_exists`) fires and
+    //               skips respawn.
+    //   4. ts=…306..…650+  no further orchestrator for the primary
+    //               initiative. 7 `Admitted` tasks + 1
+    //               `PendingActivation` (the just-retried canary)
+    //               stranded with no dispatcher. Kernel CPU 0%
+    //               for ~4 minutes until manual termination.
+    //
+    // The post-exit hook's correctness assumption ("activation FSM
+    // mirrors task lifecycle") was ALREADY violated for completed
+    // tasks before iter 9; the symptom only surfaced once Option 2
+    // (`6237618`) made `RetrySubTask` viable for executors that
+    // would never make progress, which in turn put us into the
+    // post-ceiling state where the orchestrator's exit was the
+    // ONLY path that could revive the DAG.
+    //
+    // ## Fix shape
+    //
+    // The cascade is identical to `transition_task_in_tx`'s INV-ACT-01
+    // block, parameterised on the terminal mapping
+    // `TaskState::Completed → 'Completed'`. The WHERE filter
+    // (`activation_state = 'Active'`) is the idempotency guard: a
+    // recovery-sweep re-emit on top of an already-terminal row is a
+    // no-op. PendingActivation rows (NULL `activated_at`) are
+    // intentionally untouched; the Migration 5 CHECK forbids stamping
+    // them as terminal directly, and `CompleteTask` only flips
+    // `Running → Completed` for tasks whose activation has already
+    // been bound (`Active`) anyway.
+    //
+    // The cascade lives INSIDE the existing transaction so the
+    // §2.5.8 single-tx contract is preserved end-to-end: the task
+    // status, the export snapshots, AND the activation closure all
+    // commit together or all roll back. A crash mid-cascade is
+    // impossible.
+    let activation_rows = tx.execute(
+        &format!(
+            "UPDATE {SUBTASK_ACTIVATIONS}
+                SET activation_state = 'Completed',
+                    terminated_at    = ?1
+              WHERE task_id          = ?2
+                AND activation_state = 'Active'"
+        ),
+        rusqlite::params![now, task_id],
+    ).map_err(|_| ())?;
+    if activation_rows > 0 {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"ActivationCascadeTerminated\",\
+             \"task_id\":\"{task_id}\",\"activation_state\":\"Completed\",\
+             \"rows\":{activation_rows}}}",
+        );
+    }
+
     tx.commit().map_err(|_| ())
 }
 
@@ -5997,6 +6081,175 @@ mod tests {
             "rejected commit must NOT modify the task state");
         assert_eq!(count_export_snapshots(&store, "t1"), 0,
             "rejected commit must NOT leak snapshot rows");
+    }
+
+    /// Read the `(activation_state, terminated_at)` pair for the
+    /// activation row identified by `activation_id`. Used by the
+    /// cascade-terminate tests below.
+    fn read_activation_terminal(
+        store:         &Store,
+        activation_id: &str,
+    ) -> (String, Option<i64>) {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT activation_state, terminated_at FROM {SUBTASK_ACTIVATIONS}
+                  WHERE activation_id = ?1"
+            ),
+            rusqlite::params![activation_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap()
+    }
+
+    /// Primary regression guard for the iter-9 post-ceiling silence
+    /// (`/tmp/iter9-artifacts/kernel.stderr.log`, ts=1778650306). The
+    /// `commit_task_completion` path previously left the bound
+    /// `subtask_activations` row in `'Active'` after a clean
+    /// `Running → Completed` flip; the post-exit storm-guard
+    /// (`spawn_planner_dispatcher`'s `pending_exists && !active_exists`
+    /// preflight per `aafd4f2`) then read that stale `Active` row,
+    /// concluded a worker was still in flight, and skipped the
+    /// orchestrator respawn — leaving the initiative's remaining
+    /// `Admitted` tasks stranded with no dispatcher.
+    ///
+    /// This test pins the invariant: a successful `CompleteTask`
+    /// closes the activation row to `'Completed'` with a non-NULL
+    /// `terminated_at` in the SAME transaction, mirroring the
+    /// `c986e6d` cascade for the `Failed` / `Aborted` / `Cancelled`
+    /// edges.
+    #[test]
+    fn commit_task_completion_closes_active_activation_row() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-complete-cascade");
+        let activation_id = seed_active_executor_activation(
+            &store,
+            "t-complete-cascade",
+            /*crash*/ 0,
+        );
+
+        commit_task_completion("t-complete-cascade", &[], None, &store).unwrap();
+
+        assert_eq!(
+            task_state_of(&store, "t-complete-cascade"),
+            TaskState::Completed.as_sql_str(),
+            "task state must flip Running → Completed",
+        );
+
+        let (state, terminated_at) =
+            read_activation_terminal(&store, &activation_id);
+        assert_eq!(state, "Completed",
+            "activation row must transition Active → Completed when \
+             commit_task_completion succeeds (mirror of c986e6d \
+             cascade for the success edge)");
+        assert!(terminated_at.is_some(),
+            "Migration 5 CHECK (`activation_state IN ('Completed', 'Failed') \
+             ⇒ terminated_at IS NOT NULL`) must be satisfied");
+    }
+
+    /// Cascade lives INSIDE the transaction that flips the task: the
+    /// task status, the export snapshots, AND the activation closure
+    /// commit together. This test exercises both side-effects in one
+    /// call to prove the transaction stays atomic (single
+    /// `commit_task_completion` produces all three observable changes).
+    #[test]
+    fn commit_task_completion_atomically_writes_status_exports_and_activation() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-atomic");
+        let activation_id = seed_active_executor_activation(
+            &store, "t-atomic", /*crash*/ 0,
+        );
+        let exports = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
+
+        commit_task_completion("t-atomic", &exports, None, &store).unwrap();
+
+        assert_eq!(
+            task_state_of(&store, "t-atomic"),
+            TaskState::Completed.as_sql_str(),
+        );
+        assert_eq!(count_export_snapshots(&store, "t-atomic"), 2);
+        let (state, terminated_at) =
+            read_activation_terminal(&store, &activation_id);
+        assert_eq!(state, "Completed");
+        assert!(terminated_at.is_some());
+    }
+
+    /// Idempotency guard: the cascade's `WHERE activation_state =
+    /// 'Active'` filter makes a recovery-sweep re-emit on top of an
+    /// already-terminal activation row a no-op (nothing matches → 0
+    /// rows updated → `terminated_at` preserved verbatim). The
+    /// `commit_task_completion` call itself returns `Err(())` on the
+    /// second attempt because the task is already `Completed`
+    /// (`UPDATE … WHERE state = 'Running'` matches 0 rows), but the
+    /// activation row must remain unchanged. This pins the
+    /// recovery-sweep contract from `c986e6d`'s
+    /// `second_terminal_transition_is_no_op_for_activation` to the
+    /// success path.
+    #[test]
+    fn commit_task_completion_cascade_is_idempotent_on_replay() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-replay");
+        let activation_id = seed_active_executor_activation(
+            &store, "t-replay", /*crash*/ 0,
+        );
+
+        commit_task_completion("t-replay", &[], None, &store).unwrap();
+        let (_, first_term) = read_activation_terminal(&store, &activation_id);
+        assert!(first_term.is_some());
+
+        // Second call on a Completed task: the `state = 'Running'`
+        // guard rejects (0 rows updated → Err), so the cascade never
+        // runs. The activation row's terminated_at must be preserved.
+        let result = commit_task_completion("t-replay", &[], None, &store);
+        assert!(result.is_err(),
+            "second commit_task_completion on a Completed task must reject");
+        let (state, second_term) =
+            read_activation_terminal(&store, &activation_id);
+        assert_eq!(state, "Completed");
+        assert_eq!(second_term, first_term,
+            "terminated_at must be preserved across the rejected replay");
+    }
+
+    /// `PendingActivation` rows (NULL `activated_at`) are intentionally
+    /// untouched by the cascade — the Migration 5 CHECK forbids
+    /// stamping them as terminal directly, and `CompleteTask` only
+    /// flips `Running → Completed` for tasks whose activation has
+    /// already been bound (`Active`) anyway. This test pins the
+    /// `WHERE activation_state = 'Active'` filter: a stale
+    /// PendingActivation row from a prior orchestrator turn must NOT
+    /// be collapsed into Completed by an unrelated CompleteTask.
+    #[test]
+    fn commit_task_completion_cascade_skips_pending_activation_rows() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-pending");
+        let pending_id = uuid::Uuid::new_v4().to_string();
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        // Insert a PendingActivation row (no session_id, no
+        // activated_at) — same shape that `handle_retry_sub_task`
+        // produces.
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS} (
+                    activation_id, task_id, initiative_id, activation_state,
+                    session_id, evaluation_sha,
+                    crash_retry_count, review_reject_count,
+                    created_at, activated_at, terminated_at
+                 ) VALUES (?1, 't-pending', 'init-int', 'PendingActivation',
+                           NULL, NULL, 0, 0, ?2, NULL, NULL)"
+            ),
+            rusqlite::params![&pending_id, now],
+        ).unwrap();
+        drop(conn);
+
+        commit_task_completion("t-pending", &[], None, &store).unwrap();
+
+        let (state, terminated_at) =
+            read_activation_terminal(&store, &pending_id);
+        assert_eq!(state, "PendingActivation",
+            "PendingActivation rows must remain untouched (CHECK forbids \
+             flipping them to terminal without activated_at)");
+        assert!(terminated_at.is_none(),
+            "PendingActivation must keep terminated_at NULL");
     }
 
     // ── read_completion_inputs — §2.5.8 step 1+2 ──────────────────────────
