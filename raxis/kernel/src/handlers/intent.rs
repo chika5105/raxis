@@ -6937,9 +6937,19 @@ mod tests {
             "at-cap critique must be persisted in full");
     }
 
-    /// Reviewer task NOT in Running → FailTaskNotRunning. The
-    /// task-state gate is the first check; payload validation is
-    /// short-circuited.
+    /// Reviewer task in a terminal (non-{Admitted, Running}) state
+    /// → FailTaskNotRunning. The task-state gate is the first check;
+    /// payload validation is short-circuited.
+    ///
+    /// V2.5 update — `handle_submit_review` accepts BOTH `Admitted`
+    /// and `Running` (Admitted is folded into a kernel-driven
+    /// `Admitted → Running` transition; see the §"Task-state gate"
+    /// comment in `handle_submit_review`). The reject path therefore
+    /// fires for the remaining states: `Completed`, `Failed`,
+    /// `GatesPending`, `Aborted`, `Cancelled`, `BlockedRecoveryPending`.
+    /// We pin `Completed` here as the canonical terminal probe — a
+    /// double-submission against an already-finished Reviewer is the
+    /// real-world shape this gate exists to reject.
     #[test]
     fn submit_review_rejects_non_running_reviewer() {
         let store  = Arc::new(Store::open_in_memory().unwrap());
@@ -6947,14 +6957,14 @@ mod tests {
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
-        // Caller passes Admitted; the gate must reject regardless of
-        // the actual DB state.
+        // Caller passes Completed (a terminal state); the gate must
+        // reject regardless of the actual DB state.
         let req = make_submit_review_request(
             "rev1", Some(false), Some("auth missing"),
         );
         let err = handle_submit_review(
-            req, TaskState::Admitted, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect_err("non-Running reviewer must reject");
+            req, TaskState::Completed, &dummy_session_id(), 1, &store, &policy, &ctx,
+        ).expect_err("terminal-state reviewer must reject");
 
         assert_eq!(err.0, PlannerErrorCode::FailTaskNotRunning);
         // Critically: no side effects on the Executor's column.
