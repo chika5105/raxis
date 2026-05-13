@@ -124,6 +124,11 @@ use std::time::Duration;
 use raxis_audit_tools::{AuditEvent, AuditEventKind};
 use sha2::{Digest, Sha256};
 
+use super::harness_timeout::{
+    run_command_output_timeout, wait_with_output_timeout, BoundedWaitError,
+    SEED_TIMEOUT,
+};
+
 // ---------------------------------------------------------------------------
 // Pinned host:port + credentials for the docker-compose stack the
 // un-mock worker landed. The literals here track
@@ -301,6 +306,26 @@ pub enum ServiceEvidenceError {
         service: &'static str,
         env_var: &'static str,
     },
+
+    /// The seed-write child process did not exit within the
+    /// configured timeout (`SEED_TIMEOUT`, currently 30 s) and was
+    /// SIGKILLed by the harness. Distinct from `SeedFailed` so a
+    /// regression test (and a CI log scraper) can match the
+    /// timeout path specifically vs. a generic seed failure.
+    ///
+    /// Spec: `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` in
+    /// `raxis/specs/invariants.md`.
+    SeedTimedOut {
+        service: &'static str,
+        /// Operator-readable label for the wrapped subprocess
+        /// (e.g. `"psql"`, `"mongosh"`, `"redis-cli"`).
+        label: String,
+        /// Timeout that elapsed before SIGKILL.
+        timeout: Duration,
+        /// Target the seeder was talking to (host:port + db),
+        /// surfaced for fast operator triage.
+        target: String,
+    },
 }
 
 impl fmt::Display for ServiceEvidenceError {
@@ -361,6 +386,20 @@ impl fmt::Display for ServiceEvidenceError {
                 "[service-evidence:{service}] opt-in env var {env_var} \
                  not set; helper bypassed (returns Ok(()) for compatibility \
                  with the realistic-scenario harness).",
+            ),
+            Self::SeedTimedOut {
+                service,
+                label,
+                timeout,
+                target,
+            } => write!(
+                f,
+                "[service-evidence:{service}] seed `{label}` against {target} \
+                 did not exit within {:?}; SIGKILLed by the harness. The \
+                 backing service is probably down or unreachable — verify with \
+                 `docker compose -p raxis-live-e2e-test ps`. (Spec: \
+                 INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01.)",
+                timeout,
             ),
         }
     }
@@ -559,19 +598,20 @@ pub fn seed_postgres() -> Result<PostgresSeed, ServiceEvidenceError> {
     }
     sql.push_str("COMMIT;\n");
 
+    let pg_target = format!(
+        "postgresql://{user}@{host}:{port}/{db}",
+        user = SE_PG_USER,
+        host = SE_PG_HOST,
+        port = SE_PG_PORT,
+        db = SE_PG_DATABASE,
+    );
     let mut child = Command::new("psql")
         .env("PGPASSWORD", SE_PG_PASSWORD)
         .arg("--quiet")
         .arg("--no-psqlrc")
         .arg("-v")
         .arg("ON_ERROR_STOP=1")
-        .arg(format!(
-            "postgresql://{user}@{host}:{port}/{db}",
-            user = SE_PG_USER,
-            host = SE_PG_HOST,
-            port = SE_PG_PORT,
-            db = SE_PG_DATABASE,
-        ))
+        .arg(&pg_target)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -588,12 +628,8 @@ pub fn seed_postgres() -> Result<PostgresSeed, ServiceEvidenceError> {
                 reason: format!("write to psql stdin: {e}"),
             })?;
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| ServiceEvidenceError::SeedFailed {
-            service: "postgres",
-            reason: format!("wait psql: {e}"),
-        })?;
+    let out = wait_with_output_timeout(child, SEED_TIMEOUT, "psql")
+        .map_err(|e| lift_bounded_wait_error(e, "postgres", &pg_target))?;
     if !out.status.success() {
         return Err(ServiceEvidenceError::SeedFailed {
             service: "postgres",
@@ -605,26 +641,29 @@ pub fn seed_postgres() -> Result<PostgresSeed, ServiceEvidenceError> {
         });
     }
 
-    let probe = Command::new("psql")
+    let mut probe_cmd = Command::new("psql");
+    probe_cmd
         .env("PGPASSWORD", SE_PG_PASSWORD)
         .arg("--quiet")
         .arg("--tuples-only")
         .arg("--no-align")
-        .arg(format!(
-            "postgresql://{user}@{host}:{port}/{db}",
-            user = SE_PG_USER,
-            host = SE_PG_HOST,
-            port = SE_PG_PORT,
-            db = SE_PG_DATABASE,
-        ))
+        .arg(&pg_target)
         .arg("-c")
-        .arg("SELECT COUNT(*) FROM service_evidence_pg;")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| ServiceEvidenceError::SeedMismatch {
-            service: "postgres",
-            hint: format!("probe psql: {e}"),
+        .arg("SELECT COUNT(*) FROM service_evidence_pg;");
+    let probe = run_command_output_timeout(&mut probe_cmd, SEED_TIMEOUT, "psql-count-probe")
+        .map_err(|e| match e {
+            BoundedWaitError::Timeout { label, timeout } => {
+                ServiceEvidenceError::SeedTimedOut {
+                    service: "postgres",
+                    label,
+                    timeout,
+                    target: pg_target.clone(),
+                }
+            }
+            other => ServiceEvidenceError::SeedMismatch {
+                service: "postgres",
+                hint: format!("probe psql: {other}"),
+            },
         })?;
     if !probe.status.success() {
         return Err(ServiceEvidenceError::SeedMismatch {
@@ -817,12 +856,8 @@ pub fn seed_mongodb() -> Result<MongoSeed, ServiceEvidenceError> {
                 reason: format!("write mongosh stdin: {e}"),
             })?;
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| ServiceEvidenceError::SeedFailed {
-            service: "mongodb",
-            reason: format!("wait mongosh: {e}"),
-        })?;
+    let out = wait_with_output_timeout(child, SEED_TIMEOUT, "mongosh")
+        .map_err(|e| lift_bounded_wait_error(e, "mongodb", &uri))?;
     if !out.status.success() {
         return Err(ServiceEvidenceError::SeedFailed {
             service: "mongodb",
@@ -942,6 +977,7 @@ pub fn seed_redis() -> Result<RedisSeed, ServiceEvidenceError> {
     for e in &seed.entries {
         script.push_str(&format!("SET {} {}\n", e.key, e.value));
     }
+    let redis_target = format!("redis://{}:{}", SE_REDIS_HOST, SE_REDIS_PORT);
     let mut child = Command::new("redis-cli")
         .arg("-h")
         .arg(SE_REDIS_HOST)
@@ -966,12 +1002,8 @@ pub fn seed_redis() -> Result<RedisSeed, ServiceEvidenceError> {
                 reason: format!("write redis-cli stdin: {e}"),
             })?;
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| ServiceEvidenceError::SeedFailed {
-            service: "redis",
-            reason: format!("wait redis-cli: {e}"),
-        })?;
+    let out = wait_with_output_timeout(child, SEED_TIMEOUT, "redis-cli")
+        .map_err(|e| lift_bounded_wait_error(e, "redis", &redis_target))?;
     if !out.status.success() {
         return Err(ServiceEvidenceError::SeedFailed {
             service: "redis",
@@ -1332,6 +1364,7 @@ pub fn seed_mysql() -> Result<MysqlSeed, ServiceEvidenceError> {
             r.value,
         ));
     }
+    let mysql_target = format!("mysql://raxis_test@{SE_PG_HOST}:33099/raxis_e2e");
     let mut child = Command::new("mysql")
         .arg(format!("--host={SE_PG_HOST}"))
         .arg("--protocol=TCP")
@@ -1355,12 +1388,8 @@ pub fn seed_mysql() -> Result<MysqlSeed, ServiceEvidenceError> {
                 reason: format!("write mysql stdin: {e}"),
             })?;
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| ServiceEvidenceError::SeedFailed {
-            service: "mysql",
-            reason: format!("wait mysql: {e}"),
-        })?;
+    let out = wait_with_output_timeout(child, SEED_TIMEOUT, "mysql")
+        .map_err(|e| lift_bounded_wait_error(e, "mysql", &mysql_target))?;
     if !out.status.success() {
         return Err(ServiceEvidenceError::SeedFailed {
             service: "mysql",
@@ -1480,6 +1509,7 @@ pub fn seed_mssql() -> Result<MssqlSeed, ServiceEvidenceError> {
             r.value,
         ));
     }
+    let mssql_target = "mssql://sa@127.0.0.1:14399/master".to_owned();
     let mut child = Command::new("sqlcmd")
         .arg("-S")
         .arg("127.0.0.1,14399")
@@ -1506,12 +1536,8 @@ pub fn seed_mssql() -> Result<MssqlSeed, ServiceEvidenceError> {
                 reason: format!("write sqlcmd stdin: {e}"),
             })?;
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| ServiceEvidenceError::SeedFailed {
-            service: "mssql",
-            reason: format!("wait sqlcmd: {e}"),
-        })?;
+    let out = wait_with_output_timeout(child, SEED_TIMEOUT, "sqlcmd")
+        .map_err(|e| lift_bounded_wait_error(e, "mssql", &mssql_target))?;
     if !out.status.success() {
         return Err(ServiceEvidenceError::SeedFailed {
             service: "mssql",
@@ -1792,7 +1818,41 @@ fn service_of(e: &ServiceEvidenceError) -> &'static str {
         | ServiceEvidenceError::FileReadFailed { service, .. }
         | ServiceEvidenceError::FileContentMismatch { service, .. }
         | ServiceEvidenceError::AuditEventMissing { service, .. }
-        | ServiceEvidenceError::OptInBypassed { service, .. } => service,
+        | ServiceEvidenceError::OptInBypassed { service, .. }
+        | ServiceEvidenceError::SeedTimedOut { service, .. } => service,
+    }
+}
+
+/// Render a [`BoundedWaitError`] into the service-evidence error
+/// taxonomy. The `Timeout` variant lifts to `SeedTimedOut` so a
+/// regression test and CI log scraper can pattern-match on the
+/// timeout path specifically; everything else maps to `SeedFailed`.
+fn lift_bounded_wait_error(
+    err: BoundedWaitError,
+    service: &'static str,
+    target: &str,
+) -> ServiceEvidenceError {
+    match err {
+        BoundedWaitError::Timeout { label, timeout } => {
+            ServiceEvidenceError::SeedTimedOut {
+                service,
+                label,
+                timeout,
+                target: target.to_owned(),
+            }
+        }
+        BoundedWaitError::SpawnFailed { label, reason } => {
+            ServiceEvidenceError::SeedFailed {
+                service,
+                reason: format!("spawn `{label}` against {target}: {reason}"),
+            }
+        }
+        BoundedWaitError::WaitFailed { label, reason } => {
+            ServiceEvidenceError::SeedFailed {
+                service,
+                reason: format!("wait `{label}` against {target}: {reason}"),
+            }
+        }
     }
 }
 

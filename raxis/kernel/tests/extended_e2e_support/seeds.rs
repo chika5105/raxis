@@ -13,9 +13,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use serde::Deserialize;
+
+use super::harness_timeout::{
+    run_command_output_timeout, run_command_status_timeout, SEED_TIMEOUT,
+};
 
 /// `live-e2e/docker-compose.extended.e2e.yml` pins these.
 pub const PG_HOST_PORT:    &str = "127.0.0.1:54399";
@@ -143,6 +147,12 @@ pub fn workspace_root() -> PathBuf {
 
 /// Verify the postgres seed via `psql -t -c 'SELECT COUNT(*) ...'`.
 /// Panics with a remediation message on any failure.
+///
+/// Routed through [`super::harness_timeout::run_command_output_timeout`]
+/// so an unreachable docker container surfaces a typed
+/// [`super::harness_timeout::BoundedWaitError::Timeout`] within
+/// [`SEED_TIMEOUT`] instead of hanging the test runner indefinitely
+/// (`INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`).
 pub fn verify_postgres_seed_count_or_panic() {
     let mut cmd = Command::new("psql");
     cmd.env("PGPASSWORD", PG_PASSWORD)
@@ -151,12 +161,14 @@ pub fn verify_postgres_seed_count_or_panic() {
         .arg("--no-align")
         .arg(format!("postgresql://{PG_USER}@127.0.0.1:54399/{PG_DATABASE}"))
         .arg("-c")
-        .arg("SELECT COUNT(*) FROM seeded_rows;")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = cmd.output().unwrap_or_else(|e| panic!(
-        "spawn `psql` failed: {e}; install postgresql-client and re-run"
-    ));
+        .arg("SELECT COUNT(*) FROM seeded_rows;");
+    let out = run_command_output_timeout(&mut cmd, SEED_TIMEOUT, "psql-verify-pg-count")
+        .unwrap_or_else(|e| panic!(
+            "psql preflight wrapper failed: {e}\n\
+             remediation:\n  \
+             docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait\n  \
+             (or set RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1 to opt out of harness auto-bring-up)"
+        ));
     if !out.status.success() {
         panic!(
             "psql preflight failed (exit {:?}): {}\n\
@@ -185,6 +197,9 @@ pub fn verify_postgres_seed_count_or_panic() {
 }
 
 /// Verify the mongo seed via `mongosh --eval 'db.seeded_docs.countDocuments({})'`.
+///
+/// Bounded by [`SEED_TIMEOUT`] via the harness wrapper —
+/// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`.
 pub fn verify_mongo_seed_count_or_panic() {
     let uri = format!(
         "mongodb://{MONGO_USER}:{MONGO_PASSWORD}@127.0.0.1:27399/{MONGO_DATABASE}\
@@ -194,12 +209,13 @@ pub fn verify_mongo_seed_count_or_panic() {
     cmd.arg("--quiet")
         .arg(&uri)
         .arg("--eval")
-        .arg("print(db.seeded_docs.countDocuments({}))")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = cmd.output().unwrap_or_else(|e| panic!(
-        "spawn `mongosh` failed: {e}; install mongosh and re-run"
-    ));
+        .arg("print(db.seeded_docs.countDocuments({}))");
+    let out = run_command_output_timeout(&mut cmd, SEED_TIMEOUT, "mongosh-verify-count")
+        .unwrap_or_else(|e| panic!(
+            "mongosh preflight wrapper failed: {e}\n\
+             remediation:\n  \
+             docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait"
+        ));
     if !out.status.success() {
         panic!(
             "mongosh preflight failed (exit {:?}): {}\n\
@@ -256,15 +272,19 @@ fn require_tcp_reachable(host_port: &str, what: &str) {
 /// `mongosh` against a long-running container. Idempotent. Used
 /// when an operator wants to refresh the seed mid-investigation
 /// without `docker compose down -v`.
+///
+/// Both subprocesses are bounded by [`SEED_TIMEOUT`] via the
+/// harness wrapper — `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`.
 pub fn reseed_both_or_panic() {
     let pg_script = pg_seed_script_path();
-    let pg_status = Command::new("psql")
+    let mut pg_cmd = Command::new("psql");
+    pg_cmd
         .env("PGPASSWORD", PG_PASSWORD)
         .arg("--quiet")
         .arg(format!("postgresql://{PG_USER}@127.0.0.1:54399/{PG_DATABASE}"))
-        .arg("-f").arg(&pg_script)
-        .status()
-        .unwrap_or_else(|e| panic!("spawn psql for reseed failed: {e}"));
+        .arg("-f").arg(&pg_script);
+    let pg_status = run_command_status_timeout(&mut pg_cmd, SEED_TIMEOUT, "psql-reseed")
+        .unwrap_or_else(|e| panic!("psql reseed wrapper failed: {e}"));
     assert!(
         pg_status.success(),
         "psql reseed failed: {pg_status:?}; script={}",
@@ -276,12 +296,13 @@ pub fn reseed_both_or_panic() {
         "mongodb://{MONGO_USER}:{MONGO_PASSWORD}@127.0.0.1:27399/{MONGO_DATABASE}\
          ?authSource=admin",
     );
-    let mongo_status = Command::new("mongosh")
+    let mut mongo_cmd = Command::new("mongosh");
+    mongo_cmd
         .arg("--quiet")
         .arg(&mongo_uri)
-        .arg("--file").arg(&mongo_script)
-        .status()
-        .unwrap_or_else(|e| panic!("spawn mongosh for reseed failed: {e}"));
+        .arg("--file").arg(&mongo_script);
+    let mongo_status = run_command_status_timeout(&mut mongo_cmd, SEED_TIMEOUT, "mongosh-reseed")
+        .unwrap_or_else(|e| panic!("mongosh reseed wrapper failed: {e}"));
     assert!(
         mongo_status.success(),
         "mongosh reseed failed: {mongo_status:?}; script={}",
