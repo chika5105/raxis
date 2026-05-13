@@ -206,6 +206,25 @@ fn fresh_task_id() -> TaskId {
 
 /// Friendly variant name for panic messages — `IpcMessage` does not derive
 /// a short Display.
+///
+/// Every variant of `raxis_ipc::IpcMessage` MUST appear here so the match
+/// stays compiler-exhaustive: any future variant addition will surface as
+/// an E0004 here and force the test author to make a deliberate decision
+/// about whether the new variant is expected on the mock-planner wire.
+/// This mirrors the structural-totality invariant pinned by
+/// `kernel::observability::kernel_substrate_ipc_route` (see
+/// `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`).
+///
+/// Note on the Path-A3 admission variants
+/// (`TproxyAdmissionRequest` / `KernelTproxyAdmissionResponse` /
+/// `DnsResolveRequest` / `KernelDnsResolveResponse`,
+/// `airgap-architecture.md §3`): these tests do not construct or
+/// expect any of those variants — they are produced/consumed by
+/// the in-VM `raxis-tproxy` substrate path, not by the dumb mock
+/// planner. They are listed here purely so a panic message that
+/// somehow surfaced one of them would print the variant name
+/// instead of failing to compile this fixture. No behaviour
+/// change for the variants these tests exercise.
 fn describe_message(msg: &IpcMessage) -> &'static str {
     match msg {
         IpcMessage::IntentRequest(_)              => "IntentRequest",
@@ -214,6 +233,10 @@ fn describe_message(msg: &IpcMessage) -> &'static str {
         IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
         IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
         IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
+        IpcMessage::TproxyAdmissionRequest(_)        => "TproxyAdmissionRequest",
+        IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
+        IpcMessage::DnsResolveRequest(_)             => "DnsResolveRequest",
+        IpcMessage::KernelDnsResolveResponse(_)      => "KernelDnsResolveResponse",
         IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
         IpcMessage::WitnessAck { .. }             => "WitnessAck",
         IpcMessage::OperatorRequest(_)            => "OperatorRequest",

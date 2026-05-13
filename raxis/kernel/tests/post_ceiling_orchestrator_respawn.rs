@@ -759,6 +759,25 @@ fn wait_for_stderr_substring_any(
 // Misc
 // ---------------------------------------------------------------------------
 
+/// Friendly variant name for the "expected KernelIntentResponse, got X"
+/// panic message in `run_post_ceiling_scenario`.
+///
+/// Every variant of `raxis_ipc::IpcMessage` MUST appear here so the match
+/// stays compiler-exhaustive: any future variant addition will surface as
+/// an E0004 here and force the test author to make a deliberate decision
+/// about whether the new variant could ever appear on the planner-socket
+/// reply path this scenario exercises.
+///
+/// Note on the Path-A3 admission variants
+/// (`TproxyAdmissionRequest` / `KernelTproxyAdmissionResponse` /
+/// `DnsResolveRequest` / `KernelDnsResolveResponse`,
+/// `airgap-architecture.md §3`): the post-ceiling scenario only
+/// drives a single `IntentRequest(ReportFailure)` round-trip; the
+/// kernel cannot lawfully respond with any A3 admission variant
+/// to that request (it would be a wire-protocol violation caught
+/// by `ipc/auth.rs`). These arms exist purely to keep the match
+/// exhaustive — if one ever appeared the test would still panic
+/// with a legible variant name rather than fail to compile.
 fn describe(msg: &IpcMessage) -> &'static str {
     match msg {
         IpcMessage::IntentRequest(_)              => "IntentRequest",
@@ -767,6 +786,10 @@ fn describe(msg: &IpcMessage) -> &'static str {
         IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
         IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
         IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
+        IpcMessage::TproxyAdmissionRequest(_)        => "TproxyAdmissionRequest",
+        IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
+        IpcMessage::DnsResolveRequest(_)             => "DnsResolveRequest",
+        IpcMessage::KernelDnsResolveResponse(_)      => "KernelDnsResolveResponse",
         IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
         IpcMessage::WitnessAck { .. }             => "WitnessAck",
         IpcMessage::OperatorRequest(_)            => "OperatorRequest",
