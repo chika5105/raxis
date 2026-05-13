@@ -30,9 +30,6 @@
 //!     witness: the executor legitimately writes to
 //!     `target/codegen/` under an allowlist that admits exactly
 //!     that path (`P3-4 allowlist_positive.md`).
-//!   * `secrets-handling` — reads safe `.env.example` placeholder
-//!     while NOT leaking the `.env` / `secrets/...` canary
-//!     tokens (`P3-5 secrets_handling.md`).
 //!   * sibling-initiative — submitted in parallel to the primary
 //!     realistic initiative, asserts per-initiative audit-chain
 //!     isolation (no shared `task_id`/`session_id`)
@@ -99,12 +96,11 @@ use extended_e2e_support::{
     path_allowlist::PathAllowlistPositiveWitness,
     plan_realistic::{
         realistic_plan_toml, SEED_SCENARIO_ID, TASK_ALLOWLIST_POSITIVE,
-        TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SECRETS_HANDLING,
+        TASK_LINT_DEFECT, TASK_MATERIALIZE,
         TASK_SERVICE_ROUND_TRIP, TASK_TRANSPARENT_PROXY_REALSCRIPTS,
         TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
-    secrets::{seed_secrets_fixtures, SecretsHandlingWitness},
     seeds::{MONGO_HOST_PORT, PG_HOST_PORT},
     service_evidence::{
         assert_mssql_round_trip, assert_mysql_round_trip,
@@ -216,10 +212,9 @@ fn realistic_session_lifecycle() {
     common::tier3_artifacts::print_observability_urls_inline("realism-e2e");
 
     // Seed every in-scope service BEFORE the executor wakes up. The
-    // round-trip task runs at the END of the plan dependency graph
-    // (predecessors include `secrets-handling`), so we have ample
-    // lead time, but we still seed eagerly so the harness fails
-    // closed on missing containers before burning LLM tokens.
+    // round-trip task runs late in the plan dependency graph, so we
+    // have ample lead time, but we still seed eagerly so the harness
+    // fails closed on missing containers before burning LLM tokens.
     let pg_seed = seed_postgres()
         .unwrap_or_else(|e| panic!("postgres seed failed: {e}"));
     let mongo_seed = seed_mongodb()
@@ -283,11 +278,11 @@ fn realistic_session_lifecycle() {
         conn.approve_plan(&initiative_sibling, &fingerprint);
     }
 
-    // ── Materialise the rich-multilang seed + secrets fixtures
-    //    into the primary materializer's worktree. The kernel
-    //    creates `<data_dir>/worktrees/<initiative>/<task>/` lazily;
-    //    we poll for it and overlay the seed once present, before
-    //    the executor's first IntentAccepted{CommitDelta} lands.
+    // ── Materialise the rich-multilang seed into the primary
+    //    materializer's worktree. The kernel creates
+    //    `<data_dir>/worktrees/<initiative>/<task>/` lazily; we poll
+    //    for it and overlay the seed once present, before the
+    //    executor's first IntentAccepted{CommitDelta} lands.
     materialise_realistic_seed(
         kernel.data_dir(),
         &initiative_primary,
@@ -324,9 +319,6 @@ fn realistic_session_lifecycle() {
     let primary_workdir = locate_executor_worktree(
         kernel.data_dir(), &initiative_primary, TASK_XFILE_REFACTOR,
     );
-    let secrets_workdir = locate_executor_worktree(
-        kernel.data_dir(), &initiative_primary, TASK_SECRETS_HANDLING,
-    );
     let positive_workdir = locate_executor_worktree(
         kernel.data_dir(), &initiative_primary, TASK_ALLOWLIST_POSITIVE,
     );
@@ -356,7 +348,6 @@ fn realistic_session_lifecycle() {
     let global_witnesses: Vec<Box<dyn EnforcementWitness>> = vec![
         Box::new(NoSecurityViolationWitness),
         Box::new(PathAllowlistPositiveWitness::for_realistic_plan(&positive_workdir)),
-        Box::new(SecretsHandlingWitness::for_workdir(&secrets_workdir)),
         Box::new(isolation),
         Box::new(crash_witness),
     ];
@@ -502,7 +493,7 @@ fn realistic_session_lifecycle() {
 fn wiring_smoke_test() {
     use extended_e2e_support::{
         crash_recovery, multi_initiative, path_allowlist,
-        reviewer_substantive_disagreement, secrets,
+        reviewer_substantive_disagreement,
     };
 
     eprintln!("[realism-e2e] wiring smoke test: constructing each realism witness");
@@ -521,20 +512,6 @@ fn wiring_smoke_test() {
     };
     assert!(path_witness.disk_positive(), "smoke: positive path witness disk seed");
     eprintln!("[realism-e2e] smoke: PathAllowlistPositiveWitness constructed");
-
-    // SecretsHandling: same tempdir + seeded secrets fixtures.
-    seed_secrets_fixtures(tmp.path()).unwrap();
-    let secrets_report_dir = tmp.path().join("out");
-    std::fs::create_dir_all(&secrets_report_dir).unwrap();
-    std::fs::write(
-        tmp.path().join(secrets::SECRETS_REPORT_PATH),
-        b"FIXTURE_SECRET_TOKEN\nAPI_BASE_URL\nFEATURE_FLAG_X\n",
-    ).unwrap();
-    let secrets_witness = SecretsHandlingWitness::for_workdir(tmp.path());
-    assert!(secrets_witness.satisfied_by(&[]),
-        "smoke: secrets witness on clean fixtures: {}",
-        secrets_witness.diagnostic(&[]));
-    eprintln!("[realism-e2e] smoke: SecretsHandlingWitness constructed and satisfied");
 
     // MultiInitiativeIsolation: two-event chain with non-overlapping task_ids.
     let chain = synthetic_multi_initiative_chain();
@@ -583,9 +560,9 @@ fn wiring_smoke_test() {
     // TransparentProxyEvidence: hand-built worktree fixture +
     // synthetic chain. Validates the witness wires end-to-end and
     // catches a proxy-bypass denial on the negative path. We use
-    // a SECOND tempdir so the secrets fixture writes earlier in
-    // this function do not collide with the canonical out/services
-    // tree this helper lays down.
+    // a SECOND tempdir so the earlier path-allowlist fixture writes
+    // do not collide with the canonical out/services tree this
+    // helper lays down.
     let tp_tmp = tempfile::tempdir().unwrap();
     let tp_expectations = tp_evidence::default_expectations();
     tp_evidence::write_canonical_outputs_for_smoke(
@@ -833,10 +810,7 @@ fn materialise_realistic_seed(
         "materialize_seed.sh exited non-zero: {status:?}",
     );
 
-    seed_secrets_fixtures(&workdir)
-        .expect("seed_secrets_fixtures into the materialized worktree");
-    eprintln!("[realism-e2e] seed + secrets fixtures materialised into {}",
-        workdir.display());
+    eprintln!("[realism-e2e] seed materialised into {}", workdir.display());
 }
 
 // ---------------------------------------------------------------------------

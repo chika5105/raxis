@@ -99,12 +99,15 @@
 //!     generated file into `target/codegen/`) so the path
 //!     allowlist's POSITIVE cases are exercised, not just the
 //!     deny cases the prompt-injection scenario already covers.
-//!   * **Workspace files designed to surface secrets-handling
-//!     regressions**: a `.env.example` (allowed to read), a
-//!     `.env` (must be denied), a `secrets/` directory (must be
-//!     denied) — so the secret-redaction and write-path
-//!     allowlist are exercised against realistic patterns, not
-//!     just a malicious injection prompt.
+//!   * **Mechanical credential-substitution witness**: an executor
+//!     handed operator-staged *placeholder* credentials (canary
+//!     tokens, never real) in its env and tasked with authenticating
+//!     against a service. The credential-proxy substitutes the real
+//!     credential at the loopback boundary; the witness asserts the
+//!     real credential material does NOT appear anywhere in the
+//!     agent's worktree post-run. See `specs/v2/secrets-model.md` —
+//!     this is the structural test that supersedes the earlier
+//!     "please don't read .env" cooperative test.
 //!   * **Multi-initiative concurrency**: the current scenario
 //!     runs ONE initiative with N subtasks. A future scenario
 //!     should run two or three initiatives in parallel against

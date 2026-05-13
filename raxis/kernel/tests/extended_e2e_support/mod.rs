@@ -21,7 +21,6 @@ pub mod plan;
 pub mod plan_realistic;
 pub mod prompts;
 pub mod reviewer_substantive_disagreement;
-pub mod secrets;
 pub mod seeds;
 pub mod service_evidence;
 pub mod transparent_proxy_evidence;
