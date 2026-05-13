@@ -119,6 +119,52 @@ use crate::initiatives::lifecycle as kernel_lifecycle;
 /// crate::session_spawn_orchestrator::PLANNER_TASK_PROMPT_ENV`).
 pub use raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV;
 
+/// Path A3 universal-airgap opt-in check.
+///
+/// Returns `true` iff both gates pass:
+///
+/// 1. The `runtime-airgap-a3` Cargo feature is compiled into the
+///    kernel binary. The feature gates the kernel-side admission
+///    handler, the DNS resolver, and the per-session vsock
+///    listeners; without it the code paths are absent and the env
+///    var has nothing to switch on.
+/// 2. The kernel process was started with `RAXIS_AIRGAP_A3=1` in
+///    the launching environment. The env-var gate lets an operator
+///    who built with the feature run a default-off boot (e.g. for
+///    bit-identical regression against the V2 baseline).
+///
+/// When this returns `true` the session-spawn path selects
+/// `EgressTier::Mediated` for Executor / Orchestrator sessions and
+/// stamps `RAXIS_AIRGAP_A3=1` into the spawned guest's env so PID 1
+/// brings up the in-guest iptables REDIRECT chain, IPv6 disable,
+/// and resolv.conf rewrite documented in
+/// `specs/v2/airgap-architecture.md §4`.
+///
+/// Reviewer sessions stay at `EgressTier::None` (no NIC) regardless
+/// of the gate — the V2 baseline already lacks a NIC for reviewers
+/// and A3 unifies the executor / orchestrator path onto the same
+/// no-NIC posture.
+///
+/// **Reads env on every call.** Cheap (a single `std::env::var`
+/// call); not memoised so an operator can flip the gate between
+/// session spawns in a long-running kernel for debugging. The
+/// per-spawn cost is negligible compared to the rest of session
+/// activation.
+#[cfg(feature = "runtime-airgap-a3")]
+fn airgap_a3_active() -> bool {
+    std::env::var("RAXIS_AIRGAP_A3")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Default-off path: feature compiled out ⇒ A3 is unconditionally
+/// inactive and the kernel boots through the legacy
+/// `Tier1Tproxy` Executor / Orchestrator pipeline bit-identically.
+#[cfg(not(feature = "runtime-airgap-a3"))]
+fn airgap_a3_active() -> bool {
+    false
+}
+
 /// Failure modes specific to the kernel-side bridge.
 ///
 /// Wraps `SpawnError` for substrate failures and adds the kernel-
@@ -3163,11 +3209,42 @@ pub async fn spawn_executor_for_task(
     }
 
     // ── Step 3: build the spawn spec. ────────────────────────────
+    //
+    // Executor egress tier selection — Path A3 vs legacy default-off.
+    //
+    // The legacy V2 baseline ships the Executor at `Tier1Tproxy` (a
+    // NAT-attached virtio-net device + iptables REDIRECT to an
+    // in-guest tproxy that is, today, NOT shipped on the canonical
+    // executor rootfs — see the audit finding in the Path A3
+    // implementation prompt). Under Path A3 the Executor (and
+    // Orchestrator) switch to `EgressTier::Mediated` which produces
+    // **no** virtio-net device; all outbound TCP and DNS flows are
+    // mediated by the kernel over vsock. Selection is double-gated:
+    //
+    //   * Cargo feature `runtime-airgap-a3` MUST be compiled in (the
+    //     kernel-side admission listener and the planner-executor's
+    //     tproxy / DNS stub spawn paths are `#[cfg(feature = ...)]`).
+    //   * `RAXIS_AIRGAP_A3=1` MUST be set in the kernel's env (so an
+    //     operator who builds with the feature but does not opt in
+    //     keeps the bit-identical legacy boot).
+    //
+    // Default-off path is bit-identical to the V2 baseline: feature
+    // OFF or env var unset ⇒ `Tier1Tproxy` is selected and the
+    // existing NAT-attached executor boots exactly as it does on
+    // origin/main. See `specs/v2/airgap-architecture.md` for the
+    // full A3 contract and `INV-NETISO-A3-UNIVERSAL-NO-NIC-01` for
+    // the structural-no-NIC invariant.
+    #[allow(deprecated)]
+    let executor_egress_tier = if airgap_a3_active() {
+        EgressTier::Mediated
+    } else {
+        EgressTier::Tier1Tproxy
+    };
     let (vcpu_count, mem_mib, egress_tier, entrypoint_argv) = match agent_kind {
         ExecutorAgentKind::Executor => (
             spawn_ctx.executor_vcpu_count,
             spawn_ctx.executor_mem_mib,
-            EgressTier::Tier1Tproxy,
+            executor_egress_tier,
             vec![
                 "/usr/local/bin/raxis-executor".to_owned(),
                 "--task-id".to_owned(),
@@ -3318,6 +3395,18 @@ pub async fn spawn_executor_for_task(
                 env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), prompt);
             }
         }
+    }
+    // Path A3 — stamp `RAXIS_AIRGAP_A3=1` into the guest env so
+    // PID 1 in `crates/planner-core::guest_init` knows to install
+    // the A3 iptables REDIRECT chain, disable IPv6, point
+    // `/etc/resolv.conf` at the in-guest DNS stub, and the
+    // executor binary spawns the in-guest tproxy + DNS stub before
+    // entering the dispatch loop. The default-off path leaves the
+    // env var unset and the guest boots through the legacy code
+    // path bit-identically.
+    if airgap_a3_active() {
+        env.entry("RAXIS_AIRGAP_A3".to_owned())
+            .or_insert_with(|| "1".to_owned());
     }
     let vm_spec = VmSpec {
         vcpu_count,

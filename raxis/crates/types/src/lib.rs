@@ -25,6 +25,7 @@ pub mod plan_bundle;
 pub mod planner_env;
 pub mod planner_fetch;
 pub mod policy;
+pub mod tproxy;
 pub mod push;
 pub mod structured_output;
 pub mod witness;
@@ -60,6 +61,10 @@ pub use plan_bundle::{
 };
 pub use planner_fetch::{PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse};
 pub use policy::Role;
+pub use tproxy::{
+    DnsQueryType, DnsResolveRequest, DnsResolveResponse, TproxyAdmissionRequest,
+    TproxyAdmissionResponse, TproxyProtocol,
+};
 pub use structured_output::{
     DiagnosticSeverity, StructuredOutputKind,
     STRUCTURED_OUTPUT_MAX_APPROACH_BYTES, STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES,

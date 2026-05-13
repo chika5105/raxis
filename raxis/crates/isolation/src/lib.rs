@@ -214,11 +214,19 @@ pub struct WorkspaceMount {
 
 /// Egress tier the kernel wants enforced on the guest's network surface.
 ///
-/// V2 ships only `None` (Reviewer images: `INV-NETISO-01`) and
-/// `Tier1Tproxy` (Executor / Orchestrator: kernel-mediated egress per
-/// `kernel-mediated-egress.md`). `Tier2CredProxy` is a V3 placeholder
-/// for credential-proxy-mediated provider calls per
-/// `credential-proxy.md`.
+/// V2 ships four tiers:
+/// * `None` — Reviewer images (no NIC, `INV-NETISO-01`).
+/// * `Tier1Tproxy` — legacy default-off path for Executor / Orchestrator
+///   (virtio-net + NAT + iptables REDIRECT to the in-guest tproxy per
+///   `vm-network-isolation.md §3`).
+/// * `Mediated` — Path A3 universal-airgap tier (no NIC for any role;
+///   all egress flows through the kernel admission gate over vsock per
+///   `airgap-architecture.md`). Selected by the kernel session-spawn
+///   path when `RAXIS_AIRGAP_A3=1` is set AND the kernel was built with
+///   the `runtime-airgap-a3` feature. Default-off path leaves it
+///   unreachable so behaviour is bit-identical to the V2 baseline.
+/// * `Tier2CredProxy` — V3 placeholder for credential-proxy-mediated
+///   provider calls (`credential-proxy.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum EgressTier {
@@ -227,7 +235,31 @@ pub enum EgressTier {
     None,
     /// Tier-1 tproxy: tap device + nftables redirect to the kernel's
     /// egress proxy (`vm-network-isolation.md §3`).
+    ///
+    /// **Deprecated under Path A3.** Retained for the default-off path
+    /// (the legacy Executor / Orchestrator pipeline that boots with a
+    /// NAT-attached virtio-net device). Path A3 selects
+    /// [`Self::Mediated`] instead, which has the same admission
+    /// semantics but produces no NIC and routes admission decisions
+    /// over vsock. Removing the variant would be a wire-compat break
+    /// for legacy audit replay; the production session-spawn path is
+    /// updated to select `Mediated` under `RAXIS_AIRGAP_A3=1`.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Path A3 supersedes Tier1Tproxy with Mediated (no NIC, vsock admission). \
+                See specs/v2/airgap-architecture.md."
+    )]
     Tier1Tproxy,
+    /// Path A3 universal-airgap tier. No NIC in the guest;
+    /// `raxis-tproxy` in the rootfs routes every outbound TCP and
+    /// DNS query through AF_VSOCK to the kernel-side admission
+    /// handler. Selected by session-spawn under
+    /// `RAXIS_AIRGAP_A3=1` + `runtime-airgap-a3` Cargo feature.
+    /// Both V2 microVM substrates honour the tier by emitting no
+    /// virtio-net device — `crates/isolation-apple-vz` returns
+    /// `network: None` and `crates/isolation-firecracker` omits the
+    /// `PUT /network-interfaces` call entirely.
+    Mediated,
     /// V3 placeholder: per-credential proxy
     /// (`credential-proxy.md`).
     Tier2CredProxy,

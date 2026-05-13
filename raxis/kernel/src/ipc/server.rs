@@ -1119,6 +1119,10 @@ pub(crate) mod planner_dispatch_log {
             IpcMessage::WitnessAck { .. }             => "WitnessAck",
             IpcMessage::OperatorRequest(_)            => "OperatorRequest",
             IpcMessage::OperatorResponse(_)           => "OperatorResponse",
+            IpcMessage::TproxyAdmissionRequest(_)         => "TproxyAdmissionRequest",
+            IpcMessage::KernelTproxyAdmissionResponse(_)  => "KernelTproxyAdmissionResponse",
+            IpcMessage::DnsResolveRequest(_)              => "DnsResolveRequest",
+            IpcMessage::KernelDnsResolveResponse(_)       => "KernelDnsResolveResponse",
         }
     }
 }

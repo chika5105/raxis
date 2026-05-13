@@ -125,10 +125,22 @@ inside an Apple Virtualization Framework (AVF) microVM. The VM boundary is hardw
 the guest kernel runs in a separate virtual address space with no shared memory with other VMs
 or the host process (except through explicitly configured VirtioFS mounts).
 
-**Network isolation (INV-NETISO-01):** AVF VMs are provisioned **without a virtual NIC**. There
-is no `virtio-net` device in the VM configuration. This is not a firewall rule — it is the
-complete absence of a network device. The guest kernel has no interface to bring up. A
-compromised planner cannot exfiltrate data over the network because there is no network stack.
+**Network isolation (INV-NETISO-01 family).** AVF / Firecracker VMs are provisioned
+**without a virtual NIC** for the Reviewer role unconditionally, and for every role
+under Path A3 (`RAXIS_AIRGAP_A3=1` + `runtime-airgap-a3` Cargo feature; see
+`airgap-architecture.md`). There is no `virtio-net` device in the VM configuration.
+This is not a firewall rule — it is the complete absence of a network device. The
+guest kernel has no interface to bring up.
+
+Under the legacy non-A3 path, the Executor / Orchestrator boot with
+`EgressTier::Tier1Tproxy` (a NAT-attached virtio-net device plus iptables
+REDIRECT to an in-guest `raxis-tproxy`). Under Path A3 every role boots with
+`EgressTier::Mediated` (no NIC) and outbound TCP flows via in-guest
+`raxis-tproxy` → AF_VSOCK → kernel admission gate → host TCP socket → upstream.
+DNS likewise flows over vsock through an in-guest stub forwarder. The kernel's
+admission gate is the **sole arbiter** of every guest-originated byte; a
+compromised planner cannot exfiltrate data over the network because there is
+no network stack and the vsock control channel is policy-mediated.
 
 **IPC surface:** The only communication channel between the guest and the host (and thus the
 Kernel) is a VSock device (`AF_VSOCK`). VSock is a host-kernel-mediated transport: the guest
@@ -680,7 +692,10 @@ socket. The framing protocol is length-prefixed bincode (unchanged from V1 UDS f
   (`VZVirtioBlockDeviceConfiguration` + `VZDiskImageStorageDeviceAttachment`
   for storage; `VZVirtioFileSystemDeviceConfiguration` + `VZSingleDirectoryShare`
   + `VZSharedDirectory` for VirtioFS; `VZVirtioNetworkDeviceConfiguration` +
-  `VZNATNetworkDeviceAttachment` for Tier1Tproxy egress;
+  `VZNATNetworkDeviceAttachment` for legacy Tier1Tproxy egress, omitted
+  entirely for `EgressTier::Mediated` under Path A3 — see
+  `airgap-architecture.md` for the universal-airgap model that replaces the
+  NAT tap with a vsock chokepoint to the kernel admission gate;
   `VZVirtioSocketDeviceConfiguration` for the planner channel) and (b) the
   async lifecycle (`startWithCompletionHandler:`, `stopWithCompletionHandler:`,
   `connectToPort:completionHandler:`) bridged from AVF's serial dispatch

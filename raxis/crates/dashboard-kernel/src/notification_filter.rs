@@ -498,6 +498,17 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         //     task; the operator follows them via the session-
         //     stream surface, not the notification inbox.
         K::StructuredOutputEmitted { .. } => None,
+
+        // 11. Path A3 universal-airgap admission + DNS events.
+        //     `TproxyAdmissionDenied` is the structured signal a
+        //     repeated-denial stall detector consumes (mirrors the
+        //     legacy `TransparentProxyDenied` priority — None at the
+        //     individual event level; the `SessionEgressStallDetected`
+        //     summary is the operator-attention surface). Granted
+        //     admissions and DNS resolutions are observability-only.
+        K::TproxyAdmissionGranted { .. } => None,
+        K::TproxyAdmissionDenied { .. } => None,
+        K::DnsResolveRequested { .. } => None,
     }
 }
 

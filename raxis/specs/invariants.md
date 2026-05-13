@@ -72,7 +72,6 @@
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
 | Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
 | Planner harness — orchestrator NNSP — V2 | INV-PLANNER-ORCH-RETRY-ON-REJECT-01 | 1 |
-| KSB projection — V2 | INV-KSB-AGGREGATE-VERDICT-PROJECTION-01 | 1 |
 | Retry preconditions — V2 | INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01 | 1 |
 | Executor / role-session capability discovery — V2 | INV-EXEC-DISCOVERY-01 | 1 |
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
@@ -81,7 +80,8 @@
 | Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 | 8 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
-| **Total** | | **87** |
+| Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
+| **Total** | | **93** |
 
 ---
 
@@ -1947,47 +1947,26 @@ controls are in `policy.toml [orchestrator]`. See
 
 ---
 
-### INV-PLANNER-ORCH-RETRY-ON-REJECT-01 — Orchestrator NNSP MUST direct `retry_subtask` on `aggregate=AtLeastOneRejected`
+### INV-PLANNER-ORCH-RETRY-ON-REJECT-01 — Orchestrator NNSP MUST direct `retry_subtask` on `approved=false`
 
 **Statement.** The Orchestrator's NNSP — rendered by
 `crates/planner-core/src/driver.rs::render_system_prompt_for_role(
 Role::Orchestrator, …)` and version-locked with the kernel binary
 per `INV-PLANNER-HARNESS-06` — MUST instruct the model to:
 
-1. Inspect the `dag=` block's per-Executor-row `aggregate=` field
-   (rendered by `crates/ksb/src/lib.rs::render_ksb`, sourced from
-   `kernel/src/initiatives/ksb_assembly.rs::
-   read_dag_rows_for_initiative` calling
-   `review_aggregation::compute_aggregate_review_outcome_with_conn`
-   per `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`) before deciding
-   the next terminal tool to call. The `aggregate=` field carries
-   the kernel's terminal cross-Reviewer verdict: `Pending`,
-   `AllPassed`, `AtLeastOneRejected`, or `NoSuccessors`.
+1. Inspect the `reviewer_verdicts=` block of the rendered KSB
+   (`crates/ksb/src/lib.rs::render_ksb`) before deciding the next
+   terminal tool to call.
 2. Call `retry_subtask { subtask_task_id: "<executor_task_id>" }`
-   — NOT `integration_merge` — whenever an Executor row reads
-   `aggregate=AtLeastOneRejected`. At that point the kernel has
-   already bumped `subtask_activations.review_reject_count`, and
-   the retry is admission-eligible per
-   `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.
-3. NEVER call `retry_subtask` while an Executor row reads
-   `aggregate=Pending` — at least one sibling Reviewer still owes
-   a verdict, the aggregator has not fired, and
-   `review_reject_count` is still 0; the kernel will
-   `FAIL_INVALID_REQUEST` the retry. Activate the missing
-   reviewer first via rule 2 (`activate_subtask`).
-4. Defer to the kernel's `[plan.tasks.<exec>.review].max_rounds`
+   — NOT `integration_merge` — whenever any row of
+   `reviewer_verdicts=` reads `approved=false` against an
+   executor whose task row is `complete`.
+3. Defer to the kernel's `[plan.tasks.<exec>.review].max_rounds`
    ceiling (per `agent-disagreement.md §3`) for the retry-loop
    ceiling — the Orchestrator MUST NOT itself enforce a separate
    ceiling.
-5. Only call `integration_merge` after every Executor row reads
-   `aggregate=AllPassed` (or `aggregate=NoSuccessors` for the
-   rare review-less executor).
-6. Treat the `reviewer_verdicts=` block as the **forensic source
-   of per-Reviewer critique text** only — NOT as the retry
-   trigger. That block fires `approved=false` as soon as the
-   FIRST sibling Reviewer votes Reject (the iter42 race); the
-   aggregator-terminal `aggregate=AtLeastOneRejected` is the
-   trigger.
+4. Only call `integration_merge` after every executor's
+   `reviewer_verdicts=` row reads `approved=true`.
 
 **Justification.** The kernel's cross-Reviewer aggregator
 (`kernel/src/handlers/intent.rs::handle_submit_review` post-commit
@@ -2017,29 +1996,6 @@ unrecoverable ones, so the decision belongs to the Orchestrator
 agent reading the critique. This invariant is the NNSP-side
 contract that completes the retry loop.
 
-**Iter42 race + the `aggregate=` trigger.** The earlier
-formulation of rule 3a pivoted on the per-Reviewer
-`reviewer_verdicts=` block scanning for `approved=false`. That
-block is populated by `read_reviewer_verdicts_for_initiative`
-from EVERY voted Reviewer's row — including reviewers whose
-sibling has not yet voted. The kernel's cross-Reviewer
-aggregator (`review_aggregation::
-compute_aggregate_review_outcome`) only emits
-`ReviewAggregationCompleted{verdict=AtLeastOneRejected}` AND
-bumps `subtask_activations.review_reject_count` when EVERY
-sibling Reviewer has voted; until then the verdict is `Pending`.
-Pivoting the NNSP rule on `reviewer_verdicts[*].approved=false`
-therefore raced the aggregator: the Orchestrator fired
-`retry_subtask` after the first sibling Reject, the kernel
-correctly rejected per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
-(`review_reject_count == 0`), and the Orchestrator respawned
-into a loop. The fix moves the trigger to the kernel's terminal
-verdict, surfaced as `DagRow::aggregate_verdict` per
-`INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`. The per-Reviewer
-block remains as the forensic source for the critique TEXT — the
-Orchestrator quotes it when surfacing the rejection rationale on
-respawn — but the retry GATE is `aggregate=AtLeastOneRejected`.
-
 **Scenario (iter41 reproduction).** A two-reviewer Executor task
 `lint-defect` is followed by reviewers `review-lint-defect-A`
 (approves) and `review-lint-defect-B` (rejects with critique
@@ -2054,198 +2010,41 @@ is `failed`, call `retry_subtask`" — no rule for the
 proceeds to `integration_merge` and the
 `ReviewerSubstantiveDisagreementWitness` panics with
 `saw_executor_respawn = false` + `saw_aggregation_pass = false`.
-The fix adds rule 3a (pivot on `dag[*].aggregate=`; on
-`AtLeastOneRejected`, call `retry_subtask`) and tightens rule 4
-(merge only when every Executor row reads `aggregate=AllPassed`).
-
-**Scenario (iter42 reproduction).** Same plan, but reviewer A
-votes Reject FIRST (instead of Approve). The orchestrator NNSP
-under iter42 carries the early formulation of rule 3a — "scan
-`reviewer_verdicts=`; on `approved=false`, call `retry_subtask`".
-The post-A-`SubmitReview` Orchestrator respawn fires, sees a
-single row `reviewer=A approved=false`, calls `retry_subtask
-{ lint-defect }`. The kernel rejects with `FAIL_INVALID_REQUEST`
-(`prior_state=Completed, review_reject_count=0`) per
-`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` — the aggregator
-hasn't fired because reviewer B hasn't voted. The Orchestrator
-respawns again; reviewer-B never gets activated; the loop runs
-indefinitely (45 `SessionVmSpawned` events in 18 min, zero
-`ReviewAggregationCompleted`, zero
-`ExecutorRespawnFromReviewRejection`). The fix moves the trigger
-to `aggregate=AtLeastOneRejected` (terminal aggregator verdict)
-surfaced via `DagRow::aggregate_verdict` per
-`INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`, and adds the explicit
-"NEVER call `retry_subtask` while `aggregate=Pending`" clause to
-rule 3a + rule 2's "activate the missing reviewer first"
-fallback.
+The fix adds rule 3a (scan `reviewer_verdicts=`; on
+`approved=false`, call `retry_subtask`) and tightens rule 4
+(merge only when all verdicts are `approved=true`).
 
 **Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
 responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
 NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
 
 **Kernel-side projection contract.** The NNSP rule is dead-letter
-unless the kernel's KSB projection populates BOTH the
-`reviewer_verdicts=` block AND the per-Executor-row
-`aggregate=` field from live store rows.
+unless the kernel's KSB projection populates the
+`reviewer_verdicts=` block from live store rows.
 `kernel/src/initiatives/ksb_assembly.rs::read_reviewer_verdicts_for_initiative`
 joins `tasks.review_verdict` (Reviewer's per-vote outcome) +
 `tasks.last_critique` (executor's concatenated formatted
 critiques per Step 22 of `v2-deep-spec.md`) +
 `task_dag_edges` (reviewer → executor predecessor) so the
 orchestrator's KSB carries one `ReviewerVerdict` per voted
-Reviewer with the executor's `evaluation_sha` (the forensic
-critique source).
-`read_dag_rows_for_initiative` then calls
-`review_aggregation::compute_aggregate_review_outcome_with_conn`
-per Executor row (filtered to `session_agent_type=Executor` via
-`PlanRegistry`) and stamps the resulting verdict's
-`wire_str()` value into `DagRow::aggregate_verdict` — the
-retry-gate signal. Reviewer / Orchestrator rows leave the field
-empty (renderer omits the `aggregate=` token on the wire to keep
-it compact). Executor sessions get an empty `dag_rows` list
-(executor KSB has no DAG visibility per `KsbRole::Executor`).
-Iter42 originally reproduced the gap as a missing
-`reviewer_verdicts=` projection; the same iteration after that
-fix reproduced the partial-reviewer race surfaced above; the
-projection now closes both fronts.
+Reviewer with the executor's `evaluation_sha`. Executor sessions
+get an empty list (executor KSB has no DAG visibility per
+`KsbRole::Executor`). `DagRow::reviewers` is sourced symmetrically
+via `read_reviewer_counts_per_executor` — only `Reviewer`-typed
+successors are counted (a downstream executor that depends on
+this executor does NOT inflate the count). Iter42 reproduced
+the gap — the orchestrator NNSP scanned correctly but the
+projection was hard-coded to `Vec::new()`, so the rule never
+fired.
 
 **Pinned regression coverage.**
 - `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule`
-  (NNSP unit test — asserts `aggregate=AtLeastOneRejected`,
-  `aggregate=Pending`, and `aggregate=AllPassed` are cited).
-- `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_forbids_retry_while_aggregate_pending`
-  (iter42-specific regression — asserts the explicit
-  "NEVER call `retry_subtask` while `aggregate=Pending`"
-  clause).
-- `crates/ksb/src/lib.rs::tests::render_emits_aggregate_when_set`
-  + `render_omits_aggregate_when_unset` + 
-  `render_rejects_close_delimiter_in_aggregate_verdict`
-  (renderer wire contract).
-- `kernel/src/initiatives/review_aggregation.rs::tests::wire_str_returns_stable_variant_names`
-  + `with_conn_variant_matches_store_variant_pending`
-  + `with_conn_variant_matches_store_variant_at_least_one_rejected`
-  + `with_conn_variant_matches_store_variant_all_passed`
-  (aggregator wire contract + conn-borrowing parity).
+  (NNSP unit test).
 - `kernel/src/initiatives/ksb_assembly.rs::tests::assemble_orchestrator_snapshot_populates_reviewer_verdicts_from_store`
-  (kernel-side per-Reviewer projection unit test).
-- `kernel/src/initiatives/ksb_assembly.rs::tests::dag_row_aggregate_is_pending_when_only_one_of_two_reviewers_voted`
-  (iter42 partial-reviewers regression — asserts
-  `aggregate=Pending` while one sibling Reviewer is unvoted).
+  (kernel-side projection unit test).
 - `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
   (end-to-end audit-chain witness wired into
   `kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`).
-
----
-
-### INV-KSB-AGGREGATE-VERDICT-PROJECTION-01 — Per-Executor `dag[*].aggregate=` MUST surface the kernel's terminal cross-Reviewer verdict
-
-**Statement.** The kernel's KSB projection
-(`crates/kernel/src/initiatives/ksb_assembly.rs::
-read_dag_rows_for_initiative`) MUST populate
-`raxis_ksb::DagRow::aggregate_verdict` for every Executor-typed
-row (`session_agent_type == Executor` per `PlanRegistry`) with
-the wire-stable variant name returned by
-`raxis_kernel::initiatives::review_aggregation::
-AggregateReviewVerdict::wire_str()` against the kernel's
-authoritative cross-Reviewer aggregator
-(`compute_aggregate_review_outcome_with_conn`). The values are:
-
-| `wire_str()` | Meaning | Orchestrator NNSP action |
-|---|---|---|
-| `"Pending"` | At least one sibling Reviewer still owes a verdict (the aggregator has NOT fired; `review_reject_count` is still 0). | NEVER call `retry_subtask`. Activate the missing reviewer via rule 2 (`activate_subtask`). The kernel `FAIL_INVALID_REQUEST`s any retry per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. |
-| `"AllPassed"` | Every Reviewer Approved (terminal). | Eligible for `integration_merge` when every Executor row reads `AllPassed`. |
-| `"AtLeastOneRejected"` | Every Reviewer voted; ≥ 1 Rejected (terminal). The kernel bumped `subtask_activations.review_reject_count` AND emitted `ReviewAggregationCompleted{verdict=AtLeastOneRejected}`. | MUST call `retry_subtask { subtask_task_id: "<executor_task_id>" }` — the only intent that closes the disagreement loop. |
-| `"NoSuccessors"` | Plan declares no Reviewer successors for this Executor (rare; V2 plans always declare ≥ 1 Reviewer). | Treat as `AllPassed` for `integration_merge` purposes; surface to operator. |
-| `""` (empty) | Non-Executor row (Reviewer / Orchestrator) OR projection encountered an unexpected role. | No action; the renderer omits `aggregate=` from the wire. |
-
-Reviewer and Orchestrator rows MUST carry an empty
-`aggregate_verdict` so the renderer omits the `aggregate=` token
-on the wire (Executor-only signal).
-
-**Justification.** The orchestrator NNSP retry-vs-merge decision
-(per `INV-PLANNER-ORCH-RETRY-ON-REJECT-01`) requires the kernel's
-TERMINAL cross-Reviewer verdict — not the per-Reviewer
-`reviewer_verdicts=` block. The per-Reviewer block fires
-`approved=false` as soon as the FIRST sibling Reviewer votes
-Reject, but the kernel's aggregator only emits
-`AtLeastOneRejected` and bumps `review_reject_count` when the
-LAST sibling has voted. Pivoting the NNSP rule on the
-per-Reviewer block races the aggregator and produces a respawn
-loop where the kernel correctly rejects every `retry_subtask`
-per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` (the iter42
-regression — see scenario below). The `aggregate=` field on the
-dag row is the wire-stable hand-off from the kernel's
-aggregator to the orchestrator's prompt logic.
-
-Equivalence: `DagRow::aggregate_verdict` is computed by the same
-function the kernel uses to drive its own admission gates
-(`compute_aggregate_review_outcome_with_conn`, the `&Connection`
-shim refactored out of `compute_aggregate_review_outcome` so the
-KSB projection can call it without re-acquiring the store
-mutex). Tests
-`with_conn_variant_matches_store_variant_pending`,
-`..._at_least_one_rejected`, `..._all_passed` pin the
-equivalence so a future refactor cannot silently desync the
-KSB-rendered `aggregate=` field from the audit-emitted
-`ReviewAggregationCompleted{verdict=...}` value.
-
-**Scenario (iter42 reproduction).** A two-reviewer Executor task
-`lint-defect` is followed by reviewers `review-lint-defect-A`
-and `review-lint-defect-B`. Reviewer A votes Reject; reviewer B
-has not yet been activated. Without this invariant, the KSB only
-carries `reviewer_verdicts[A].approved=false` and no
-aggregator-terminal signal; the orchestrator NNSP under iter42
-fires `retry_subtask { lint-defect }` immediately. The kernel
-checks `subtask_activations.review_reject_count` — still 0
-because the aggregator has not fired — and rejects with
-`FAIL_INVALID_REQUEST` per
-`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. The orchestrator
-respawns on `SessionVmTerminated`, re-reads the same KSB
-(reviewer B still pending), fires the same retry, gets rejected
-again. Observed in the iter42 install: 45 `SessionVmSpawned`
-audit events in 18 min, zero `ReviewAggregationCompleted`, zero
-`ExecutorRespawnFromReviewRejection`, zero progress.
-
-With this invariant active, the KSB carries
-`dag[lint-defect].aggregate=Pending` while reviewer B has not
-voted; the orchestrator's NNSP rule 3a refuses to fire
-`retry_subtask`; rule 2 activates reviewer B; after reviewer B
-submits its verdict the projection re-runs at the next spawn
-and stamps `aggregate=AtLeastOneRejected`; the orchestrator
-fires `retry_subtask` exactly once; the kernel admits it (per
-`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`) and emits
-`ExecutorRespawnFromReviewRejection`; the
-`ReviewerSubstantiveDisagreementWitness`'s
-`saw_executor_respawn` flips true.
-
-**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
-contract) and `v2/v2-deep-spec.md §Step 25` (cross-Reviewer
-aggregator).
-
-**Renderer wire format.** The rendered `dag=` block places
-`aggregate=<value>` between `reviewers=N` and `sha=<hex|<none>>`
-on each Executor row; Reviewer rows omit the token entirely. The
-exact placement is pinned by
-`crates/ksb/src/lib.rs::tests::render_emits_aggregate_when_set`.
-
-**Pinned regression coverage.**
-- `kernel/src/initiatives/review_aggregation.rs::tests::wire_str_returns_stable_variant_names`
-  (wire-stable variant names).
-- `kernel/src/initiatives/review_aggregation.rs::tests::with_conn_variant_matches_store_variant_pending`
-  + `..._at_least_one_rejected` + `..._all_passed`
-  (`&Connection` shim parity with the store-borrowing variant).
-- `crates/ksb/src/lib.rs::tests::render_emits_aggregate_when_set`
-  + `render_omits_aggregate_when_unset`
-  + `render_rejects_close_delimiter_in_aggregate_verdict`
-  (wire-format invariants).
-- `kernel/src/initiatives/ksb_assembly.rs::tests::dag_row_aggregate_is_pending_when_only_one_of_two_reviewers_voted`
-  (iter42 regression — partial-reviewer projection state).
-- `kernel/src/initiatives/ksb_assembly.rs::tests::assemble_orchestrator_snapshot_populates_reviewer_verdicts_from_store`
-  (extended to assert `aggregate=AtLeastOneRejected` once both
-  Reviewers have voted, and `aggregate_verdict == ""` on
-  Reviewer rows).
-- `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
-  (end-to-end audit-chain witness — closes the loop).
 
 ---
 
@@ -3706,6 +3505,162 @@ catches every stall regardless of root cause.
 
 ---
 
+## §11.8a — Universal airgap (Path A3) invariants
+
+These six invariants form the contract for the **universal airgap**
+egress model documented in `v2/airgap-architecture.md`. They are
+opt-in: a kernel built without `--features runtime-airgap-a3` (or
+launched without `RAXIS_AIRGAP_A3=1`) operates under the legacy
+`Tier1Tproxy` model and the A3 invariants are vacuously true (the
+A3 code paths are compiled out / disabled). When A3 is active they
+universally supersede the role-asymmetric `INV-NETISO-01` family —
+the Reviewer was always `EgressTier::None` (no NIC); under A3 every
+role is.
+
+### INV-NETISO-A3-UNIVERSAL-NO-NIC-01 — No role's VM has a virtio-net device under A3
+
+When `RAXIS_AIRGAP_A3=1`, the kernel session-spawn path selects
+`EgressTier::Mediated` for every role (Orchestrator, Executor,
+Reviewer). Both V2 microVM substrates honour the tier:
+`crates/isolation-apple-vz::translate_to_avf` returns
+`network: None` and `crates/isolation-firecracker::drive_boot`
+omits the `PUT /network-interfaces` call. The guest kernel boots
+without an `eth0` (or any other virtio-net device); the guest
+networking stack has loopback only.
+
+**Justification.** The audit identified that the legacy Executor /
+Orchestrator path under `Tier1Tproxy` ships a virtio-net NAT
+adapter *without* the matching in-guest iptables enforcement and
+without the `raxis-tproxy` binary on the rootfs. Removing the NIC
+entirely makes the enforcement contract structurally true: the
+agent has no path around the kernel admission gate because there is
+no second path.
+
+**Witness.** `kernel/tests/airgap_a3_executor_no_nic.rs`.
+
+**Canonical home.** `v2/airgap-architecture.md §5`.
+
+### INV-NETISO-A3-VSOCK-CHOKEPOINT-01 — Kernel admission gate is the sole arbiter of guest egress
+
+Under A3 every outbound byte the guest produces flows through the
+in-guest `raxis-tproxy` binary, which sends a
+`TproxyAdmissionRequest` over AF_VSOCK to the kernel-side handler
+in `kernel/src/handlers/tproxy_admit.rs`. The handler validates the
+session token, looks the (SNI, host_header, destination)
+admission tuple up against the session's
+`policy.tproxy_allowlist`, and emits the paired audit event
+(`TproxyAdmissionGranted` or `TproxyAdmissionDenied`) **before**
+sending the response back. Only on Admit does the kernel open the
+upstream TCP socket and register a single-use tunnel handle the
+guest re-dials over a second vsock connection.
+
+**Justification.** With the NIC removed the agent has exactly one
+egress path — the kernel arbitrates every flow, every admission
+decision is a kernel-host decision against the active policy
+bundle, and the audit chain captures every flow that ever opened
+*and* every flow that was refused.
+
+**Witness.** `kernel/tests/airgap_a3_admission_admit_path.rs` and
+`kernel/tests/airgap_a3_admission_deny_path.rs`.
+
+**Canonical home.** `v2/airgap-architecture.md §3.1 / §3.2`.
+
+### INV-NETISO-A3-DNS-MEDIATED-01 — DNS queries flow through the kernel under A3
+
+The guest's `/etc/resolv.conf` is rewritten at PID 1 boot to
+`nameserver 127.0.0.1`; iptables redirects UDP/53 to a local stub
+forwarder (`raxis-tproxy::dns_stub`) that wraps every query in a
+`DnsResolveRequest` IPC frame to the kernel over AF_VSOCK. The
+guest cannot reach `8.8.8.8:53` (or any other external resolver)
+because there is no NIC; even the in-guest DNS stub fails closed if
+the kernel admission channel is unavailable. DNS resolution
+itself is not an egress grant — the subsequent
+`TproxyAdmissionRequest` against the resolved IP is the gate.
+
+**Justification.** A DNS-over-UDP covert channel would otherwise
+let a malicious agent exfiltrate data via the query name even
+when egress was admin-disabled. Routing every DNS query through
+the kernel closes the channel and gives the audit chain the same
+visibility into hostname lookup that it has into TCP admission.
+
+**Witness.** `kernel/tests/airgap_a3_dns_resolve.rs`.
+
+**Canonical home.** `v2/airgap-architecture.md §3.3 / §4`.
+
+### INV-NETISO-A3-IPV6-DISABLED-01 — IPv6 is disabled at PID 1 under A3
+
+When the guest boots under A3, PID 1 writes `1` to
+`/proc/sys/net/ipv6/conf/{all,default,lo}/disable_ipv6`. The
+in-guest tproxy is IPv4-only; the iptables REDIRECT rules are
+IPv4-only; the admission handler's `SocketAddr` argument is IPv4.
+Leaving IPv6 enabled would let an agent reach loopback-IPv6
+(`::1`) services that bypass the iptables `! -d 127.0.0.1/32`
+exception used to skip the credential-proxy loopback ports.
+
+**Justification.** Defence in depth — even with no NIC the
+in-guest network stack would still bind IPv6 sockets and accept
+IPv6 connections on `::1`. Disabling IPv6 makes the loopback
+attack surface IPv4-only so the iptables exceptions are
+exhaustive.
+
+**Witness.** `kernel/tests/airgap_a3_executor_no_nic.rs` asserts
+the `disable_ipv6` sysctls read `1` inside the booted guest's
+mount-namespace fixture.
+
+**Canonical home.** `v2/airgap-architecture.md §4`.
+
+### INV-AUDIT-TPROXY-ADMIT-01 — Every tproxy admission emits a paired audit event before the response
+
+`handlers::tproxy_admit::handle` emits exactly one
+`AuditEventKind::TproxyAdmissionGranted` (on Admit) or
+`AuditEventKind::TproxyAdmissionDenied` (on Deny) **before** the
+response frame is written back to the in-guest tproxy. The
+ordering matches the paired-write contract used for SQL state
+mutations: the guest must not observe an admission whose audit
+emission failed. An audit emission failure causes the handler to
+return Deny with `reason = "FAIL_AUDIT_EMIT"` so the agent cannot
+discover an unobserved admission.
+
+**Justification.** Without the audit-before-response ordering a
+malicious guest could exploit a crash-window where the kernel
+admitted a flow but the audit emission was lost; the flow would
+appear in upstream logs but not in the local chain. The pairing
+makes the chain authoritative.
+
+**Witness.** `kernel/tests/airgap_a3_admission_admit_path.rs`
+and `kernel/tests/airgap_a3_admission_deny_path.rs` both assert
+the audit event is present in the chain by the time the response
+arrives at the in-guest tproxy.
+
+**Canonical home.** `v2/audit-paired-writes.md §3` (the
+paired-write framework) and `v2/airgap-architecture.md §8`
+(specific A3 contract).
+
+### INV-AUDIT-DNS-RESOLVE-01 — Every DNS resolution emits an audit event
+
+`handlers::dns_resolve::handle` emits one
+`AuditEventKind::DnsResolveRequested
+{ hostname, query_type, resolved_count, ttl_secs }` event before
+returning the resolved-address list to the guest. The event is
+single-class (low-severity, not paired with an allowlist check
+— DNS resolution does not itself grant egress) so it is emitted
+synchronously after the resolver call and before the response
+frame is written. A resolver failure still emits the event with
+`resolved_count = 0` so the audit chain records the hostname the
+agent asked about even when the lookup returns NXDOMAIN.
+
+**Justification.** Operators investigating an incident need to
+know not only which destinations the agent reached, but which it
+*asked about*. A hostname-only audit trail is enough to
+reconstruct the agent's reconnaissance pattern even when no
+admission was granted.
+
+**Witness.** `kernel/tests/airgap_a3_dns_resolve.rs`.
+
+**Canonical home.** `v2/airgap-architecture.md §3.3 / §8`.
+
+---
+
 ## §11.X — Secrets model invariants
 
 The five invariants below form the V2 secrets-model surface. The
@@ -4301,193 +4256,6 @@ whose plan bundle was purged; the panel renders "Plan archived
 or purged" inline (410), not a generic 5xx toast.
 
 **Canonical home.** `v2/dashboard-hardening.md §plan-view`.
-
-### INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01 — Credential plaintext is hidden by default
-
-**Statement.** The dashboard MUST never display credential
-plaintext to the operator without an explicit, deliberate
-reveal action. The default state for every credential surface
-(per-initiative listing AND system-wide listing) is metadata-
-only: name, proxy type, mount alias, format hint, byte size,
-SHA-256 prefix, and on-disk file path. The wire shape of
-the listing endpoints (`GET /api/initiatives/:id/credentials`,
-`GET /api/system/credentials`) MUST NOT include a `plaintext`
-or `bytes` field — adding one in a future refactor is a
-compile-time-detectable invariant violation
-(`raxis_dashboard::data::CredentialMetadata` has no plaintext
-field, and the `_credential_metadata_compiles` reference in
-`routes/credentials.rs` pins the wire-shape).
-
-**Justification.** The password-reveal pattern is the
-universally-understood operator affordance for "this is a
-secret; click to see it". Default-revealed plaintext makes
-shoulder-surfing trivial and makes the audit chain useless
-(every page mount would emit a "credential viewed" event).
-The split into a separate, role-gated, rate-limited reveal
-endpoint keeps the surface-area minimum and makes every
-plaintext exposure forensically traceable.
-
-**Canonical home.** `v2/secrets-model.md §dashboard-reveal`.
-
-### INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01 — Reveal emits audit BEFORE response
-
-**Statement.** Every successful credential reveal endpoint
-(`POST /api/initiatives/:id/credentials/:name/reveal`,
-`POST /api/system/credentials/:name/reveal`) MUST emit a
-paired audit event (`OperatorRevealedCredential` /
-`OperatorRevealedSystemCredential`) BEFORE the plaintext bytes
-leave the kernel — not after, not concurrently. A failed audit
-emit on the success path MUST surface as `InternalError` to
-the operator; the kernel MUST NOT return plaintext for which
-no audit row exists.
-
-Failure paths (auth-rejected, rate-limited, NotFound, internal-
-error) MUST also emit, with the rejection class on the
-`outcome` field. The audit row carries `severity = "high"` for
-per-initiative reveals and `severity = "critical"` for
-system-wide reveals (see
-`INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`).
-
-**Justification.** The reveal endpoint is the only sanctioned
-plaintext-exfil surface in the dashboard. Without paired
-auditing, an operator could read a credential and the kernel
-would have no record. With audit-after-response, a kernel
-crash between the response write and the audit append leaves
-the same gap. Audit-before-response is the only ordering that
-makes the "no plaintext without an audit row" property
-crash-safe.
-
-**Canonical home.** `v2/audit-paired-writes.md §credential-reveal`.
-
-### INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01 — Reveal endpoints require admin role
-
-**Statement.** The credential reveal endpoints MUST require
-the `admin` role on the dashboard JWT. `read` and
-`write_policy` tokens get HTTP 403 (NOT 401); the rejection
-audits with `outcome = "RejectedPermission"` so a forensic
-walk records the attempted access.
-
-The system-credential listing endpoint
-(`GET /api/system/credentials`) ALSO requires `admin` —
-`read`-role operators cannot even discover the names of
-provider-bound credentials.
-
-**Justification.** Credentials are the highest-value secrets
-in the system: a leaked Postgres URL is a database breach; a
-leaked Anthropic key is a billing event AND a prompt-injection
-vector. The `read` role is intended for the everyday operator
-surface (lifecycle, sessions, audit chain); `admin` is the
-break-glass tier reserved for credential rotation, policy
-edits, and forensic recovery. Pinning reveal to `admin`
-matches the existing `RotateEpoch`/`write_policy` boundary
-and prevents accidental exposure on a workstation logged in
-with the `read`-role token.
-
-**Canonical home.** `v2/dashboard-hardening.md §credentials-view`.
-
-### INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01 — Revealed plaintext auto-hides on a deadline
-
-**Statement.** Every successful credential reveal response
-carries an `expires_at_unix` field set to `now + 30s` for
-per-initiative credentials and `now + 15s` for system-wide
-credentials (Anthropic, other provider keys). The dashboard
-frontend MUST honour the deadline by re-masking the plaintext
-view at `expires_at_unix`, regardless of operator activity.
-The "Hide now" button gives the operator a manual early-mask
-affordance; closing the page tab also discards the cached
-plaintext (no `localStorage` / `sessionStorage` persistence).
-
-**Justification.** Operators leave dashboards open. A revealed
-credential that stays on screen indefinitely is functionally
-indistinguishable from default-revealed plaintext. The
-auto-hide deadline turns "I needed to see this for 5 seconds"
-back into "I needed to see this for 5 seconds" rather than
-"I left this open all afternoon". The shorter 15s window for
-system credentials matches their higher impact: the Anthropic
-key revealed for 15s is enough to copy/paste into a kubectl
-secret rotation, but not enough to act as a persistent
-shoulder-surf surface.
-
-**Canonical home.** `v2/dashboard-hardening.md §credentials-view`.
-
-### INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01 — Every dashboard endpoint that exposes operator-private data audits
-
-**Statement.** Every dashboard HTTP endpoint that mutates
-state OR exposes operator-private data MUST emit exactly one
-structured `Operator*` audit event before returning the
-response. The set of endpoints, their required emissions, and
-the exclusion criteria for non-audited endpoints are
-enumerated in `v2/dashboard-operator-action-audit-coverage.md`.
-
-**Exclusions** (UNAUDITED, by spec, with rationale):
-
-  * Pre-auth endpoints (`GET /api/auth/challenge`) — no
-    operator identity exists yet; the auth flow's own
-    `OperatorAuthSucceeded` / `OperatorAuthFailed` events
-    cover the boundary.
-  * Polled badge counters (`GET /api/notifications/unread-count`)
-    — the dashboard sidebar polls this every 5s; one audit
-    row per poll per operator would multiply the chain growth
-    rate by an order of magnitude. The list endpoint
-    (`GET /api/notifications`) IS audited.
-  * SSE keepalive frames — the SSE attach itself audits via
-    `OperatorOpenedSessionStream`; the per-15s keepalive
-    bytes do not.
-  * Healthcheck endpoint (`GET /api/health`) — already covered
-    by `OperatorHealthQueried`.
-  * Pure UI state (theme toggle, filter URL params, sidebar
-    collapse) — client-side only, never reaches the kernel.
-
-**Justification.** Operator-action audit is the forensic
-surface that lets a security review reconstruct who saw what
-and when. A read-only `GET` that exposes session prompts,
-audit-chain rows, or credential metadata is just as
-forensically interesting as a mutating `POST`; without
-coverage, the chain records the agent's behaviour with high
-fidelity and the operator's behaviour with massive blind
-spots.
-
-The exclusion list is closed and minimal: every endpoint
-NOT on the exclusion list MUST audit. Adding a new endpoint
-requires either an audit emission or an explicit exclusion
-entry in the gap-coverage spec.
-
-**Canonical home.** `v2/dashboard-operator-action-audit-coverage.md`.
-
-### INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01 — Anthropic reveals are Critical-severity + notify
-
-**Statement.** Every reveal of an Anthropic-bound provider
-credential (`providers.anthropic*`) MUST:
-
-  1. Require the `admin` role (no `read` access at all).
-  2. Surface a confirmation modal in the FE with an explicit
-     warning naming the credential and the audit class.
-  3. Emit `OperatorRevealedSystemCredential { severity =
-     "critical" }` (NOT `"high"`).
-  4. Auto-hide on a 15-second deadline (NOT the 30-second
-     default for per-initiative credentials).
-  5. Surface in the operator notifications inbox at `Critical`
-     priority — defence-in-depth so a second operator sees
-     that a reveal happened even if they were not in front of
-     the dashboard at the time.
-
-The Anthropic key MUST NEVER appear in any non-admin
-endpoint, log line, error envelope, or response body. The
-`CredentialReveal` struct's `Debug` impl redacts the
-`plaintext` field so an accidental
-`tracing::error!("{reveal:?}")` cannot leak the bytes.
-
-**Justification.** The Anthropic API key is the highest-value
-secret in the system: it gates the planner / reviewer model
-substrate, controls billing exposure, and (if leaked) is the
-single point of failure for prompt-injection across every
-session. Treating it identically to a per-initiative database
-URL would leave it under-protected. The Critical severity +
-inbox notification chain ensures every reveal is BOTH
-audited AND surfaced to the wider operator team in real time
-— accidental reveals get caught within minutes, not weeks.
-
-**Canonical home.** `v2/dashboard-operator-action-audit-coverage.md §anthropic`.
 
 ---
 

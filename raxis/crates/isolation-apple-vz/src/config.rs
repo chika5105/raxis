@@ -575,9 +575,23 @@ pub fn translate(
     // ---- 5. Network ----------------------------------------------------
     let network = match spec.egress_tier {
         EgressTier::None => None,
+        // Legacy default-off path. Path A3 supersedes this with
+        // `EgressTier::Mediated` (no NIC, vsock admission); the
+        // variant is preserved so a kernel built without
+        // `runtime-airgap-a3` and launched without
+        // `RAXIS_AIRGAP_A3=1` boots a NAT-attached executor
+        // bit-identically to the V2 baseline.
+        #[allow(deprecated)]
         EgressTier::Tier1Tproxy => Some(AvfNetworkDevice {
             mode: AvfNetworkMode::Nat,
         }),
+        // Path A3 — `airgap-architecture.md §5`. No NIC; all
+        // egress flows over the per-VM vsock device to the
+        // kernel admission handler. INV-NETISO-A3-UNIVERSAL-
+        // NO-NIC-01 is structurally enforced here: the AVF
+        // configuration handed to `VZVirtualMachineConfiguration`
+        // omits `networkDevices` entirely.
+        EgressTier::Mediated => None,
         EgressTier::Tier2CredProxy => {
             // V3+ placeholder per `extensibility-traits.md §3.4` — V2
             // never reaches here (kernel rejects the tier upstream),

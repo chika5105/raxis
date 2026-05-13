@@ -442,10 +442,21 @@ fn drive_boot(
         })?;
     }
 
-    // Optional network — `EgressTier::Tier1Tproxy` triggers a tap-
-    // device assignment by the kernel's egress wiring (per
-    // `vm-network-isolation.md §3`). Tier-`None` skips entirely.
-    if matches!(spec.egress_tier, raxis_isolation::EgressTier::Tier1Tproxy) {
+    // Optional network — only the legacy `EgressTier::Tier1Tproxy` path
+    // attaches a tap device (per `vm-network-isolation.md §3`).
+    // `EgressTier::None` (Reviewer) and `EgressTier::Mediated` (Path A3
+    // universal-airgap, per `airgap-architecture.md §5`) both produce
+    // a NIC-less VM — A3 routes outbound TCP and DNS over the per-VM
+    // vsock device to the kernel admission handler, so attaching a
+    // virtio-net interface would be a redundant covert channel. The
+    // `#[allow(deprecated)]` is needed because `Tier1Tproxy` is
+    // marked deprecated in favour of `Mediated`; the variant is
+    // still selected on the default-off path so legacy operators get
+    // bit-identical behaviour until they opt in via
+    // `RAXIS_AIRGAP_A3=1`.
+    #[allow(deprecated)]
+    let attach_nic = matches!(spec.egress_tier, raxis_isolation::EgressTier::Tier1Tproxy);
+    if attach_nic {
         api.put_network_interface(&NetworkInterface {
             iface_id:      "eth0".to_owned(),
             host_dev_name: "raxis-tap".to_owned(),

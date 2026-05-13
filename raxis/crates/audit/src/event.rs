@@ -2029,6 +2029,97 @@ pub enum AuditEventKind {
         reason: String,
     },
 
+    // --- Path A3 universal-airgap admission + DNS audit events.
+    //
+    // Canonical home: `v2/airgap-architecture.md §8`. These three
+    // variants are emitted ONLY when the kernel is built with the
+    // `runtime-airgap-a3` feature AND `RAXIS_AIRGAP_A3=1` was set
+    // in the launching env (so default-off audit chains stay
+    // bit-identical). They are wire-disjoint from the legacy
+    // `TransparentProxy{Admitted,Denied}` pair so an audit reader
+    // can distinguish A3 admissions from the legacy chokepoint
+    // even when both code paths are present in the same kernel
+    // binary.
+    //
+    // `INV-AUDIT-TPROXY-ADMIT-01`: every TproxyAdmissionRequest the
+    // kernel processes emits exactly one paired event (Granted or
+    // Denied) BEFORE the response frame is written back to the
+    // in-guest tproxy; an audit emission failure causes the
+    // handler to return Deny with reason="FAIL_AUDIT_EMIT" so the
+    // guest cannot observe an unobserved admission.
+
+    /// Emitted when the A3 kernel-side tproxy admission handler
+    /// admits one outbound flow over vsock. Mirrors the
+    /// `TransparentProxyAdmitted` shape so dashboards keying on
+    /// `host_or_sni` / `original_dst_ip` keep working when A3 is
+    /// active.
+    TproxyAdmissionGranted {
+        /// Session whose VM the request came from.
+        session_id: String,
+        /// SNI (TLS) or Host header (HTTP) the kernel matched
+        /// against the allowlist. `None` for raw TCP flows where
+        /// the admission decision fell through to the
+        /// `destination_ip` / `port` tuple.
+        host_or_sni: Option<String>,
+        /// Original destination as seen on the iptables-
+        /// redirected agent socket (post-DNS resolution).
+        original_dst_ip: String,
+        /// Original destination port.
+        original_dst_port: u16,
+        /// Layer-7 protocol guess (`https` / `http` / `tcp`).
+        protocol: String,
+        /// Tunnel handle the kernel registered for the byte
+        /// shuttle path. Auditable so a forensic reader can
+        /// correlate a granted admission with the upstream socket
+        /// the kernel opened on its behalf.
+        tunnel_id: String,
+    },
+
+    /// Emitted when the A3 admission handler denies one outbound
+    /// flow. Mirrors the `TransparentProxyDenied` shape with a
+    /// stable `reason` taxonomy.
+    TproxyAdmissionDenied {
+        /// Session whose VM the request came from.
+        session_id: String,
+        /// SNI / Host header the kernel observed, when available.
+        host_or_sni: Option<String>,
+        /// Original destination as seen on the iptables-
+        /// redirected agent socket.
+        original_dst_ip: String,
+        /// Original destination port.
+        original_dst_port: u16,
+        /// Layer-7 protocol guess (`https` / `http` / `tcp`).
+        protocol: String,
+        /// Stable short reason string. Same taxonomy as the
+        /// legacy `TransparentProxyDenied.reason` plus
+        /// `"FAIL_SESSION_TOKEN_MISMATCH"` (session-auth failure)
+        /// and `"FAIL_AUDIT_EMIT"` (audit emission failure
+        /// triggered fail-closed deny).
+        reason: String,
+    },
+
+    /// Emitted by `kernel::handlers::dns_resolve` whenever a guest
+    /// asks the kernel-side resolver for a hostname. Low-severity
+    /// single-class event (`INV-AUDIT-DNS-RESOLVE-01`); DNS
+    /// resolution itself does NOT grant egress so this is NOT a
+    /// paired-write event — it is observability only.
+    DnsResolveRequested {
+        /// Session whose VM submitted the query.
+        session_id: String,
+        /// Hostname the guest asked about. Recorded verbatim
+        /// even when resolution returns NXDOMAIN so the audit
+        /// trail captures reconnaissance patterns.
+        hostname: String,
+        /// `"A"` / `"AAAA"` mirroring the wire query type.
+        query_type: String,
+        /// Number of addresses the kernel-side resolver returned.
+        /// `0` ⇒ NXDOMAIN or resolver failure.
+        resolved_count: u32,
+        /// Upper-bound TTL the kernel told the guest to cache the
+        /// answer for. `0` ⇒ resolver failure / negative cache.
+        ttl_secs: u32,
+    },
+
     // --- V2 reviewer-egress-defaults-decision.md §5.
 
     /// Emitted ONCE per implicit-provider grant when the kernel /
@@ -3430,6 +3521,9 @@ impl AuditEventKind {
             Self::KernelPushEnqueued { .. } => "KernelPushEnqueued",
             Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
             Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
+            Self::TproxyAdmissionGranted { .. } => "TproxyAdmissionGranted",
+            Self::TproxyAdmissionDenied { .. } => "TproxyAdmissionDenied",
+            Self::DnsResolveRequested { .. } => "DnsResolveRequested",
             Self::DefaultProviderEgressApplied { .. } => "DefaultProviderEgressApplied",
             Self::SessionEgressStallDetected { .. } => "SessionEgressStallDetected",
             Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",

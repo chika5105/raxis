@@ -19,9 +19,9 @@
 // messages and vice versa.
 
 use raxis_types::{
-    EscalationRequest, EscalationResponse, IntentRequest, IntentResponse,
-    OperatorRequest, OperatorResponse, PlannerFetchRequest, PlannerFetchResponse,
-    WitnessSubmission,
+    DnsResolveRequest, DnsResolveResponse, EscalationRequest, EscalationResponse, IntentRequest,
+    IntentResponse, OperatorRequest, OperatorResponse, PlannerFetchRequest, PlannerFetchResponse,
+    TproxyAdmissionRequest, TproxyAdmissionResponse, WitnessSubmission,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -73,6 +73,43 @@ pub enum IpcMessage {
     /// `request_id` echoes the planner's correlation id from the
     /// request.
     KernelPlannerFetchResponse(PlannerFetchResponse),
+
+    // -----------------------------------------------------------------------
+    // Path A3 — in-guest tproxy admission + DNS resolution.
+    // airgap-architecture.md §3
+    // -----------------------------------------------------------------------
+    /// **Guest → kernel.** Admission request from the in-VM
+    /// `raxis-tproxy` for one outbound TCP connection it has
+    /// intercepted via iptables REDIRECT. The kernel matches the
+    /// `(sni, host_header, destination)` tuple against the session's
+    /// `policy.tproxy_allowlist`, emits the paired
+    /// `TproxyAdmissionGranted` / `TproxyAdmissionDenied` audit
+    /// event, and responds with `KernelTproxyAdmissionResponse`. See
+    /// `airgap-architecture.md §3.1` for the wire-protocol contract.
+    ///
+    /// Only present on the per-session A3 admission vsock channel;
+    /// the kernel's planner socket dispatch loop also routes this
+    /// variant when running in A3 mode so the admission frames share
+    /// the planner socket's session-token authentication contract.
+    TproxyAdmissionRequest(TproxyAdmissionRequest),
+
+    /// **Kernel → guest.** Verdict for a [`Self::TproxyAdmissionRequest`].
+    /// On Admit the guest re-dials the kernel's tunnel port with the
+    /// returned `(tunnel_id, tunnel_token)`; on Deny it closes the
+    /// agent-side TCP with RST.
+    KernelTproxyAdmissionResponse(TproxyAdmissionResponse),
+
+    /// **Guest → kernel.** DNS resolution request from the in-VM
+    /// stub forwarder. The kernel resolves via the host-side
+    /// resolver and audits the hostname before returning the
+    /// resolved addresses. DNS resolution does not itself grant
+    /// egress (see `INV-NETISO-A3-DNS-MEDIATED-01`).
+    DnsResolveRequest(DnsResolveRequest),
+
+    /// **Kernel → guest.** Resolved addresses for a
+    /// [`Self::DnsResolveRequest`]. Empty `addresses` ⇒ NXDOMAIN /
+    /// resolver failure.
+    KernelDnsResolveResponse(DnsResolveResponse),
 
     // -----------------------------------------------------------------------
     // Verifier / witness intake (verifier → kernel)
