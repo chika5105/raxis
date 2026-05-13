@@ -1018,8 +1018,12 @@ identity only.
    * Looks up the public key in the `operator_keys` table.
    * Checks the operator's certificate status via
      `CertEnforcer::enforce` (same path as CLI auth).
-   * Returns a short-lived JWT (1 hour, HS256 with a kernel-
-     generated ephemeral secret rotated at boot):
+   * Returns a JWT (24 hour TTL by default, HS256 with a kernel-
+     generated ephemeral secret rotated at boot — see
+     `dashboard-hardening.md §2.8` and
+     `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`; the per-boot
+     secret regeneration still invalidates every token the
+     instant the kernel exits):
      ```json
      {
        "token": "<jwt>",

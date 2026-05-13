@@ -11,8 +11,13 @@
 //!   Ed25519 keys + operator certificates the CLI uses
 //!   (`raxis_crypto::verify_ed25519` + `PolicyBundle::operator_entry`
 //!   + `cert_check::CertEnforcer`). No passwords, no shared secrets.
-//! * Short-lived JWT (HS256, 1 hour TTL) signed with a kernel-
-//!   process-local ephemeral secret rotated at boot. Bounded
+//! * Short-lived JWT (HS256, 24 hour TTL by default; see
+//!   `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`) signed with a
+//!   secret that persists across kernel restarts when a
+//!   `data_dir` is configured (see
+//!   `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01` /
+//!   `crates/dashboard/src/jwt_secret.rs`), and falls back to a
+//!   process-local ephemeral key for in-memory tests. Bounded
 //!   in-memory revocation set on logout.
 //! * Read-only API surface backed by an injectable
 //!   [`DashboardData`] trait. The kernel binary wires a concrete

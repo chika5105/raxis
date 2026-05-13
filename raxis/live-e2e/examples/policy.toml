@@ -107,7 +107,7 @@ priority             = 100
 enabled      = true
 bind_address = "127.0.0.1"
 bind_port    = 19820
-jwt_ttl_secs = 3600
+jwt_ttl_secs = 86400
 
 # ── External provider integration (OPTIONAL) ──────────────────────────
 # Uncomment the [gateway] block and at least one [[providers]] entry to

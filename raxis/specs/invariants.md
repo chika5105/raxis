@@ -80,14 +80,14 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 | 8 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 | 9 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
 | Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01 | 1 |
-| **Total** | | **105** |
+| **Total** | | **106** |
 
 ---
 
@@ -4487,6 +4487,60 @@ whose plan bundle was purged; the panel renders "Plan archived
 or purged" inline (410), not a generic 5xx toast.
 
 **Canonical home.** `v2/dashboard-hardening.md §plan-view`.
+
+---
+
+### INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 — Autologin URL minted at boot stays valid for the kernel's process lifetime
+
+**Statement.** The autologin URL printed by the kernel test
+harness at boot (and best-effort opened in the operator's
+default browser by `spawn_url_opener`) MUST carry a JWT whose
+`expires_at` is at least **24 hours** in the future at mint
+time. Concretely:
+
+  1. `DashboardConfig::default().jwt_ttl_secs` ≥ 86 400 s
+     (24 h). The default is pinned at exactly 86 400 in
+     `crates/dashboard/src/config.rs::DEFAULT_JWT_TTL_SECS`.
+  2. The genesis emitter (`crates/genesis-tools/src/policy_toml.rs`)
+     writes `jwt_ttl_secs = 86400` into the genesis-bootstrapped
+     `policy.toml`, so a kernel booted from genesis without
+     an operator-supplied policy override inherits the same
+     budget.
+  3. A JWT minted via `POST /api/auth/verify` MUST authorise
+     every read endpoint (`GET /api/initiatives`, `…/tasks`,
+     `…/sessions`, etc.) for the full TTL window.
+
+**Justification.** The realistic-scenario live-e2e harness
+(`extended_e2e_realistic_scenario`) routinely runs 60+
+minutes — its default deadline is 3 600 s and operators
+override it via `RAXIS_E2E_REALISTIC_DEADLINE_SECS` for slow-
+VM iterations. The original 1-hour TTL the spec pinned
+regularly expired mid-run: by the time a QA worker noticed
+"the dashboard is up, here is the URL", the JWT was already
+30+ minutes into its 60-minute budget. `parseAutologinHash`
+mirrors the URL's stale `expires_at` into `localStorage`
+without checking freshness (separation of concerns — the
+`RequireAuth` route guard is the single seam that judges
+freshness), `RequireAuth::isTokenLive` then sees the expired
+profile and redirects to `/login`, and the operator lands on
+the manual challenge-response form even though the kernel is
+still serving traffic.
+
+The 24-hour floor outlives every realistic kernel lifetime
+in production today while preserving the short-secret
+contract: `JwtSigner::new` mints a fresh 32-byte HMAC secret
+from `OsRng` at every kernel boot and discards it on
+shutdown, so every JWT — autologin or otherwise — is
+invalidated the instant the kernel exits. Widening the TTL
+inside one boot does NOT survive a restart.
+
+**Canonical home.** `v2/dashboard-hardening.md §2.8`.
+
+**Witness.** `crates/dashboard/tests/autologin_witness.rs`
+(three test cases pin the constant, the loader path, and the
+end-to-end mint → authorise flow). The genesis emitter
+witness (`crates/genesis-tools/src/policy_toml.rs::dashboard_section_is_emitted_with_enabled_true_and_loopback_defaults`)
+asserts the on-disk artifact carries `jwt_ttl_secs = 86400`.
 
 ---
 

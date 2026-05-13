@@ -10,10 +10,29 @@
 //! bind_port     = 9820
 //! tls_cert_path = ""           # optional PEM
 //! tls_key_path  = ""
-//! jwt_ttl_secs  = 3600
+//! jwt_ttl_secs  = 86400
 //! max_pending_challenges = 100
 //! max_revoked_jwts = 1000
 //! ```
+//!
+//! ### JWT TTL rationale (`INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`)
+//!
+//! The default TTL is **24 hours** rather than the original 1 hour
+//! because the autologin URL printed at kernel boot must remain
+//! valid for the kernel's process lifetime — and a long-running
+//! realistic-scenario test routinely exceeds 60 minutes. Combined
+//! with the V2.5 persistent JWT secret
+//! (`INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`) the autologin URL
+//! also survives supervisor-triggered restarts, which is the
+//! point of pairing this invariant with operator-session
+//! continuity. Operators concerned about session length on
+//! exposed hosts can shorten the TTL via the `[dashboard]` block
+//! and/or rotate the secret via
+//! `raxis dashboard rotate-jwt-secret` (which bumps
+//! `secret_generation` and invalidates every pre-rotation token,
+//! regardless of TTL). The witness test
+//! (`crates/dashboard/tests/autologin_witness.rs`) pins the
+//! contract.
 
 use serde::Deserialize;
 
@@ -25,8 +44,28 @@ pub const DEFAULT_DASHBOARD_ADDR: &str = "127.0.0.1";
 /// Default TCP port for the dashboard listener (per spec §4.3).
 pub const DEFAULT_DASHBOARD_PORT: u16 = 9820;
 
-/// Default JWT TTL (1 hour, per spec §4.2).
-pub const DEFAULT_JWT_TTL_SECS: u64 = 3600;
+/// Default JWT TTL (24 hours).
+///
+/// `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`: the autologin URL
+/// printed at kernel boot MUST remain valid for the kernel's
+/// process lifetime. Realistic-scenario live-e2e runs cap at ~24
+/// hours of wall-clock today (`extended_e2e_realistic_scenario`
+/// default 60 min, overridable via
+/// `RAXIS_E2E_REALISTIC_DEADLINE_SECS`); the 1-hour TTL the spec
+/// originally pinned regularly expired mid-test, leaving the QA
+/// worker stuck on the manual challenge-response form even though
+/// the kernel was still up. The 24-hour budget keeps the autologin
+/// URL valid through any realistic kernel-process lifetime. Paired
+/// with the persistent JWT secret
+/// (`INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`, V2.5+) the budget
+/// also covers the supervisor-restart window — the dashboard
+/// auth surface intentionally treats the 24 h TTL and the
+/// per-secret `secret_generation` claim as the two independent
+/// kill switches an operator can pull. Operators concerned about
+/// session length on exposed hosts can shorten the TTL via the
+/// `[dashboard]` block and/or rotate the secret via the
+/// `raxis dashboard rotate-jwt-secret` CLI.
+pub const DEFAULT_JWT_TTL_SECS: u64 = 86_400;
 
 /// Default maximum number of in-flight challenges retained in
 /// memory before LRU eviction (per spec §4.2).
@@ -67,7 +106,10 @@ pub struct DashboardConfig {
     #[serde(default)]
     pub tls_key_path: String,
 
-    /// JWT TTL in seconds. Default 3600 (1 hour).
+    /// JWT TTL in seconds. Default 86400 (24 hours). Pinned by
+    /// `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01` so the autologin
+    /// URL printed at kernel boot outlives the longest realistic
+    /// kernel-process lifetime.
     #[serde(default = "default_jwt_ttl_secs")]
     pub jwt_ttl_secs: u64,
 
@@ -138,7 +180,11 @@ mod tests {
         assert!(!d.enabled, "dashboard disabled by default");
         assert_eq!(d.bind_address, "127.0.0.1");
         assert_eq!(d.bind_port, 9820);
-        assert_eq!(d.jwt_ttl_secs, 3600);
+        // INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 pin: the
+        // default TTL is 24 h so the autologin URL printed at
+        // kernel boot stays valid through the longest realistic
+        // kernel-process lifetime.
+        assert_eq!(d.jwt_ttl_secs, 86_400);
         assert_eq!(d.max_pending_challenges, 100);
         assert_eq!(d.max_revoked_jwts, 1000);
     }

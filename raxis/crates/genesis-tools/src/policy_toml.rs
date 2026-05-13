@@ -130,7 +130,18 @@ const DEFAULT_LANE_PRIORITY: u8 = 100;
 /// `<data_dir>/providers/` before it can do anything useful.
 const DEFAULT_DASHBOARD_BIND_ADDRESS: &str = "127.0.0.1";
 const DEFAULT_DASHBOARD_BIND_PORT:    u16  = 9820;
-const DEFAULT_DASHBOARD_JWT_TTL_SECS: u64  = 3600;
+/// `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`: the autologin URL
+/// printed at kernel boot MUST remain valid for the kernel's
+/// process lifetime. The realistic-scenario live-e2e harness
+/// routinely runs 60+ minutes, the previous 1-hour TTL expired
+/// mid-run, and the QA worker landed on the manual challenge-
+/// response form because `parseAutologinHash` happily stored an
+/// already-expired profile in `localStorage` and `RequireAuth`
+/// bounced to `/login`. 24 hours keeps the URL alive through
+/// every realistic kernel uptime while the per-boot HMAC secret
+/// regeneration still invalidates every token the instant the
+/// kernel exits. Mirrors `raxis_dashboard::config::DEFAULT_JWT_TTL_SECS`.
+const DEFAULT_DASHBOARD_JWT_TTL_SECS: u64  = 86_400;
 
 // ---------------------------------------------------------------------------
 // Emitter
@@ -528,8 +539,10 @@ mod tests {
             "expected loopback bind_address by default:\n{toml_str}");
         assert!(toml_str.contains("bind_port    = 9820"),
             "expected port 9820 (spec default) by default:\n{toml_str}");
-        assert!(toml_str.contains("jwt_ttl_secs = 3600"),
-            "expected 1 h JWT TTL by default:\n{toml_str}");
+        assert!(toml_str.contains("jwt_ttl_secs = 86400"),
+            "expected 24 h JWT TTL by default (INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 — \
+             autologin URL minted at boot must remain valid for the kernel's process \
+             lifetime; the realistic-scenario live-e2e harness runs >1h):\n{toml_str}");
 
         // Round-trip through the dashboard-config loader so the
         // bytes we emit are exactly what the kernel boot path reads.
@@ -541,7 +554,7 @@ mod tests {
         assert!(cfg.enabled, "loaded config must agree with TOML");
         assert_eq!(cfg.bind_address, "127.0.0.1");
         assert_eq!(cfg.bind_port,    9820);
-        assert_eq!(cfg.jwt_ttl_secs, 3600);
+        assert_eq!(cfg.jwt_ttl_secs, 86_400);
     }
 
     #[test]

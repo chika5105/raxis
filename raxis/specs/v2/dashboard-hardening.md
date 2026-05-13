@@ -482,6 +482,142 @@ event surfaces in the operator notifications inbox at
 time. See `dashboard-operator-action-audit-coverage.md §6`
 for the full contract.
 
+## 2.8 Autologin URL (`INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`)
+
+The kernel's test harness (`kernel/tests/common/dashboard.rs`)
+mints a fully-signed JWT during boot and prints a URL of the
+shape
+
+```
+http://127.0.0.1:<port>/login#autologin=1
+    &token=<jwt>
+    &operator_id=<fp>
+    &display_name=<name>
+    &roles=<r1,r2,…>
+    &expires_at=<unix>
+    &next=%2F
+```
+
+to stderr, then best-effort opens it in the operator's default
+browser via `spawn_url_opener`. The QA worker (and any human
+operator) follows the URL to attach a fresh browser to the live
+test without typing a challenge-response sequence by hand.
+
+The React `LoginPage::parseAutologinHash` consumes the URL
+fragment, mirrors the values into `localStorage`
+(`raxis.dashboard.token.v1` + `raxis.dashboard.profile.v1`), then
+`window.location.assign("/")` does a full-page navigation so
+`RequireAuth` reads the freshly-written profile on the next
+mount. The fragment is never transmitted over the wire (HTTP
+layer drops the part after `#` by spec) and is scrubbed by the
+page-load navigation, so the JWT never lingers in browser
+history.
+
+### 2.8.1 Invariant
+
+**`INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`** — *An autologin
+URL minted at kernel boot MUST remain valid for the kernel's
+process lifetime.*
+
+Concretely, the JWT carried in the URL fragment MUST have an
+`expires_at` at least **24 hours** in the future at mint time.
+Realistic-scenario live-e2e runs routinely exceed 60 minutes
+(default deadline `RAXIS_E2E_REALISTIC_DEADLINE_SECS=3600`,
+overridable to multi-hour values for slow-VM iterations); the
+original 1-hour TTL the spec pinned regularly expired mid-run,
+leaving the QA worker stuck on the manual challenge-response
+form because `parseAutologinHash` happily mirrors an expired
+profile into `localStorage` (it validates shape, not freshness)
+and `RequireAuth` then bounces to `/login`. The 24-hour floor
+keeps the boot-time URL alive through every realistic kernel-
+process lifetime in production today.
+
+The contract is bounded by the kernel's per-boot HMAC-secret
+regeneration (`JwtSigner::new` mints a fresh 32-byte secret from
+`OsRng` at every kernel boot and discards it on shutdown): every
+JWT — autologin or otherwise — is invalidated the instant the
+kernel exits, so widening the TTL inside one boot does NOT
+survive a restart.
+
+### 2.8.2 TTL placement + override
+
+The default TTL is pinned in three places that MUST agree
+byte-for-byte:
+
+| Surface                                                  | Default | Pinned in                                                                  |
+|----------------------------------------------------------|---------|----------------------------------------------------------------------------|
+| `[dashboard].jwt_ttl_secs` (genesis-emitted policy.toml) | 86 400  | `crates/genesis-tools/src/policy_toml.rs::DEFAULT_DASHBOARD_JWT_TTL_SECS`   |
+| `DashboardConfig::default().jwt_ttl_secs`                | 86 400  | `crates/dashboard/src/config.rs::DEFAULT_JWT_TTL_SECS`                     |
+| `JwtSigner::new(ttl_secs)` clamp (production minimum)    | 60      | `crates/dashboard/src/auth.rs::JwtSigner::new` (clamps to ≥ 60 s)          |
+
+Operators concerned about session length on exposed hosts MAY
+lower the value via the `[dashboard]` block (clamped to a 60 s
+floor so the dashboard does not become unusable through a
+misconfiguration) and rotate the policy epoch; the witness test
+(`crates/dashboard/tests/autologin_witness.rs`) pins the default
+constant and the genesis-emitted artifact agree at 86 400.
+
+### 2.8.3 URL admittance rules
+
+The URL fragment is admitted by `parseAutologinHash` only when
+ALL of the following hold:
+
+  * `autologin=1` is present (otherwise a stray `#token=…` from
+    a bookmark / share link cannot accidentally land an operator
+    on a stale credential).
+  * `token`, `operator_id`, `display_name`, `roles`, `expires_at`
+    are ALL present. Missing any one ⇒ `null` ⇒ no
+    `localStorage` write; the operator falls through to the
+    manual challenge-response form. This protects against an
+    upstream URL builder that drops fields (e.g. a broken
+    template rebuild).
+  * `roles` is a comma-separated, non-empty list. An empty role
+    set would render a logged-in but un-authorised session that
+    bounces from every protected route.
+  * `expires_at` parses as a positive integer. We do NOT reject
+    already-expired values here — the `RequireAuth` route guard
+    is the single seam that judges freshness (`isTokenLive`), so
+    a future TTL extension cannot accidentally double-check
+    freshness in two places that disagree.
+  * `next`, if present, MUST start with `/` and MUST NOT start
+    with `//` (open-redirect protection). Otherwise `next`
+    defaults to `/`.
+
+### 2.8.4 Frontend redirect contract
+
+`parseAutologinHash` returns the parsed payload, the page mirrors
+it into `localStorage`, and then `window.location.assign(next)`
+performs a real (non-SPA) navigation. The SPA `navigate()` path
+was deliberately rejected: `RequireAuth`, the React Query auth
+subscriber, and the top-level layout all snapshot `localStorage`
+once at mount, so a SPA navigation keeps the same React tree
+mounted and the freshly-written token is NOT picked up until the
+operator manually refreshes. The full-page reload guarantees the
+new tree boots from a clean React root and reads `localStorage`
+on first render, which is exactly the contract the live-e2e QA
+tour pins (Run 3 + Run 4 in `dashboard-fe/QA-CHECKLIST.md`).
+
+### 2.8.5 Witness coverage
+
+`crates/dashboard/tests/autologin_witness.rs` pins the contract
+end-to-end:
+
+  * Asserts `DEFAULT_JWT_TTL_SECS ≥ AUTOLOGIN_MIN_TTL_SECS`
+    (= 86 400) at the constant level, so a regression surfaces
+    before the HTTP layer is even brought up.
+  * Boots an in-memory `DashboardServer`, runs the real
+    `GET /api/auth/challenge` → `POST /api/auth/verify` HTTP
+    path with a fresh keypair, and asserts the minted JWT's
+    `expires_at - now() ≥ AUTOLOGIN_MIN_TTL_SECS`.
+  * Hits `GET /api/initiatives` with the minted JWT and asserts
+    `200 OK` — "mint" is necessary but not sufficient; the
+    contract is "the operator can actually drive the dashboard
+    for the next 24 h" (limited by kernel uptime).
+
+`crates/genesis-tools/src/policy_toml.rs::dashboard_section_is_emitted_with_enabled_true_and_loopback_defaults`
+asserts the on-disk policy.toml carries `jwt_ttl_secs = 86400`,
+so the genesis emitter and the constant cannot drift.
+
 ---
 
 ## 3. SSE reconnection contract (frontend-facing)
@@ -519,6 +655,7 @@ for the full contract.
 | SSE shutdown sentinel                | `crates/dashboard/src/server.rs::ShutdownSignal`                    | `select!` in `build_sse_stream`         |
 | Graceful start-failure handling      | `crates/dashboard-kernel/src/lib.rs::start_dashboard`               | Returns `Result`; kernel main matches  |
 | Smoke tests                          | `crates/dashboard/tests/hardening_smoke.rs`                         | Auth + body + path + burst             |
+| Autologin TTL invariant              | `crates/dashboard/tests/autologin_witness.rs`                       | `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01` |
 
 ---
 

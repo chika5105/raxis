@@ -26,11 +26,14 @@
 //!    (`gen`); operators rotate via
 //!    `raxis dashboard rotate-jwt-secret`, which bumps the
 //!    counter and invalidates every pre-rotation token. JWT TTL
-//!    defaults to 1 hour (configurable). When the dashboard is
-//!    constructed without a `data_dir` (in-process tests, the
-//!    `InMemoryDashboardData` wiring path) the signer falls back
-//!    to a process-local ephemeral secret at generation `1`,
-//!    matching the legacy semantics.
+//!    defaults to 24 hours (configurable) — pinned by
+//!    `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01` so the autologin
+//!    URL printed at kernel boot stays valid for the kernel's
+//!    process lifetime, even on long-running live-e2e iterations.
+//!    When the dashboard is constructed without a `data_dir`
+//!    (in-process tests, the `InMemoryDashboardData` wiring path)
+//!    the signer falls back to a process-local ephemeral secret
+//!    at generation `1`, matching the legacy semantics.
 //! 4. **Bounded memory.** Both the pending-challenge map and the
 //!    revocation set have configurable upper bounds. Eviction
 //!    is FIFO + age-based; an attacker cannot DoS the dashboard
