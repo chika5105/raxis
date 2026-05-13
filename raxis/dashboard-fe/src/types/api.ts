@@ -271,6 +271,20 @@ export interface SubsystemHealthResponse {
   generated_at_ms: number;
 }
 
+/**
+ * `INV-NOTIF-SCOPE-01` priority bucket projected onto the row
+ * server-side via
+ * `raxis_dashboard_kernel::notification_priority_for_kind_str`.
+ *
+ * The canonical taxonomy (which `AuditEventKind`s map to which
+ * priority) lives in
+ * `crates/dashboard-kernel/src/notification_filter.rs`. The
+ * frontend treats this string as opaque — DO NOT add new buckets
+ * here without first extending the Rust enum and updating both
+ * `notification_priority` arms.
+ */
+export type NotificationPriority = "Critical" | "High" | "Medium" | "Low";
+
 export interface NotificationView {
   notification_id: string;
   event_kind: string;
@@ -282,6 +296,13 @@ export interface NotificationView {
   read: boolean;
   source_event_id: string;
   created_at: number;
+  /**
+   * `null` / `undefined` means the row pre-dates the
+   * `notification_priority` filter (legacy data). The UI renders
+   * those as an "unclassified" Low-tier fallback rather than
+   * dropping them.
+   */
+  priority?: NotificationPriority | null;
 }
 
 export interface UnreadCountResponse {

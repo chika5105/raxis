@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
-import { dashboardApi, ApiError } from "@/api/client";
+import { ApiError, dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
 import { FailurePill } from "@/components/FailureReasonPanel";
@@ -24,6 +24,17 @@ import {
   snapshotNotificationCaches,
   zeroUnreadCount,
 } from "@/lib/notification-cache";
+import {
+  applyPriorityFilter,
+  compareByPriorityThenTimeDesc,
+  PRIORITY_FILTER_VALUES,
+  type PriorityFilter,
+  priorityAriaLabel,
+  priorityGlyph,
+  priorityIconClasses,
+  readSnoozeLowPriority,
+  writeSnoozeLowPriority,
+} from "@/lib/notification-priority";
 import { notificationDisplaySummary } from "@/lib/notification-summary";
 
 export function NotificationsPage() {
@@ -32,6 +43,40 @@ export function NotificationsPage() {
   const [params, setParams] = useSearchParams();
   const initiativeId = params.get("initiative_id") ?? undefined;
   const [unreadOnly, setUnreadOnly] = useState(false);
+
+  // ── INV-NOTIF-SCOPE-01 surface controls ──────────────────────
+  // The priority pill filter is URL-driven (`?priority=Critical`)
+  // so operators can deep-link "show me only Criticals" — same
+  // pattern as the `?status=` legend filter shipped in `acf09e2`.
+  // We coerce any unknown value back to `"All"` so a stale
+  // bookmark or a typo can't trap the operator on an empty
+  // pseudo-filter.
+  const priorityParam = params.get("priority");
+  const priorityFilter: PriorityFilter =
+    PRIORITY_FILTER_VALUES.includes(priorityParam as PriorityFilter)
+      ? (priorityParam as PriorityFilter)
+      : "All";
+  const setPriorityFilter = (next: PriorityFilter) => {
+    const merged = new URLSearchParams(params);
+    if (next === "All") {
+      merged.delete("priority");
+    } else {
+      merged.set("priority", next);
+    }
+    setParams(merged, { replace: true });
+  };
+
+  // Snooze toggle persists via localStorage; off by default. We
+  // hydrate from storage on mount and never read again — the
+  // setter mirrors the change back into storage so multiple
+  // tabs converge on next reload.
+  const [snoozeLowPriority, setSnoozeLowPriority] = useState<boolean>(() =>
+    readSnoozeLowPriority(),
+  );
+  const toggleSnooze = (next: boolean) => {
+    setSnoozeLowPriority(next);
+    writeSnoozeLowPriority(next);
+  };
 
   const list = useQuery({
     // The list cache lives under a `"list"` discriminator under
@@ -120,10 +165,35 @@ export function NotificationsPage() {
     },
   });
 
+  // Sort + filter happens client-side: the server returns
+  // every row that matches `unread_only` / `initiative_id`, and
+  // the priority pill / snooze toggle act as visual lenses on
+  // that result. This keeps the SQL hot-path simple (no priority
+  // column index) and lets the operator switch pills without
+  // burning a refetch.
+  //
+  // The `useMemo` MUST run before the early returns below so
+  // React's rules-of-hooks invariant holds across renders — if
+  // the loading branch returns first, then the success branch
+  // calls `useMemo`, React sees a different hook count between
+  // renders and tears the page down with "Rendered more hooks
+  // than during the previous render".
+  const items = list.data ?? [];
+  const visibleItems = useMemo(() => {
+    const filtered = applyPriorityFilter(items, priorityFilter, snoozeLowPriority);
+    return [...filtered].sort(compareByPriorityThenTimeDesc);
+  }, [items, priorityFilter, snoozeLowPriority]);
+
   if (list.isPending) return <PageSpinner />;
   if (list.error)
     return <ErrorBox error={list.error} onRetry={() => list.refetch()} />;
-  const items = list.data;
+
+  // Empty-state copy is sensitive to which lens hid the rows so
+  // the operator never wonders "are there really no
+  // notifications, or am I looking through a too-narrow filter?"
+  const hadAnyRows = items.length > 0;
+  const allFiltersOff =
+    priorityFilter === "All" && !snoozeLowPriority && !unreadOnly;
 
   return (
     <div className="space-y-4">
@@ -131,8 +201,12 @@ export function NotificationsPage() {
         <div>
           <h1 className="text-xl font-semibold text-ink">Notifications</h1>
           <p className="text-sm text-ink-muted">
-            Routed events that matched the active{" "}
-            <code className="font-mono">[notifications]</code> policy.
+            Important events that need operator attention. The full
+            audit-grade history of every operator action is in the{" "}
+            <Link to="/audit" className="text-accent hover:underline">
+              Audit Chain
+            </Link>
+            .
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -145,6 +219,18 @@ export function NotificationsPage() {
             />
             Unread only
           </label>
+          <label
+            className="text-sm text-ink-muted flex items-center gap-1.5"
+            title="Hide Low + unclassified rows from the inbox. Stored locally; does not affect the audit chain."
+          >
+            <input
+              type="checkbox"
+              checked={snoozeLowPriority}
+              onChange={(e) => toggleSnooze(e.target.checked)}
+              className="accent-accent"
+            />
+            Snooze low-priority
+          </label>
           <button
             type="button"
             className="btn"
@@ -156,6 +242,12 @@ export function NotificationsPage() {
         </div>
       </header>
 
+      {/* INV-DASHBOARD-FAILURE-VISIBILITY-01 — surface
+          mark-read / mark-all-read mutation failures inline so
+          operators see why an inbox action did not take
+          effect. Anchored above the priority pills so the banner
+          stays visually attached to the header buttons that
+          triggered it. */}
       {markAll.error && (
         <ActionFailureBanner
           label="Mark all read failed"
@@ -171,6 +263,34 @@ export function NotificationsPage() {
         />
       )}
 
+      {/* Priority filter pills — Critical / High / Medium / Low / All.
+          Mirrors the clickable status legend pattern shipped in
+          `acf09e2` so operators can switch lenses without leaving
+          the page. URL-driven (`?priority=…`) for deep-linking. */}
+      <nav
+        aria-label="Filter notifications by priority"
+        className="flex items-center gap-1.5 flex-wrap text-xs"
+      >
+        {PRIORITY_FILTER_VALUES.map((p) => {
+          const active = priorityFilter === p;
+          return (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setPriorityFilter(p)}
+              aria-pressed={active}
+              className={`rounded-full px-3 py-1 border transition-colors ${
+                active
+                  ? "bg-accent text-white border-accent"
+                  : "bg-panel-low text-ink-muted border-edge hover:bg-panel-high"
+              }`}
+            >
+              {p}
+            </button>
+          );
+        })}
+      </nav>
+
       {initiativeId && (
         <div className="text-xs text-ink-muted">
           Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
@@ -184,11 +304,51 @@ export function NotificationsPage() {
         </div>
       )}
 
-      {items.length === 0 ? (
-        <Empty title="No notifications." />
+      {visibleItems.length === 0 ? (
+        // INV-NOTIF-SCOPE-01: when the inbox is empty (either
+        // because there really are no important events or the
+        // active filters hid them), point the operator at the
+        // audit chain so they understand the contract — Operator*
+        // history lives there, not here.
+        hadAnyRows && !allFiltersOff ? (
+          <Empty
+            title="No notifications match the active filters."
+            hint={
+              <span>
+                Try selecting{" "}
+                <button
+                  type="button"
+                  onClick={() => setPriorityFilter("All")}
+                  className="text-accent hover:underline"
+                >
+                  All priorities
+                </button>{" "}
+                or clearing the snooze / unread-only toggles. Operator
+                actions you've taken (mark-read, view-diff, …) are in
+                the{" "}
+                <Link to="/audit" className="text-accent hover:underline">
+                  Audit Chain
+                </Link>
+                .
+              </span>
+            }
+          />
+        ) : (
+          <Empty
+            title="All caught up."
+            hint={
+              <span>
+                Operator-action history is in the{" "}
+                <Link to="/audit" className="text-accent hover:underline">
+                  Audit Chain →
+                </Link>
+              </span>
+            }
+          />
+        )
       ) : (
         <ul className="card p-0 overflow-hidden divide-y divide-edge/40">
-          {items.map((n) => {
+          {visibleItems.map((n) => {
             // Default activation drills into the linked entity
             // (initiative > task) and marks the notification
             // read, mirroring the Slack/Gmail "click row to
@@ -221,10 +381,25 @@ export function NotificationsPage() {
                 }`}
               >
                 <div className="flex items-center gap-2 flex-wrap">
+                  {/* Priority icon — Critical = red "!", High =
+                      amber triangle, Medium = blue dot, Low =
+                      gray dot, unclassified = hollow gray dot.
+                      Sourced from server-projected
+                      `n.priority` so the FE never re-derives the
+                      audit→notification taxonomy. */}
+                  <span
+                    aria-label={priorityAriaLabel(n.priority)}
+                    title={priorityAriaLabel(n.priority)}
+                    className={`inline-flex items-center justify-center w-4 h-4 rounded-full text-[10px] font-bold leading-none ${priorityIconClasses(
+                      n.priority,
+                    )}`}
+                  >
+                    {priorityGlyph(n.priority)}
+                  </span>
                   {!n.read && (
                     <span
                       className="w-1.5 h-1.5 rounded-full bg-accent"
-                      aria-hidden="true"
+                      aria-label="Unread"
                     />
                   )}
                   <span className={auditBadgeClasses(n.event_kind)}>
@@ -271,6 +446,11 @@ export function NotificationsPage() {
                     n.payload,
                   )}
                 </p>
+                {/* INV-DASHBOARD-FAILURE-VISIBILITY-01 — when a
+                    notification is itself a failure event, render
+                    a compact `FailurePill` so the operator sees
+                    "WHY did this fire?" without having to drill
+                    into the audit log. */}
                 {isFailureAuditEvent(n.event_kind, n.payload) && (
                   <div className="mt-1.5">
                     <FailurePill

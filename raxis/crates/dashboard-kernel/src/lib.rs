@@ -1481,6 +1481,22 @@ impl DashboardData for KernelDashboardData {
             .map(|r| {
                 let payload = serde_json::from_str(&r.payload_json)
                     .unwrap_or(serde_json::json!({}));
+                // INV-NOTIF-SCOPE-01 — project the canonical
+                // `notification_priority` taxonomy onto every row
+                // so the dashboard FE can group + filter without
+                // mirroring the audit→notification map in TS.
+                // Pre-filter rows (legacy data from before the
+                // Phase 1 worker shipped) come back as `None`;
+                // the FE renders those as "unclassified" rather
+                // than dropping them, since they were already
+                // emitted under the old policy.
+                // INV-NOTIF-SCOPE-01 — qualified path so the
+                // pub-use re-export stays the canonical entry
+                // point for downstream callers.
+                let priority = notification_filter::notification_priority_for_kind_str(
+                    &r.event_kind,
+                )
+                .map(|p| p.as_str().to_string());
                 NotificationView {
                     notification_id: r.notification_id,
                     event_kind: r.event_kind,
@@ -1492,6 +1508,7 @@ impl DashboardData for KernelDashboardData {
                     read: r.read,
                     source_event_id: r.source_event_id,
                     created_at: r.created_at,
+                    priority,
                 }
             })
             .collect())

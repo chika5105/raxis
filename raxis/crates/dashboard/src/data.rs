@@ -817,6 +817,21 @@ pub struct NotificationView {
     pub source_event_id: String,
     /// Unix-seconds creation timestamp.
     pub created_at: u64,
+    /// `INV-NOTIF-SCOPE-01` projection of `event_kind` through
+    /// `raxis_dashboard_kernel::notification_priority_for_kind_str`.
+    /// One of `"Critical"`, `"High"`, `"Medium"`, `"Low"`, or
+    /// `null`. The kernel-glue layer
+    /// (`dashboard-kernel::KernelDashboardData::list_notifications`)
+    /// is the single producer; the dashboard FE consumes the
+    /// string verbatim to render priority icons and the filter
+    /// pills. `None` here means the row pre-dates the
+    /// `notification_priority` filter (legacy data), in which
+    /// case the FE renders it as an "unclassified" Low-tier
+    /// fallback rather than dropping it. The taxonomy itself
+    /// lives in `crates/dashboard-kernel/src/notification_filter.rs`
+    /// and is exhaustive over `AuditEventKind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
 }
 
 /// Trait the kernel implements. Default impls are NOT provided
@@ -2108,6 +2123,10 @@ mod tests {
             read,
             source_event_id: "evt-1".into(),
             created_at: ts,
+            // Tests in this crate don't exercise the priority
+            // projection (that's a `dashboard-kernel` concern);
+            // leave `None` so legacy callers stay untouched.
+            priority: None,
         }
     }
 
