@@ -75,7 +75,8 @@
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01 | 1 |
-| **Total** | | **73** |
+| Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
+| **Total** | | **74** |
 
 ---
 
@@ -3648,6 +3649,94 @@ helpers);
 up + opt-out gate);
 `live-e2e/README.md` (operator-facing recipe + env-var
 documentation).
+
+---
+
+## §11.11 — Host hygiene (INV-HOST-HYGIENE-*)
+
+These invariants govern the parent-side worktree pool that
+spawns Raxis worker agents. They are operational invariants:
+the kernel does not enforce them at admission time, but the
+live-e2e harness and the operator dashboard MUST refuse to
+proceed when they are violated, because a saturated host
+cannot satisfy the V2 disk-watchdog contract
+(`INV-CAPACITY-02`, `host-capacity.md §7.1`).
+
+### INV-HOST-HYGIENE-01 — Worktree pool MUST be swept; live-e2e MUST refuse over-pressure
+
+**Statement.** Every host running Raxis worker agents MUST
+have a worktree-hygiene mechanism that prunes git worktrees
+whose branches have landed to `origin/main` AND whose files
+are not actively held open. The live-e2e harness MUST refuse
+to run when host disk usage exceeds 90% on the repo volume,
+`/private/tmp`, or `/var/folders/*`.
+
+The reference implementation is `cargo xtask hygiene` (sweep)
++ `cargo xtask hygiene-check --threshold-pct N` (read-only
+preflight). The hygiene mechanism MAY be invoked manually or
+on a periodic timer (the macOS launchd plist
+`raxis/launchd/com.raxis.hygiene.plist` and the Linux
+systemd unit `raxis/systemd/raxis-hygiene.{service,timer}`
+are the supported defaults — see
+`guides/operator/18-host-hygiene.md`).
+
+The classifier rule is mechanical:
+
+* REMOVABLE only when ALL of: (a) the worktree is NOT the
+  main checkout, (b) the worktree is NOT on the operator's
+  `--keep` allowlist, (c) the worktree is NOT the current
+  `cargo xtask` invocation's own dir, (d) the branch tip is
+  reachable from `origin/main` (`git merge-base
+  --is-ancestor <tip> origin/main`), AND (e) no process
+  holds files open under the worktree (lsof CWD evidence
+  on macOS / Linux).
+* KEEP otherwise. The classifier surfaces a typed
+  `KeepReason` (`MainCheckout` / `OnKeepList` /
+  `SelfInvocation` / `Locked` / `DetachedHead` /
+  `BranchAhead` / `InUse` / `TooNew`) so the dry-run output
+  is auditable.
+
+The live-e2e preflight emits a structured
+`AuditEventKind::OperatorAttentionRequired` with
+`attention_kind = "HostHygieneDiskPressure"` and a JSON
+`details` payload conforming to
+`raxis_types::host_preflight::HostPreflightError::DiskPressure`
+*before* bailing the test. The dashboard banner
+(`HostHygieneBanner`, `INV-DASHBOARD-FAILURE-VISIBILITY-01`)
+subscribes to this event and renders a dismissible amber
+strip carrying the offending volume, used percentage, free
+space, and the `cargo xtask hygiene` remediation command.
+
+**Justification.** A single saturating run of seven
+concurrent parent-side workers (each carrying a multi-GiB
+`cargo target/`) filled 902 GiB and tripped
+`DiskFullHaltEntered` mid-iteration. The kernel's own
+`min_free_disk_mb` floor caught the failure but only AFTER
+1867 s of wasted live-e2e runtime — every activation in
+iter 16 was rejected with `FailDiskFull`. The hygiene
+sweep + preflight refuses to start a 31-min flow when the
+host is already one `cargo build` away from
+`DiskFullHaltEntered`, converting a mid-flight failure into
+a sub-second skip with a clear, structured remediation
+pointer.
+
+**Scenario.** Six parent-side worker agents land their
+branches over a 24-hour window; each leaves behind a
+`/private/tmp/raxis-<task>-<pid>/` worktree carrying a
+~3 GiB `target/`. The seventh worker spawns, the host disk
+crosses 90%, the live-e2e preflight observes the
+`/System/Volumes/Data` capacity, emits
+`OperatorAttentionRequired{HostHygieneDiskPressure}`, and
+fails the test before any kernel boot. The operator clicks
+the dashboard banner, runs `cargo xtask hygiene`, watches
+the six landed worktrees disappear, and re-runs the test —
+clean.
+
+**Canonical home.** `xtask/src/hygiene.rs` header (sweep
+mechanism), `guides/operator/18-host-hygiene.md` (operator
+recipe). The structured-error payload is pinned in
+`crates/types/src/host_preflight.rs`; the dashboard banner
+contract is pinned in `dashboard-hardening.md §6`.
 
 ---
 

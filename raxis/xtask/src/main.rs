@@ -11,6 +11,7 @@ mod dev_kernel;
 mod dev_keys;
 mod dev_prereqs;
 mod dev_reset;
+mod hygiene;
 mod images;
 mod license_check;
 mod linux_microvm;
@@ -120,6 +121,30 @@ fn main() -> anyhow::Result<()> {
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             macos_firewall::run_status(&tail).context("macos-firewall-status")
         }
+        Some("hygiene") => {
+            // `cargo xtask hygiene [--dry-run] [--max-age-days N]
+            //                      [--keep BRANCH ...]`
+            // — sweep `git worktree list` and prune parent-side
+            //   worktrees whose branch tip has landed to
+            //   `origin/main` AND whose files are not actively
+            //   held open. See `INV-HOST-HYGIENE-01` and
+            //   `xtask/src/hygiene.rs` header for the motivation
+            //   (the multi-GiB `target/` per worktree that filled
+            //   902 GiB and tripped `DiskFullHaltEntered`).
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            hygiene::run(&tail).context("hygiene")
+        }
+        Some("hygiene-check") => {
+            // `cargo xtask hygiene-check [--threshold-pct N]`
+            // — read-only `df -P` probe across the repo volume,
+            //   `/private/tmp`, and `/var/folders/*` (AVF guest
+            //   dir). Exits non-zero when ANY monitored volume is
+            //   above `--threshold-pct` (default 85). The live-e2e
+            //   harness uses the 90% form as a sub-second
+            //   preflight (INV-HOST-HYGIENE-01).
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            hygiene::run_check(&tail).context("hygiene-check")
+        }
         Some("dev-reset") => {
             // `cargo xtask dev-reset notifications [--data-dir <P>] [--dry-run]`
             // — Phase 2 of dashboard-hardening §2 / INV-NOTIF-SCOPE-01.
@@ -137,9 +162,9 @@ fn main() -> anyhow::Result<()> {
         Some(other) => anyhow::bail!(
             "unknown xtask target: {other:?}\n\
              available: spec-graph [--strict], license-check [--strict], \
-             dev-keys, dev-codesign, dev-prereqs, dev-reset, images, \
-             linux-microvm, linux-prereqs, macos-firewall-prereq, \
-             macos-firewall-status, perf, observability"
+             dev-keys, dev-codesign, dev-prereqs, dev-reset, hygiene, \
+             hygiene-check, images, linux-microvm, linux-prereqs, \
+             macos-firewall-prereq, macos-firewall-status, perf, observability"
         ),
         None => anyhow::bail!(
             "usage: cargo xtask <target> [flags]\n\
@@ -149,6 +174,8 @@ fn main() -> anyhow::Result<()> {
              dev-keys init  [--dir <PATH>] [--force]   — emit local-build signing keypair\n                                                 (release-and-distribution.md §8)\n  \
              dev-codesign   [--profile <P>]            — ad-hoc codesign target/<P>/raxis-kernel\n                 [--entitlements <PATH>]    against release/raxis.entitlements\n                 [--binary <NAME>]          (macOS only; no-op on Linux)\n                                                 (system-requirements.md §5.2)\n  \
              dev-prereqs    [--install]                 — verify / install AVF demo prerequisites\n                 [--scope user|workspace]   (Homebrew, musl-cross, openssl@3,\n                 [--arch aarch64|x86_64]    rustup musl target, codesign, cargo);\n                 [--skip-cargo-config]     idempotently patches\n                                                 ~/.cargo/config.toml linker pin.\n                                                 (demo-e2e-sample/AVF_DEMO.md §0)\n  \
+             hygiene        [--dry-run]                — prune parent-side `git worktree`s whose\n                 [--max-age-days N]                       branch tip has landed to origin/main\n                 [--keep BRANCH ...]                      AND whose files are not actively held\n                                                          open. Skips the main checkout, anything\n                                                          on --keep, and the worktree the xtask\n                                                          itself was invoked from. Prints disk-\n                                                          before / disk-after to stderr.\n                                                          (INV-HOST-HYGIENE-01)\n  \
+             hygiene-check  [--threshold-pct N]         — read-only `df -P` probe across the repo\n                                                          volume, /private/tmp, and /var/folders/*.\n                                                          Exits non-zero when any volume exceeds\n                                                          --threshold-pct (default 85). Used as\n                                                          live-e2e preflight at 90%.\n                                                          (INV-HOST-HYGIENE-01)\n  \
              dev-reset notifications                    — wipe the operator-notifications inbox\n                 [--data-dir <PATH>]                       projection (kernel.db::notifications\n                 [--dry-run]                               table + notifications/inbox.jsonl)\n                                                           so the next kernel boot starts empty\n                                                           AFTER the notification_priority\n                                                           filter took effect. The audit chain\n                                                           at <data_dir>/audit/ is NEVER touched\n                                                           (INV-NOTIF-SCOPE-01).\n  \
              images dev-kernel                          — stage Linux guest-kernel binary at\n                 (--from-file <PATH> | --url <URL> --sha256 <HEX>) \n                 [--install-dir <PATH>] [--arch <ARCH>] [--force]\n                                                 <install_dir>/kernel/vmlinux\n                                                 (system-requirements.md §11)\n  \
              images bake-rootfs --role <ROLE>           — docker build per-role Containerfile\n                 [--builder docker|podman|buildah]         and extract OCI rootfs into\n                 [--platform <PLAT>] [--keep]              images/<role>/rootfs/. Auto-detects\n                                                           docker → podman → buildah on $PATH;\n                                                           --platform defaults to the OCI shape\n                                                           of `default_target_triple()`. Run\n                                                           BEFORE dev-stage; dev-stage overlays\n                                                           the planner binary on top.\n  \
