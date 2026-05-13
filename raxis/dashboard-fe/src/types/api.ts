@@ -45,6 +45,58 @@ export interface InitiativeListEntry {
   updated_at: number;
 }
 
+// Structured failure reason attached to a Failed / Revoked / Rejected
+// entity (session, task, initiative, subsystem). Mirrors
+// `raxis_dashboard::data::FailureInfo` byte-for-byte; see
+// `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
+//
+// Operator-experience contract: every red Failure pill in the UI
+// MUST be backed by one of these. When the wire ships
+// `failure: null` on a Failed-state entity the FE renders
+// "No reason supplied — kernel bug" so the gap is visible rather
+// than swallowed.
+//
+// `fields` is rendered as a definition list and `artifacts` as
+// click-through links (kernel.stderr.log, worktree path, audit-chain
+// row, …). `event_id` / `seq` anchor the reason back to the
+// audit-chain row so the operator can deep-link from the panel
+// to the originating event.
+export interface FailureField {
+  label: string;
+  value: string;
+}
+
+export interface FailureArtifact {
+  label: string;
+  href: string;
+}
+
+export interface FailureInfo {
+  /// PascalCase error class, e.g. `SessionVmFailedFinal`,
+  /// `WorktreeProvisionFailed`, `ReviewerRejected`. Used as the
+  /// panel headline + the `data-failure-kind` attribute for E2E
+  /// selectors.
+  kind: string;
+  /// Free-form human-readable reason from the originating kernel
+  /// event (`final_reason`, `reason`, etc.). NOT truncated /
+  /// sanitised — the operator needs the raw text.
+  message: string;
+  /// Structured fields (`exit_code`, `target_host`, `port`, …)
+  /// rendered as a `<dl>`. Empty array ⇒ no detail block.
+  fields?: FailureField[];
+  /// Click-through links (`kernel.stderr.log`, worktree path,
+  /// audit-chain deep link, …). Empty array ⇒ no artifact block.
+  artifacts?: FailureArtifact[];
+  /// Audit-chain anchor (event_id + seq) so the FE can deep-link
+  /// to the originating row. `null` when the reason was synthesised
+  /// outside the audit chain (rare).
+  event_id?: string | null;
+  seq?: number | null;
+  /// Unix-seconds when the failure was observed (kernel-side).
+  /// Zero when unknown — the panel suppresses the timestamp row.
+  observed_at?: number;
+}
+
 export interface ReviewerVerdictView {
   verdict: string;
   critique: string;
@@ -69,6 +121,16 @@ export interface TaskView {
   path_allowlist: string[];
   created_at: number;
   updated_at: number;
+  /// Failure reason, set when the task is in a terminal-failure
+  /// state (`Failed`, `Revoked`, `BlockedForRecovery`, …). The
+  /// dashboard renders this through `<FailureReasonPanel>` on the
+  /// task detail + initiative-DAG side panel. `null` (the JSON
+  /// default) ⇒ no failure reported.
+  failure?: FailureInfo | null;
+  /// Downstream task_ids that were blocked by this task's failure.
+  /// Populated only for terminal-failure tasks so the FE can show
+  /// the cascade in the DAG side panel.
+  blocked_downstream?: string[];
 }
 
 export interface DagEdge {
@@ -83,6 +145,11 @@ export interface InitiativeView extends InitiativeListEntry {
   policy_epoch: number;
   tasks: TaskView[];
   edges: DagEdge[];
+  /// Failure reason, set when the initiative is in a
+  /// terminal-failure state (`Failed`, `Aborted`). The dashboard
+  /// renders this in `<FailureReasonPanel>` at the top of the
+  /// initiative detail page.
+  failure?: FailureInfo | null;
 }
 
 export interface DagNode {
@@ -109,6 +176,11 @@ export interface SessionView {
   output_tokens: number;
   created_at: number;
   updated_at: number;
+  /// Failure reason, set when the session is in a terminal-failure
+  /// state (`Failed`, `VmFailedFinal`, `Errored`, …). The dashboard
+  /// renders this through `<FailureReasonPanel>` on Sessions list +
+  /// SessionDetail header.
+  failure?: FailureInfo | null;
 }
 
 export interface EscalationView {
@@ -183,6 +255,14 @@ export interface SubsystemHealthCard {
   details: SubsystemDetailRow[];
   grafana_url: string | null;
   last_observed_at: number;
+  /// Most-recent failure reason for `failing` / `degraded` cards.
+  /// Surfaced inline beneath the status pill so the operator
+  /// never has to grep kernel.stderr.log to find out why a
+  /// reporter is unhappy. `null` ⇒ healthy reporter or kernel
+  /// did not supply a reason (operator-actionable bug — the
+  /// card renders "No reason supplied — kernel bug" in that
+  /// case).
+  last_error?: string | null;
 }
 
 export interface SubsystemHealthResponse {
