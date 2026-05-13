@@ -4525,29 +4525,61 @@ async fn handle_retry_sub_task(
     //     but the bridge couldn't observe a clean exit; the
     //     credential-proxy manager still drains.
     //
-    // Errors are LOGGED but do NOT propagate: failing the retry
+    // INV-RETRY-WATCHDOG: `terminate_session` calls
+    // `Session::shutdown(grace)` synchronously. On AVF, a half-dead
+    // VM (planner process exited via `planner_session_revoked_on_exit`
+    // but the host-side vsock bridge is wedged) can hang that call
+    // indefinitely. Observed live e2e iter 5: two tokio worker
+    // threads parked in `terminate_session` for 3+ minutes →
+    // RetrySubTask handler never returns → no `intent_response` →
+    // orchestrator post-exit hook never observes the new
+    // `PendingActivation` row → DAG stall.
+    //
+    // Mitigation: detach into `tokio::spawn` + `tokio::time::timeout`
+    // so the retry handler returns immediately. Worst-case worker
+    // leak is bounded by per-task retry ceilings.
+    //
+    // Errors are LOGGED but never propagate: failing the retry
     // because the VM was already dead would be surreal.
-    if let Some(prior_sid) = decision.prior_session_id.as_ref() {
+    if let Some(prior_sid) = decision.prior_session_id.clone() {
         let grace = std::time::Duration::from_secs(2);
-        if let Err(e) = ctx.session_spawn.terminate_session(prior_sid, grace).await {
-            // Quiet on the SessionNotActive case — it's the
-            // expected path for crash-driven retries. Verbose on
-            // anything else so operators can diagnose pathological
-            // shutdown bugs.
-            let is_not_active = matches!(
-                e,
-                raxis_session_spawn::SpawnError::SessionNotActive { .. },
-            );
-            if !is_not_active {
-                eprintln!(
-                    "{{\"level\":\"warn\",\
-                     \"event\":\"RetrySubTaskTerminateBestEffortFailed\",\
-                     \"task_id\":\"{}\",\"prior_session_id\":\"{}\",\
-                     \"error\":\"{}\"}}",
-                    task_id_owned, prior_sid, e,
-                );
+        let watchdog = grace + std::time::Duration::from_secs(8);
+        let session_spawn = std::sync::Arc::clone(&ctx.session_spawn);
+        let task_id_for_log = task_id_owned.clone();
+        tokio::spawn(async move {
+            match tokio::time::timeout(
+                watchdog,
+                session_spawn.terminate_session(&prior_sid, grace),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let is_not_active = matches!(
+                        e,
+                        raxis_session_spawn::SpawnError::SessionNotActive { .. },
+                    );
+                    if !is_not_active {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"RetrySubTaskTerminateBestEffortFailed\",\
+                             \"task_id\":\"{}\",\"prior_session_id\":\"{}\",\
+                             \"error\":\"{}\"}}",
+                            task_id_for_log, prior_sid, e,
+                        );
+                    }
+                }
+                Err(_elapsed) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"RetrySubTaskTerminateBestEffortTimeout\",\
+                         \"task_id\":\"{}\",\"prior_session_id\":\"{}\",\
+                         \"timeout_secs\":{}}}",
+                        task_id_for_log, prior_sid, watchdog.as_secs(),
+                    );
+                }
             }
-        }
+        });
     }
 
     // ── Step 5: audit-after-commit — `SessionRevoked` for the prior
