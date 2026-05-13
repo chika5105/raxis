@@ -155,11 +155,21 @@ pub use streaming::{
     AnthropicStreamAggregator, ContentBlockDeltaPayload, StreamEvent,
     DEFAULT_STREAM_CHANNEL_CAP, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
+pub use tool_audit::{
+    sha256_hex, RecordingAuditSink, ToolAuditEvent, ToolAuditOutcome, ToolAuditSink,
+    ToolErrorClass,
+};
 pub use tools::{
-    build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,
-    EditFileTool, GitCommitTool, GrepSearchTool, ReadFileTool, Tool, ToolContext, ToolError,
+    build_executor_registry, build_executor_registry_full, build_executor_registry_with_sleep,
+    build_orchestrator_registry, build_orchestrator_registry_full,
+    build_orchestrator_registry_with_sleep, build_reviewer_registry, BashTool, EditFileTool,
+    ExecutorBashStub, GitCommitTool, GrepSearchTool, ReadFileTool, Tool, ToolContext, ToolError,
     ToolOutput, ToolRegistry,
 };
+pub use tools_mongo::MongoQueryTool;
+pub use tools_postgres::PostgresQueryTool;
+pub use tools_redis::RedisQueryTool;
+pub use tools_smtp::SmtpSendTool;
 pub use transport::{
     connect, KernelTransport, KernelTransportConfig, StreamTransport, TransportError,
 };
