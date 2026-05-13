@@ -34,7 +34,8 @@
 > `INV-CONVERGENCE-*` (§9), `INV-PLANNER-HARNESS-01..06` (§10),
 > `INV-EXEC-DISCOVERY-01` (§10.4a),
 > `INV-VERIFIER-*` (§11), `INV-ENV-01` (§11.5),
-> `INV-AUDIT-PAIRED-01..07` (§11.6). V2 invariants in their canonical
+> `INV-AUDIT-PAIRED-01..07` (§11.6),
+> `INV-SUPERVISOR-*` + `INV-DASHBOARD-KERNEL-LIFECYCLE-01` (§11.12). V2 invariants in their canonical
 > homes that have NOT yet been mirrored here include:
 > `INV-VM-CAP-01..05`, `INV-PUSH-01..05`, `INV-KEY-01..08`,
 > `INV-MERGE-WORKTREE-RETAIN`, `INV-MERGE-CONSISTENCY`,
@@ -81,7 +82,9 @@
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
-| **Total** | | **93** |
+| Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01 | 7 |
+| Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01 | 1 |
+| **Total** | | **101** |
 
 ---
 
@@ -4654,6 +4657,389 @@ in `dashboard-hardening.md §5.7`.
   * Wire-shape: `crates/types/src/host_preflight.rs::tests`
     (JSON round-trip, `pressure_kind` discriminator,
     `Display` rendering, `ATTENTION_KIND` constant).
+
+---
+
+## §11.12 — Self-healing supervisor (INV-SUPERVISOR-*)
+
+These invariants govern the optional `raxis-supervisor` binary
+that wraps `raxis-kernel` so a deadlock / panic / OOM-kill /
+crash becomes a sub-second auto-restart instead of a permanently
+wedged kernel. Lands behind the
+`RAXIS_SUPERVISOR_AUTO_RESTART=1` opt-in env var; default-off
+preserves the existing operator-managed restart behaviour and
+leaves live-e2e iter-by-iter behaviour bit-identical.
+
+Canonical home: `v2/self-healing-supervisor.md`.
+
+### INV-SUPERVISOR-RESTART-AUDIT-01 — Every restart emits a paired audit chain entry
+
+**Statement.** Every kernel restart triggered by the supervisor
+emits a paired (`KernelRestartInitiated` + matching
+`KernelRestartCompleted` OR `KernelRestartHaltedCircuitOpen`)
+audit-chain entry, and the chain stays hash-continuous across
+the restart boundary. When the restart cause is a deadlock
+detection on the prior run, a `KernelDeadlockDetected` event is
+synthesised into the chain on the next boot from the on-disk
+forensic dump (`<data_dir>/deadlock_dump_<unix_ts>.json`),
+sequenced ahead of `KernelRestartCompleted` so the chain reads
+left-to-right as
+`KernelDeadlockDetected → KernelStarted → KernelRestartCompleted`.
+
+**Justification.** The audit chain is the single
+forensically-trustworthy record of kernel-process lifecycle
+(`R-7`, `INV-04`). Without paired restart records the chain
+would silently elide deadlock-driven exits — an offline
+verifier looking at the JSONL would see a clean
+`KernelStarted` after a `KernelStarted` with no signal that the
+prior kernel died. Pairing the events explicitly preserves
+forensic legibility AND keeps `verify-chain` hash-clean across
+the restart.
+
+**Scenario.** A deadlock cycle forms across two
+`parking_lot::Mutex`es at `t=0`. The watcher detects it at
+`t≈2 s`, writes
+`<data_dir>/deadlock_dump_1714500002.json`, and exits 70. The
+supervisor classifies the exit, writes the sentinel, and
+spawns a new kernel. The new kernel boots, runs
+`recovery::reconcile`, opens the audit writer, scans
+`<data_dir>/` for unprocessed dumps, finds the file, emits
+`KernelDeadlockDetected { dump_path: Some("...") }`, then
+emits the canonical `KernelStarted`, then emits
+`KernelRestartCompleted { prev_run_exit_code: 70,
+recovery_sweep_ms: 47, dump_path: Some("...") }`. The dump
+file is moved to `<data_dir>/deadlock_dumps_consumed/` so the
+next boot doesn't double-emit. `verify-chain` reads the
+segment end-to-end and validates every `prev_sha256` link.
+
+**Witness.** `raxis/kernel/tests/deadlock_supervisor_handoff.rs`
+seeds a synthetic dump file and a partial audit chain,
+re-boots the kernel binary, and asserts:
+*  `KernelDeadlockDetected { dump_path: Some(...) }` is
+   appended;
+*  `KernelStarted` is appended;
+*  `KernelRestartCompleted { prev_run_exit_code: 70 }` is
+   appended;
+*  `raxis_audit_tools::verify_chain_from(audit_dir, 0)` returns
+   `Ok` end-to-end across the seeded prior segment + the
+   freshly-appended events.
+
+**Canonical home.** `v2/self-healing-supervisor.md` §3.3 +
+§3.4 (boot-time rehydration + new audit event variants);
+`v2/audit-paired-writes.md` §6 (restart audit emission
+contract addendum).
+
+---
+
+### INV-SUPERVISOR-CIRCUIT-BREAKER-01 — ≤3 restarts in 60s sliding window
+
+**Statement.** The supervisor allows **at most 3** kernel
+restarts inside any rolling **60-second** window. The 4th
+restart attempt within the window MUST cause the supervisor
+to:
+1. Refuse the restart (no kernel child spawned);
+2. Write the sentinel as `Halted (CircuitOpen)`;
+3. On the next boot of the supervisor (manually or via
+   `reset-circuit-breaker`), emit
+   `KernelRestartHaltedCircuitOpen { attempts_in_window,
+   window_secs, last_failure_reason }` into the audit chain;
+4. Exit `0` (the supervisor is done; operator must intervene).
+
+The window is a true sliding window (each restart's
+`unix_ts` is recorded; entries older than `window_secs` fall
+off). The state survives supervisor restarts via
+`<data_dir>/supervisor_state.json` so a launchd / systemd
+restart of the supervisor does not silently re-arm the
+breaker.
+
+**Justification.** Without this bound a persistent deadlock
+(or a kernel that fails its boot recovery) would burn
+indefinitely in a tight restart loop, hot-loading the disk +
+audit chain. The 3/60 s limit converts a pathological loop
+into an operator-paged halt within ~3 minutes wall-clock,
+preserving forensic evidence (the dump files for each of the
+3 attempts persist on disk).
+
+**Scenario.** A kernel bug introduced in an upgrade
+deadlocks immediately on the first session-spawn — every
+restart hits the same bug at the same code path and exits 70
+within ~5 s. The supervisor restarts at `t=5, t=10, t=15`,
+then refuses at `t=20` with `Halted (CircuitOpen)`. The
+operator opens the dashboard, sees the red banner, runs
+`raxis-supervisor reset-circuit-breaker --yes` after rolling
+back the kernel binary, and the cycle clears.
+
+**Witness.**
+`raxis/crates/supervisor/tests/circuit_breaker.rs::four_failures_in_window_open_circuit`
+spawns a fake child binary that exits 70 on launch, runs the
+supervisor's spawn-and-classify loop synthetically with a
+fake clock, and asserts the 4th attempt is refused + sentinel
+transitions to `Halted (CircuitOpen)`.
+
+**Canonical home.** `v2/self-healing-supervisor.md` §4.3.
+
+---
+
+### INV-SUPERVISOR-OPT-IN-01 — Auto-restart is gated behind `RAXIS_SUPERVISOR_AUTO_RESTART=1`
+
+**Statement.** The supervisor's spawn-and-watch loop runs ONLY
+when `RAXIS_SUPERVISOR_AUTO_RESTART=1` is set in the
+supervisor's process environment. Without the env var,
+`raxis-supervisor start` logs a single
+`{"event":"SupervisorOptInGateClosed"}` line on stderr and
+exits `0` immediately without spawning a kernel child. The
+operator's existing manual `raxis-kernel` invocation runs
+exactly as it did before this surface landed.
+
+**Justification.** Phase-1 rollout discipline. The kernel's
+default deadlock behaviour today (`panic = "abort"` on
+detection, operator restarts manually) is the
+known-stable-on-iter-41 baseline. An always-on supervisor
+would ship a behaviour change to the live-e2e harness
+(`raxis/live-e2e/...`) the same day the supervisor lands,
+mixing two variables in one regression-window. The env-var
+gate keeps live-e2e bit-identical until phase 2.
+
+**Scenario.** A developer runs `cargo test
+-p raxis-kernel --test extended_e2e_realistic_scenario`. The
+test harness does not set
+`RAXIS_SUPERVISOR_AUTO_RESTART=1`. Even if the supervisor
+binary is on PATH, no auto-restart fires; if a deadlock
+forms, the kernel exits non-zero and the test fails fast as
+before. The same test on a production deployment with
+`RAXIS_SUPERVISOR_AUTO_RESTART=1` set in the launchd
+environment would auto-restart up to the §INV-SUPERVISOR-
+CIRCUIT-BREAKER-01 ceiling.
+
+**Witness.**
+`raxis/crates/supervisor/tests/opt_in_gate.rs::no_env_var_means_no_supervision`
+invokes the supervisor's `lib::run` entrypoint with an
+empty `RAXIS_SUPERVISOR_AUTO_RESTART` env var and asserts
+no kernel child is spawned + the gate-closed log line is
+emitted.
+
+**Canonical home.** `v2/self-healing-supervisor.md` §4.9.
+
+---
+
+### INV-SUPERVISOR-SIGTERM-RESPECT-01 — SIGTERM never triggers a restart
+
+**Statement.** The supervisor MUST NOT restart the kernel
+after a SIGTERM-induced exit, regardless of who sent the
+signal:
+1. **Operator → supervisor → kernel** (the canonical
+   `raxis-supervisor stop` path): the supervisor sets
+   `intentional_shutdown = true`, forwards SIGTERM to the
+   kernel child, waits for the child to exit, classifies as
+   `Halted (OperatorTerminated)`, and exits 0 itself.
+2. **External actor → kernel directly** (e.g. an init system
+   or a manual `kill -TERM <kernel_pid>`): the supervisor
+   observes the child exit with `WIFSIGNALED + SIGTERM` and
+   `intentional_shutdown = false`, classifies as `Halted
+   (ExternalSigterm)`, and exits 0 without spawning a
+   replacement.
+
+The bound on this is mechanical: the §4.4 classification
+table makes both paths return `SupervisorAction::Halt`, and
+the supervisor never spawns a replacement child after
+classifying `Halt`.
+
+**Justification.** SIGTERM is the universal "please stop"
+signal. Auto-restarting after SIGTERM transforms `kill
+-TERM` (and `launchctl stop`, `systemctl stop`, the operator's
+own `raxis-supervisor stop`) into an infuriating "stop, then
+auto-restart 200 ms later" loop — a UX bug serious enough
+that it would single-handedly disqualify the supervisor for
+production. The contract makes restart behaviour a strict
+subset of the failure space: only crash recovery, never
+operator override.
+
+**Scenario.** Operator runs `systemctl stop raxis-supervisor`
+on a Linux production host. systemd sends SIGTERM to the
+supervisor PID. The supervisor handler sets
+`intentional_shutdown = true`, forwards SIGTERM to the
+kernel child, waits up to 30 s for the kernel's own
+`signal::ctrl_c` handler to drain in-flight IPC, observes
+the child exit, writes sentinel `Halted
+(OperatorTerminated)`, and exits 0. systemd sees the supervisor
+exit 0 and marks the unit `inactive (dead)`. No replacement
+kernel is spawned. The dashboard renders the grey "Kernel
+terminated by operator" banner with the `raxis-supervisor
+start` restart command.
+
+**Witness.**
+`raxis/crates/supervisor/tests/sigterm_respect.rs::sigterm_to_supervisor_propagates_and_halts`
+spawns the supervisor against a fake kernel child, sends
+SIGTERM via `nix::sys::signal::kill`, and asserts (a) the
+child receives the forwarded SIGTERM, (b) the supervisor
+exits 0 within the grace window, (c) the sentinel is written
+as `Halted (OperatorTerminated)`, (d) NO replacement child
+process is spawned (verified by polling `/proc` or
+equivalent under the supervisor's process group).
+
+**Canonical home.** `v2/self-healing-supervisor.md` §4.5.
+
+---
+
+### INV-SUPERVISOR-SIGINT-RESPECT-01 — SIGINT never triggers a restart
+
+**Statement.** The supervisor MUST NOT restart the kernel
+after a SIGINT-induced exit. SIGINT is universally Ctrl+C
+(the user pressed it on the controlling terminal); the
+supervisor classifies as `Halted (OperatorInterrupt)` and
+exits 0 without spawning a replacement, regardless of whether
+the supervisor or an external actor sent the signal.
+
+**Justification.** Same UX argument as
+`INV-SUPERVISOR-SIGTERM-RESPECT-01`, with extra force: SIGINT
+is what every developer types when they want a process to
+stop right now. A supervisor that ignored SIGINT would be
+worse than one that ignored SIGTERM, because terminal users
+expect Ctrl+C to mean "stop everything, including the
+supervisor's restart loop".
+
+**Scenario.** Developer runs `raxis-supervisor start
+--data-dir ~/.raxis` in a terminal, presses Ctrl+C. The
+shell delivers SIGINT to the foreground process group (both
+the supervisor AND the kernel child receive it). The
+supervisor handler observes either delivery path (its own
+SIGINT or the child's exit-on-SIGINT), classifies, writes
+sentinel `Halted (OperatorInterrupt)`, exits 0. Terminal
+returns to a prompt within the grace window.
+
+**Witness.**
+`raxis/crates/supervisor/tests/sigint_respect.rs::sigint_to_supervisor_propagates_and_halts`
+mirrors the SIGTERM-respect test against SIGINT.
+
+**Canonical home.** `v2/self-healing-supervisor.md` §4.5.
+
+---
+
+### INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01 — Exit-code → action mapping is mechanical
+
+**Statement.** The supervisor's `classify(outcome,
+intentional_shutdown) → SupervisorAction` function MUST
+return the action specified by the §4.4 exit-code table for
+every input combination. The table is exhaustive (covers
+`WEXITSTATUS = 0`, `WEXITSTATUS = 70`, other non-zero exits,
+SIGTERM with both supervisor-sent and external origins,
+SIGINT, SIGKILL with both origins, SIGABRT/SIGSEGV/SIGBUS,
+SIGHUP, and a fall-through for any other signal). No code
+path decides restart vs halt outside this function.
+
+**Justification.** Centralising the decision in a single pure
+function makes the operator-signal contract auditable: every
+restart-or-not call has exactly one source of truth, every
+row of the table has a witness sub-test, and the §4.4 table
+itself is the documentation. Without this discipline,
+restart logic would scatter across the spawn loop, signal
+handlers, and the circuit breaker — and a future contributor
+would re-introduce the "auto-restart after SIGTERM" UX bug
+the moment they touched any one of those sites.
+
+**Scenario.** A developer adds a new `SIGUSR1`-driven
+observability dump path to the kernel (separate PR). The
+supervisor's table has a fall-through "any other signal →
+restart with circuit breaker" row; the new SIGUSR1 path
+either causes the kernel to exit `0` (handled, no restart)
+or to crash (SIGSEGV → restart). The classifier needs no
+update; the §4.4 table covers the new case structurally.
+
+**Witness.**
+`raxis/crates/supervisor/tests/exit_classification.rs::*`
+runs one sub-test per row of the §4.4 table, asserting
+`classify(...)` returns the documented `SupervisorAction`
+for each combination.
+
+**Canonical home.** `v2/self-healing-supervisor.md` §4.4.
+
+---
+
+### INV-SUPERVISOR-SHUTDOWN-GRACE-01 — Supervisor honours the shutdown grace deadline
+
+**Statement.** When the supervisor forwards SIGTERM (or
+SIGINT) to the kernel child, it MUST wait at least
+`RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS` (default `30`) for
+the kernel to exit naturally before escalating to SIGKILL.
+The supervisor MUST NOT escalate inside the grace window
+even if the operator sends a second SIGTERM (which is
+recorded as already-shutting-down + ignored). The
+escalation, when it fires, MUST emit a structured
+`KernelGracefulShutdownTimedOut { grace_secs, child_pid }`
+log line on supervisor stderr.
+
+**Justification.** The kernel's own graceful shutdown path
+runs `dashboard::serve_with_shutdown` (which drains SSE
+clients, dashboard-hardening.md §1.5), the IPC graceful
+drain seam (any in-flight `IntentRequest` completes), and
+the audit-writer fsync. Cutting that short with a premature
+SIGKILL would (a) drop in-flight operator-visible work, (b)
+risk a partial audit-write on the way out, and (c) defeat
+the point of having a graceful shutdown handler in the
+kernel at all. The 30-second default is generous enough to
+absorb a long-running planner or an integration-merge
+fsync; operators who need a tighter bound use
+`raxis-supervisor stop --force` (which uses a 5 s grace).
+
+**Scenario.** A long-running planner-orchestrator session
+is mid-evaluation when the operator runs `raxis-supervisor
+stop`. SIGTERM reaches the supervisor, which forwards to the
+kernel. The kernel's `signal::ctrl_c` handler drains SSE
+clients (~1 s), waits for the in-flight intent to finish
+(~8 s), and exits cleanly. Total wall-clock: ~9 s, well
+under the 30 s grace; supervisor classifies as `Halted
+(OperatorTerminated)` and exits 0. No SIGKILL was sent.
+
+**Witness.**
+`raxis/crates/supervisor/tests/shutdown_grace.rs::supervisor_waits_full_grace_before_sigkill`
+spawns a fake kernel child that takes 5 s to handle SIGTERM.
+Sets `RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS=10`. Asserts the
+child exited via SIGTERM (not SIGKILL — checked via the
+exit-status discriminator), and that the elapsed wall-clock
+between SIGTERM-send and child-exit is ≥ 5 s and
+< 10 s (i.e. inside the grace window, not at the deadline).
+
+**Canonical home.** `v2/self-healing-supervisor.md` §4.5.
+
+---
+
+### INV-DASHBOARD-KERNEL-LIFECYCLE-01 — Dashboard surfaces non-Healthy state within 5s
+
+**Statement.** When `<data_dir>/kernel_lifecycle_status.json`
+shows a non-`Healthy` status, the operator dashboard MUST
+render the matching `KernelLifecycleBanner` within 5 seconds
+of the sentinel transition. The banner copy + tone for each
+sub-state is pinned by `v2/self-healing-supervisor.md §5.3`.
+
+**Justification.** The kernel may be down during a restart
+window (sentinel = `Restarting`) or permanently halted
+(sentinel = `Halted (CircuitOpen)`). Without a prominent
+banner, the operator's dashboard is silently empty / stale
+and the operator has no way to distinguish "the dashboard
+itself is broken" from "the kernel is down" from "the kernel
+is recovering". The 5-second cadence is an upper bound on
+how long an operator stares at stale data before learning
+the kernel state changed.
+
+**Scenario.** A deadlock fires on the kernel; supervisor
+writes sentinel `Restarting (DeadlockDetected, attempt 1/3)`.
+The operator's dashboard tab is open; within 5 s the yellow
+banner replaces the (previously absent) banner area, telling
+the operator the kernel is restarting and that this is
+attempt 1 of 3. After the kernel boots, the supervisor
+writes sentinel `Healthy`; within 5 s the banner clears.
+
+**Witness.** Pair of tests:
+*  `raxis/crates/dashboard/tests/kernel_lifecycle_endpoint.rs::sentinel_transitions_round_trip_through_handler`
+   writes the sentinel, hits `GET /api/health/kernel-lifecycle`,
+   asserts every sub-state of the §4.6 schema round-trips.
+*  `raxis/dashboard-fe/src/components/banners/__tests__/KernelLifecycleBanner.test.tsx`
+   asserts the React banner renders the expected tone +
+   headline + detail for each sub-state.
+
+**Canonical home.** `v2/self-healing-supervisor.md` §5;
+`v2/dashboard-hardening.md §6` (kernel-lifecycle banner
+contract addendum).
 
 ---
 
