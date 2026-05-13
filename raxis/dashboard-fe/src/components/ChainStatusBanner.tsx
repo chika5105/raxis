@@ -57,11 +57,15 @@ export function ChainStatusBanner() {
     // chain may still be intact; we just couldn't reach the
     // verdict. The hard-red treatment is reserved for the
     // backend reporting `status: "broken"`.
+    //
+    // Light mode uses the deeper amber-700/900 ramp; dark mode
+    // keeps the original amber-500/200 pairing. Both pairs land
+    // above WCAG AA (≥4.5:1) on their own canvas.
     return (
-      <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 flex items-center justify-between gap-3">
+      <div className="rounded-md border border-amber-700/40 bg-amber-700/10 px-3 py-2 text-xs text-amber-900 flex items-center justify-between gap-3 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
         <span>
           Audit chain status unavailable.{" "}
-          <span className="text-amber-300/70">
+          <span className="text-amber-800/80 dark:text-amber-300/70">
             {q.error instanceof Error ? q.error.message : "Unknown error."}
           </span>
         </span>
@@ -90,12 +94,18 @@ export function ChainStatusBanner() {
       data-chain-status={s.status}
       className={clsx(
         "rounded-md border px-3 py-2 text-xs flex flex-wrap items-center gap-3 justify-between",
+        // Each tone carries a light-mode pair (-700 tint + -800/-900
+        // text) AND a dark-mode pair (-500 tint + -200 text). The
+        // light-mode pairs deepen the ramp to clear WCAG AA against
+        // the warm off-white panel; previously the dashboard reused
+        // the dark-mode-only -500/-200 pairing in both themes and
+        // landed around 1.1:1 in light mode (effectively invisible).
         tone === "ok" &&
-          "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
+          "border-emerald-700/40 bg-emerald-700/10 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-200",
         tone === "broken" &&
-          "border-rose-500/50 bg-rose-500/10 text-rose-200",
+          "border-rose-700/50 bg-rose-700/10 text-rose-800 dark:border-rose-500/50 dark:bg-rose-500/10 dark:text-rose-200",
         tone === "unknown" &&
-          "border-amber-500/40 bg-amber-500/10 text-amber-200",
+          "border-amber-700/40 bg-amber-700/10 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200",
       )}
     >
       <div className="flex items-center gap-2">
@@ -113,7 +123,7 @@ export function ChainStatusBanner() {
           </span>
         )}
         {s.status === "broken" && s.last_error && (
-          <span className="text-rose-300/90 truncate max-w-[60ch]">
+          <span className="text-rose-800/85 dark:text-rose-300/90 truncate max-w-[60ch]">
             · {s.last_error}
             {s.last_verified_seq > 0 && (
               <>
@@ -146,7 +156,9 @@ export function ChainStatusBanner() {
 
 // Tiny per-row glyph variant used by the audit-entry list. Same
 // color tone, no border / background — meant to fit inside an
-// existing row rather than draw its own banner.
+// existing row rather than draw its own banner. Light/dark uses
+// the same per-tone split as the banner above so the glyph stays
+// legible on either canvas.
 export function ChainStatusIcon({
   status,
 }: {
@@ -154,10 +166,10 @@ export function ChainStatusIcon({
 }) {
   const cls =
     status === "ok"
-      ? "text-emerald-400"
+      ? "text-emerald-700 dark:text-emerald-400"
       : status === "broken"
-        ? "text-rose-400"
-        : "text-amber-400";
+        ? "text-rose-700 dark:text-rose-400"
+        : "text-amber-700 dark:text-amber-400";
   const glyph = status === "ok" ? "✓" : status === "broken" ? "✗" : "?";
   return (
     <span
