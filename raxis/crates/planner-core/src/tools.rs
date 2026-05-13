@@ -46,7 +46,6 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::ToolSpec;
-use crate::tool_audit::ToolAuditSink;
 
 // ---------------------------------------------------------------------------
 // ToolOutput / ToolError / Tool trait
@@ -159,7 +158,7 @@ pub trait Tool: Send + Sync {
 
 /// Per-execution context the dispatch loop hands to every tool
 /// invocation.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ToolContext {
     /// Workspace root the planner is operating in (the per-session
     /// VM's worktree mount, e.g. `/workspace`). Tool path inputs
@@ -171,28 +170,6 @@ pub struct ToolContext {
     /// surface a structured-error output rather than blocking the
     /// dispatch loop indefinitely.
     pub deadline:       Option<Duration>,
-    /// Optional tool-side audit sink. Credential-bearing tools
-    /// (`postgres_query`, `mongo_query`, `redis_query`, `smtp_send`)
-    /// emit a `ToolAuditEvent` after every invocation when a sink is
-    /// installed. The sink is best-effort observability — the tool's
-    /// correctness MUST NOT depend on it being installed. Tests
-    /// install a [`crate::tool_audit::RecordingAuditSink`] to assert
-    /// against the sanitized event shape; production binaries install
-    /// a sink that forwards to the planner's tracing pipeline.
-    pub tool_audit_sink: Option<Arc<dyn ToolAuditSink>>,
-}
-
-impl std::fmt::Debug for ToolContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolContext")
-            .field("workspace_root", &self.workspace_root)
-            .field("deadline", &self.deadline)
-            .field(
-                "tool_audit_sink",
-                &self.tool_audit_sink.as_ref().map(|_| "<installed>"),
-            )
-            .finish()
-    }
 }
 
 impl ToolContext {
@@ -200,17 +177,9 @@ impl ToolContext {
     /// that don't exercise the timeout path.
     pub fn for_workspace(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
-            workspace_root:  workspace_root.into(),
-            deadline:        None,
-            tool_audit_sink: None,
+            workspace_root: workspace_root.into(),
+            deadline:       None,
         }
-    }
-
-    /// Install an audit sink on this context. Builder-style so a
-    /// caller can chain `ToolContext::for_workspace(p).with_audit_sink(s)`.
-    pub fn with_audit_sink(mut self, sink: Arc<dyn ToolAuditSink>) -> Self {
-        self.tool_audit_sink = Some(sink);
-        self
     }
 }
 
@@ -497,16 +466,7 @@ impl Tool for EditFileTool {
 /// is reported in the trailing line.
 ///
 /// **Hardening note.** The reviewer role does NOT include this
-/// tool — see [`build_reviewer_registry`]. The executor role ALSO
-/// does NOT spawn the real `BashTool`: the executor rootfs is
-/// planner-binary-only by design (no `/bin/bash`), and the
-/// stub-shaped [`ExecutorBashStub`] is registered under the name
-/// `bash` instead so the model gets an actionable steering message
-/// pointing it at the structured DB / mail tools
-/// (`postgres_query`, `mongo_query`, `redis_query`, `smtp_send`).
-/// `BashTool` itself remains available for host-side / out-of-VM
-/// integrations where the executable IS present (operator-driven
-/// scripts, integration test fixtures, etc.).
+/// tool — see [`build_reviewer_registry`].
 pub struct BashTool;
 
 #[async_trait::async_trait]
@@ -590,84 +550,6 @@ impl Tool for BashTool {
             // body via the dispatch loop.
             Ok(ToolOutput { content: body, is_error: Some(true) })
         }
-    }
-}
-
-/// `bash` — actionable-error stub for the executor role.
-///
-/// The canonical executor rootfs is planner-binary-only by design
-/// (`Cargo.toml §51-58` — the binary is statically linked and the
-/// VM image ships only that one executable, no `/bin/bash` and no
-/// coreutils). Before this stub the executor registry registered
-/// the real [`BashTool`], which then failed every invocation with
-/// `spawn failed: No such file or directory (os error 2)` —
-/// indistinguishable to the model from a transient error, so the
-/// LLM retried indefinitely and burnt the crash budget.
-///
-/// **Option B** of the executor-tool-registry remediation: keep the
-/// `bash` name registered (so any test / operator expectation that
-/// `bash` exists in the executor registry still holds) but replace
-/// the impl with a structured error pointing the LLM at the right
-/// structured tools. The first time the model invokes `bash` it
-/// gets a clear nudge ("use postgres_query / mongo_query / ..."),
-/// so it discovers the structured tools mid-conversation.
-///
-/// Returns the same `{error_class: "BashUnavailable", message: ...}`
-/// shape the four credential-bearing tools use, so the dispatch loop
-/// + audit chain treat it uniformly with the rest of the structured
-/// failure surface.
-pub struct ExecutorBashStub;
-
-#[async_trait::async_trait]
-impl Tool for ExecutorBashStub {
-    fn name(&self) -> &'static str { "bash" }
-    fn description(&self) -> &'static str {
-        "DISABLED in the executor rootfs. The executor VM image is \
-         planner-binary-only by design — `/bin/bash` is not present \
-         and never will be. Use the structured tools instead: \
-         `postgres_query` / `mongo_query` / `redis_query` / \
-         `smtp_send` for database / mail access; `read_file` / \
-         `edit_file` / `grep_search` for filesystem work; \
-         `git_commit` for VCS work; `task_complete` / \
-         `report_failure` / `single_commit` to terminate the turn."
-    }
-    fn input_schema(&self) -> serde_json::Value {
-        // Match the original BashTool schema so an LLM that has
-        // pre-learned the `bash` shape still produces a syntactically
-        // valid invocation (which then gets the actionable steering
-        // message rather than a schema-rejection error).
-        serde_json::json!({
-            "type":     "object",
-            "required": ["command"],
-            "properties": {
-                "command": {
-                    "type":        "string",
-                    "description": "Ignored. `bash` is disabled in the \
-                                   executor rootfs; the structured \
-                                   tools listed in this tool's \
-                                   description are the supported \
-                                   surface.",
-                }
-            }
-        })
-    }
-    async fn execute(
-        &self,
-        _input: &serde_json::Value,
-        _ctx:   &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let body = serde_json::json!({
-            "error_class": "BashUnavailable",
-            "message":     "bash is not available in the executor rootfs \
-                            (planner-binary-only by design). Use the \
-                            structured tools: `postgres_query`, \
-                            `mongo_query`, `redis_query`, `smtp_send` \
-                            for database / mail access; `read_file`, \
-                            `edit_file`, `grep_search`, `git_commit` \
-                            for filesystem / VCS work. Re-issue your \
-                            request using one of these tools."
-        });
-        Ok(ToolOutput::err(body.to_string()))
     }
 }
 
@@ -1632,24 +1514,9 @@ pub fn build_executor_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(EditFileTool));
-    // `bash` is registered as an actionable-error stub — the canonical
-    // executor rootfs ships no `/bin/bash`, so the real [`BashTool`]
-    // would always fail with `ENOENT`. The stub returns a structured
-    // error message that points the LLM at the structured DB / mail
-    // tools (`postgres_query` / `mongo_query` / `redis_query` /
-    // `smtp_send`). See [`ExecutorBashStub`] for the rationale.
-    r.register(Arc::new(ExecutorBashStub));
+    r.register(Arc::new(BashTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(GitCommitTool));
-    // Credential-proxy structured tools (INV-EXEC-TOOL-REGISTRY-01).
-    // Each tool dials the loopback URL the kernel session-spawn
-    // path stamps into the VM env (`DATABASE_URL` / `MONGO_URL` /
-    // `REDIS_URL` / `SMTP_URL`); the host-side credential proxy
-    // handles upstream auth + TLS.
-    r.register(Arc::new(crate::tools_postgres::PostgresQueryTool));
-    r.register(Arc::new(crate::tools_mongo::MongoQueryTool));
-    r.register(Arc::new(crate::tools_redis::RedisQueryTool));
-    r.register(Arc::new(crate::tools_smtp::SmtpSendTool));
     // V2 §3.1 — disabled by default; the planner-binary main.rs
     // overrides via [`build_executor_registry_with_sleep`] when the
     // operator policy declares `[budget.sleep_caps]`.
@@ -1712,15 +1579,9 @@ pub fn build_executor_registry_with_sleep(
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(EditFileTool));
-    // `bash` is the actionable-error stub; see `build_executor_registry`.
-    r.register(Arc::new(ExecutorBashStub));
+    r.register(Arc::new(BashTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(GitCommitTool));
-    // Credential-proxy structured tools (INV-EXEC-TOOL-REGISTRY-01).
-    r.register(Arc::new(crate::tools_postgres::PostgresQueryTool));
-    r.register(Arc::new(crate::tools_mongo::MongoQueryTool));
-    r.register(Arc::new(crate::tools_redis::RedisQueryTool));
-    r.register(Arc::new(crate::tools_smtp::SmtpSendTool));
     r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(TaskCompleteTool));
@@ -1809,87 +1670,6 @@ mod tests {
         // via `[budget.sleep_caps]`).
         assert!(r.get("sleep").is_some(),
             "executor registry MUST include the sleep tool (V2 §3.1)");
-    }
-
-    /// **INV-EXEC-TOOL-REGISTRY-01.** Every credential-proxied
-    /// service the planner-core binary links a client for MUST be
-    /// reachable via a structured tool from the executor registry.
-    /// The kernel session-spawn path stamps loopback URLs for these
-    /// proxies (`DATABASE_URL` / `MONGO_URL` / `REDIS_URL` /
-    /// `SMTP_URL`); without the matching tool the LLM has no way to
-    /// reach the upstream and tries `bash` instead, burning the
-    /// crash budget.
-    #[test]
-    fn executor_registry_exposes_credential_proxy_tools() {
-        let r = build_executor_registry();
-        assert!(r.get("postgres_query").is_some(),
-            "executor registry MUST include postgres_query (tokio-postgres) — \
-             INV-EXEC-TOOL-REGISTRY-01");
-        assert!(r.get("mongo_query").is_some(),
-            "executor registry MUST include mongo_query (mongodb) — \
-             INV-EXEC-TOOL-REGISTRY-01");
-        assert!(r.get("redis_query").is_some(),
-            "executor registry MUST include redis_query (redis) — \
-             INV-EXEC-TOOL-REGISTRY-01");
-        assert!(r.get("smtp_send").is_some(),
-            "executor registry MUST include smtp_send (lettre) — \
-             INV-EXEC-TOOL-REGISTRY-01");
-    }
-
-    /// The `_with_sleep` constructor MUST also include the
-    /// credential-proxy tools — operator-policy-enabled sleep
-    /// shouldn't drop the structured DB / mail surface.
-    #[test]
-    fn executor_registry_with_sleep_exposes_credential_proxy_tools() {
-        let r = build_executor_registry_with_sleep(60, 300);
-        assert!(r.get("postgres_query").is_some());
-        assert!(r.get("mongo_query").is_some());
-        assert!(r.get("redis_query").is_some());
-        assert!(r.get("smtp_send").is_some());
-    }
-
-    /// The reviewer + orchestrator registries MUST NOT include the
-    /// credential-proxy tools. Those tools require credentials to be
-    /// stamped into the env, which only the executor's session-spawn
-    /// path does. The role-asymmetry guarantee.
-    #[test]
-    fn reviewer_and_orchestrator_registries_exclude_credential_proxy_tools() {
-        for (name, r) in [
-            ("reviewer", build_reviewer_registry()),
-            ("orchestrator", build_orchestrator_registry()),
-        ] {
-            for tool in ["postgres_query", "mongo_query", "redis_query", "smtp_send"] {
-                assert!(r.get(tool).is_none(),
-                    "{name} registry MUST NOT include `{tool}` — credentials \
-                     are only stamped into the executor's session env");
-            }
-        }
-    }
-
-    /// The executor's `bash` registration is the `ExecutorBashStub`
-    /// actionable-error variant. It MUST return a structured error
-    /// shape pointing the LLM at the structured DB / mail tools so
-    /// the LLM discovers `postgres_query` / `mongo_query` /
-    /// `redis_query` / `smtp_send` mid-conversation rather than
-    /// burning the crash budget on `bash: ENOENT` retries.
-    #[tokio::test]
-    async fn executor_bash_stub_returns_actionable_error() {
-        let r   = build_executor_registry();
-        let t   = r.get("bash").expect("bash MUST be registered");
-        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
-        let out = t.execute(
-            &serde_json::json!({ "command": "psql -c 'SELECT 1'" }),
-            &ctx,
-        ).await.unwrap();
-        assert_eq!(out.is_error, Some(true),
-            "bash stub MUST return a structured error");
-        let body: serde_json::Value = serde_json::from_str(&out.content).unwrap();
-        assert_eq!(body["error_class"], "BashUnavailable");
-        for hint in ["postgres_query", "mongo_query", "redis_query", "smtp_send"] {
-            assert!(body["message"].as_str().unwrap().contains(hint),
-                "stub error MUST mention `{hint}` so the LLM discovers it; \
-                 got: {}", body["message"]);
-        }
     }
 
     #[test]

@@ -52,58 +52,6 @@ base64      = { workspace = true }
 # error, which is the correct fail-closed behaviour).
 tokio-vsock = { workspace = true, optional = true }
 
-# ── Executor DB / mail credential-proxy clients ──────────────────────
-#
-# The executor planner binary speaks the canonical wire protocol of
-# each credential-proxied service so the in-guest agent can issue
-# structured queries (postgres_query / mongo_query / redis_query /
-# smtp_send) against the loopback `127.0.0.1:<port>` URLs the
-# `CredentialProxyManager::loopback_env()` stamps into the VM's
-# environment. The proxies on the host handle the real credential
-# substitution + upstream auth (mTLS where applicable); the in-VM
-# clients only need plaintext loopback connectivity, so we keep
-# TLS features out of the build whenever the driver supports it.
-#
-# `tokio-postgres` is pinned to the same `0.7` line the
-# `raxis-credential-proxy-postgres` test fixtures use, so the agent's
-# wire shape and the proxy's wire shape stay in lockstep.
-tokio-postgres = "0.7"
-# `mongodb` 3.x default-features pull in `compat-3-0-0` (BSON 2-compat
-# shim) and `rustls-tls`. We disable the compat shim (we link bson 2.x
-# directly via the driver's re-export) and keep `rustls-tls` because
-# the driver requires SOME TLS feature to compile, even when every URI
-# we dial is plaintext loopback (`mongodb://127.0.0.1:<port>/`).
-mongodb        = { version = "3", default-features = false, features = ["rustls-tls", "bson-3", "compat-3-3-0"] }
-# `redis` async client. `tokio-comp` wires the runtime; `aio` is
-# already pulled in transitively but listed explicitly so the
-# `AsyncCommands` trait is in scope. We do NOT enable any TLS feature
-# — the proxy is on loopback and the proxy speaks TLS upstream.
-redis          = { version = "0.27", default-features = false, features = ["tokio-comp", "aio"] }
-# `lettre` SMTP client. `tokio1` is the runtime adapter;
-# `smtp-transport` is the AsyncSmtpTransport; `builder` is the
-# `Message::builder()` shape. No TLS feature — the proxy handles
-# STARTTLS / implicit TLS upstream; the in-VM client speaks plaintext
-# to the loopback listener.
-lettre         = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1"] }
-# `bytes::BytesMut` is the buffer type tokio-postgres' `ToSql` trait
-# uses to serialize parameter values onto the wire. Pinned to the
-# same `1` major-line the proxy crates depend on so the workspace
-# resolves a single bytes version.
-bytes          = "1"
-# `bson` direct dep — same `3.1` line `mongodb` pulls in transitively;
-# cargo unifies the two onto a single rlib. The explicit
-# `serde_json-1` feature is what lights up `Bson::into_relaxed_extjson`
-# and `bson::serialize_to_document(&serde_json::Value)`, which is the
-# JSON↔BSON bridge `mongo_query` uses to keep `serde_json::Value`s
-# (the canonical tool I/O shape) round-tripping cleanly through
-# `mongodb::Collection::<Document>` operations.
-bson           = { version = "3.1", default-features = false, features = ["serde", "serde_json-1"] }
-# `futures-util` provides the `TryStreamExt::try_next` adapter the
-# `mongodb::Cursor<Document>` stream needs to be consumed inside
-# `mongo_query`'s row-cap loop. No runtime; we only pull in the
-# stream combinator surface.
-futures-util   = { version = "0.3", default-features = false, features = ["std"] }
-
 # `libc` is used by `guest_init::mount_pid1_essentials` to invoke
 # the `mount(2)` syscall directly. Linux-only — on macOS / other
 # the `guest_init` module compiles to a no-op via `cfg(target_os
