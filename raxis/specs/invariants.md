@@ -2699,7 +2699,7 @@ substitution_round_trip` witness in the realism extended e2e.
 
 ---
 
-## §11.9 — Dashboard surface (INV-DASHBOARD-* / INV-AUDIT-DASHBOARD-* / INV-AUDIT-OPERATOR-*)
+## §11.9 — Dashboard surface (INV-DASHBOARD-* / INV-AUDIT-DASHBOARD-* / INV-AUDIT-OPERATOR-* / INV-NOTIF-SCOPE-*)
 
 The dashboard is a privileged read surface over kernel state
 plus a narrow mutating surface (policy advance, mark-read).
@@ -2804,6 +2804,77 @@ clicked, action ran". A single-class enum keeps the
 discriminant small enough for dashboards to render directly.
 
 **Canonical home.** `v2/dashboard-hardening.md §2.2`.
+
+### INV-NOTIF-SCOPE-01 — Notifications are a strict subset of audit events
+
+**Statement.** The operator-notifications inbox is a strict
+projection of the audit chain — every notification corresponds
+to exactly one audit event, but not every audit event creates a
+notification. The mapping
+`AuditEventKind → Option<NotificationPriority>` is defined by
+`notification_priority` in
+`crates/dashboard-kernel/src/notification_filter.rs` and is
+EXHAUSTIVE over `raxis_audit_tools::AuditEventKind`. Operator-
+initiated dashboard actions (`OperatorNotificationMarkedRead`,
+`OperatorNotificationsMarkedAllRead`,
+`OperatorNotificationViewed`, `OperatorWorktreeAccessed`,
+`OperatorDiffViewed`, `OperatorFileContentFetched`,
+`OperatorAuditChainReverified`, `OperatorHealthQueried`) are
+recorded in the audit chain but MUST NOT create notifications.
+The notification priority bucket is one of `Critical`, `High`,
+`Medium`, `Low`, or `None` (the audit-only sentinel); rows with
+`None` are dropped at notification dispatch and never reach the
+inbox SQLite table or `inbox.jsonl`.
+
+**Two-layer filter, one source of truth.** The filtering happens
+at two sites for defence-in-depth, but both sites consult the
+same exhaustive match (typed twin
+`notification_priority(&AuditEventKind)` and string twin
+`notification_priority_for_kind_str(&str)`, locked against
+divergence by the `typed_and_string_apis_agree_on_all_constructed_variants`
+unit test):
+
+  1. `kernel/src/notifications/sink.rs::NotifyingAuditSink::emit`
+     — primary gate. Skips ALL inbox-side I/O (SQLite insert,
+     `inbox.jsonl` append, SSE fan-out) when priority is `None`.
+  2. `kernel/src/notifications/mod.rs::dispatch` — defence-in-
+     depth. Re-applies the str-keyed filter so any caller that
+     bypasses `NotifyingAuditSink` still cannot poison the inbox.
+
+The audit-sink upstream is unaffected by either filter: every
+event still reaches the chain. This is what `notifications-as-
+strict-subset` means in practice.
+
+**Append-only enum discipline.** Adding a new
+`AuditEventKind` variant requires extending both
+`notification_priority` arms — Rust's exhaustive match enforces
+this at compile time. Removing or reordering existing variants
+is forbidden by the workspace-wide append-only enum convention.
+
+**Justification.** Operators who see their own clicks reflected
+back as inbox rows ("you marked notification X as read", "you
+viewed diff Y", "you reverified the chain") drown in noise and
+miss the genuinely-important signals — escalations awaiting
+approval, session-VM final failures, audit-chain integrity
+violations. The audit chain is the forensic surface; the
+notifications inbox is the attention surface. Conflating them
+trades a useful inbox for a redundant audit log.
+
+The exhaustive `match` keeps the taxonomy a one-place-edit
+contract: a new kernel event cannot land in production without a
+deliberate decision about whether it deserves operator
+attention. The two-layer filter prevents accidental rebleed if
+a future contributor adds a side-channel into the dispatch path
+that bypasses `NotifyingAuditSink`.
+
+**Reset path (dev-mode).** `cargo xtask dev-reset notifications`
+truncates the `notifications` SQLite table and removes
+`<data_dir>/notifications/inbox.jsonl` so the operator can clear
+pre-filter rows from earlier dev runs. The command NEVER
+touches `<data_dir>/audit/`; an integration test asserts the
+audit-segment file is byte-identical before/after.
+
+**Canonical home.** `v2/dashboard-hardening.md §2.6`.
 
 ### INV-DASHBOARD-VALIDATE-01 — Validation precedes every side effect and privileged read
 

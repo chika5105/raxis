@@ -294,6 +294,96 @@ no per-tile link is invented.
 
 ---
 
+## 2.6. Audit chain ≠ notifications inbox (`INV-NOTIF-SCOPE-01`)
+
+The audit chain and the operator-notifications inbox are two
+distinct surfaces with two distinct contracts. Conflating them
+is the bug `INV-NOTIF-SCOPE-01` exists to prevent.
+
+| Surface                | Audit chain                                                    | Notifications inbox                                     |
+|------------------------|----------------------------------------------------------------|---------------------------------------------------------|
+| Purpose                | Forensic-grade record of EVERY operator action + system event  | Operator-attention surface — "do I need to act?"        |
+| Append discipline      | Append-only, hash-chained, never filtered                      | Filtered projection — strict subset of audit events     |
+| Rendered at            | `/audit` page + `raxis_audit_tools::ChainReader`               | `/notifications` page + sidebar badge count             |
+| Has `read` / mark-read | NO — reading is non-mutating                                   | YES — `PATCH /api/notifications/:id/read`               |
+| Operator-action events | INCLUDED (every `Operator*` kind from §2.2)                    | EXCLUDED (operators don't notify themselves)            |
+| Source of truth        | `raxis-audit-tools` chain at `<data_dir>/audit/`               | `kernel.db::notifications` table + `inbox.jsonl`        |
+| Wipe semantics         | Never wiped — moving a kernel forward never destroys forensics | Wipeable in dev via `cargo xtask dev-reset notifications` |
+
+**The taxonomy lives in code, not docs.** The mapping
+`AuditEventKind → Option<NotificationPriority>` is defined by
+`notification_priority` in
+`crates/dashboard-kernel/src/notification_filter.rs` and is
+EXHAUSTIVE — adding a new `AuditEventKind` variant to
+`raxis_audit_tools::event::AuditEventKind` REQUIRES extending
+both the typed match and its str-keyed companion
+`notification_priority_for_kind_str`, or the workspace fails to
+compile (`#[deny(unreachable_patterns)]` + the type's lack of
+`#[non_exhaustive]` both pin this).
+
+**Filter sites — defence-in-depth.** Two gates drop non-notifying
+events:
+
+1. `kernel/src/notifications/sink.rs::NotifyingAuditSink::emit`
+   — primary filter. Computes
+   `notification_priority(&kind)` BEFORE any inbox-side I/O
+   (no SQLite write, no `inbox.jsonl` append, no SSE
+   fan-out). The audit-sink upstream is unaffected — the event
+   is still appended to the chain.
+2. `kernel/src/notifications/mod.rs::dispatch` — string-keyed
+   defence-in-depth. Recomputes
+   `notification_priority_for_kind_str(&event.event_kind)` and
+   short-circuits if `None`. This catches any caller that
+   bypasses the typed sink (e.g. test helpers wiring a raw
+   audit envelope into the dispatcher).
+
+**Categories that MUST NOT notify** (audit-only):
+
+  * Every `Operator*` event from §2.2 (mark-read, view-diff,
+    view-file, view-worktree, chain-reverify, view-health).
+  * Routine lifecycle events (`SessionVmSpawned`, `SessionCreated`,
+    `TaskAdmitted`, `TaskStateChanged`,
+    `IntentAccepted` / `IntentRejected`,
+    `CredentialProxyStarted`,
+    `DefaultProviderEgressApplied`, `KernelPushEnqueued`,
+    `PushAttempted`, `NotificationDelivered`, …).
+  * High-volume I/O events (`DatabaseQueryExecuted`,
+    `HttpProxyRequestExecuted`, `RedisCommandExecuted`,
+    `MongoCommandExecuted`, `SmtpMessageRelayed`, all
+    cloud-credential serve / cache events).
+
+**Categories that DO notify** are split across four priority
+buckets:
+
+  * **Critical** — chain integrity, isolation refusal,
+    breakglass, security violation, replay rejection,
+    operator-cert revocation, disk-full halt, lineage /
+    initiative quarantine, …
+  * **High** — escalation submitted / timed out,
+    `OperatorAttentionRequired`, witness rejected, verifier
+    crash, gateway crash / quarantine, push failed, plan
+    rejected, initiative aborted, certificate expiring soon, …
+  * **Medium** — kernel started / stopped, policy advanced,
+    plan approved, escalation approved / denied, witness
+    accepted, integration merge completed, push completed,
+    review aggregation completed, …
+  * **Low** — disk healthy after full, admission deferred at
+    cap, gateway respawn, git-consistency verified.
+
+**Operational consequence.** The notification surface is a
+strict subset of the audit chain — by construction, by exhaustive
+match, and by the two-layer defence-in-depth filter. Operators
+look at `/notifications` to know what needs them; they look at
+`/audit` for the complete record (including their own actions).
+
+**Reset path (dev-mode).** `cargo xtask dev-reset notifications`
+truncates the `notifications` SQLite table and removes
+`<data_dir>/notifications/inbox.jsonl`. It NEVER touches
+`<data_dir>/audit/`; the command's smoke test asserts the
+audit-segment file is byte-identical before/after.
+
+---
+
 ## 3. SSE reconnection contract (frontend-facing)
 
 * Endpoint: `GET /api/sessions/:id/stream`.
