@@ -286,6 +286,40 @@ alongside the `tasks` row in the same transaction (INV-STORE-02). Only Executor 
 tasks have rows here; Orchestrator tasks do not, because the Orchestrator is activated by the
 Kernel at initiative start, not by another agent.
 
+**Activation-FSM cascade rule (V2.5 hardening — `c986e6d` + `09222b8`).** The
+activation FSM mirrors the parent task FSM: whenever a `tasks.state` transition
+enters a terminal state, the kernel MUST close out any matching
+`subtask_activations` row whose `activation_state = 'Active'` in the **same
+SQLite transaction**. Two call sites are load-bearing:
+
+1. `transition_task_in_tx` (the single source of truth for task FSM mutations
+   on Failed / Aborted / Cancelled edges) cascades:
+
+   | Task terminal      | Activation terminal | Notes                                 |
+   |--------------------|---------------------|---------------------------------------|
+   | `Completed`        | `Completed`         | Reached when `commit_task_completion` (rare path) routes through `transition_task_in_tx`. |
+   | `Failed`           | `Failed`            | The common `handle_report_failure` path. |
+   | `Aborted`          | `Failed`            | Operator-driven abort. The activation FSM has no `Aborted` variant; the operator distinction is preserved on `tasks.actor` / `tasks.block_reason`. |
+   | `Cancelled`        | `Failed`            | Cancellation by the kernel (e.g., upstream task failure cascade). Same activation collapse as Aborted. |
+
+2. `commit_task_completion` (the happy-path Running → Completed flip whose own
+   transaction does NOT go through `transition_task_in_tx`) mirrors the same
+   `UPDATE subtask_activations SET activation_state = 'Completed',
+   terminated_at = ? WHERE task_id = ? AND activation_state = 'Active'` inside
+   the single-tx contract.
+
+The `WHERE activation_state = 'Active'` filter is the idempotency guard:
+a recovery-sweep re-emit on top of an already-terminal row is a no-op, and
+`PendingActivation` rows are intentionally untouched (the
+Migration 5 CHECK constraint forbids stamping `PendingActivation` rows as
+terminal directly — the `RetrySubTask` happy path inserts a fresh
+`PendingActivation` row instead). Without this cascade the orchestrator's
+post-exit respawn storm-guard (`aafd4f2`) sees a stale `Active` row on a
+sibling completed task and refuses to re-spawn, stranding the initiative.
+Pin: `kernel/src/initiatives/task_transitions.rs` (cascade for the Failed /
+Aborted / Cancelled edges) + `kernel/src/handlers/intent.rs::
+commit_task_completion` (cascade for the Completed edge).
+
 ---
 
 ### Step 6: `session_agent_type` and `can_delegate` as Orthogonal Fields
