@@ -92,6 +92,7 @@ pub mod tool_audit;
 pub mod tools;
 pub mod tools_mongo;
 pub mod tools_postgres;
+pub mod tools_redis;
 pub mod transport;
 
 pub use custom_tools::{
