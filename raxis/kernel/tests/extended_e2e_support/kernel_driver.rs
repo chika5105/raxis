@@ -1457,20 +1457,40 @@ pub fn realistic_lifecycle_deadline() -> Duration {
 /// Poll the audit chain until BOTH `initiative_ids` emit
 /// `IntegrationMergeCompleted`. Surfaces `SecurityViolation`
 /// instantly. Returns the merged chain at completion.
+///
+/// **Fast-fail on terminal spawn failure** (extension of
+/// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`):
+/// the kernel emits a structured `orchestrator_spawn_failed`
+/// JSON line on `stderr` after exhausting its transient-retry
+/// budget for a session VM. Once that event lands for one of
+/// the watched initiatives the lifecycle cannot make further
+/// progress without an operator command (`recovery::reconcile`
+/// is not driven by the harness), so polling further is a
+/// guaranteed indefinite wait. The harness scans
+/// `<data_dir>/kernel.stderr.log` for the matching JSON token
+/// on every poll iteration and panics immediately with the
+/// kernel's own `error` + `hint` fields surfaced so the
+/// operator sees the root cause in seconds instead of waiting
+/// 30 min for [`realistic_lifecycle_deadline`].
+///
+/// The bound on filesystem reads is the deadline itself: the
+/// scan reads `kernel.stderr.log` at most once per 500 ms
+/// (the existing poll cadence) and never blocks on a pipe —
+/// `read_to_string` against a regular file is bounded by the
+/// file size which the kernel caps via its log rotation.
 pub fn poll_for_dual_lifecycle_completion(
     data_dir: &Path,
     initiative_ids: [&str; 2],
     deadline: Duration,
 ) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
+    let stderr_path = data_dir.join("kernel.stderr.log");
     let start = Instant::now();
     let mut last_len = 0usize;
     loop {
         if start.elapsed() > deadline {
-            let stderr_path = audit_dir.parent().map(|p| p.join("kernel.stderr.log"));
-            let stderr_tail = stderr_path
-                .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
+            let stderr_tail = std::fs::read_to_string(&stderr_path)
+                .ok()
                 .map(|s| {
                     let lines: Vec<&str> = s.lines().collect();
                     let n = lines.len();
@@ -1488,6 +1508,45 @@ pub fn poll_for_dual_lifecycle_completion(
                 last_len,
                 summarize_chain_for_panic(&audit_dir),
                 stderr_tail,
+            );
+        }
+
+        // Fast-fail on terminal `orchestrator_spawn_failed` for either
+        // watched initiative. See the function-level docstring for the
+        // rationale; without this branch a substrate that fails every
+        // spawn attempt (e.g. an apple-vz host that cannot map the
+        // canonical image because the kernel's trust anchor is
+        // unpopulated and the verifier silently degraded to
+        // `RootfsErofs`) leaves the test waiting the full
+        // [`realistic_lifecycle_deadline`] for an event that will
+        // never arrive.
+        if let Some((bad_initiative, error, hint)) =
+            scan_stderr_for_terminal_orchestrator_spawn_failed(
+                &stderr_path,
+                &initiative_ids,
+            )
+        {
+            let stderr_tail = std::fs::read_to_string(&stderr_path)
+                .ok()
+                .map(|s| {
+                    let lines: Vec<&str> = s.lines().collect();
+                    let n = lines.len();
+                    let take = n.min(60);
+                    lines[n.saturating_sub(take)..].join("\n")
+                })
+                .unwrap_or_else(|| "<no kernel.stderr.log on disk>".to_owned());
+            panic!(
+                "kernel emitted terminal `orchestrator_spawn_failed` \
+                 for initiative {bad_initiative} after exhausting its \
+                 transient-retry budget; the lifecycle cannot complete \
+                 without operator-driven recovery, so the harness will \
+                 not poll further (would be a guaranteed indefinite \
+                 wait per INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01).\n\
+                 \n\
+                 kernel.error: {error}\n\
+                 kernel.hint:  {hint}\n\
+                 \n\
+                 ── kernel.stderr (tail) ──\n{stderr_tail}",
             );
         }
 
@@ -1526,6 +1585,72 @@ pub fn poll_for_dual_lifecycle_completion(
 
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Scan `kernel.stderr.log` for the kernel's terminal
+/// `orchestrator_spawn_failed` JSON line bound to one of
+/// `watched_initiatives`. Returns
+/// `(initiative_id, error, hint)` on the first match, `None`
+/// otherwise.
+///
+/// The shape we match on (verbatim from
+/// `kernel/src/initiatives/orchestrator_spawn.rs`):
+///
+/// ```jsonc
+/// {"level":"error","event":"orchestrator_spawn_failed",
+///  "initiative_id":"019e20c9-…","session_id":"…",
+///  "error":"session-spawn failed: …",
+///  "hint":"PlanApproved was committed; …"}
+/// ```
+///
+/// We intentionally do NOT match on
+/// `session_vm_transient_retry` — those are mid-flight retries
+/// the kernel may still resolve. Only `orchestrator_spawn_failed`
+/// is a *terminal* state for the boot path.
+fn scan_stderr_for_terminal_orchestrator_spawn_failed(
+    stderr_path:        &Path,
+    watched_initiatives: &[&str; 2],
+) -> Option<(String, String, String)> {
+    let bytes = std::fs::read(stderr_path).ok()?;
+    for line in bytes.split(|&b| b == b'\n') {
+        if line.is_empty() { continue; }
+        // Cheap pre-filter so we don't parse every line as JSON.
+        if !memmem(line, b"\"orchestrator_spawn_failed\"") { continue; }
+        let value: serde_json::Value = match serde_json::from_slice(line) {
+            Ok(v)  => v,
+            Err(_) => continue,
+        };
+        if value.get("event").and_then(|e| e.as_str())
+            != Some("orchestrator_spawn_failed")
+        {
+            continue;
+        }
+        let initiative_id = match value.get("initiative_id")
+            .and_then(|i| i.as_str()) {
+            Some(s) => s.to_owned(),
+            None    => continue,
+        };
+        if !watched_initiatives.iter().any(|w| *w == initiative_id) {
+            continue;
+        }
+        let error = value.get("error").and_then(|e| e.as_str())
+            .unwrap_or("<no `error` field on orchestrator_spawn_failed>")
+            .to_owned();
+        let hint = value.get("hint").and_then(|h| h.as_str())
+            .unwrap_or("<no `hint` field on orchestrator_spawn_failed>")
+            .to_owned();
+        return Some((initiative_id, error, hint));
+    }
+    None
+}
+
+/// Byte-level substring search. Cheap pre-filter so the polling
+/// loop doesn't pay JSON-parse cost on every stderr line.
+fn memmem(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 pub fn read_audit_chain(audit_dir: &Path) -> Result<Vec<AuditEvent>, ()> {
@@ -1771,5 +1896,127 @@ mod tests {
             "block must not include legacy `endpoint = ...`");
         assert!(!block.contains("resource_attributes"),
             "block must not include legacy `resource_attributes = {{...}}`");
+    }
+
+    // ─── orchestrator_spawn_failed fast-fail watchdog ───────────────
+    //
+    // Regression tests for the audit-poll fast-fail extension of
+    // `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`.
+    //
+    // The scanner is a pure function over a stderr-log file plus the
+    // two watched `initiative_id`s; we synthesise the kernel's exact
+    // JSON shape in a tempdir and assert detection vs. non-detection
+    // on the lines that matter.
+
+    /// The kernel emits `orchestrator_spawn_failed` for an initiative
+    /// the harness is waiting on → scan returns `Some` with the
+    /// kernel's `error` + `hint` fields surfaced verbatim.
+    #[test]
+    fn scan_stderr_matches_terminal_spawn_failed_for_watched_initiative() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("kernel.stderr.log");
+        let initiative_a = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+        let initiative_b = "019e20c9-e093-7052-a0d1-1ca53d8b8fd8";
+        let body = format!(
+            "{{\"level\":\"info\",\"event\":\"session_vm_transient_retry\",\
+              \"session_id\":\"sess-1\",\"attempt\":1}}\n\
+             {{\"level\":\"error\",\"event\":\"orchestrator_spawn_failed\",\
+              \"initiative_id\":\"{initiative_b}\",\"session_id\":\"sess-7\",\
+              \"error\":\"session-spawn failed: apple-vz-14.x: \
+              block device rootfs: Invalid disk image. The disk image \
+              format is not recognized.\",\
+              \"hint\":\"PlanApproved was committed; recovery::reconcile \
+              or a follow-up operator command is needed to drive the \
+              orchestrator boot once the substrate is available\"}}\n",
+        );
+        std::fs::write(&log, body).expect("write stderr fixture");
+
+        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+            &log,
+            &[initiative_a, initiative_b],
+        )
+        .expect("scanner must surface the matching line");
+        assert_eq!(hit.0, initiative_b,
+            "initiative_id of the matched line must surface verbatim");
+        assert!(hit.1.contains("Invalid disk image"),
+            "kernel `error` field must propagate to the panic body \
+             (got: {})", hit.1);
+        assert!(hit.2.contains("recovery::reconcile"),
+            "kernel `hint` field must propagate so the operator sees \
+             the kernel's own remediation hint (got: {})", hit.2);
+    }
+
+    /// `session_vm_transient_retry` is a mid-flight retry the kernel
+    /// may still resolve — it must NOT trip the fast-fail watchdog.
+    /// Only the terminal `orchestrator_spawn_failed` line should.
+    #[test]
+    fn scan_stderr_ignores_transient_retry_lines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("kernel.stderr.log");
+        let initiative_a = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+        let initiative_b = "019e20c9-e093-7052-a0d1-1ca53d8b8fd8";
+        let body = format!(
+            "{{\"level\":\"info\",\"event\":\"session_vm_transient_retry\",\
+              \"initiative_id\":\"{initiative_a}\",\
+              \"session_id\":\"sess-1\",\"attempt\":1,\
+              \"previous_reason\":\"isolation spawn failed: ...\"}}\n\
+             {{\"level\":\"info\",\"event\":\"session_vm_transient_retry\",\
+              \"initiative_id\":\"{initiative_b}\",\
+              \"session_id\":\"sess-2\",\"attempt\":2,\
+              \"previous_reason\":\"isolation spawn failed: ...\"}}\n",
+        );
+        std::fs::write(&log, body).expect("write stderr fixture");
+
+        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+            &log,
+            &[initiative_a, initiative_b],
+        );
+        assert!(
+            hit.is_none(),
+            "transient retries must not trip the watchdog; got {hit:?}",
+        );
+    }
+
+    /// A `orchestrator_spawn_failed` line bound to an initiative the
+    /// harness is NOT waiting on (e.g. a leftover from a prior boot
+    /// of the same data_dir) must not panic the current poll. Filters
+    /// strictly by `watched_initiatives`.
+    #[test]
+    fn scan_stderr_ignores_spawn_failed_for_unwatched_initiative() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("kernel.stderr.log");
+        let initiative_watched   = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+        let initiative_unwatched = "019eFFFF-ffff-ffff-ffff-fffffffffff0";
+        let body = format!(
+            "{{\"level\":\"error\",\"event\":\"orchestrator_spawn_failed\",\
+              \"initiative_id\":\"{initiative_unwatched}\",\
+              \"session_id\":\"sess-1\",\
+              \"error\":\"...\",\"hint\":\"...\"}}\n",
+        );
+        std::fs::write(&log, body).expect("write stderr fixture");
+
+        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+            &log,
+            &[initiative_watched, initiative_watched],
+        );
+        assert!(
+            hit.is_none(),
+            "spawn_failed for unwatched initiative must be filtered; got {hit:?}",
+        );
+    }
+
+    /// Missing stderr log file is a no-op (the kernel may have crashed
+    /// before opening it, or rotated it away). Scanner must not panic
+    /// and must return None so the outer deadline path can surface the
+    /// underlying failure mode instead.
+    #[test]
+    fn scan_stderr_missing_file_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("does-not-exist.log");
+        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+            &log,
+            &["a", "b"],
+        );
+        assert!(hit.is_none(), "missing-file must be a no-op, got {hit:?}");
     }
 }

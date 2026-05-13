@@ -244,6 +244,42 @@ The harness ships these wrappers in:
   per-protocol probe helpers.
 * `kernel/tests/extended_e2e_support/docker_stack.rs` —
   auto-bring-up + opt-out gate.
+* `kernel/tests/extended_e2e_support/kernel_driver.rs` —
+  `poll_for_dual_lifecycle_completion` and the
+  `orchestrator_spawn_failed` scanner that satisfies the
+  audit-poll half of the invariant (see below).
+
+### Audit-poll fail-fast on `orchestrator_spawn_failed`
+
+The same invariant applies to the lifecycle-completion poll
+the realistic-scenario harness uses to wait for
+`IntegrationMergeCompleted` events. Once the kernel emits a
+terminal `orchestrator_spawn_failed` JSON line on stderr for
+either watched initiative — after exhausting its
+`session_vm_transient_retry` budget for a session VM — the
+lifecycle cannot make further progress without operator-side
+`recovery::reconcile`, which the harness does not drive.
+Polling further is a guaranteed indefinite wait until the
+`RAXIS_E2E_REALISTIC_DEADLINE_SECS` deadline (30 min default).
+
+The harness therefore reads `<data_dir>/kernel.stderr.log`
+on every poll iteration (cheap substring pre-filter) and
+panics with the kernel's own `error` + `hint` surfaced
+verbatim, so the operator sees the substrate failure in
+seconds. The most common trigger today is an unpopulated
+`EXPECTED_KERNEL_SIGNING_KEY_BYTES`: the kernel can't verify
+the canonical-image manifest, silently degrades to
+`ImageKind::RootfsErofs`, and apple-vz rejects the gzip'd
+initramfs CPIO as "Invalid disk image". Remediation lives
+in `specs/v2/release-and-distribution.md §8.2` — `cargo xtask
+dev-keys init` once per machine, then export
+`RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat
+~/.config/raxis/keys/raxis-dev-signing.pub.hex)"` before
+`cargo build --release -p raxis-kernel`.
+
+Mid-flight `session_vm_transient_retry` lines are
+intentionally NOT a fail-fast trigger — those are stalls the
+kernel may still resolve.
 
 ### Postgres + MySQL + MSSQL — active by default
 

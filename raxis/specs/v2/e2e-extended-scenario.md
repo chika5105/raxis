@@ -267,6 +267,25 @@ The wrappers live in
 the operator-facing recipe + env-var documentation lives in
 `live-e2e/README.md`.
 
+The audit-poll loop has the same fail-fast contract: once the
+kernel emits a terminal `orchestrator_spawn_failed` JSON line
+for either watched initiative,
+`poll_for_dual_lifecycle_completion` surfaces the kernel's own
+`error` + `hint` and panics — rather than wait the full
+`realistic_lifecycle_deadline` (30 min default) for an
+`IntegrationMergeCompleted` event that the kernel has already
+documented as un-driveable without operator-side
+`recovery::reconcile`. The most common trigger today is an
+unpopulated `EXPECTED_KERNEL_SIGNING_KEY_BYTES`: the kernel's
+canonical-image verifier surfaces
+`canonical_image_trust_anchor_unpopulated`, silently falls back
+to `ImageKind::RootfsErofs`, and then apple-vz rejects the
+gzip'd initramfs CPIO as "Invalid disk image. The disk image
+format is not recognized." Surfacing this in seconds via the
+fast-fail keeps the failure mode legible; the operator remediation
+(rebuild the kernel with `RAXIS_KERNEL_SIGNING_KEY_HEX` exported)
+lives in `release-and-distribution.md §8.2`.
+
 ---
 
 ## §4 — Executor task contract

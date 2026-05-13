@@ -3598,10 +3598,34 @@ fail-fast surfaces the literal token
 `RAXIS_LIVE_E2E_DOCKER_STACK_DOWN` so a CI log scraper can pin
 the failure mode.
 
+The lifecycle-completion poll (`poll_for_dual_lifecycle_completion`
+in `extended_e2e_support::kernel_driver`) MUST also fail-fast
+when the kernel emits a *terminal* `orchestrator_spawn_failed`
+event for either watched initiative. The kernel logs this JSON
+shape on stderr after exhausting its
+`session_vm_transient_retry` budget for a session VM, and the
+event's own `hint` field documents that "PlanApproved was
+committed; recovery::reconcile or a follow-up operator command
+is needed to drive the orchestrator boot once the substrate is
+available" — neither of which the harness performs.
+Polling further is therefore a guaranteed indefinite wait
+until [`realistic_lifecycle_deadline`] (30 min default). The
+scanner is a pure substring-prefilter over `kernel.stderr.log`
+(read at the existing 500 ms poll cadence) that surfaces the
+kernel's own `error` + `hint` in the panic body so the operator
+sees the substrate failure in seconds — typically the
+"`apple-vz-14.x: block device rootfs: Invalid disk image`" path
+on a host whose `EXPECTED_KERNEL_SIGNING_KEY_BYTES` is the
+all-zero placeholder (see `release-and-distribution.md §8.2`).
+The scanner intentionally filters out the mid-flight
+`session_vm_transient_retry` lines so a substrate that
+self-recovers after a transient stall is not falsely failed.
+
 [`SEED_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
 [`HEALTH_PROBE_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
 [`DOCKER_PROBE_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
 [`DOCKER_BRINGUP_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
+[`realistic_lifecycle_deadline`]: ../kernel/tests/extended_e2e_support/kernel_driver.rs
 
 **Justification.** A single unbounded `Child::wait_with_output()`
 is enough to hang the entire test runner indefinitely when its
@@ -3638,7 +3662,17 @@ with a 2 s timeout; asserts the typed
 which exercises the auto-bring-up opt-out path against a
 synthetic non-existent project name and asserts the
 `RAXIS_LIVE_E2E_DOCKER_STACK_DOWN` token surfaces in the panic
-message.
+message. The audit-poll fast-fail extension is witnessed by
+[`extended_e2e_support::kernel_driver::tests::scan_stderr_matches_terminal_spawn_failed_for_watched_initiative`](../kernel/tests/extended_e2e_support/kernel_driver.rs)
+(positive: terminal `orchestrator_spawn_failed` surfaces the
+kernel's own `error` + `hint`),
+[`…::scan_stderr_ignores_transient_retry_lines`](../kernel/tests/extended_e2e_support/kernel_driver.rs)
+(negative: mid-flight `session_vm_transient_retry` lines do
+NOT trip the watchdog), and
+[`…::scan_stderr_ignores_spawn_failed_for_unwatched_initiative`](../kernel/tests/extended_e2e_support/kernel_driver.rs)
+(filter: spawn-failed for an initiative the current poll is
+not watching is ignored, so leftovers from a prior boot of the
+same data_dir don't false-fail a fresh test).
 
 **Canonical home.**
 `kernel/tests/extended_e2e_support/harness_timeout.rs` (wrapper
@@ -3647,6 +3681,10 @@ message.
 helpers);
 `kernel/tests/extended_e2e_support/docker_stack.rs` (auto-bring-
 up + opt-out gate);
+`kernel/tests/extended_e2e_support/kernel_driver.rs`
+(`poll_for_dual_lifecycle_completion` + the
+`orchestrator_spawn_failed` scanner that satisfies the audit-
+poll fast-fail half of this invariant);
 `live-e2e/README.md` (operator-facing recipe + env-var
 documentation).
 
