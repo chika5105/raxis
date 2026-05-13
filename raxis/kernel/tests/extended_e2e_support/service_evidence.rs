@@ -128,6 +128,10 @@ use super::harness_timeout::{
     run_command_output_timeout, wait_with_output_timeout, BoundedWaitError,
     SEED_TIMEOUT,
 };
+use super::health_probe::{
+    probe_mongodb, probe_mssql, probe_mysql, probe_postgres, probe_redis,
+    probe_smtp, HealthProbeError,
+};
 
 // ---------------------------------------------------------------------------
 // Pinned host:port + credentials for the docker-compose stack the
@@ -326,6 +330,18 @@ pub enum ServiceEvidenceError {
         /// surfaced for fast operator triage.
         target: String,
     },
+
+    /// The pre-seed reachability probe (e.g. `pg_isready`,
+    /// `mongosh ping`, `redis-cli PING`, TCP handshake against
+    /// the SMTP submission port) failed. Distinct from
+    /// `SeedTimedOut` so the operator sees the EARLIER signal
+    /// — the probe burns 5 s, the seeder would have burned the
+    /// full 30 s before reporting the same root cause.
+    PreSeedHealthCheckFailed {
+        service: &'static str,
+        target: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ServiceEvidenceError {
@@ -400,6 +416,19 @@ impl fmt::Display for ServiceEvidenceError {
                  `docker compose -p raxis-live-e2e-test ps`. (Spec: \
                  INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01.)",
                 timeout,
+            ),
+            Self::PreSeedHealthCheckFailed {
+                service,
+                target,
+                reason,
+            } => write!(
+                f,
+                "[service-evidence:{service}] pre-seed reachability probe \
+                 failed against {target}: {reason}. Bring up the backing \
+                 stack with `docker compose -p raxis-live-e2e-test \
+                 -f live-e2e/docker-compose.extended.e2e.yml up -d --wait` \
+                 (or set RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1 to opt out of harness \
+                 auto-bring-up).",
             ),
         }
     }
@@ -575,6 +604,13 @@ pub fn postgres_canonical_bytes(seed: &PostgresSeed) -> Vec<u8> {
 /// binary needs no `tokio-postgres` dev-dependency (matching the
 /// existing [`super::seeds`] precedent).
 pub fn seed_postgres() -> Result<PostgresSeed, ServiceEvidenceError> {
+    // Pre-seed reachability probe — `pg_isready -t 2` wrapped in
+    // a 5 s harness-side bounded wait. Surfaces a typed
+    // `PreSeedHealthCheckFailed` within seconds when the docker
+    // container is not up; the alternative (skip-probe) burns
+    // the full 30 s `SEED_TIMEOUT` for the same root cause.
+    probe_postgres().map_err(lift_health_probe_error)?;
+
     let seed = PostgresSeed {
         rows: postgres_seed_rows(),
     };
@@ -801,6 +837,7 @@ pub fn mongo_canonical_bytes(seed: &MongoSeed) -> Vec<u8> {
 }
 
 pub fn seed_mongodb() -> Result<MongoSeed, ServiceEvidenceError> {
+    probe_mongodb().map_err(lift_health_probe_error)?;
     let seed = MongoSeed {
         docs: mongo_seed_docs(),
     };
@@ -957,6 +994,7 @@ pub fn redis_canonical_bytes(seed: &RedisSeed) -> Vec<u8> {
 }
 
 pub fn seed_redis() -> Result<RedisSeed, ServiceEvidenceError> {
+    probe_redis().map_err(lift_health_probe_error)?;
     let seed = RedisSeed {
         entries: redis_seed_entries(),
     };
@@ -1137,6 +1175,7 @@ pub fn smtp_envelope_sha256(seed: &SmtpSeed) -> String {
 /// upstream-connected audit event would also be absent, so this
 /// seed failing is the earlier and clearer signal.
 pub fn seed_smtp() -> Result<SmtpSeed, ServiceEvidenceError> {
+    probe_smtp().map_err(lift_health_probe_error)?;
     let seed = smtp_seed();
     // Plain SMTP submission against the mailserver's :25 (mapped
     // to host :25199). Hand-rolled because we don't want a `lettre`
@@ -1338,6 +1377,11 @@ pub fn seed_mysql() -> Result<MysqlSeed, ServiceEvidenceError> {
     let seed = MysqlSeed {
         rows: mysql_seed_rows(),
     };
+    // Probe is opt-in (skips when ENV_LIVE_MYSQL_URL is unset)
+    // so the env-gated short-circuit below remains the
+    // authoritative gate; we still call the probe so the
+    // env-set path fails closed within 5 s rather than after 30 s.
+    probe_mysql().map_err(lift_health_probe_error)?;
     if std::env::var(ENV_LIVE_MYSQL_URL).is_err() {
         eprintln!(
             "[service-evidence:mysql] {ENV_LIVE_MYSQL_URL} not set; \
@@ -1483,6 +1527,8 @@ pub fn seed_mssql() -> Result<MssqlSeed, ServiceEvidenceError> {
     let seed = MssqlSeed {
         rows: mssql_seed_rows(),
     };
+    // Probe is opt-in (skips when ENV_LIVE_MSSQL_URL is unset).
+    probe_mssql().map_err(lift_health_probe_error)?;
     if std::env::var(ENV_LIVE_MSSQL_URL).is_err() {
         eprintln!(
             "[service-evidence:mssql] {ENV_LIVE_MSSQL_URL} not set; \
@@ -1819,7 +1865,16 @@ fn service_of(e: &ServiceEvidenceError) -> &'static str {
         | ServiceEvidenceError::FileContentMismatch { service, .. }
         | ServiceEvidenceError::AuditEventMissing { service, .. }
         | ServiceEvidenceError::OptInBypassed { service, .. }
-        | ServiceEvidenceError::SeedTimedOut { service, .. } => service,
+        | ServiceEvidenceError::SeedTimedOut { service, .. }
+        | ServiceEvidenceError::PreSeedHealthCheckFailed { service, .. } => service,
+    }
+}
+
+fn lift_health_probe_error(err: HealthProbeError) -> ServiceEvidenceError {
+    ServiceEvidenceError::PreSeedHealthCheckFailed {
+        service: err.service,
+        target: err.target,
+        reason: err.reason,
     }
 }
 

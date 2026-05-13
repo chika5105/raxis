@@ -16,6 +16,7 @@ pub mod concurrency;
 pub mod crash_recovery;
 pub mod credential_substitution_evidence;
 pub mod harness_timeout;
+pub mod health_probe;
 pub mod injection;
 pub mod kernel_driver;
 pub mod multi_initiative;
