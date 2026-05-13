@@ -633,7 +633,7 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
         "policy.toml already has a [gateway] block; bootstrap template changed",
     );
     let injected = format!(
-        "\n# ── [gateway] + [[providers]] + [egress] (extended-e2e) ──\n\
+        "\n# ── [gateway] + [[providers]] + [egress] + [[lanes]] (extended-e2e) ──\n\
          [gateway]\n\
          binary_path              = \"{gw}\"\n\
          spawn_timeout_secs       = 30\n\
@@ -652,7 +652,24 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          data_fetch_timeout_ms = 30000\n\
          pricing.input_tokens_per_dollar      = 200000\n\
          pricing.output_tokens_per_dollar     = 50000\n\
-         pricing.cache_read_tokens_per_dollar = 2000000\n",
+         pricing.cache_read_tokens_per_dollar = 2000000\n\
+         \n\
+         # ── [[lanes]] registration (V2 §Step 28 + INV-SCHED-03) ─────────\n\
+         # The extended-scenario plan (`plan.rs`) declares\n\
+         # `[workspace] lane_id = \"e2e-extended-lane\"`. The kernel\n\
+         # validator `lifecycle::validate_workspace_lane_in_policy`\n\
+         # rejects any plan whose workspace lane has no matching\n\
+         # `[[lanes]]` entry — without this block\n\
+         # `lifecycle::approve_plan` returns\n\
+         # `LifecycleError::PlanLaneNotInPolicy` BEFORE the tx opens.\n\
+         # (Pre-fix the lane absence collapsed silently to a\n\
+         # `FailBudgetExceeded` rejection only at IntegrationMerge\n\
+         # admission — see iter-38/39 root cause.)\n\
+         [[lanes]]\n\
+         lane_id              = \"e2e-extended-lane\"\n\
+         max_concurrent_tasks = 8\n\
+         max_cost_per_epoch   = 100000\n\
+         priority             = 100\n",
         gw = gateway_binary.display(),
     );
     body.push_str(&injected);

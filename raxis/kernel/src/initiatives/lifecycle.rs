@@ -204,6 +204,65 @@ pub enum LifecycleError {
         suggestion:     String,
     },
 
+    /// **V2 (Step 28) — `INVALID_PLAN_SCHEMA` lane-not-in-policy.**
+    /// The plan's `[workspace] lane_id` is structurally valid
+    /// (non-empty, no per-task override — already passed
+    /// `validate_single_lane_propagation`) **but** the operator's
+    /// signed policy bundle declares no `[[lanes]]` entry with that
+    /// `lane_id`. Surfaced by `validate_workspace_lane_in_policy`
+    /// at `approve_plan` time — before `BEGIN TRANSACTION` — so a
+    /// plan whose workspace lane has no policy backing never
+    /// allocates a task row.
+    ///
+    /// **Why this is a hard reject (vs. silently letting the kernel
+    /// fall back to `default`).** The scheduler resolves the
+    /// per-task `lane_id` against the policy at every budget
+    /// admission via `scheduler::lane::lane_config_for_row`. If the
+    /// lane is absent, that call returns
+    /// `SchedulerError::NoLaneAssigned`, and every Phase-C admission
+    /// gate (currently `SingleCommit` + `IntegrationMerge`) maps the
+    /// error verbatim to the wire-level
+    /// `PlannerErrorCode::FailBudgetExceeded` (see
+    /// `handlers/intent.rs::run_phase_c` Step 10 — `map_err(|_|
+    /// FailBudgetExceeded)`). **Crucially**, the early-dispatch
+    /// handlers (`ActivateSubTask`, `CompleteTask`, `SubmitReview`,
+    /// `RetrySubTask`, `StructuredOutput`, `ReportFailure`) bypass
+    /// the budget check entirely — sub-task admission flows succeed
+    /// silently against an unregistered lane, masking the gap until
+    /// the synthetic `IntegrationMerge` coordinator-task admitted by
+    /// `auto_spawn_orchestrator_session_in_tx` reaches Phase C and
+    /// fails. That is exactly the iter-39 shape on the realistic
+    /// scenario: the sibling-initiative's IntegrationMerge was
+    /// rejected with `FailBudgetExceeded` after a **single** sibling
+    /// sub-task completion (budget never accumulated near the cap),
+    /// the orchestrator's planner-session exited cleanly without
+    /// emitting `IntegrationMergeCompleted`, and the harness
+    /// `poll_for_dual_lifecycle_completion` blocked until its 3900 s
+    /// deadline. Pulling the check forward to `approve_plan` time
+    /// gives the operator a clear, actionable diagnostic at the
+    /// moment of submission instead of a 30-65 min silent hang.
+    ///
+    /// **Empty-registry inert mode.** When `policy_lanes` is empty
+    /// (production-impossible — genesis always emits the `default`
+    /// lane — but used by `approve_plan_for_test` fixtures that
+    /// don't configure a policy), the validator returns `Ok(())`
+    /// without further inspection. This mirrors the existing
+    /// "empty registry ⇒ inert" pattern in `validate_task_vm_images`
+    /// and `validate_task_environment_consistency`.
+    ///
+    /// `workspace_lane` carries the lane string the plan declared
+    /// verbatim. `declared_lanes` is a comma-separated rendering of
+    /// every `[[lanes]] lane_id` in the active policy so the
+    /// operator can see the candidate set. `suggestion` carries the
+    /// actionable remediation hint (advance the policy with the
+    /// new lane, or change the plan to use a declared lane).
+    #[error("plan workspace lane_id `{workspace_lane}` not declared in policy [[lanes]] (declared: {declared_lanes}): {suggestion}")]
+    PlanLaneNotInPolicy {
+        workspace_lane:  String,
+        declared_lanes:  String,
+        suggestion:      String,
+    },
+
     /// **V2 (Step 17) — `INVALID_PLAN_SCHEMA` shift-left, DAG family.**
     /// A `[[tasks]]` block declares a structurally invalid dependency
     /// graph. Surfaced by `validate_plan_dag` at `approve_plan` time,
@@ -557,6 +616,14 @@ pub fn approve_plan_for_test(
     // that need to exercise INV-ELASTIC-01 set up their own
     // `ElasticConfig` and call `approve_plan` directly.
     let default_elastic = raxis_policy::ElasticConfig::default();
+    // V2 §Step 28 + INV-SCHED-03 — fixtures default to an empty
+    // lanes slice so the policy-registration validator runs in
+    // inert mode (matches the long-standing test ergonomics of
+    // `validate_task_vm_images` /
+    // `validate_task_environment_consistency`). Tests that need to
+    // exercise the validator (positive or negative path) call
+    // `approve_plan` directly with a populated `policy_lanes`.
+    let empty_lanes: Vec<raxis_policy::LaneEntry> = Vec::new();
     approve_plan(
         initiative_id,
         approving_operator,
@@ -570,6 +637,7 @@ pub fn approve_plan_for_test(
         &empty_vm_images,
         None,
         &default_elastic,
+        &empty_lanes,
         store,
         audit,
         plan_registry,
@@ -622,6 +690,19 @@ pub fn approve_plan(
     // [`raxis_policy::ElasticConfig::default`] when the
     // operator omits the section).
     policy_elastic:                      &raxis_policy::ElasticConfig,
+    // V2 §Step 28 + INV-SCHED-03 — operator-side `[[lanes]]`
+    // registry snapshot. Drives `validate_workspace_lane_in_policy`
+    // so any plan whose `[workspace] lane_id` doesn't resolve
+    // against a declared `[[lanes]] lane_id` is rejected
+    // BEFORE BEGIN TRANSACTION. Empty slice ⇒ inert (matches
+    // the existing `validate_task_vm_images` /
+    // `validate_task_environment_consistency` "empty registry
+    // is permitted" pattern, preserved for
+    // `approve_plan_for_test` fixtures); production
+    // `handle_approve_plan` always passes the policy bundle's
+    // `lanes()` slice, which is non-empty (genesis emits the
+    // `default` lane).
+    policy_lanes:                        &[raxis_policy::LaneEntry],
     store:                               &Store,
     audit:                               &dyn AuditSink,
     plan_registry:                       &PlanRegistry,
@@ -916,6 +997,19 @@ pub fn approve_plan(
         &workspace_lane_raw,
         &plan_tasks,
     )?;
+    // V2 §Step 28 + INV-SCHED-03 — lane-in-policy registration:
+    // rejects a plan whose workspace lane has no `[[lanes]]` entry
+    // in the operator's signed policy. Sister check to
+    // `validate_single_lane_propagation` — that one proves the plan
+    // shape is single-lane; this one proves the declared lane has a
+    // policy-side budget ceiling to enforce against. Without this,
+    // sub-task admission (early-dispatch, no budget check) silently
+    // succeeds while the synthetic IntegrationMerge coordinator
+    // (Phase-C, full budget check) collapses to `FailBudgetExceeded`
+    // and the orchestrator exits without a terminal event,
+    // surfacing as a silent harness deadline hang. Inert when
+    // `policy_lanes` is empty (test-fixture path).
+    validate_workspace_lane_in_policy(&workspace_lane, policy_lanes)?;
 
     // V2_GAPS.md §12.8 / §12.9 (INV-PLAN-POLICY-PRECEDENCE-01).
     // Resolve the per-initiative target_ref from the plan-side
@@ -3218,6 +3312,92 @@ fn validate_single_lane_propagation(
     }
 
     Ok(workspace_lane)
+}
+
+/// V2 §Step 28 (companion to
+/// [`validate_single_lane_propagation`]) — verify the plan's
+/// `[workspace] lane_id` resolves against the operator's signed
+/// `[[lanes]]` registry **before** `BEGIN TRANSACTION`.
+///
+/// **Why this validator exists.**
+/// `validate_single_lane_propagation` proves the plan declares a
+/// non-empty workspace lane and forbids per-task overrides — but
+/// that is purely a plan-shape check; it never inspects the policy.
+/// Once the plan ships through `approve_plan`, the kernel records
+/// that `lane_id` verbatim on every task row (including the
+/// synthetic orchestrator-coordinator row inserted by
+/// `auto_spawn_orchestrator_session_in_tx`), and every Phase-C
+/// intent handler resolves the same string against
+/// `scheduler::lane::lane_config_for_row` to gate admission against
+/// `max_concurrent_tasks` / `max_cost_per_epoch`.
+///
+/// If the plan declares a lane that isn't in policy, the gap is
+/// **silent on the early-dispatch handlers** (`ActivateSubTask`,
+/// `CompleteTask`, `SubmitReview`, `RetrySubTask`,
+/// `StructuredOutput`, `ReportFailure` — none of which run the
+/// budget check) and **terminal on Phase-C handlers**
+/// (`SingleCommit`, `IntegrationMerge`): `lane_config_for_row`
+/// returns `SchedulerError::NoLaneAssigned`,
+/// `reserve_budget_in_tx` propagates it, and
+/// `handlers/intent.rs::run_phase_c` Step 10's
+/// `map_err(|_| FailBudgetExceeded)` rewrites it to the wire-level
+/// `FailBudgetExceeded`. Sub-tasks all succeed silently against an
+/// unregistered lane; only the synthetic `IntegrationMerge`
+/// coordinator-task admitted by
+/// `auto_spawn_orchestrator_session_in_tx` ever fails — at which
+/// point the orchestrator's planner-session exits without emitting
+/// `IntegrationMergeCompleted` and the harness's
+/// `poll_for_dual_lifecycle_completion` blocks silently until its
+/// deadline. INV-SCHED-03 (added to `specs/invariants.md` in the
+/// same commit) pins that asymmetry.
+///
+/// Pulling the check forward to `approve_plan` time gives the
+/// operator an actionable diagnostic at the moment of submission
+/// instead of a 30–65 min silent hang during the initiative run.
+///
+/// **Empty-registry inert mode.** When `policy_lanes` is empty
+/// (production-impossible — genesis always emits the `default`
+/// lane — but used by `approve_plan_for_test` fixtures and the
+/// kernel-side unit tests in this module), the validator returns
+/// `Ok(())` without inspecting `workspace_lane`. This mirrors the
+/// existing "empty registry ⇒ inert" pattern in
+/// [`validate_task_vm_images`] /
+/// [`validate_task_environment_consistency`] and preserves the
+/// test fixtures' "skip the policy plumbing" ergonomics.
+fn validate_workspace_lane_in_policy(
+    workspace_lane: &str,
+    policy_lanes:   &[raxis_policy::LaneEntry],
+) -> Result<(), LifecycleError> {
+    if policy_lanes.is_empty() {
+        return Ok(());
+    }
+    if policy_lanes.iter().any(|l| l.lane_id == workspace_lane) {
+        return Ok(());
+    }
+    // Render the declared set so the operator's error message
+    // names every candidate. Policy lane lists are bounded by
+    // operator policy and never exceed tens of entries.
+    let mut declared = String::with_capacity(128);
+    for (i, lane) in policy_lanes.iter().enumerate() {
+        if i > 0 { declared.push_str(", "); }
+        declared.push('"');
+        declared.push_str(&lane.lane_id);
+        declared.push('"');
+    }
+    Err(LifecycleError::PlanLaneNotInPolicy {
+        workspace_lane: workspace_lane.to_owned(),
+        declared_lanes: declared,
+        suggestion:     "Either (a) change the plan's `[workspace] lane_id` \
+                         to one of the declared `[[lanes]] lane_id` values, \
+                         or (b) advance the policy epoch with a new \
+                         `[[lanes]]` entry whose `lane_id` matches the plan \
+                         (and re-sign with the operator key). V2 §Step 28 \
+                         requires the workspace lane to resolve against the \
+                         signed policy so the per-lane \
+                         `SUM(reserved_cost) ≤ max_cost_per_epoch` budget \
+                         ceiling has a concrete entry to enforce."
+            .to_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -6905,6 +7085,7 @@ target_ref = "refs/heads/raxis/feature"
         let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
         let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
         let default_elastic = raxis_policy::ElasticConfig::default();
+        let empty_lanes: Vec<raxis_policy::LaneEntry> = Vec::new();
         approve_plan(
             &init_id,
             "op",
@@ -6918,6 +7099,7 @@ target_ref = "refs/heads/raxis/feature"
             &empty_vm_images,
             None,
             &default_elastic,
+            &empty_lanes,
             &store,
             &audit,
             &registry,
@@ -7293,6 +7475,168 @@ target_ref = "refs/heads/raxis/feature"
         // produce a PlanApproved record.
         assert!(audit.events().is_empty(),
                 "no audit events may be emitted when the tx rolls back");
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // V2 §Step 28 + INV-SCHED-03 — `validate_workspace_lane_in_policy`
+    // witness tests
+    //
+    // The validator is the kernel-side fail-fast for the iter-38/39
+    // realistic_session_lifecycle regression: a plan whose
+    // `[workspace] lane_id` does not resolve against the operator's
+    // `[[lanes]]` registry collapses to `FailBudgetExceeded` only at
+    // the synthetic IntegrationMerge admission, after every sub-task
+    // has completed silently — surfacing as a deadline-only hang.
+    // These tests pin the three observable properties: the negative
+    // path rejects pre-tx with the structured error AND zero state
+    // mutation; the positive path admits; and the empty-registry
+    // fixtures stay inert.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Direct caller of `approve_plan` (not `approve_plan_for_test`) so
+    /// the lane-in-policy validator runs against a populated
+    /// `policy_lanes` slice. Mirrors the shape of
+    /// `assert_dag_rule_blocks_approve_plan` so the no-state-mutation
+    /// invariant is checked the same way every shift-left rejection is.
+    fn approve_plan_with_lanes(
+        store:        &Store,
+        init_id:      &str,
+        pk_bytes:     &[u8],
+        audit:        &FakeAuditSink,
+        registry:     &PlanRegistry,
+        policy_lanes: &[raxis_policy::LaneEntry],
+    ) -> Result<PlanApproved, LifecycleError> {
+        let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig>
+            = std::collections::HashMap::new();
+        let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
+        let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
+        let default_elastic = raxis_policy::ElasticConfig::default();
+        approve_plan(
+            init_id,
+            "op-test",
+            None,
+            pk_bytes,
+            1,
+            "refs/heads/main",
+            false,
+            &empty_envs,
+            &empty_creds,
+            &empty_vm_images,
+            None,
+            &default_elastic,
+            policy_lanes,
+            store,
+            audit,
+            registry,
+            None,
+        )
+    }
+
+    fn lane_entry(lane_id: &str) -> raxis_policy::LaneEntry {
+        raxis_policy::LaneEntry {
+            lane_id:              lane_id.to_owned(),
+            max_concurrent_tasks: 4,
+            max_cost_per_epoch:   10_000,
+            priority:             100,
+        }
+    }
+
+    #[test]
+    fn approve_plan_rejects_workspace_lane_not_in_policy_pre_tx() {
+        // Plan declares `[workspace] lane_id = "ghost-lane"`. Policy
+        // declares only `default`. The validator must reject pre-tx
+        // with `PlanLaneNotInPolicy` and leave initiatives/tasks/edges/
+        // audit/registry untouched (INV-STORE-02 shift-left atomicity).
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+
+        let plan = r#"
+            [workspace]
+            lane_id = "ghost-lane"
+
+            [[tasks]]
+            task_id = "t1"
+        "#;
+        // Use the raw seeder so our `[workspace] lane_id` override is
+        // persisted verbatim (the lane-aware `seed_draft_initiative`
+        // would auto-prepend a default workspace block).
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let policy_lanes = vec![lane_entry("default")];
+
+        let err = approve_plan_with_lanes(
+            &store, &init_id, &pk_bytes, &audit, &registry, &policy_lanes,
+        ).unwrap_err();
+        match &err {
+            LifecycleError::PlanLaneNotInPolicy {
+                workspace_lane, declared_lanes, suggestion,
+            } => {
+                assert_eq!(workspace_lane, "ghost-lane",
+                    "error must carry the plan's literal workspace lane id");
+                assert!(declared_lanes.contains("\"default\""),
+                    "error must enumerate declared lanes; got: {declared_lanes}");
+                assert!(!suggestion.is_empty(),
+                    "V2 §Step 17 mandates a non-empty remediation suggestion");
+            }
+            other => panic!("expected PlanLaneNotInPolicy, got {other:?}"),
+        }
+
+        // Pre-tx rejection — NOTHING may have been mutated.
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft",
+                   "initiative must remain Draft after lane-in-policy rejection");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0,
+                   "no task rows may be persisted on shift-left rejection");
+        assert_eq!(count_edges_for_initiative(&store, &init_id), 0,
+                   "no DAG edges may be persisted on shift-left rejection");
+        assert!(audit.events().is_empty(),
+                "shift-left rejection must emit no audit events");
+        assert!(registry.is_empty(),
+                "shift-left rejection must not populate the plan registry");
+    }
+
+    #[test]
+    fn approve_plan_accepts_workspace_lane_when_declared_in_policy() {
+        // Positive path: the plan's workspace lane matches a `[[lanes]]`
+        // entry. The validator must be transparent — admission proceeds
+        // exactly as if `policy_lanes` were the empty inert slice.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+
+        let plan = r#"
+            [workspace]
+            lane_id = "feature-work"
+
+            [[tasks]]
+            task_id = "t1"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let policy_lanes = vec![lane_entry("default"), lane_entry("feature-work")];
+
+        let result = approve_plan_with_lanes(
+            &store, &init_id, &pk_bytes, &audit, &registry, &policy_lanes,
+        ).expect("declared workspace lane must admit successfully");
+        assert_eq!(result.tasks_admitted, 1,
+            "the single plan task must be admitted on the happy path");
+        assert_eq!(read_initiative_state(&store, &init_id), "Executing",
+            "initiative must transition Draft → Executing on admission");
+    }
+
+    #[test]
+    fn validate_workspace_lane_in_policy_is_inert_on_empty_registry() {
+        // Empty `policy_lanes` ⇒ the validator must return Ok regardless
+        // of the workspace lane. Mirrors the long-standing behavior of
+        // `validate_task_vm_images` /
+        // `validate_task_environment_consistency` so existing test
+        // fixtures don't have to plumb a full policy bundle.
+        validate_workspace_lane_in_policy("any-lane", &[])
+            .expect("empty registry must be inert");
+        validate_workspace_lane_in_policy("", &[])
+            .expect("empty registry must be inert even on empty workspace lane");
     }
 
     /// **V2 Step 17 end-to-end** — each shift-left DAG rule must abort

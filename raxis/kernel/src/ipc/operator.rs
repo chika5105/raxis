@@ -1312,6 +1312,21 @@ async fn handle_approve_plan(
     // owns 'static data without cross-thread borrows.
     let policy_elastic_snapshot: raxis_policy::ElasticConfig =
         policy_snapshot.elastic().clone();
+    // V2 §Step 28 + INV-SCHED-03 — snapshot the operator's
+    // `[[lanes]]` registry at the same epoch the plan was
+    // submitted against. Drives
+    // `lifecycle::validate_workspace_lane_in_policy`: a plan whose
+    // `[workspace] lane_id` does not match any declared
+    // `[[lanes]] lane_id` is rejected at `approve_plan` time with
+    // `LifecycleError::PlanLaneNotInPolicy`, BEFORE
+    // `BEGIN TRANSACTION`. Without this check the budget gate
+    // collapses to a wire-level `FailBudgetExceeded` only on the
+    // first Phase-C handler (`SingleCommit` / `IntegrationMerge`),
+    // which silently breaks the orchestrator's terminal-event
+    // emission and surfaces as a harness deadline hang. Cloned so
+    // the spawn_blocking hop owns 'static data.
+    let policy_lanes_snapshot: Vec<raxis_policy::LaneEntry> =
+        policy_snapshot.lanes().to_vec();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
@@ -1337,6 +1352,7 @@ async fn handle_approve_plan(
             &policy_vm_images_snapshot,
             policy_default_executor_image_snapshot.as_ref(),
             &policy_elastic_snapshot,
+            &policy_lanes_snapshot,
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,

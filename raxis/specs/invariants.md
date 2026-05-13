@@ -66,7 +66,7 @@
 | Escalation — V1 | INV-ESC-01..06 | 6 |
 | Kernel store — V1 | INV-STORE-01..03 | 3 |
 | Policy epochs — V1 | INV-POLICY-01 | 1 |
-| Scheduler — V1 | INV-SCHED-01, INV-SCHED-02 | 2 |
+| Scheduler — V1 | INV-SCHED-01, INV-SCHED-02, INV-SCHED-03 | 3 |
 | VCS path enforcement — V1 | INV-TASK-PATH-01, INV-TASK-PATH-02 | 2 |
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
@@ -77,7 +77,7 @@
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01 | 1 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
-| **Total** | | **75** |
+| **Total** | | **76** |
 
 ---
 
@@ -1085,6 +1085,79 @@ returned `BudgetExceeded`; the intent handler rejected with
 the harness polled silently for 10+ minutes until killed.
 Post-fix every TaskCompleted decrements the lane charge so the
 coordinator task's reservation fits.
+
+---
+
+### INV-SCHED-03 — Every plan's `[workspace] lane_id` must be declared in the active policy's `[[lanes]]`
+
+**Statement.** A plan submitted to `lifecycle::approve_plan` is
+admitted if and only if its `[workspace] lane_id` matches the
+`lane_id` of some `[[lanes]]` entry in the operator-signed policy
+bundle that's authoritative at approval time. The check fires in
+`lifecycle::validate_workspace_lane_in_policy`, called **before**
+`BEGIN TRANSACTION`. Failure surfaces as
+`LifecycleError::PlanLaneNotInPolicy { workspace_lane,
+declared_lanes, suggestion }`. The validator runs in inert mode
+when `policy_lanes` is empty (test-fixture path used by
+`approve_plan_for_test`); production `handle_approve_plan` always
+passes the bundle's full `lanes()` slice, which is non-empty
+(genesis emits the `default` lane).
+
+**Justification.** The scheduler resolves the per-task `lane_id`
+against the policy on every Phase-C budget admission via
+`scheduler::lane::lane_config_for_row`. If the lane is absent,
+that call returns `SchedulerError::NoLaneAssigned`,
+`scheduler::budget::reserve_budget_in_tx` propagates it, and
+`handlers/intent.rs::run_phase_c` Step 10's
+`map_err(|_| FailBudgetExceeded)` rewrites it to the wire-level
+`PlannerErrorCode::FailBudgetExceeded`. Crucially, the
+**early-dispatch** handlers (`ActivateSubTask`, `CompleteTask`,
+`SubmitReview`, `RetrySubTask`, `StructuredOutput`,
+`ReportFailure`) bypass the budget check entirely — sub-task
+admission flows succeed silently against an unregistered lane,
+masking the gap until the synthetic IntegrationMerge
+coordinator-task admitted by
+`auto_spawn_orchestrator_session_in_tx` reaches Phase C and
+fails. That asymmetry surfaces as a deadline-only silent hang in
+the live-e2e harness: every sub-task completes, the orchestrator
+session for IntegrationMerge exits without emitting
+`IntegrationMergeCompleted`, and the harness's
+`poll_for_dual_lifecycle_completion` blocks until its
+`RAXIS_E2E_REALISTIC_DEADLINE_SECS` deadline.
+
+Pulling the check forward to `approve_plan` time gives the
+operator an actionable
+`LifecycleError::PlanLaneNotInPolicy` diagnostic at the moment
+of submission. The error string enumerates every declared
+`lane_id` and a remediation suggestion (either change the plan
+to use a declared lane, or advance the policy epoch with a
+new `[[lanes]]` entry that matches).
+
+This is the structural-contract sister of INV-SCHED-02: that
+invariant pins lane-bookkeeping atomicity at terminal-state
+transitions; this one pins lane-existence at admission, so the
+bookkeeping has a concrete `(max_concurrent_tasks,
+max_cost_per_epoch)` ceiling to enforce against.
+
+**Scenario.** Iter 39 of `realistic_session_lifecycle`
+(`/private/tmp/raxis-fix-loop-respawn2-33043/raxis`, 2026-05-13).
+The realistic-scenario plan declares
+`[workspace] lane_id = "e2e-realistic-lane"` (primary) and
+`"e2e-realistic-sibling-lane"` (sibling). The genesis-emitted
+bootstrap `policy.toml` declared only the `default` lane; the
+test harness's `enable_gateway_in_policy` appended `[gateway]` +
+`[[providers]]` + `[egress]` but no `[[lanes]]`. Result: every
+`ActivateSubTask` / `CompleteTask` succeeded silently against
+the unregistered lanes; the sibling's first IntegrationMerge
+intent was rejected with `FailBudgetExceeded` after a **single**
+sibling-task completion (budget never accumulated near a cap —
+the lane lookup itself failed); the orchestrator's
+planner-session exited cleanly; no respawn fired; the harness
+polled silently until the 3900 s deadline. Post-fix
+`approve_plan` rejects the plan with
+`PlanLaneNotInPolicy("e2e-realistic-sibling-lane", declared:
+"default", ...)` and the harness registers the lanes in the
+same fix commit so the live-e2e runs to completion.
 
 ---
 

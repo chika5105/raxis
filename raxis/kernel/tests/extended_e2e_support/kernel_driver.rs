@@ -760,7 +760,7 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
         "policy.toml already has a [gateway] block; bootstrap template changed",
     );
     let injected = format!(
-        "\n# ── [gateway] + [[providers]] + [egress] (realism-e2e) ──\n\
+        "\n# ── [gateway] + [[providers]] + [egress] + [[lanes]] (realism-e2e) ──\n\
          [gateway]\n\
          binary_path              = \"{gw}\"\n\
          spawn_timeout_secs       = 30\n\
@@ -779,7 +779,41 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          data_fetch_timeout_ms = 30000\n\
          pricing.input_tokens_per_dollar      = 200000\n\
          pricing.output_tokens_per_dollar     = 50000\n\
-         pricing.cache_read_tokens_per_dollar = 2000000\n",
+         pricing.cache_read_tokens_per_dollar = 2000000\n\
+         \n\
+         # ── [[lanes]] registration (V2 §Step 28 + INV-SCHED-03) ─────────\n\
+         # The realistic-scenario plans declare `[workspace] lane_id =\n\
+         # \"e2e-realistic-lane\"` (primary plan, `plan_realistic.rs`)\n\
+         # and `[workspace] lane_id = \"e2e-realistic-sibling-lane\"`\n\
+         # (sibling plan, `multi_initiative.rs`). The kernel-side\n\
+         # `lifecycle::validate_workspace_lane_in_policy` rejects any\n\
+         # plan whose workspace lane has no matching `[[lanes]]` entry\n\
+         # — without these blocks `lifecycle::approve_plan` returns\n\
+         # `LifecycleError::PlanLaneNotInPolicy` BEFORE the tx opens,\n\
+         # and the harness sees an admission failure instead of an\n\
+         # `IntegrationMergeCompleted`. (Pre-fix, the lane absence\n\
+         # collapsed silently to a per-IntegrationMerge\n\
+         # `FailBudgetExceeded` rejection because `lane_config_for_row`\n\
+         # returned `NoLaneAssigned` and `intent.rs::run_phase_c` Step\n\
+         # 10 maps that to the wire-level budget error — the\n\
+         # iter-38/39 reproduction.)\n\
+         #\n\
+         # Caps are sized generously so the per-task cost\n\
+         # (`base_cost_for_intent_kind` + `cost_per_touched_path *\n\
+         # |touched_paths|`) on every realistic-scenario task clears\n\
+         # comfortably with margin for the synthetic IntegrationMerge\n\
+         # coordinator slice.\n\
+         [[lanes]]\n\
+         lane_id              = \"e2e-realistic-lane\"\n\
+         max_concurrent_tasks = 8\n\
+         max_cost_per_epoch   = 100000\n\
+         priority             = 100\n\
+         \n\
+         [[lanes]]\n\
+         lane_id              = \"e2e-realistic-sibling-lane\"\n\
+         max_concurrent_tasks = 8\n\
+         max_cost_per_epoch   = 100000\n\
+         priority             = 100\n",
         gw = gateway_binary.display(),
     );
     body.push_str(&injected);
