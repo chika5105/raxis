@@ -9,6 +9,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { auditBadgeClasses } from "@/lib/audit-tone";
 import { fmtRelative } from "@/lib/format";
+import { notificationDisplaySummary } from "@/lib/notification-summary";
 
 export function NotificationsPage() {
   const navigate = useNavigate();
@@ -157,7 +158,13 @@ export function NotificationsPage() {
                     )}
                   </span>
                 </div>
-                <p className="mt-1.5 text-sm text-ink">{n.summary}</p>
+                <p className="mt-1.5 text-sm text-ink">
+                  {notificationDisplaySummary(
+                    n.summary,
+                    n.event_kind,
+                    n.payload,
+                  )}
+                </p>
                 <Mono className="text-[10px] text-ink-subtle">
                   source event {n.source_event_id}
                 </Mono>
