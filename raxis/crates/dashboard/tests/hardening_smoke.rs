@@ -20,8 +20,10 @@
 
 use std::sync::Arc;
 
+use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::InMemoryDashboardData;
+use raxis_dashboard::routes::auth::operator_fingerprint_hex;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
 
 /// Bind the dashboard with a default in-memory fixture and
@@ -236,5 +238,118 @@ async fn burst_of_unauth_requests_drains_without_panicking() {
             "every burst request must surface a 4xx (got {s})",
         );
     }
+    handle.shutdown().await.expect("shutdown");
+}
+
+// ---------------------------------------------------------------------------
+// Authenticated SSE on an unknown session must surface a structured 404
+// JSON envelope, NOT a hung 200 connection. This is the post-fix
+// regression guard for the issue the realistic-scenario probe surfaced
+// against the live kernel: `GET /api/sessions/<bogus>/stream?tail=1`
+// would respond `200 OK` and emit a single `tail-complete` SSE frame,
+// then keep the TCP connection open until the browser idle-killed it.
+// ---------------------------------------------------------------------------
+
+/// Drive the full challenge → verify HTTP path with a freshly-generated
+/// Ed25519 keypair and return `(token, fingerprint)`. The fingerprint is
+/// the same value the verify route computes (SHA-256[:16] of the
+/// pubkey, hex-encoded), so callers can pre-register the operator on the
+/// in-memory fixture before issuing the verify call.
+async fn mint_jwt(base: &str, signing_key: &ed25519_dalek::SigningKey) -> (String, String) {
+    let client = reqwest::Client::new();
+    let pubkey_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let fingerprint = operator_fingerprint_hex(&pubkey_bytes);
+
+    let challenge_resp = client
+        .get(format!("{base}/api/auth/challenge"))
+        .send()
+        .await
+        .expect("challenge send");
+    assert_eq!(challenge_resp.status(), 200, "challenge endpoint must 200");
+    let challenge_json: serde_json::Value = challenge_resp.json().await.expect("challenge json");
+    let challenge_hex = challenge_json["challenge"]
+        .as_str()
+        .expect("challenge field is string")
+        .to_owned();
+    let challenge_bytes = hex::decode(&challenge_hex).expect("challenge hex");
+
+    use ed25519_dalek::Signer;
+    let sig: ed25519_dalek::Signature = signing_key.sign(&challenge_bytes);
+    let body = serde_json::json!({
+        "challenge": challenge_hex,
+        "signature": hex::encode(sig.to_bytes()),
+        "public_key": hex::encode(pubkey_bytes),
+    });
+    let verify_resp = client
+        .post(format!("{base}/api/auth/verify"))
+        .json(&body)
+        .send()
+        .await
+        .expect("verify send");
+    assert_eq!(verify_resp.status(), 200, "verify must 200 for valid sig");
+    let verify_json: serde_json::Value = verify_resp.json().await.expect("verify json");
+    let token = verify_json["token"]
+        .as_str()
+        .expect("token field is string")
+        .to_owned();
+    (token, fingerprint)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sse_authenticated_unknown_session_returns_404_envelope() {
+    // Set up a fixture with one operator allow-listed for `Read`.
+    let cfg = DashboardConfig {
+        enabled: true,
+        bind_address: "127.0.0.1".into(),
+        bind_port: 0,
+        static_dir: None,
+        ..Default::default()
+    };
+    // Deterministic seed — this is a unit-test fixture only, not
+    // an operator key. The fingerprint derived from it is registered
+    // on the in-memory data layer below so the verify path resolves
+    // a known operator + role list.
+    let seed = [0xA5u8; 32];
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubkey_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let fingerprint = operator_fingerprint_hex(&pubkey_bytes);
+    let data = InMemoryDashboardData::new();
+    data.with_operator(fingerprint.clone(), "tester", vec![DashboardRole::Read]);
+    let server = DashboardServer::bind(cfg, Arc::clone(&data))
+        .await
+        .expect("bind");
+    let addr = server.local_addr();
+    let handle = ServerHandle::spawn(server);
+    let base = format!("http://{addr}");
+
+    let (token, _fp) = mint_jwt(&base, &signing_key).await;
+
+    // The session id below has not been registered via
+    // `install_stream_source` / `push_session`. The pre-fix
+    // contract would have returned `200 OK` and a single
+    // `tail-complete` SSE frame, then hung. The post-fix
+    // contract returns a structured 404.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("build client");
+    let res = client
+        .get(format!("{base}/api/sessions/no-such-session/stream?tail=1"))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        res.status(),
+        404,
+        "SSE on unknown session w/ valid auth must return 404, got {}",
+        res.status(),
+    );
+    let body: serde_json::Value = res.json().await.expect("json body");
+    assert_eq!(
+        body["code"], "FAIL_DASHBOARD_NOT_FOUND",
+        "404 must carry the structured ApiError envelope (got {body:?})",
+    );
+
     handle.shutdown().await.expect("shutdown");
 }

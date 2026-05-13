@@ -112,6 +112,26 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
+    // Spec contract (`dashboard-hardening.md §1.6`):
+    //
+    // > Unknown session: `404 Not Found` JSON envelope (NOT a hung
+    // > connection), even when `Last-Event-ID` is present.
+    //
+    // Resolve the session id against the data layer first so a
+    // typo / stale URL surfaces as a structured 404 the operator
+    // UI can render, rather than as a 200 SSE response that emits
+    // a single `tail-complete` frame and then keeps the connection
+    // open until the browser's idle timeout. The kernel-side
+    // `stream_subscribe` impl lazily creates a per-session capture
+    // so it never returns NotFound on its own; the explicit
+    // pre-check is the only enforcement point.
+    //
+    // We map every non-success (including transient store-read
+    // errors) directly to the corresponding ApiError so the
+    // failure surface for the SSE handler matches the rest of the
+    // session API surface (`/api/sessions/:id` returns 404 / 500
+    // through the same path).
+    state.data.get_session(&id)?;
     // Fast-path the kernel-shutdown case: a freshly-attached
     // subscriber that hits a kernel that already triggered
     // shutdown gets a single sentinel frame and a clean close
