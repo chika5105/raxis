@@ -54,6 +54,7 @@ describe("auditTone", () => {
     expect(auditTone("DatabaseQueryExecuted")).toBe("info");
     expect(auditTone("DefaultProviderEgressApplied")).toBe("info");
     expect(auditTone("PathScopeOverrideApplied")).toBe("info");
+    expect(auditTone("CredentialProxySubstituted")).toBe("info");
   });
 
   it("classifies throttle / admission events as block", () => {

@@ -70,6 +70,22 @@ export function summarizeNotificationPayload(
       }
       return null;
     }
+    case "CredentialProxySubstituted": {
+      const proxy = str(payload, "proxy_type");
+      const cred = str(payload, "credential_name");
+      const realResolved = bool(payload, "real_resolved");
+      const shape = str(payload, "substitution_shape");
+      if (!proxy || !cred) return null;
+      const tail = [
+        shape ? `shape=${shape}` : null,
+        realResolved === false ? "real-resolved=false" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      return tail
+        ? `${proxy} proxy "${cred}" substituted real credential (${tail})`
+        : `${proxy} proxy "${cred}" substituted real credential`;
+    }
     case "CredentialProxyUpstreamConnected": {
       const proxy = str(payload, "proxy_type");
       const cred = str(payload, "credential_name");

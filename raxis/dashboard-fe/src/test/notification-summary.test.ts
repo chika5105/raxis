@@ -47,6 +47,30 @@ describe("summarizeNotificationPayload", () => {
     );
   });
 
+  it("derives a CredentialProxySubstituted line", () => {
+    expect(
+      summarizeNotificationPayload("CredentialProxySubstituted", {
+        credential_name: "test-pg-dev",
+        proxy_type: "postgres",
+        real_resolved: true,
+        session_id: "3258b2d3-629d-4706-81cf-ac424df163b1",
+        substitution_shape: "scram-sha-256",
+      }),
+    ).toBe(
+      'postgres proxy "test-pg-dev" substituted real credential (shape=scram-sha-256)',
+    );
+    expect(
+      summarizeNotificationPayload("CredentialProxySubstituted", {
+        credential_name: "synthetic-pg",
+        proxy_type: "postgres",
+        real_resolved: false,
+        substitution_shape: "scram-sha-256",
+      }),
+    ).toBe(
+      'postgres proxy "synthetic-pg" substituted real credential (shape=scram-sha-256, real-resolved=false)',
+    );
+  });
+
   it("derives a TLS-up connect line when tls=true", () => {
     const summary = summarizeNotificationPayload(
       "CredentialProxyUpstreamConnected",
