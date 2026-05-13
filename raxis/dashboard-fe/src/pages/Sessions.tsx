@@ -6,6 +6,7 @@ import clsx from "clsx";
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
+import { FailurePill } from "@/components/FailureReasonPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
@@ -14,6 +15,7 @@ import {
   StatusLegend,
 } from "@/components/StatusLegend";
 import { fmtRelative, fmtTokens } from "@/lib/format";
+import { isTerminalFailureState } from "@/lib/state-color";
 import {
   parseStatusParam,
   serializeStatusParam,
@@ -207,8 +209,17 @@ export function SessionsPage() {
                     </Link>
                   </td>
                   <td className="px-4 py-2 text-ink-muted">{s.role}</td>
-                  <td className="px-4 py-2">
-                    <StateBadge state={s.state} pulse={s.state === "Running"} />
+                  <td className="px-4 py-2 align-top">
+                    <div className="flex flex-col items-start gap-1">
+                      <StateBadge state={s.state} pulse={s.state === "Running"} />
+                      {isTerminalFailureState(s.state) && (
+                        <FailurePill
+                          failed
+                          reason={s.failure ?? null}
+                          compact
+                        />
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-2 text-xs">
                     {s.initiative_id && (

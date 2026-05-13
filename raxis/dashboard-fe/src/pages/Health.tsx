@@ -159,6 +159,15 @@ function statusDotClass(status: string): string {
 }
 
 function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
+  const isUnhealthy = card.status === "failing" || card.status === "degraded";
+  // Operator-experience contract `INV-DASHBOARD-FAILURE-VISIBILITY-01`:
+  // every `failing` / `degraded` card MUST surface its `last_error`.
+  // When the kernel did NOT supply one we render an explicit
+  // operator-actionable bug marker so the gap is visible rather
+  // than silently swallowed by the green dot.
+  const errorText =
+    card.last_error?.trim() ||
+    (isUnhealthy ? "No reason supplied — kernel bug" : "");
   return (
     <article
       className="card p-3 space-y-2"
@@ -180,6 +189,17 @@ function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
         </span>
       </header>
       <p className="text-xs text-ink-muted leading-snug">{card.summary}</p>
+      {isUnhealthy && errorText && (
+        <div
+          role="alert"
+          data-testid="subsystem-last-error"
+          className="text-xs rounded border border-bad/40 bg-bad/10 text-bad px-2 py-1.5 whitespace-pre-wrap break-words leading-snug"
+          title={errorText}
+        >
+          <span className="font-bold mr-1" aria-hidden="true">!</span>
+          {errorText}
+        </div>
+      )}
       {card.details.length > 0 && (
         <dl className="text-[11px] text-ink-muted space-y-0.5">
           {card.details.map((row) => (

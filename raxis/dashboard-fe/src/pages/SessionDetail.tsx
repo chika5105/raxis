@@ -5,11 +5,13 @@ import { Link, useParams } from "react-router-dom";
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
 import { ErrorBox } from "@/components/ErrorBox";
+import { FailureReasonPanel } from "@/components/FailureReasonPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { SessionStream } from "@/components/SessionStream";
 import { StateBadge } from "@/components/StateBadge";
 import { fmtAbsolute, fmtRelative, fmtTokens } from "@/lib/format";
+import { isTerminalFailureState } from "@/lib/state-color";
 
 export function SessionDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -110,6 +112,13 @@ export function SessionDetailPage() {
           />
         </div>
       </header>
+
+      {(isTerminalFailureState(s.state) || s.failure) && (
+        <FailureReasonPanel
+          reason={s.failure ?? null}
+          heading="Session failure reason"
+        />
+      )}
 
       <SessionStream sessionId={s.session_id} />
     </div>

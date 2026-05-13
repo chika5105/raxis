@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 
-import { dashboardApi } from "@/api/client";
+import { ApiError, dashboardApi } from "@/api/client";
 import { fmtAbsolute } from "@/lib/format";
 import type { ChainStatusResponse } from "@/types/api";
 
@@ -36,12 +37,26 @@ export function ChainStatusBanner() {
     staleTime: 15_000,
   });
 
+  const [reverifyError, setReverifyError] = useState<unknown>(null);
+  const [reverifying, setReverifying] = useState(false);
   const onReverify = async () => {
-    const fresh = await dashboardApi.audit.chainStatus({ reverify: true });
-    queryClient.setQueryData<ChainStatusResponse>(
-      ["audit", "chain-status"],
-      fresh,
-    );
+    setReverifyError(null);
+    setReverifying(true);
+    try {
+      const fresh = await dashboardApi.audit.chainStatus({ reverify: true });
+      queryClient.setQueryData<ChainStatusResponse>(
+        ["audit", "chain-status"],
+        fresh,
+      );
+    } catch (err) {
+      // Surface the audit-tools error message inline rather than
+      // silently no-oping (`INV-DASHBOARD-FAILURE-VISIBILITY-01`).
+      // The button rests right beneath this banner, so a sibling
+      // inline error frames it as a direct response to the click.
+      setReverifyError(err);
+    } finally {
+      setReverifying(false);
+    }
   };
 
   if (q.isPending) {
@@ -146,10 +161,58 @@ export function ChainStatusBanner() {
           className="btn text-[11px] px-2 py-1"
           onClick={onReverify}
           aria-label="Re-verify audit chain"
+          disabled={reverifying}
         >
-          Re-verify
+          {reverifying ? "Re-verifying…" : "Re-verify"}
         </button>
       </div>
+      {reverifyError !== null && (
+        <ReverifyFailureRow
+          error={reverifyError}
+          onDismiss={() => setReverifyError(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Inline error sibling for the "Re-verify chain" button. Renders
+// in the same banner so the operator sees the audit-tools error
+// (`FAIL_DASHBOARD_AUDIT_VERIFY` / etc.) where they clicked,
+// not in a transient toast. `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
+function ReverifyFailureRow({
+  error,
+  onDismiss,
+}: {
+  error: unknown;
+  onDismiss: () => void;
+}) {
+  const isApi = error instanceof ApiError;
+  const code = isApi ? error.code : "ERROR";
+  const detail = isApi
+    ? error.detail
+    : error instanceof Error
+      ? error.message
+      : String(error);
+  return (
+    <div
+      role="alert"
+      data-testid="reverify-failure"
+      className="w-full mt-2 rounded border border-rose-700/50 bg-rose-700/10 px-2 py-1.5 text-[12px] text-rose-900 dark:border-rose-500/50 dark:bg-rose-500/10 dark:text-rose-200 flex items-start gap-2"
+    >
+      <span aria-hidden="true" className="font-bold">!</span>
+      <div className="flex-1 min-w-0">
+        <span className="font-mono">{code}</span>{" "}
+        <span className="break-words">{detail || "(no detail)"}</span>
+      </div>
+      <button
+        type="button"
+        className="text-[11px] hover:underline"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+      >
+        Dismiss
+      </button>
     </div>
   );
 }

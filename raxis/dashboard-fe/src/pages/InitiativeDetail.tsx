@@ -8,9 +8,14 @@ import { CopyButton } from "@/components/CopyButton";
 import { DagGraph } from "@/components/DagGraph";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
+import {
+  FailurePill,
+  FailureReasonPanel,
+} from "@/components/FailureReasonPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
+import { isTerminalFailureState } from "@/lib/state-color";
 import {
   StatusFilterPills,
   StatusLegend,
@@ -119,6 +124,13 @@ export function InitiativeDetailPage() {
           <Row label="Policy epoch" value={`#${init.policy_epoch}`} />
         </div>
       </header>
+
+      {(isTerminalFailureState(init.state) || init.failure) && (
+        <FailureReasonPanel
+          reason={init.failure ?? null}
+          heading="Initiative failure reason"
+        />
+      )}
 
       {/* Clickable status legend — drives a URL-stored `?status=`
        * filter that dims non-matching rows in the task table and
@@ -242,11 +254,20 @@ export function InitiativeDetailPage() {
                         <Mono>{t.task_id}</Mono>
                       </div>
                     </td>
-                    <td className="px-4 py-2">
-                      <StateBadge
-                        state={t.state}
-                        pulse={t.state === "Running"}
-                      />
+                    <td className="px-4 py-2 align-top">
+                      <div className="flex flex-col items-start gap-1">
+                        <StateBadge
+                          state={t.state}
+                          pulse={t.state === "Running"}
+                        />
+                        {isTerminalFailureState(t.state) && (
+                          <FailurePill
+                            failed
+                            reason={t.failure ?? null}
+                            compact
+                          />
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-2 text-xs">
                       {t.session_id ? (
@@ -295,6 +316,25 @@ export function InitiativeDetailPage() {
                   pulse={focusedTask.state === "Running"}
                 />
               </div>
+              {(isTerminalFailureState(focusedTask.state) ||
+                focusedTask.failure) && (
+                <div className="mt-3">
+                  <FailureReasonPanel
+                    reason={focusedTask.failure ?? null}
+                    heading="Task failure reason"
+                    collapsible
+                  />
+                  {focusedTask.blocked_downstream &&
+                    focusedTask.blocked_downstream.length > 0 && (
+                      <div className="mt-2 text-[11px] text-warn">
+                        Blocks {focusedTask.blocked_downstream.length} downstream{" "}
+                        {focusedTask.blocked_downstream.length === 1
+                          ? "task"
+                          : "tasks"}
+                      </div>
+                    )}
+                </div>
+              )}
               <dl className="mt-3 space-y-2 text-xs">
                 <Row
                   label="Session"

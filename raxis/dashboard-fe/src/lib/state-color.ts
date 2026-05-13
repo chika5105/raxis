@@ -133,6 +133,38 @@ export function toneClasses(tone: StateBadgeTone): string {
   return TONE_CLASSES[tone];
 }
 
+/// Returns true when the kernel state string represents a
+/// terminal failure / rejection / blocked-recovery condition —
+/// i.e. an entity for which a `FailureInfo` reason SHOULD be
+/// surfaced via `<FailureReasonPanel>` /  `<FailurePill>`.
+///
+/// Used across the dashboard to decide whether the missing-reason
+/// "kernel bug" affordance should fire. Mirrors the kernel-side
+/// terminal-failure classifier used when projecting
+/// `FailureInfo` onto entity view shapes.
+///
+/// Anchors: `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
+export function isTerminalFailureState(
+  state: string | null | undefined,
+): boolean {
+  if (!state) return false;
+  // Match against the canonical PascalCase variants used by the
+  // kernel FSMs (`raxis-types::fsm::*`). `BlockedRecoveryPending`
+  // counts as a failure-bearing state because the kernel has
+  // already captured a `block_reason` for it, and the operator
+  // needs to see why recovery is pending.
+  const FAILURE_STATES = new Set([
+    "Failed",
+    "Aborted",
+    "Cancelled",
+    "Revoked",
+    "Errored",
+    "BlockedRecoveryPending",
+    "VmFailedFinal",
+  ]);
+  return FAILURE_STATES.has(state);
+}
+
 /// Compact uppercase label for tight surfaces (DAG node chips,
 /// inline-list ribbons) that can't fit the full kernel state
 /// name. Splits PascalCase tokens on uppercase boundaries and

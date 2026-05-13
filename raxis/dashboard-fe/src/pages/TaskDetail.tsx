@@ -5,10 +5,12 @@ import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
+import { FailureReasonPanel } from "@/components/FailureReasonPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
+import { isTerminalFailureState } from "@/lib/state-color";
 
 export function TaskDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -58,6 +60,33 @@ export function TaskDetailPage() {
           </Link>
         )}
       </header>
+
+      {(isTerminalFailureState(t.state) || t.failure) && (
+        <FailureReasonPanel
+          reason={t.failure ?? null}
+          heading="Task failure reason"
+        />
+      )}
+
+      {t.blocked_downstream && t.blocked_downstream.length > 0 && (
+        <section className="card border-warn/40 bg-warn/5 p-3 text-sm">
+          <h2 className="text-xs uppercase tracking-wide text-warn font-medium">
+            Downstream tasks blocked by this failure
+          </h2>
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {t.blocked_downstream.map((tid) => (
+              <li key={tid}>
+                <Link
+                  to={`/tasks/${tid}`}
+                  className="badge bg-warn-muted/30 border-warn text-warn hover:bg-warn hover:text-white font-mono text-[11px]"
+                >
+                  {tid}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <section className="card p-4">

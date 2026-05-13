@@ -2,12 +2,17 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
-import { dashboardApi } from "@/api/client";
+import { dashboardApi, ApiError } from "@/api/client";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
+import { FailurePill } from "@/components/FailureReasonPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { auditBadgeClasses } from "@/lib/audit-tone";
+import {
+  failureFromAuditEvent,
+  isFailureAuditEvent,
+} from "@/lib/failure-extract";
 import { fmtRelative } from "@/lib/format";
 import {
   decrementUnreadCount,
@@ -151,6 +156,21 @@ export function NotificationsPage() {
         </div>
       </header>
 
+      {markAll.error && (
+        <ActionFailureBanner
+          label="Mark all read failed"
+          error={markAll.error}
+          onDismiss={() => markAll.reset()}
+        />
+      )}
+      {markRead.error && (
+        <ActionFailureBanner
+          label="Mark read failed"
+          error={markRead.error}
+          onDismiss={() => markRead.reset()}
+        />
+      )}
+
       {initiativeId && (
         <div className="text-xs text-ink-muted">
           Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
@@ -251,6 +271,19 @@ export function NotificationsPage() {
                     n.payload,
                   )}
                 </p>
+                {isFailureAuditEvent(n.event_kind, n.payload) && (
+                  <div className="mt-1.5">
+                    <FailurePill
+                      failed
+                      reason={failureFromAuditEvent(
+                        n.event_kind,
+                        n.payload,
+                        { eventId: n.source_event_id, observedAt: n.created_at },
+                      )}
+                      compact
+                    />
+                  </div>
+                )}
                 <Mono className="text-[10px] text-ink-subtle">
                   source event {n.source_event_id}
                 </Mono>
@@ -259,6 +292,68 @@ export function NotificationsPage() {
           })}
         </ul>
       )}
+    </div>
+  );
+}
+
+interface ActionFailureBannerProps {
+  /// What the operator tried to do (e.g. "Mark all read failed").
+  label: string;
+  /// React Query mutation error.
+  error: unknown;
+  /// Clears the mutation error state so the banner auto-hides
+  /// once the operator acknowledges it.
+  onDismiss: () => void;
+}
+
+/// Inline error banner for failed dashboard mutations. Surfaces
+/// the API `code` + `detail` (raw kernel error) so the operator
+/// can read WHY the action failed without opening devtools.
+///
+/// Anchors `INV-DASHBOARD-FAILURE-VISIBILITY-01` clause on
+/// operator-action rejections — when an Approve / Mark-read /
+/// Re-verify fails with `RejectedPermission` / `InternalError`,
+/// the operator MUST see the reason inline rather than a generic
+/// toast.
+function ActionFailureBanner({
+  label,
+  error,
+  onDismiss,
+}: ActionFailureBannerProps) {
+  const isApi = error instanceof ApiError;
+  const code = isApi ? error.code : "ERROR";
+  const detail =
+    isApi
+      ? error.detail
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  return (
+    <div
+      role="alert"
+      data-testid="action-failure-banner"
+      className="card border-bad/40 bg-bad/5 p-3 text-sm flex items-start gap-3"
+    >
+      <span aria-hidden="true" className="text-bad font-bold leading-none mt-0.5">
+        !
+      </span>
+      <div className="flex-1 min-w-0">
+        <p className="font-medium text-bad">{label}</p>
+        <p className="mt-0.5 text-[12.5px] font-mono text-bad/90 break-words">
+          {code}
+        </p>
+        <p className="mt-1 text-ink whitespace-pre-wrap break-words">
+          {detail || "(no detail returned by the kernel)"}
+        </p>
+      </div>
+      <button
+        type="button"
+        className="text-xs text-ink-muted hover:text-accent"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+      >
+        Dismiss
+      </button>
     </div>
   );
 }

@@ -6,9 +6,17 @@ import { dashboardApi } from "@/api/client";
 import { ChainStatusBanner } from "@/components/ChainStatusBanner";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
+import {
+  FailurePill,
+  FailureReasonPanel,
+} from "@/components/FailureReasonPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { auditBadgeClasses } from "@/lib/audit-tone";
+import {
+  failureFromAuditEvent,
+  isFailureAuditEvent,
+} from "@/lib/failure-extract";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
 import type { AuditEntryView } from "@/types/api";
 
@@ -106,6 +114,14 @@ export function AuditPage() {
             {all.map((a) => {
               const isOpen = expanded === a.event_id;
               const toggle = () => setExpanded(isOpen ? null : a.event_id);
+              const isFailure = isFailureAuditEvent(a.event_kind, a.payload);
+              const reason = isFailure
+                ? failureFromAuditEvent(a.event_kind, a.payload, {
+                    seq: a.seq,
+                    eventId: a.event_id,
+                    observedAt: a.at,
+                  })
+                : null;
               // Outer row is a real interactive surface but
               // contains nested <a> links to the initiative /
               // task. Plain <button> would be invalid HTML
@@ -151,6 +167,9 @@ export function AuditPage() {
                         · {a.task_id}
                       </Link>
                     )}
+                    {isFailure && (
+                      <FailurePill failed reason={reason} compact />
+                    )}
                     <span className="ml-auto text-xs text-ink-subtle">
                       {fmtRelative(a.at)}
                     </span>
@@ -166,12 +185,18 @@ export function AuditPage() {
                   {isOpen && (
                     <div
                       id={`audit-payload-${a.event_id}`}
-                      className="px-4 pb-3 pt-1 bg-panel"
+                      className="px-4 pb-3 pt-1 bg-panel space-y-2"
                     >
                       <div className="text-[11px] text-ink-subtle">
                         <Mono>{a.event_id}</Mono> · {fmtAbsolute(a.at)}
                       </div>
-                      <pre className="mt-2 text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
+                      {isFailure && (
+                        <FailureReasonPanel
+                          reason={reason}
+                          heading={`Failure event · #${a.seq}`}
+                        />
+                      )}
+                      <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
                         {JSON.stringify(a.payload, null, 2)}
                       </pre>
                     </div>
