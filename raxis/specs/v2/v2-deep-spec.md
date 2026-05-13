@@ -627,8 +627,17 @@ More critically, the Orchestrator could hallucinate that a failed sub-task succe
 proceed to `IntegrationMerge` with missing work.
 
 **Decision (Step 12):** Two independent counters on `subtask_activations`:
-- `crash_retry_count` — incremented by the Kernel on OS-level process death (SIGCHLD / VM exit
-  with non-zero code). Ceiling: `max_crash_retries` declared in the plan.
+- `crash_retry_count` — incremented by the Kernel on:
+  * OS-level process death (SIGCHLD / VM exit with non-zero code);
+  * `SecurityViolation` revocation of a sub-planner session
+    (Step 13's "for sub-planner sessions: the revocation is equivalent to a crash" carve-out);
+  * `ReportFailure` from an Executor (an LLM that loops on
+    "I cannot make progress" is, from the operator's vantage, indistinguishable from a process
+    crash loop — bounding it under the same budget keeps the V2 ops contract that every
+    unsuccessful attempt against an Executor counts toward the same per-task ceiling).
+
+  Ceiling: `max_crash_retries` declared in the plan
+  (kernel default `DEFAULT_MAX_CRASH_RETRIES = 3` when omitted).
 - `review_reject_count` — incremented by the Kernel when a Reviewer submits `approved: false`
   for this sub-task. Ceiling: `max_review_rejections` declared in the plan.
 

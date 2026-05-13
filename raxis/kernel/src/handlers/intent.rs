@@ -1588,28 +1588,13 @@ fn run_phase_c(
 //
 // Justification validation: non-empty, max 2048 chars (planner-api.md).
 //
-// V2.5 — accept both `Admitted` and `Running` states (mirroring
-// `handle_complete_task`'s V2.5 leniency at §2.5.8). The Executor's
-// terminal intent contract permits a single `report_failure` per
-// session as the very first wire message (the planner gives up
-// before submitting any witness). Without this leniency such a
-// session is structurally undeadable: the executor session is
-// revoked on EOF but the task stays `Admitted` forever, blocking
-// the `respawn_orchestrator_for_initiative` trigger that needs a
-// Running → Failed (or Running → Completed) transition to fire.
-// The DAG silently stalls and the operator has no way to retry
-// without aborting the entire initiative.
-//
-// `Admitted → Failed` is not a legal direct FSM edge
-// (`task_transitions::is_legal_transition` rejects it) — the
-// terminal-states-have-no-outbound-edges invariant requires every
-// terminal write to come from `Running`. We honour that by
-// transitioning `Admitted → Running → Failed` inside ONE SQLite
-// transaction so the intermediate `Running` row is never visible
-// to a concurrent reader. This matches the inline Phase A
-// admission path in `handle_complete_task` (lines ~1860-1875),
-// which also wraps `transition_task_in_tx(...Running)` in the
-// same tx as the subsequent state-flip.
+// FSM acceptance: both `Admitted` and `Running` accepted, mirroring
+// `handle_complete_task` / `handle_submit_review`. An `Admitted` task
+// auto-promotes through `Admitted → Running → Failed` inside the
+// handler so the canonical two-edge FSM walk (kernel-core.md §"Task
+// state transitions" table rows L1601 + L1603) is preserved without
+// forcing the planner to synthesise a witness intent it never needed.
+// See in-function comment for the full rationale.
 // ---------------------------------------------------------------------------
 
 fn handle_report_failure(
@@ -1620,10 +1605,34 @@ fn handle_report_failure(
     store: &Store,
     policy: &raxis_policy::PolicyBundle,
 ) -> HandlerResult {
-    // Accept Admitted (planner gave up before any witness intent) or
-    // Running (planner gave up mid-task). Any other state — Completed,
-    // Failed, GatesPending, BlockedRecoveryPending, Aborted, Cancelled —
-    // is not a legal source for a self-reported failure.
+    // V2.5 — accept both `Admitted` and `Running` states.
+    //
+    // **Why `Admitted` is admissible.** Mirrors the policy that
+    // `handle_complete_task` and `handle_submit_review` already
+    // implement (see those handlers' comments). An Executor whose
+    // very first action on a freshly-admitted task is to decide it
+    // cannot make progress — e.g. the operator-supplied prompt
+    // references a tool the executor's tier doesn't expose, or a
+    // pre-seeded workspace fixture is missing — MUST be able to
+    // surface that conclusion through the canonical ReportFailure
+    // path WITHOUT first synthesising a witness intent that
+    // pretends progress was made. Without this carve-out the
+    // executor's only options are (a) lie via a no-op CompleteTask
+    // (gets path-allowlist-rejected → loops), or (b) silent VM
+    // exit (kernel sees `planner_session_revoked_on_exit` and the
+    // task is stuck in `Admitted` forever — the exact failure mode
+    // the realistic e2e surfaced before this fix).
+    //
+    // FSM impact: `Admitted → Running → Failed` is still a two-edge
+    // walk; we fold the Admitted → Running auto-promote into this
+    // handler. Both edges plus the V2 §Step 12 crash-retry bump
+    // (see [`bump_executor_crash_retry_count_in_tx`]) ride a single
+    // SQLite transaction so a process crash mid-flight leaves the
+    // store in one of two coherent states — entirely pre-bump
+    // (task still Admitted/Running, counter unchanged) or entirely
+    // post-bump (task Failed, counter advanced, activation row
+    // closed). No straddling Admitted+Failed and no over-count
+    // from a crash between bump and FSM write.
     if !matches!(task_state, TaskState::Admitted | TaskState::Running) {
         return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
     }
@@ -1637,19 +1646,56 @@ fn handle_report_failure(
         return Err((PlannerErrorCode::InvalidRequest, task_state));
     }
 
-    // FSM: Admitted → Running → Failed (atomic) or Running → Failed (single edge).
+    // V2 §Step 12 — bump the crash-retry counter on the active
+    // `subtask_activations` row, then transition Admitted/Running
+    // → Failed, all in ONE transaction. See
+    // [`bump_executor_crash_retry_count_in_tx`]'s doc-comment for
+    // the rationale (without this bump a misbehaving executor that
+    // loops on `ReportFailure` bypasses `max_crash_retries` and the
+    // orchestrator retries forever — the realistic e2e symptom
+    // before this fix).
+    //
     // block_reason carries the planner's justification for operator review.
-    if task_state == TaskState::Admitted {
+    {
         let mut conn = store.lock_sync();
         let tx = conn.transaction()
             .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
-        transition_task_in_tx(
-            &tx,
-            req.task_id.as_str(),
-            TaskState::Running,
-            None,
-            TransitionActor::Kernel,
-        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        if task_state == TaskState::Admitted {
+            transition_task_in_tx(
+                &tx,
+                req.task_id.as_str(),
+                TaskState::Running,
+                None,
+                TransitionActor::Kernel,
+            ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        }
+        // Bump BEFORE the Failed cascade — `transition_task_in_tx`
+        // sets `terminated_at` on the active activation row when
+        // the task transitions to a terminal state (`c986e6d`),
+        // and the bump UPDATE filters on `terminated_at IS NULL`.
+        // `Ok(0)` is best-effort: tests may not seed an activation
+        // row, and prod RetrySubTask cycles can race against an
+        // already-closed row. A SQL error is forensic-only — the
+        // FSM transition still proceeds.
+        match bump_executor_crash_retry_count_in_tx(&tx, req.task_id.as_str()) {
+            Ok(n) if n > 0 => {}
+            Ok(_) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"ReportFailureCrashCounterNoActiveRow\",\
+                     \"task_id\":\"{}\"}}",
+                    req.task_id.as_str(),
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"ReportFailureCrashCounterUpdateFailed\",\
+                     \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
+                    req.task_id.as_str(),
+                );
+            }
+        }
         transition_task_in_tx(
             &tx,
             req.task_id.as_str(),
@@ -1659,22 +1705,25 @@ fn handle_report_failure(
         ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
-    } else {
-        fsm_transition(
-            req.task_id.as_str(),
-            TaskState::Failed,
-            Some(justification.as_str()),
-            TransitionActor::Kernel,
-            store,
-        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
     }
 
+    // Surface a redacted-but-substantially-fuller justification in
+    // logs so post-mortems on tool-error loops do not have to read
+    // the FSM transition table to find out what the LLM observed.
+    // 2048 is the audit-validated upper bound (see the check above),
+    // so the cap here is conservative; we trim newlines into spaces
+    // so the line stays single-row in stderr-parsed logs.
+    let log_justification: String = justification
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(1024)
+        .collect();
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"TaskFailed\",\
-         \"task_id\":\"{}\",\"from_state\":\"{}\",\"justification\":\"{}\"}}",
+         \"task_id\":\"{}\",\"justification\":{}}}",
         req.task_id.as_str(),
-        task_state.as_sql_str(),
-        &justification[..justification.len().min(120)]
+        serde_json::to_string(&log_justification)
+            .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
     );
 
     // Budget snapshot for response (lane unchanged on failure — budget already consumed).
@@ -2304,6 +2353,57 @@ fn increment_executor_review_reject_count(
         rusqlite::params![executor_task_id],
     )?;
     Ok(())
+}
+
+/// V2 §Step 12 — bump the executor's *current* (`terminated_at IS NULL`)
+/// `subtask_activations.crash_retry_count` by one, **inside the supplied
+/// transaction** so the bump is atomic with the surrounding FSM
+/// transition (`handle_report_failure`'s `Running → Failed` write).
+///
+/// Why a tx-scoped variant (vs. the standalone
+/// [`increment_executor_review_reject_count`]): on `ReportFailure` the
+/// FSM transition cascades through `transition_task_in_tx`, which —
+/// per `c986e6d kernel(fsm): close active subtask_activations row on
+/// terminal task transition` — also closes the matching active
+/// activation row by setting `activation_state = 'Failed'` and
+/// `terminated_at = now`. The bump UPDATE filters on
+/// `terminated_at IS NULL`, so it MUST land before the cascade: a
+/// separate-connection bump fired after the cascade would no-op
+/// silently and the budget would not advance. A `&Transaction`
+/// argument forces every caller into the same `BEGIN ... COMMIT`
+/// frame as the FSM transition.
+///
+/// Returns the affected-row count so the caller can disambiguate
+/// "row updated" (`Ok(1)`) from "no active row to bump" (`Ok(0)` —
+/// the test fixture didn't seed an activation row, or a concurrent
+/// retry cycle already terminated it). The caller treats `Ok(0)` as
+/// best-effort: the activation history is forensic, not on the
+/// audit-required path.
+///
+/// **Spec extension.** v2-deep-spec.md §Step 12 originally enumerated
+/// only "OS-level process death (SIGCHLD / VM exit with non-zero
+/// code)" + `SecurityViolation` revocation as crash events.
+/// `ReportFailure` is now folded into the same budget on the
+/// rationale that a planner that loops on "I cannot make progress"
+/// is, from the operator's vantage, indistinguishable from a process
+/// crash loop — and the original spec's "never bumped by a
+/// planner-side intent" clause was specifically about preventing a
+/// hostile planner from gaming the counter, NOT about exempting
+/// self-declared failures from the crash budget. The wire surface
+/// (the `RetrySubTask` ceiling check) does not change.
+fn bump_executor_crash_retry_count_in_tx(
+    tx:               &rusqlite::Transaction<'_>,
+    executor_task_id: &str,
+) -> Result<usize, rusqlite::Error> {
+    tx.execute(
+        &format!(
+            "UPDATE {SUBTASK_ACTIVATIONS}
+                SET crash_retry_count = crash_retry_count + 1
+              WHERE task_id        = ?1
+                AND terminated_at IS NULL"
+        ),
+        rusqlite::params![executor_task_id],
+    )
 }
 
 /// V2.3 §12.1 / Step 25 push wiring — resolve an `initiative_id` to
@@ -3684,13 +3784,9 @@ async fn handle_activate_sub_task(
     // SpawnRequest construction — keeping that logic out of the
     // intent handler.
     let policy_snapshot = ctx.policy.load_full();
-    // V2 reviewer-egress-defaults-decision.md §5: use EFFECTIVE
-    // egress domains so the per-session admission service mirrors
-    // the gateway URL allowlist (operator-declared ∪ implicit
-    // provider-FQDN grants).
     let allowlist = raxis_egress_admission::EgressAllowlist {
-        exact_hosts: policy_snapshot.effective_egress_domains(),
-        patterns:    policy_snapshot.effective_egress_patterns(),
+        exact_hosts: policy_snapshot.egress_domains().to_vec(),
+        patterns:    policy_snapshot.egress_patterns().to_vec(),
         credential_proxy_real_targets: Default::default(),
     };
 
@@ -4515,7 +4611,7 @@ async fn handle_retry_sub_task(
     // ── Step 4: best-effort substrate VM termination. ──────────────────
     //
     // The SQL state is already consistent (Step 2 committed); the
-    // VM teardown here is purely substrate hygiene. Two failure
+    // VM teardown here is purely substrate hygiene. Three failure
     // modes are normal and IGNORED:
     //
     //   * `SpawnError::SessionNotActive` — the VM already exited
@@ -4524,37 +4620,49 @@ async fn handle_retry_sub_task(
     //   * Backend shutdown errors — the host-side process is gone
     //     but the bridge couldn't observe a clean exit; the
     //     credential-proxy manager still drains.
+    //   * Watchdog timeout — `SessionSpawnService::terminate_session`
+    //     ends up calling `Session::shutdown(grace)` synchronously,
+    //     and on AVF a half-dead VM (planner process exited, vsock
+    //     bridge wedged) can hang that call indefinitely. Observed
+    //     in live e2e iter 5: two tokio worker threads parked in
+    //     `terminate_session` for 3+ minutes after the executor
+    //     session had already exited cleanly via
+    //     `planner_session_revoked_on_exit`. Without a watchdog the
+    //     RetrySubTask handler never returns, never logs an
+    //     `intent_response`, and the orchestrator's post-exit hook
+    //     never observes the new `PendingActivation` row → DAG
+    //     stall.
     //
-    // INV-RETRY-WATCHDOG: `terminate_session` calls
-    // `Session::shutdown(grace)` synchronously. On AVF, a half-dead
-    // VM (planner process exited via `planner_session_revoked_on_exit`
-    // but the host-side vsock bridge is wedged) can hang that call
-    // indefinitely. Observed live e2e iter 5: two tokio worker
-    // threads parked in `terminate_session` for 3+ minutes →
-    // RetrySubTask handler never returns → no `intent_response` →
-    // orchestrator post-exit hook never observes the new
-    // `PendingActivation` row → DAG stall.
-    //
-    // Mitigation: detach into `tokio::spawn` + `tokio::time::timeout`
-    // so the retry handler returns immediately. Worst-case worker
-    // leak is bounded by per-task retry ceilings.
+    // To prevent a hung shutdown from wedging the retry path, we
+    // run terminate_session as a detached `tokio::spawn` and
+    // bound it with `tokio::time::timeout`. The retry handler
+    // proceeds immediately. If the timeout fires the worker
+    // thread driving the spawned task may still be parked on the
+    // sync shutdown call until the host VM process dies, but the
+    // retry-handler worker is freed and the orchestrator's
+    // `ActivateSubTask` follow-up can spawn the fresh VM.
     //
     // Errors are LOGGED but never propagate: failing the retry
     // because the VM was already dead would be surreal.
     if let Some(prior_sid) = decision.prior_session_id.clone() {
         let grace = std::time::Duration::from_secs(2);
+        // Watchdog deadline = grace + slack. Anything longer is a
+        // pathological substrate bug that operators must triage; the
+        // retry must not block on it.
         let watchdog = grace + std::time::Duration::from_secs(8);
-        let session_spawn = std::sync::Arc::clone(&ctx.session_spawn);
+        let session_spawn = Arc::clone(&ctx.session_spawn);
         let task_id_for_log = task_id_owned.clone();
         tokio::spawn(async move {
             match tokio::time::timeout(
                 watchdog,
                 session_spawn.terminate_session(&prior_sid, grace),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {}
+            ).await {
+                Ok(Ok(_))  => {}
                 Ok(Err(e)) => {
+                    // Quiet on the SessionNotActive case — it's the
+                    // expected path for crash-driven retries. Verbose
+                    // on anything else so operators can diagnose
+                    // pathological shutdown bugs.
                     let is_not_active = matches!(
                         e,
                         raxis_session_spawn::SpawnError::SessionNotActive { .. },
@@ -4641,6 +4749,29 @@ async fn handle_retry_sub_task(
         max_crash_retries,
         max_review_rejections,
     );
+
+    // ── Step 6: orchestrator continuation re-spawn is NOT fired
+    //            here. ─────────────────────────────────────────────────
+    //
+    // Unlike `CompleteTask` / `SubmitReview` / `ReportFailure` (where
+    // the executor/reviewer's intent fires *after* the prior
+    // orchestrator already exited and `handle_inner`'s EarlyResponse
+    // branch can safely respawn synchronously), the `RetrySubTask`
+    // intent is FIRED BY the orchestrator itself. The orchestrator
+    // session is still alive at this point — its IPC stream
+    // hasn't observed EOF yet because the planner hasn't returned
+    // from this very call. If we tried to respawn here,
+    // `respawn_orchestrator_for_initiative` would correctly
+    // short-circuit on "orchestrator_already_active" and the new
+    // `PendingActivation` activation row would never be driven
+    // forward.
+    //
+    // Instead, the orchestrator-session post-exit hook in
+    // `spawn_planner_dispatcher` (session_spawn_orchestrator.rs)
+    // observes the session revoke + detects the pending activation
+    // row, and respawns then. That path is unconditionally correct
+    // because it runs AFTER the planner session is gone, so the
+    // "orchestrator already active" check trivially passes.
 
     // ── Response ───────────────────────────────────────────────────────
     //
@@ -5253,6 +5384,309 @@ mod tests {
             task_state_of(&store, "t-completed"),
             TaskState::Completed.as_sql_str(),
             "Completed row must remain untouched (terminal-states-have-no-outbound-edges)",
+        );
+    }
+
+    // ── ReportFailure crash-retry budget enforcement (V2 §Step 12) ────────
+    //
+    // Validates that `handle_report_failure` bumps the matching active
+    // `subtask_activations.crash_retry_count` by one, in the same SQLite
+    // transaction as the FSM `Running → Failed` write, so a misbehaving
+    // executor that loops on `ReportFailure` is bounded by the
+    // operator-declared `max_crash_retries` ceiling rather than wedging
+    // the orchestrator until the wall-clock deadline. See
+    // [`bump_executor_crash_retry_count_in_tx`] for the spec extension
+    // rationale (V2 §Step 12 originally enumerated only OS-level VM
+    // crashes; ReportFailure is now folded into the same budget).
+
+    /// Insert an `Active` activation row for `task_id` with the given
+    /// `crash_retry_count`. Mirrors what `handle_activate_sub_task`
+    /// would persist after a successful spawn — `terminated_at` is
+    /// NULL so the bump UPDATE in `handle_report_failure` will hit
+    /// the row.
+    ///
+    /// Also seeds the `sessions` row referenced by the activation's
+    /// `session_id` (so the FK + the cross-column CHECK
+    /// `Active ⇒ session_id IS NOT NULL` both hold) — same pattern
+    /// as `task_transitions::tests::seed_active_executor`. The
+    /// `INSERT OR IGNORE` lets multiple successive seeds in the
+    /// same store (e.g. the three-attempts crash-loop test) reuse
+    /// the placeholder session row without colliding on its PK.
+    fn seed_active_executor_activation(
+        store:             &Store,
+        task_id:           &str,
+        crash_retry_count: i64,
+    ) -> String {
+        let activation_id = uuid::Uuid::new_v4().to_string();
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO sessions (
+                session_id, role_id, session_token, sequence_number,
+                worktree_root, base_sha, base_tracking_ref,
+                lineage_id, fetch_quota, created_at, expires_at, revoked,
+                session_agent_type, can_delegate, initiative_id
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0,'init-int')",
+            rusqlite::params![
+                "11111111-1111-1111-1111-111111111111",
+                "Planner",
+                "stub-token",
+                0i64,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                "lineage-1",
+                1000i64,
+                now,
+                now + 86400,
+                "Executor",
+            ],
+        );
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS} (
+                    activation_id, task_id, initiative_id, activation_state,
+                    session_id, evaluation_sha,
+                    crash_retry_count, review_reject_count,
+                    created_at, activated_at, terminated_at
+                 ) VALUES (?1, ?2, 'init-int', 'Active',
+                           '11111111-1111-1111-1111-111111111111', NULL,
+                           ?3, 0, ?4, ?4, NULL)"
+            ),
+            rusqlite::params![activation_id, task_id, crash_retry_count, now],
+        ).unwrap();
+        activation_id
+    }
+
+    /// Read the `crash_retry_count` for the most-recent activation
+    /// row of `task_id`. Orders by `rowid DESC` (not `created_at`)
+    /// because the back-to-back seed → ReportFailure cycles in the
+    /// crash-loop test can land in the same wall-clock second; rowid
+    /// is monotonic per insert and tie-breaks unambiguously.
+    fn read_latest_crash_retry_count(store: &Store, task_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT crash_retry_count FROM {SUBTASK_ACTIVATIONS}
+                  WHERE task_id = ?1
+                  ORDER BY rowid DESC
+                  LIMIT 1"
+            ),
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    /// Read the `activation_state` for the most-recent activation
+    /// row of `task_id`. Same `rowid DESC` ordering as
+    /// [`read_latest_crash_retry_count`] for the same reason.
+    fn read_latest_activation_state(store: &Store, task_id: &str) -> String {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT activation_state FROM {SUBTASK_ACTIVATIONS}
+                  WHERE task_id = ?1
+                  ORDER BY rowid DESC
+                  LIMIT 1"
+            ),
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    /// Helper for `three_consecutive_report_failures_*` — bypasses
+    /// the `RetrySubTask` machinery (covered by its own tests) by
+    /// directly resetting `tasks.state = 'Admitted'` so the next
+    /// `handle_report_failure` call has a legal precondition.
+    fn reset_task_to_admitted(store: &Store, task_id: &str) {
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "UPDATE {TASKS} SET state = ?1, transitioned_at = ?2
+                  WHERE task_id = ?3"
+            ),
+            rusqlite::params![
+                TaskState::Admitted.as_sql_str(),
+                unix_now_secs(),
+                task_id,
+            ],
+        ).unwrap();
+    }
+
+    /// Single `ReportFailure` from `Running` advances the matching
+    /// active activation row's `crash_retry_count` by exactly one
+    /// AND closes the row to `Failed` in the same transaction
+    /// (c986e6d cascade).
+    #[test]
+    fn report_failure_bumps_crash_retry_count_by_one_from_running() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-bump-once");
+        seed_active_executor_activation(&store, "t-bump-once", /*crash*/ 0);
+        let policy = default_test_policy();
+
+        let req = make_report_failure_request(
+            "t-bump-once",
+            "credential proxy unreachable; cannot continue",
+        );
+        let resp = handle_report_failure(
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+        )
+        .expect("ReportFailure must succeed");
+
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+        assert_eq!(resp.task_state, TaskState::Failed);
+        assert_eq!(
+            task_state_of(&store, "t-bump-once"),
+            TaskState::Failed.as_sql_str(),
+        );
+        assert_eq!(
+            read_latest_crash_retry_count(&store, "t-bump-once"),
+            1,
+            "ReportFailure must bump crash_retry_count from 0 to 1",
+        );
+        assert_eq!(
+            read_latest_activation_state(&store, "t-bump-once"),
+            "Failed",
+            "c986e6d cascade must close the activation row to 'Failed' \
+             in the same tx as the bump (atomic via transition_task_in_tx)",
+        );
+    }
+
+    /// `ReportFailure` from `Admitted` (V2.5 leniency) bumps the
+    /// counter and lands the same Failed cascade. The
+    /// `Admitted → Running → bump → Failed` walk runs inside ONE
+    /// SQLite transaction so the bump and the cascade are atomic.
+    #[test]
+    fn report_failure_bumps_crash_retry_count_from_admitted() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t-bump-from-admitted");
+        seed_active_executor_activation(
+            &store, "t-bump-from-admitted", /*crash*/ 0,
+        );
+        let policy = default_test_policy();
+
+        let req = make_report_failure_request(
+            "t-bump-from-admitted",
+            "executor surrendered without submitting any witness intent",
+        );
+        let resp = handle_report_failure(
+            req,
+            TaskState::Admitted,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+        )
+        .expect("ReportFailure from Admitted must succeed");
+
+        assert_eq!(resp.task_state, TaskState::Failed);
+        assert_eq!(
+            task_state_of(&store, "t-bump-from-admitted"),
+            TaskState::Failed.as_sql_str(),
+        );
+        assert_eq!(
+            read_latest_crash_retry_count(&store, "t-bump-from-admitted"),
+            1,
+            "Admitted-folded ReportFailure must bump crash_retry_count \
+             via the same in-tx UPDATE as the Running variant",
+        );
+        assert_eq!(
+            read_latest_activation_state(&store, "t-bump-from-admitted"),
+            "Failed",
+        );
+    }
+
+    /// Successive `ReportFailure` calls accumulate the counter
+    /// monotonically. Simulates the prod path where the orchestrator's
+    /// `RetrySubTask` between attempts inserts a new activation row
+    /// carrying the prior counter forward verbatim — we encode that
+    /// here by re-seeding an `Active` row at the carried-forward
+    /// value before each attempt and resetting `tasks.state =
+    /// 'Admitted'` (a real `RetrySubTask` does both via
+    /// `transition_task_in_tx` + the new INSERT in
+    /// `handle_retry_sub_task`).
+    ///
+    /// At the third attempt the counter reaches `max_crash_retries`
+    /// (kernel default 3 per `DEFAULT_MAX_CRASH_RETRIES`); any
+    /// subsequent `RetrySubTask` would be rejected by
+    /// `handle_retry_sub_task`'s ceiling check, which has its own
+    /// dedicated test (`retry_sub_task_rejects_when_crash_count_at_max_crash_retries`).
+    /// This test pins the bump-half of the budget contract.
+    #[test]
+    fn three_consecutive_report_failures_reach_default_crash_ceiling() {
+        let store = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_task(&store, "t-crash-loop");
+
+        for (attempt, prior_count) in [(1u64, 0i64), (2, 1), (3, 2)].iter() {
+            seed_active_executor_activation(&store, "t-crash-loop", *prior_count);
+            reset_task_to_admitted(&store, "t-crash-loop");
+            handle_report_failure(
+                make_report_failure_request(
+                    "t-crash-loop",
+                    &format!("infra fault attempt {attempt}"),
+                ),
+                TaskState::Admitted,
+                &dummy_session_id(),
+                *attempt,
+                &store,
+                &policy,
+            ).unwrap();
+            assert_eq!(
+                read_latest_crash_retry_count(&store, "t-crash-loop"),
+                prior_count + 1,
+                "attempt {attempt} must bump {prior_count} → {}",
+                prior_count + 1,
+            );
+        }
+
+        let final_count = read_latest_crash_retry_count(&store, "t-crash-loop");
+        assert_eq!(final_count, 3);
+        assert_eq!(
+            final_count as u32,
+            crate::initiatives::plan_registry::DEFAULT_MAX_CRASH_RETRIES,
+            "three consecutive ReportFailure attempts must saturate the \
+             kernel-default crash budget (next RetrySubTask trips the \
+             ceiling check in handle_retry_sub_task)",
+        );
+    }
+
+    /// `ReportFailure` against a task with no active activation row
+    /// (e.g. a malformed test fixture, or a prod race where the row
+    /// was already closed) MUST still succeed — the bump is
+    /// best-effort. The handler logs `ReportFailureCrashCounterNoActiveRow`
+    /// to stderr and lets the FSM transition through.
+    #[test]
+    fn report_failure_succeeds_when_no_active_activation_row() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-no-activation");
+        let policy = default_test_policy();
+
+        let req = make_report_failure_request(
+            "t-no-activation",
+            "deliberate test of the no-row best-effort path",
+        );
+        let resp = handle_report_failure(
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+        )
+        .expect("ReportFailure must succeed even without an activation row");
+
+        assert_eq!(resp.task_state, TaskState::Failed);
+        assert_eq!(
+            task_state_of(&store, "t-no-activation"),
+            TaskState::Failed.as_sql_str(),
+            "FSM transition must land even when the bump UPDATE has \
+             nothing to update",
         );
     }
 

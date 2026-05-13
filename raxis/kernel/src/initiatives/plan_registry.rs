@@ -157,10 +157,17 @@ pub struct TaskPlanFields {
     ///   transient hypervisor failures.
     ///
     /// **Crash classification.** `crash_retry_count` is bumped by the
-    /// kernel's recovery sweep (SIGCHLD handler / non-zero VM exit /
-    /// `SecurityViolation` revocation per v2-deep-spec.md §Step 14)
-    /// — never by a planner-side intent. The retry handler reads it
-    /// at counter-check time only.
+    /// kernel on:
+    ///   * SIGCHLD / non-zero VM exit (recovery sweep);
+    ///   * `SecurityViolation` revocation per v2-deep-spec.md §Step 14;
+    ///   * `ReportFailure` from an Executor (V2.5 — see
+    ///     [`crate::handlers::intent::bump_executor_crash_retry_count_in_tx`]
+    ///     for the spec-extension rationale: an LLM that loops on
+    ///     `report_failure` is operationally indistinguishable from
+    ///     a crash loop, and the V2 ops contract bounds every
+    ///     unsuccessful attempt against an Executor under the same
+    ///     per-task ceiling).
+    /// The retry handler reads it at counter-check time only.
     pub max_crash_retries:         Option<u32>,
 
     /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
