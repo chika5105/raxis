@@ -194,7 +194,7 @@ pub fn bake_byo_executor_image_full(
     fs::create_dir_all(staging_dir)?;
     require_docker_on_path();
 
-    let context     = workspace_root.join("raxis").join(SEED_SUBDIR);
+    let context     = workspace_root.join(SEED_SUBDIR);
     let dockerfile  = context.join("Containerfile");
     if !dockerfile.exists() {
         panic!(
