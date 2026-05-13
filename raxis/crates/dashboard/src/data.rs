@@ -959,13 +959,20 @@ pub struct CredentialListResponse {
 /// the auto-hide deadline so the FE doesn't have to track which
 /// kind of credential it just revealed (per-initiative auto-hides
 /// at 30s; system at 15s).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct CredentialReveal {
     /// Credential name (echoed for FE state validation).
     pub name: String,
     /// Plaintext bytes as a UTF-8 string. Binary credentials are
     /// surfaced as `encoding = "base64"` and the `plaintext` field
     /// holds the standard-base64 encoding (no padding stripped).
+    ///
+    /// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` defence-
+    /// in-depth: this field is REDACTED in the manual `Debug` impl
+    /// below so a future `tracing::debug!("{reveal:?}")` cannot
+    /// accidentally leak the bytes. Serialisation (the only sanctioned
+    /// exfil path) goes through the `Serialize` derive, which IS
+    /// allowed to surface the value.
     pub plaintext: String,
     /// `"utf8"` (the credential parsed as UTF-8) or `"base64"`
     /// (binary, base64-encoded). The FE renders binary as a hex
@@ -983,6 +990,25 @@ pub struct CredentialReveal {
     /// so the operator can sanity-check what they're looking at
     /// without saving the plaintext.
     pub sha256_prefix: String,
+}
+
+// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` defence-in-
+// depth — the manual `Debug` impl REPLACES the value with
+// `<redacted>` so log lines that accidentally interpolate a
+// `CredentialReveal` (`tracing::error!("{reveal:?}")`,
+// `panic!("{reveal:?}")`, `dbg!(reveal)`, …) cannot leak the
+// plaintext.
+impl std::fmt::Debug for CredentialReveal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialReveal")
+            .field("name", &self.name)
+            .field("plaintext", &"<redacted>")
+            .field("encoding", &self.encoding)
+            .field("byte_size", &self.byte_size)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("sha256_prefix", &self.sha256_prefix)
+            .finish()
+    }
 }
 
 /// Stable wire-string label for the dashboard's credential rate
