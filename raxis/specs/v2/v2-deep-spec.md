@@ -1245,16 +1245,32 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
   is the only one the AND fold reads. Symmetric with `tasks.last_critique` (Step 22 /
   Migration 6). See `raxis_types::ReviewVerdict` doc for full reasoning.
 
-* **No `SessionAgentType` filter in the aggregation query.** Step 25 specifies the AND
-  is "across Reviewer dependents" but the agent-type signal lives on the bound session
-  row (`sessions.session_agent_type`) which is not yet populated for V2 sub-tasks (plan-
-  bundle-sealing dependency). The current implementation aggregates over ALL successors;
-  the contract is sound today because:
-    * V1 plans never produce `SubmitReview` intents (the dispatch matrix rejects them),
-      so V1 successors stay `review_verdict = NULL` and the aggregator reports `Pending`
-      indefinitely — which is the correct "wait for the missing agent" semantic for V1.
-    * V2 plans approved AFTER plan-bundle-sealing lands will declare `agent_type` per
-      task, at which point a follow-up patch will scope the join to Reviewer successors.
+* **`AgentTypeFilter` scopes the aggregation fold to Reviewer successors (V2.5
+  registry-driven, fail-closed).** The aggregator no longer trusts the
+  `task_dag_edges` join to produce only Reviewer successors; instead
+  `compute_aggregate_review_outcome` accepts an `AgentTypeFilter` borrow that holds the
+  kernel's `PlanRegistry` and the originating `reviewer_task_id`, and `is_reviewer(task_id)`
+  consults the registry once per successor row. The registry is populated atomically with
+  the sealed plan bundle (`approve_plan` → `parse_plan_tasks` → `PlanRegistry::insert`,
+  `ee6d783`) and re-seeded by `repopulate_plan_registry` on every kernel restart — so
+  every admitted V2 task has an entry by construction.
+    * **Reviewer rows are kept**; non-Reviewer rows (Executor / Orchestrator) are dropped
+      from the fold (`agent_type_filter_skips_non_reviewer_successor` regression test).
+    * **Missing-entry rows are SKIPPED (fail-closed)** and emit a structured
+      `agent_type_filter.missing_registry_entry` warn line carrying `task_id`,
+      `initiative_id`, and `reviewer_task_id` so operators can alert on it (`4883a3b`).
+      This reverses the earlier fall-open arm — under V2.5+ a missing entry can only be
+      hit by a kernel bug or a registry-rebuild race, both of which are exactly the
+      cases operators need a signal for; silently folding-as-Reviewer would erase that
+      signal AND create a test-driven backdoor where production registry-driven semantics
+      are never exercised by integration tests.
+    * If every successor is missing OR every successor is non-Reviewer the aggregator
+      surfaces `NoSuccessors`, which `handle_submit_review` translates into a structured
+      audit-only diagnostic — the Executor does NOT silently advance.
+    * V1 compatibility: V1 plans never produce `SubmitReview` intents (Step 11 dispatch
+      matrix rejects them), so V1 successors stay `review_verdict = NULL` and the
+      aggregator reports `Pending` indefinitely — the correct "wait for the missing
+      agent" semantic for V1.
 
 * **`KernelPush::AllReviewersPassed` / `ReviewRejected` emission is deferred to
   plan-bundle-sealing.** The push channel itself is implemented in
