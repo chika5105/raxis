@@ -1145,6 +1145,21 @@ When 10 sessions concurrently submit requests resolving to `anthropic:claude-opu
 
 The `consecutive_failures` counter is updated under SQLite's write lock, so the increment is serialized; spurious double-trips on the boundary are not possible.
 
+> **Implementation note (single-lock-per-operation).** The
+> `SqliteCircuitStore` Rust mutex (`Mutex<Connection>`) is **not**
+> re-entrant on the same thread. Every public method on the store
+> — `load`, `list_all`, `record_failure`, `record_success`,
+> `maybe_promote`, `manual_reset`, `try_acquire_probe`,
+> `release_probe` — acquires `self.conn` exactly once for the
+> full duration of the operation. Mutating sites perform their
+> post-commit read-back via the private `load_with_conn` helper
+> (which takes a borrowed `&Connection`) so the read reuses the
+> already-held guard instead of attempting to re-lock. This is a
+> deadlock-correctness contract; violating it parks the calling
+> thread in `__psynch_mutexwait` with the outer guard still
+> held. (Regression first surfaced in the May-10 `8524f50`
+> shape; see `crates/store/src/circuit_store.rs`.)
+
 When `Open` expires and the breaker promotes to `HalfOpen`, exactly one session's request takes the probe slot (via the CAS on `half_open_inflight`). The other 9 sessions see `HalfOpen { inflight: 1 }` and treat the model as still-degraded, falling through to the next alias entry. If the probe succeeds, the breaker closes; the next request from any session resolves normally to the now-recovered model.
 
 This design prevents a "thundering herd" of recovery attempts from re-overwhelming a fragile provider.
