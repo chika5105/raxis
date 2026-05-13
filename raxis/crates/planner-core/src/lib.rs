@@ -90,6 +90,7 @@ pub mod sidecar_client;
 pub mod streaming;
 pub mod tools;
 pub mod transport;
+pub mod vm_capabilities;
 
 pub use custom_tools::{
     load_custom_tools, validate_custom_tool, CustomToolDecl, CustomToolError, SubprocessTool,
