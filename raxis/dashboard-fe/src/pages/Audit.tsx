@@ -3,6 +3,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
+import { ChainStatusBanner } from "@/components/ChainStatusBanner";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
@@ -81,6 +82,8 @@ export function AuditPage() {
           />
         </div>
       </header>
+
+      <ChainStatusBanner />
 
       {initiativeId && (
         <div className="text-xs text-ink-muted">

@@ -15,6 +15,7 @@
 
 import type {
   AuditEntryView,
+  ChainStatusResponse,
   ChallengeResponse,
   DagView,
   EscalationView,
@@ -245,6 +246,24 @@ export const dashboardApi = {
       if (params.limit !== undefined) qs.set("limit", String(params.limit));
       const suffix = qs.toString() ? `?${qs}` : "";
       return apiFetch<AuditEntryView[]>(`/api/audit${suffix}`, signal ? { signal } : {});
+    },
+    // Chain-integrity verdict surface — `INV-AUDIT-DASHBOARD-01`.
+    // The kernel is the single source of truth; the FE renders
+    // the kernel's verdict and never re-implements verification.
+    // `reverify: true` is the explicit "Re-verify chain" button
+    // path; idle page mounts pass `reverify: false` (or omit it)
+    // so the data layer can short-circuit on its 30 s cache.
+    chainStatus: (
+      params: { reverify?: boolean } = {},
+      signal?: AbortSignal,
+    ): Promise<ChainStatusResponse> => {
+      const qs = new URLSearchParams();
+      if (params.reverify) qs.set("reverify", "true");
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<ChainStatusResponse>(
+        `/api/audit/chain-status${suffix}`,
+        signal ? { signal } : {},
+      );
     },
   },
 

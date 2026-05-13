@@ -132,6 +132,33 @@ export interface AuditEntryView {
   payload: unknown;
 }
 
+// Status banner / per-row icons for the audit chain view.
+//
+// `status` mirrors the kernel's own verdict from
+// `raxis_audit_tools::verify_chain_from`. The dashboard MUST NOT
+// reimplement verification — see `INV-AUDIT-DASHBOARD-01`.
+//
+//   * "ok"      — every link verified end-to-end.
+//   * "broken"  — at least one chain break / seq gap; UI MUST
+//                 render this as a hard-red banner with the
+//                 reason from `last_error`.
+//   * "unknown" — verification has not run yet (boot window or
+//                 audit directory absent); UI renders soft warn.
+export interface ChainStatusView {
+  status: "ok" | "broken" | "unknown";
+  last_verified_seq: number;
+  total_records: number;
+  segment_count: number;
+  verified_at_ms: number;
+  last_error: string | null;
+}
+
+// Response envelope from `GET /api/audit/chain-status`. Flattens
+// `ChainStatusView` onto the same level as `fresh`.
+export interface ChainStatusResponse extends ChainStatusView {
+  fresh: boolean;
+}
+
 export interface NotificationView {
   notification_id: string;
   event_kind: string;
