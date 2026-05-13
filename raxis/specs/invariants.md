@@ -70,6 +70,7 @@
 | Policy epochs — V1 | INV-POLICY-01 | 1 |
 | Scheduler — V1 | INV-SCHED-01, INV-SCHED-02, INV-SCHED-03 | 3 |
 | Orchestrator respawn ceiling — V2 | INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01 | 1 |
+| Auto-escalation — V2.5b | INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01 | 1 |
 | VCS path enforcement — V1 | INV-TASK-PATH-01, INV-TASK-PATH-02 | 2 |
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
@@ -1393,6 +1394,186 @@ OrchestratorRespawnCeilingExceeded`;
 (`OrchestratorRespawnCeilingExceeded` paired-class registration).
 
 ---
+
+---
+
+## §6.6 — Auto-escalation (INV-ESCALATION-AUTO-*)
+
+V2.5b extension. The orchestrator-respawn no-progress ceiling
+(`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`, `§6.5`) is fail-loud
+but fire-and-forget — operators get a notification but no tracked
+approve/deny workflow. The orchestrator itself cannot escalate
+(it's the agent that's structurally confused; it just exits
+cleanly when its intent is rejected), so the kernel auto-creates
+an `escalations` row when the ceiling exceeds. The new class
+`EscalationClass::LogicalDeadlock` carries `initiator = 'Kernel'`
+(Migration 20 added the `initiator` column to `escalations`) and
+is the FIRST V2/V2.5 escalation class with kernel admission.
+
+Invariant body covers:
+
+  * Same-transaction insert (`escalations` row + `initiatives.state =
+    'Failed'` flip in one BEGIN..COMMIT).
+  * Operator-approve handler (counter reset + initiative back to
+    `Executing` + post-commit
+    `OperatorApprovedRespawnEscalation` audit + scheduled fresh
+    orchestrator respawn).
+  * Operator-deny handler (preserves `Failed` + post-commit
+    `OperatorDeniedRespawnEscalation` audit; counter NOT reset).
+  * Defense-in-depth admission rejection of any planner-submitted
+    `EscalationRequest { class: LogicalDeadlock }` (the kernel-side
+    approve handler additionally rejects rows whose `initiator !=
+    'Kernel'`).
+
+---
+
+### INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01 — Kernel-initiated LogicalDeadlock escalation paired with orch-respawn ceiling
+
+**Statement.** When `respawn_orchestrator_for_initiative` observes
+`CeilingOutcome::Exceeded` from
+`orch_respawn_ceiling::increment_no_progress_count_in_tx`, the
+kernel MUST, in ONE SQLite transaction:
+
+  1. INSERT a row into `escalations` with `class = 'LogicalDeadlock'`,
+     `initiator = 'Kernel'`, `status = 'Pending'`, FK columns
+     (`session_id`, `task_id`, `lineage_id`) populated from the
+     most recently FSM-touched task on the failing initiative
+     whose `session_id IS NOT NULL`. The
+     `requested_scope_json` carries the
+     `RequestedEscalationScope::LogicalDeadlock { initiative_id,
+     attempts, window_secs, last_intent_kind, last_rejection_reason }`
+     payload (text fields capped at
+     `MAX_LOGICAL_DEADLOCK_REASON_LEN` = 1 KiB on a UTF-8
+     boundary).
+  2. UPDATE `initiatives` SET `state = 'Failed'`,
+     `completed_at = now()` for the offending initiative.
+
+After commit, the kernel emits
+`AuditEventKind::OrchestratorRespawnCeilingExceeded`
+post-commit per the §11.6 paired-write contract.
+
+The operator-approval handler (`approve_logical_deadlock_escalation_in_tx`
+in `kernel/src/orch_respawn_ceiling.rs`) MUST, in ONE SQLite
+transaction, refuse any row that is not
+`(class = 'LogicalDeadlock' AND initiator = 'Kernel' AND
+status = 'Pending')`. On a valid row it:
+
+  1. UPDATE `escalations` SET `status = 'Approved'`,
+     `resolved_at = now()`.
+  2. UPDATE `initiatives` SET `orchestrator_no_progress_respawn_count = 0`.
+  3. UPDATE `initiatives` SET `state = 'Executing'`,
+     `completed_at = NULL` (transitions back from `Failed`).
+
+After commit, the kernel emits
+`AuditEventKind::OperatorApprovedRespawnEscalation { initiative_id,
+escalation_id, operator_id }` and schedules a fresh orchestrator
+respawn so the "approve = retry" semantic observably fires (the
+respawn driver's own ceiling check runs on entry, but starts at 0
+because step 2 just reset it).
+
+The operator-deny handler (`deny_logical_deadlock_escalation_in_tx`)
+MUST, in ONE SQLite transaction, refuse non-matching rows by the
+same `(class, initiator, status)` triple test. On a valid row it
+ONLY UPDATEs `escalations.status = 'Denied'` (and `resolution_notes`
+if a reason was carried) — the initiative stays `Failed`, the
+counter stays at its post-ceiling value, no respawn is scheduled.
+After commit the kernel emits
+`AuditEventKind::OperatorDeniedRespawnEscalation { initiative_id,
+escalation_id, operator_id }`.
+
+The planner-side `handlers/escalation::handle` MUST reject any
+`EscalationRequest { class: LogicalDeadlock }` at admission. This
+is defense-in-depth — the operator-approval handler additionally
+rejects rows whose `initiator` is not `'Kernel'`, but the planner-
+side rejection prevents the row from being created in the first
+place.
+
+**Justification.** The pre-V2.5b ceiling event left the operator
+with a notification but no tracked workflow: there was no canonical
+"this initiative is structurally stuck; here's what to do about
+it" surface. The auto-escalation pairs the structural failure
+with an operator decision point so the recovery path is a single
+approve / deny click rather than a manual retry pipeline. The
+kernel-only initiator constraint matters because `LogicalDeadlock`
+has no capability semantics — the approval IS the action, no
+approval-token is minted, no scope is bound for downstream intent
+consumption — so a planner-submitted row is unambiguously a
+misuse.
+
+The same-transaction pairing of escalation-INSERT + initiative-
+Failed UPDATE is the load-bearing piece: an operator racing the
+audit event MUST observe a non-empty escalation row, never
+`Failed` without an actionable surface. A crash between either
+write leaves both rolled back (transactional atomicity); a crash
+after commit leaves both written (the audit emit is best-effort
+post-commit per `INV-AUDIT-PAIRED-06`).
+
+The text-field byte cap (`MAX_LOGICAL_DEADLOCK_REASON_LEN` = 1
+KiB) bounds audit-row size against a hostile orchestrator that
+loops on a pathologically long intent shape. UTF-8 boundary
+truncation prevents storing invalid UTF-8 in the audit chain.
+
+**Scenario.** An iter42-class regression re-introduces the
+no-progress orchestrator loop (orchestrator submits a rejected
+`RetrySubTask` intent, exits cleanly, post-exit hook respawns;
+loop repeats). On the 4th respawn attempt, the kernel's
+`increment_no_progress_count_in_tx` returns
+`CeilingOutcome::Exceeded { count_after_increment: 4,
+max_attempts: 3 }`. In one transaction, the kernel inserts an
+`escalations` row (class `'LogicalDeadlock'`, initiator
+`'Kernel'`, status `'Pending'`) keyed to the most-recently-FSM-
+touched task on the initiative, then flips
+`initiatives.state = 'Failed'`. After commit, the kernel emits
+`OrchestratorRespawnCeilingExceeded`. The operator's dashboard
+surfaces the new escalation under "Pending escalations" with
+class `LogicalDeadlock` and the failure-classification
+justification. The operator clicks "approve"; the kernel
+transitions the initiative back to `Executing`, resets the
+counter, emits `OperatorApprovedRespawnEscalation`, and schedules
+a fresh respawn. The new orchestrator session boots with a
+fresh counter (0 / 3) and the post-iter42 NNSP fix in
+`9ecf2fa` re-routes the `RetrySubTask` decision into a different
+intent shape that admits — the loop is broken.
+
+If the operator instead clicks "deny", the escalation flips to
+`'Denied'`, the initiative stays `Failed`, and the operator is
+expected to investigate the upstream cause manually (e.g. the
+plan asked for an impossible task; the orchestrator's NNSP has
+a regression specific to this plan's `policy.toml`; etc.).
+
+**Canonical home.** `v2/v2-deep-spec.md §Step 12 V2.5b extension`
++ `raxis-concepts/07-escalations.md §The six escalation classes`.
+
+**Implementation references.**
+
+  * `crates/types/src/escalation.rs` — `EscalationClass::LogicalDeadlock`,
+    `RequestedEscalationScope::LogicalDeadlock`,
+    `MAX_LOGICAL_DEADLOCK_REASON_LEN`.
+  * `crates/store/src/migration.rs` — `apply_migration_20`,
+    `render_migration_20_ddl`.
+  * `crates/store/migrations/0020_v2_escalations_initiator.sql` —
+    DDL artefact.
+  * `kernel/src/orch_respawn_ceiling.rs` —
+    `insert_logical_deadlock_escalation_in_tx`,
+    `approve_logical_deadlock_escalation_in_tx`,
+    `deny_logical_deadlock_escalation_in_tx`,
+    `truncate_for_scope`.
+  * `kernel/src/session_spawn_orchestrator.rs` — extension to the
+    ceiling-exceeded branch wiring the auto-create + paired-write
+    order.
+  * `kernel/src/ipc/operator.rs` — `handle_approve_escalation`
+    (pre-classifies + dispatches),
+    `handle_approve_logical_deadlock`,
+    `handle_deny_logical_deadlock`,
+    `lookup_escalation_class_initiator`.
+  * `crates/audit/src/event.rs` —
+    `AuditEventKind::OperatorApprovedRespawnEscalation`,
+    `AuditEventKind::OperatorDeniedRespawnEscalation`.
+  * `crates/dashboard-kernel/src/notification_filter.rs` —
+    promotes both new audit events to `Medium` priority.
+  * `kernel/tests/orch_respawn_ceiling_escalation.rs` — witness
+    test (7 cases) covering schema, class round-trip, audit
+    priority, ceiling auto-create, approve, deny, FSM idempotency.
 
 ---
 
