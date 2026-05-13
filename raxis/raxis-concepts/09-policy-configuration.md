@@ -136,12 +136,40 @@ Each gate maps a `claim_type` to a deterministic verifier binary.
 
 ```toml
 [egress]
-domains = ["github.com", "registry.npmjs.org"]
+domains  = ["github.com", "registry.npmjs.org"]
 patterns = ["*.githubusercontent.com"]
 max_fetches_per_window = 100
+
+# V2 default-include for inference providers (default: true).
+# When true, the kernel auto-grants the canonical FQDN of every
+# [[providers]] entry below (Anthropic ⇒ api.anthropic.com,
+# OpenAI ⇒ api.openai.com, Gemini ⇒
+# generativelanguage.googleapis.com, Bedrock ⇒
+# bedrock-runtime.<region>.amazonaws.com, http_sidecar ⇒ host of
+# sidecar_endpoint). Set to false ONLY if you intend to list every
+# provider FQDN by hand under `domains`.
+implicit_provider_grants = true
+
+# Optional opt-out — drop the implicit grant for one or more
+# provider ids. Each id MUST appear in [[providers]]; unknown ids
+# are rejected at policy load. Use this when you need to hard-deny
+# a single provider while still benefitting from defaulting on the
+# others.
+deny_provider = []
 ```
 
-The agent can only make HTTP fetches to these domains. Everything else is blocked by the kernel's fetch proxy.
+The agent can only make HTTP fetches to the *effective* allowlist
+— the union of the explicit `domains` / `patterns` above with the
+implicit provider FQDNs derived from `[[providers]]` (minus any in
+`deny_provider`). Everything else is blocked by the kernel's
+egress chokepoints (`raxis-tproxy` for Tier-1 VMs and the
+kernel-mediated fetch path for Reviewers). Each implicit grant
+emits one `DefaultProviderEgressApplied` audit event at kernel
+boot and after every `RotateEpoch` so operators can audit exactly
+what was granted by default. See
+`specs/v2/reviewer-egress-defaults-decision.md` for the full
+rationale and `specs/v2/vm-network-isolation.md §4.1` for how the
+effective allowlist is consumed by the transparent proxy.
 
 ### `[[providers]]` — LLM Providers
 

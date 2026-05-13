@@ -185,6 +185,30 @@ public GitHub HTML, package mirrors, public APIs that don't require credentials)
 the operator's allowlist controls *which* hosts agents can reach; method/path
 granularity is unnecessary for unauthenticated public traffic.
 
+**V2 default-include for inference providers** (per
+[`reviewer-egress-defaults-decision.md`](reviewer-egress-defaults-decision.md)).
+The Tier 1 allowlist consumed by `raxis-tproxy` is no longer the literal
+`[egress] domains` array; it is the **effective** allowlist
+(`PolicyBundle::effective_egress_domains()`) — the union of
+operator-declared `[egress] domains` with the FQDNs derived from
+`[[providers]]` entries. So an Executor that needs to reach
+`api.anthropic.com` because the operator declared
+`[[providers]] kind = "Anthropic"` succeeds without an explicit
+`[egress] domains = ["api.anthropic.com"]`. Operators who want to
+suppress this can set `[egress] implicit_provider_grants = false`
+or `[egress] deny_provider = ["anthropic-prod"]`. Every implicit
+grant emits one `DefaultProviderEgressApplied` audit event at
+policy install (kernel boot + every `RotateEpoch` post-commit).
+
+**Stall detection.** Repeated `TransparentProxyDenied` events for
+the same `(session, host, port, reason)` bucket trip a sliding-
+window detector inside the kernel (default 3 denials in 30 s)
+that emits one `SessionEgressStallDetected { source: "tproxy" }`
+event. The same detector also fires from the kernel-mediated
+`PlannerFetchRequest` chokepoint with `source =
+"kernel_mediated_fetch"`, so a stall observed at either layer
+contributes to the same per-(session, dest) bucket count.
+
 ### 4.2 — Tier 2 (separate spec): HTTP-granular enforcement at Credential Proxy
 
 For any endpoint that requires authentication (Stripe, AWS, GCP, internal APIs),

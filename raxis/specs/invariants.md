@@ -2483,6 +2483,107 @@ grows; this invariant pins the mitigations.
 
 ---
 
+### INV-EGRESS-DEFAULT-01 — Provider-FQDN egress is auto-granted by default
+
+For every `[[providers]]` entry in the active policy bundle
+the kernel SYNTHESISES one egress allowlist entry against
+the provider's canonical inference FQDN
+(`Anthropic ⇒ api.anthropic.com`,
+`OpenAI ⇒ api.openai.com`,
+`Gemini ⇒ generativelanguage.googleapis.com`,
+`Bedrock ⇒ bedrock-runtime.us-east-1.amazonaws.com`,
+`http_sidecar ⇒ host of sidecar_endpoint`). The synthesised
+entries are unioned with operator-declared `[egress] domains`
+and consumed by BOTH egress chokepoints — the gateway URL
+allowlist (`raxis-gateway::policy_view`) and the Tier-1
+transparent-proxy admission service
+(`raxis-egress-admission`). Operator can opt out per-policy
+with `[egress] implicit_provider_grants = false` (validator
+rejects this combination when at least one provider is
+declared and zero explicit egress is configured) or
+per-provider with `[egress] deny_provider = ["…"]`.
+
+**Justification.** Production bug class: operator declares
+`[[providers]] anthropic-prod` but forgets the matching
+`[egress] domains = ["api.anthropic.com"]` and EVERY agent
+(Reviewer, Orchestrator, Executor) silently fails its first
+inference call with `DomainNotAllowed` or
+`HostNotInAllowlist`. The invariant eliminates the
+configuration coupling — `[[providers]]` is now the single
+source of truth for "agent X can reach provider Y".
+
+**Canonical home.** `v2/reviewer-egress-defaults-decision.md §5`.
+
+### INV-EGRESS-DEFAULT-02 — Implicit grants are auditable
+
+Every implicit-provider grant the kernel applies emits one
+`AuditEventKind::DefaultProviderEgressApplied` event
+carrying `(policy_epoch, provider_id, provider_kind, fqdn)`.
+Emit timing:
+- ONE event per grant at kernel boot (so the active
+  genesis bundle's grants are recorded on every startup, not
+  just at the next `RotateEpoch`); and
+- ONE event per grant after every successful
+  `policy_manager::advance_epoch` post-commit (so a rotation
+  that adds or changes a `[[providers]]` entry surfaces its
+  derived grants in the audit chain).
+
+**Justification.** Implicit grants WITHOUT an audit event
+would be a silent security smell — operators couldn't tell
+which FQDNs the kernel is enforcing beyond the
+operator-declared `[egress] domains`. The audit trail closes
+the gap; the operator-visible diff between
+`bundle.egress_domains()` (what the operator typed) and
+`bundle.effective_egress_domains()` (what the kernel
+enforces) is reconstructible from the audit chain alone.
+
+**Canonical home.** `v2/reviewer-egress-defaults-decision.md §5`.
+
+### INV-EGRESS-DEFAULT-03 — Opt-out is validated at policy-load
+
+`[egress] deny_provider` entries that don't resolve to a
+declared `[[providers]] provider_id` are rejected at
+`PolicyBundle::load` with
+`FAIL_POLICY_EGRESS_DENY_PROVIDER_UNKNOWN`. A typo'd
+`provider_id` in `deny_provider` would otherwise silently
+fail to opt out and the operator would believe a provider
+was disabled when it wasn't.
+
+**Justification.** Closes the dual-failure mode where the
+operator BELIEVES they have opted out but the policy still
+auto-grants the FQDN.
+
+**Canonical home.** `v2/reviewer-egress-defaults-decision.md §6`.
+
+### INV-EGRESS-STALL-01 — Repeated egress denials emit one stall event
+
+When the same `(session_id, host_or_sni, port, reason)`
+tuple is denied at least 3 times within a 30-second sliding
+window (the configured defaults of
+`raxis_egress_admission::EgressStallTracker`), the kernel
+emits exactly ONE
+`AuditEventKind::SessionEgressStallDetected` event with
+`source ∈ {"tproxy", "kernel_mediated_fetch"}` identifying
+which chokepoint observed the stall. Subsequent denials
+inside the same window are debounced; the bucket re-arms
+once the window slides past the last emit.
+
+The event is a structured signal — the kernel does NOT
+auto-respawn the agent (that's the elastic-VM-scaling
+worker's territory). Downstream tooling (operator
+dashboards, alerting) consume the event to surface the
+silent-spin failure mode.
+
+**Justification.** Even with INV-EGRESS-DEFAULT-01 closing
+the dominant config-time failure, runtime stalls remain
+possible (post-admission policy reload, scoped
+`deny_provider` opt-out, cred-proxy down). The detector
+catches every stall regardless of root cause.
+
+**Canonical home.** `v2/reviewer-egress-defaults-decision.md §7`.
+
+---
+
 ## §12 — How invariants combine (composition map)
 
 Most security properties at the system level are emergent from
@@ -2498,6 +2599,7 @@ Most security properties at the system level are emergent from
 | **Path scope is enforced at every step** | INV-TASK-PATH-01 (admission) + INV-TASK-PATH-02 (completion) + INV-07 (claim derivation) |
 | **Recovery is deterministic from durable state** | INV-05 (reproducibility) + INV-INIT-08 (gate progress recoverable) + INV-INIT-05 (BlockedRecoveryPending requires operator) + INV-STORE-01/02 (atomic transactions) |
 | **Budget enforcement cannot be bypassed** | INV-02A (kernel-priced inference) + INV-02B (no direct egress) + INV-INIT-09 (no auto-deadline; budget bounds runtime) |
+| **Provider egress is correct-by-default + auditable + stall-detected** | INV-EGRESS-DEFAULT-01 (kernel auto-grants provider FQDNs) + INV-EGRESS-DEFAULT-02 (`DefaultProviderEgressApplied` audit per grant) + INV-EGRESS-DEFAULT-03 (`deny_provider` typo rejected) + INV-EGRESS-STALL-01 (`SessionEgressStallDetected` after 3-in-30s denials) — `DEFAULT-01` eliminates the dominant config-time stall; `DEFAULT-02` keeps the implicit grant auditable; `DEFAULT-03` closes the silent-opt-out failure mode; `STALL-01` catches every runtime stall regardless of root cause |
 | **Approval is real, scoped, single-use** | INV-06 (approval gate) + INV-ESC-01..05 (FSM, epoch, session, nonce, scope) |
 | **Policy advance never partial** | INV-POLICY-01 (advance phasing) + INV-STORE-01/02 (single-transaction multi-table) |
 | **Multi-agent loops bounded by structure, not budget alone** | INV-CONVERGENCE-01 (round caps) + INV-CONVERGENCE-02 (circular-revision rejection) + INV-CONVERGENCE-03 (wall-clock) + INV-04 (token budgets — backstop) |

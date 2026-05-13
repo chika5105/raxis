@@ -244,8 +244,49 @@ The audit event records the exact host and decision class:
 raxis log <init_id> --kind TransparentProxyDenied --limit 10
 ```
 
+> **V2 default-include for inference providers.** The kernel
+> auto-grants the canonical FQDN of every `[[providers]]` entry in
+> `policy.toml` (`Anthropic ⇒ api.anthropic.com`,
+> `OpenAI ⇒ api.openai.com`, `Gemini ⇒
+> generativelanguage.googleapis.com`, `Bedrock ⇒
+> bedrock-runtime.us-east-1.amazonaws.com`, `http_sidecar ⇒ host of
+> sidecar_endpoint`). So you usually do NOT need to list the
+> provider's FQDN under `[egress] domains` — it's already in the
+> effective allowlist. Each implicit grant emits one
+> `DefaultProviderEgressApplied` audit at kernel boot and after
+> every `RotateEpoch` for full traceability:
+>
+> ```bash
+> raxis log <init_id> --kind DefaultProviderEgressApplied --limit 20
+> ```
+>
+> If you intentionally want to deny a provider's FQDN (e.g. you're
+> phasing out an old `[[providers]]` entry), set `[egress]
+> deny_provider = ["<provider_id>"]` (validator rejects typos) or
+> opt out entirely with `[egress] implicit_provider_grants = false`
+> (validator also rejects the false / zero-explicit-egress
+> combination — that would leave every agent unable to reach any
+> provider).
+
+> **Egress stall detection.** When the same `(session, host, port)`
+> tuple is denied 3 times within a 30-second sliding window, the
+> kernel emits one `SessionEgressStallDetected` audit event tagged
+> `source = "tproxy"` (admission-loop chokepoint) or `source =
+> "kernel_mediated_fetch"` (kernel-mediated `PlannerFetchRequest`
+> chokepoint). If a Reviewer / Orchestrator / Executor agent looks
+> stuck and you suspect an egress problem:
+>
+> ```bash
+> raxis log <init_id> --kind SessionEgressStallDetected --limit 10
+> ```
+>
+> The event carries the destination, the chokepoint, the denial
+> count inside the window, and a stable `reason` string identical
+> to the underlying `TransparentProxyDenied.reason`.
+
 Reference: [`recipes/ops/12-debug-egress-denial.md`](../recipes/ops/12-debug-egress-denial.md),
-[`specs/v2/vm-network-isolation.md`](../../specs/v2/vm-network-isolation.md).
+[`specs/v2/vm-network-isolation.md`](../../specs/v2/vm-network-isolation.md),
+[`specs/v2/reviewer-egress-defaults-decision.md`](../../specs/v2/reviewer-egress-defaults-decision.md).
 
 ---
 
