@@ -179,6 +179,45 @@ pub struct EscalationView {
     pub created_at: u64,
 }
 
+/// Audit-chain integrity verdict surfaced by
+/// `GET /api/audit/chain-status` — `INV-AUDIT-DASHBOARD-01`.
+///
+/// The verdict comes from the kernel's own
+/// `raxis_audit_tools::verify_chain_from` walker; the dashboard
+/// surfaces it but MUST NOT recompute it. `status` is one of:
+///   * `"ok"`       — every record's `prev_sha256` chains back
+///                    to genesis and `seq` is monotone.
+///   * `"broken"`   — at least one link mismatch or seq gap was
+///                    observed; `last_error` carries the short
+///                    operator-safe reason.
+///   * `"unknown"`  — verification has not run yet (the kernel
+///                    just booted, or the audit directory is
+///                    absent). Treated as a soft warn in the FE
+///                    rather than a hard red.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainStatusView {
+    /// Verdict discriminant — `"ok"` / `"broken"` / `"unknown"`.
+    pub status: String,
+    /// Highest seq the walker observed end-to-end. For
+    /// `status = "ok"` this is the chain tail; for
+    /// `status = "broken"` this is the seq the break was
+    /// observed at (or the seq immediately before).
+    pub last_verified_seq: u64,
+    /// Number of records walked during the latest verify (only
+    /// meaningful when `status = "ok"`; for broken / unknown
+    /// chains the walker may have aborted early).
+    pub total_records: u64,
+    /// Number of distinct segment files contributing records.
+    pub segment_count: u64,
+    /// Unix-milliseconds timestamp when this verdict was
+    /// produced. `0` ⇒ the data layer has not run a verify
+    /// yet (`status = "unknown"`).
+    pub verified_at_ms: u64,
+    /// Operator-safe reason string when `status = "broken"`.
+    /// `None` on `ok` / `unknown`.
+    pub last_error: Option<String>,
+}
+
 /// Audit chain entry (paginated).
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEntryView {
@@ -532,6 +571,25 @@ pub trait DashboardData: Send + Sync + 'static {
     /// input. Returned as audit-shaped rows so the frontend can
     /// render them with the same component as the audit page.
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError>;
+
+    /// Return the kernel's audit-chain integrity verdict per
+    /// `INV-AUDIT-DASHBOARD-01`. Implementations MUST drive the
+    /// verdict through `raxis_audit_tools::verify_chain_from`
+    /// (or an equivalent kernel-side walker); the dashboard
+    /// MUST NOT reimplement the chain walk.
+    ///
+    /// `reverify = false` ⇒ return the cached verdict if it is
+    /// fresh enough (the implementation defines "fresh enough" —
+    /// the production kernel rate-limits to one walk per
+    /// 30 seconds). `reverify = true` ⇒ force a fresh walk.
+    ///
+    /// Returns `(fresh, view)` — `fresh` is `true` iff the
+    /// implementation actually walked the chain for this call
+    /// (vs returning a cached verdict); `view` is the verdict.
+    fn audit_chain_status(
+        &self,
+        reverify: bool,
+    ) -> Result<(bool, ChainStatusView), ApiError>;
 
     /// List notifications from the kernel's `notifications` table.
     /// `unread_only = true` filters to unread only.
@@ -984,6 +1042,30 @@ impl DashboardData for InMemoryDashboardData {
 
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError> {
         Ok(self.inner.read().inbox.clone())
+    }
+
+    fn audit_chain_status(
+        &self,
+        _reverify: bool,
+    ) -> Result<(bool, ChainStatusView), ApiError> {
+        // In-memory fixture: derive a trivial verdict from the
+        // seeded audit rows so the route-layer tests can assert
+        // both shape and the verdict string without standing up
+        // a real audit chain walker.
+        let g = self.inner.read();
+        let last = g.audit.iter().map(|e| e.seq).max().unwrap_or(0);
+        let total = g.audit.len() as u64;
+        Ok((
+            true,
+            ChainStatusView {
+                status:            "ok".into(),
+                last_verified_seq: last,
+                total_records:     total,
+                segment_count:     if total > 0 { 1 } else { 0 },
+                verified_at_ms:    g.audit.iter().map(|e| e.at).max().unwrap_or(0) * 1_000,
+                last_error:        None,
+            },
+        ))
     }
 
     fn list_notifications(

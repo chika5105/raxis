@@ -328,6 +328,7 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/escalations/:id",             get(escalations::detail::<D>))
         // Audit + Inbox.
         .route("/api/audit",                       get(audit::list::<D>))
+        .route("/api/audit/chain-status",          get(audit::chain_status::<D>))
         .route("/api/inbox",                       get(inbox::list::<D>))
         // Notifications.
         .route("/api/notifications",               get(notifications::list::<D>))

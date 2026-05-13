@@ -51,11 +51,12 @@ use raxis_audit_tools::reader::ChainReader;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
-    AuditEntryView, DagEdge, DashboardData, EscalationView, HealthCheck, HealthSnapshot,
-    InitiativeListEntry, InitiativeView, NotificationView, OperatorAuthResolution,
-    PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView,
-    SessionView, StructuredOutputView, TaskView, WorktreeDetail, WorktreeDiff,
-    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
+    AuditEntryView, ChainStatusView, DagEdge, DashboardData, EscalationView, HealthCheck,
+    HealthSnapshot, InitiativeListEntry, InitiativeView, NotificationView,
+    OperatorAuthResolution, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
+    ReviewerVerdictView, SessionView, StructuredOutputView, TaskView, WorktreeDetail,
+    WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
+    WorktreeTreeEntry,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -231,6 +232,11 @@ pub struct KernelDashboardData {
     /// (which don't boot the kernel) can opt out without
     /// silently exposing a no-op write surface.
     policy_advancer: Option<Arc<dyn PolicyAdvancer>>,
+    /// Cached audit-chain integrity verdict + the
+    /// monotonic-millis timestamp it was produced at, used by
+    /// `audit_chain_status` to rate-limit chain re-walks per
+    /// `INV-AUDIT-DASHBOARD-01`.
+    chain_status_cache: parking_lot::Mutex<Option<ChainStatusView>>,
 }
 
 impl KernelDashboardData {
@@ -264,6 +270,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
+            chain_status_cache: parking_lot::Mutex::new(None),
         })
     }
 
@@ -288,6 +295,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
+            chain_status_cache: parking_lot::Mutex::new(None),
         }
     }
 
@@ -745,6 +753,56 @@ impl DashboardData for KernelDashboardData {
         let mut matched: Vec<AuditEntryView> = tail.into_iter().collect();
         matched.reverse();
         Ok(matched)
+    }
+
+    fn audit_chain_status(
+        &self,
+        reverify: bool,
+    ) -> Result<(bool, ChainStatusView), ApiError> {
+        // Cache discipline (INV-AUDIT-DASHBOARD-01): full
+        // verifies are expensive (the walker scans every JSONL
+        // segment end-to-end), and a chatty UI mounted on a
+        // session-detail page should not pin a worker thread on
+        // chain re-walks. Honour `reverify` for an explicit
+        // "Re-verify chain" button click; otherwise return the
+        // cached verdict if it is fresher than
+        // `CHAIN_STATUS_TTL_MS` and run a fresh walk otherwise.
+        const CHAIN_STATUS_TTL_MS: u64 = 30_000;
+        let now_ms = unix_now_ms();
+        if !reverify {
+            let g = self.chain_status_cache.lock();
+            if let Some(cached) = g.as_ref() {
+                if now_ms.saturating_sub(cached.verified_at_ms) < CHAIN_STATUS_TTL_MS {
+                    return Ok((false, cached.clone()));
+                }
+            }
+        }
+        // Drive the kernel-owned walker — never a FE re-
+        // implementation. Audit-tools is the single source of
+        // truth for chain integrity.
+        let view = match raxis_audit_tools::verify_chain_from(&self.audit_dir, 0) {
+            Ok(stats) => ChainStatusView {
+                status:            "ok".into(),
+                last_verified_seq: stats.last_seq,
+                total_records:     stats.total_records,
+                segment_count:     stats.segment_count as u64,
+                verified_at_ms:    now_ms,
+                last_error:        None,
+            },
+            Err(e) => {
+                let (seq, msg) = describe_chain_error(&e);
+                ChainStatusView {
+                    status:            "broken".into(),
+                    last_verified_seq: seq,
+                    total_records:     0,
+                    segment_count:     0,
+                    verified_at_ms:    now_ms,
+                    last_error:        Some(msg),
+                }
+            }
+        };
+        *self.chain_status_cache.lock() = Some(view.clone());
+        Ok((true, view))
     }
 
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError> {
@@ -1276,6 +1334,34 @@ impl DashboardData for KernelDashboardData {
 ///   kernel bug.
 /// * [`git::GitError::Spawn`] / [`git::GitError::NonZero`] — kernel-side
 ///   trouble. 500.
+/// Wall-clock now in milliseconds-since-Unix-epoch. The audit
+/// chain status cache uses this as a coarse freshness clock; we
+/// deliberately do NOT use `Instant` because the cache is also
+/// surfaced on the wire (`verified_at_ms`), so the FE has to be
+/// able to render it as a human timestamp.
+fn unix_now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Render a `ChainReadError` into the `(last_verified_seq, msg)`
+/// tuple the dashboard wants on a broken-chain verdict. We
+/// pick the seq the error names whenever the variant carries
+/// one so the FE can highlight the broken record; otherwise we
+/// fall back to `0`.
+fn describe_chain_error(err: &raxis_audit_tools::ChainReadError) -> (u64, String) {
+    use raxis_audit_tools::ChainReadError as E;
+    let seq = match err {
+        E::ChainBreak { seq, .. } => *seq,
+        E::SequenceGap { expected, .. } => expected.saturating_sub(1),
+        _ => 0,
+    };
+    (seq, err.to_string())
+}
+
 fn map_git_error_to_api(err: git::GitError) -> ApiError {
     match err {
         git::GitError::NotARepo { path } => {
