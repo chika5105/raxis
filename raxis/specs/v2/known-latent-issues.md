@@ -287,7 +287,101 @@ HTTPS fetch on any arch and is hardest to silently miss).
 
 ---
 
-## L-3. (placeholder)
+## L-3. Live-e2e cpio preflight asserts `bin/bash` against a `usrmerge` cpio that only contains `usr/bin/bash`
+
+* **Class:** P0 — fixed in iter-15 (this commit). Recorded so a
+  future Containerfile or cpio-walk refactor that touches either
+  side cannot silently re-introduce the path-shape skew.
+* **Production file:**
+  `raxis/kernel/tests/extended_e2e_support/kernel_driver.rs`
+  (`required_binaries_for_canonical_role` table, `executor-starter`
+  arm).
+* **Sibling file (intentionally NOT changed in lockstep):**
+  `raxis/xtask/src/images.rs` (`required_os_binaries`).
+
+### Defect
+
+After iter-13 / iter-14 made the bake succeed, iter-15 produced a
+~559 MB canonical executor-starter image that demonstrably contained
+`bin` (as an `S_IFLNK` symlink → `usr/bin`), `usr/bin/bash`,
+`usr/bin/python3`, `usr/bin/git`, and `usr/local/bin/raxis-executor`
+— exactly what the executor needs at runtime.
+
+The live-e2e harness's cpio preflight nonetheless panicked with:
+
+```
+canonical executor-starter image is a stub — missing 1 required
+binary from .../raxis-executor-starter-0.1.0.img:
+  - bin/bash
+```
+
+### Why it's latent (in the new sense — present-but-blocking)
+
+The two sides of the assertion shared the same string `bin/bash`,
+but each side resolves it differently:
+
+* `xtask::images::required_os_binaries` runs against the **staging
+  tree** on the host filesystem and uses `Path::exists()`, which
+  transparently follows symlinks. On a usrmerge tree
+  (`bin → usr/bin`) the lookup `bin/bash` resolves through the
+  symlink and lands on the real `usr/bin/bash` file — guard passes.
+* `kernel_driver::required_binaries_for_canonical_role` runs
+  against the **packed cpio.gz** and uses a literal `BTreeMap`
+  lookup over the entry table that `cpio_inspect::list_initramfs_
+  paths` returns. The cpio encodes the usrmerge `bin` directory
+  as one `S_IFLNK` entry; no `bin/<file>` paths are ever emitted
+  because the producer (`raxis-initramfs-builder`) walks
+  `walkdir::WalkDir::follow_links(false)` to preserve the symlink
+  semantics. A literal `entries.contains_key("bin/bash")` therefore
+  always returns `false`.
+
+The producer is correct (collapsing the symlink would double the
+image size and break PID 1's `mount_pid1_essentials` symlink
+unpacking). The xtask staging-tree guard is also correct (a
+staging tree with no `bin/bash` symlink target would fail Linux
+boot; the `Path::exists()` symlink-following catches the real
+risk). The cpio-walk preflight was the odd one out: it inherited
+the `bin/bash` path string from the staging-tree guard but cannot
+follow symlinks.
+
+### Fix (landed in this iter-15 commit)
+
+Switch the cpio preflight's `executor-starter` row to the canonical
+post-usrmerge paths:
+
+```rust
+"executor-starter" => &[
+    "usr/bin/bash",
+    "usr/bin/python3",
+    "usr/bin/git",
+    "usr/local/bin/raxis-executor",
+],
+```
+
+We deliberately did NOT change the xtask sibling. The two callers
+have intentionally different semantics today (staging-tree
+symlink-follow vs. cpio literal lookup); coupling them through a
+shared `&'static [&'static str]` would require teaching the cpio
+walker to chase `S_IFLNK` entries through the entry table — a
+modest refactor that has no observable user benefit until a future
+non-usrmerge base image (e.g. an Alpine-based reviewer image)
+arrives. The added inline comment in
+`required_binaries_for_canonical_role` records this intentional
+divergence so a future reader does not "fix" one side to match the
+other and re-break iter-15 in reverse.
+
+### Owners
+
+* **Discovery / fix:** `worker/live-e2e-fix-loop` (iter-15).
+* **Symlink-following cpio walk + path-string unification:**
+  Final-cleanup-sweep, scheduled after the iter-13 live-e2e green
+  run lands and after Branch B (BYO test) enriches reviewer-core
+  with an Alpine-based variant where the divergence stops being
+  hypothetical.
+
+---
+
+## L-4. (placeholder)
 
 No additional latent issues recorded as of this audit window. Future
 entries should follow the L-1 template:

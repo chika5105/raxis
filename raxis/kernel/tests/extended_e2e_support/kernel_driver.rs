@@ -218,7 +218,22 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
         // iter-12 failure mode. The planner binary itself is
         // overlaid by `dev-stage` and lands at usr/local/bin/.
         "executor-starter" => &[
-            "bin/bash",
+            // `usr/bin/bash` (not `bin/bash`): debian:bookworm-slim
+            // ships `usrmerge`, so the cpio encodes `/bin -> /usr/bin`
+            // as a single `S_IFLNK` entry named `bin` and the actual
+            // `bash` binary lives at `usr/bin/bash`. A literal
+            // `bin/bash` lookup against the cpio entry table would
+            // always miss (iter-15) even though PID 1 reaches the
+            // binary via the `/bin -> /usr/bin` symlink that
+            // `mount_pid1_essentials` materialises at boot. The
+            // sibling stub-guard in `xtask::images::required_os_
+            // binaries` keeps `bin/bash` because it walks the
+            // **staging tree** with `Path::exists()` (symlink-
+            // following); this preflight walks the packed cpio.gz
+            // with a literal `BTreeMap` lookup. Sharing the path
+            // string would require teaching one of the two callers
+            // to chase symlinks - tracked as cleanup-sweep work.
+            "usr/bin/bash",
             "usr/bin/python3",
             "usr/bin/git",
             "usr/local/bin/raxis-executor",
