@@ -26,6 +26,13 @@ The audit's working classification (per the original mission brief):
 P2-P7 here as charter for a follow-up sprint. A standalone "Strategy A"
 megacommit would have churned ~400 test files for marginal signal.
 
+**Companion doc.** Production-side defects that are real bugs but not
+currently triggered by any caller live in
+[`known-latent-issues.md`](./known-latent-issues.md). Entries that are
+*tests passing for the wrong reason* go here; entries that are
+*production code that would fail if invoked* go there. The two
+classifications are deliberately separate (see that file's preamble).
+
 **Total surface audited:** 411 `*.rs` files containing `#[test]` /
 `#[tokio::test]` / `#[cfg(test)]`, ≈ 3 934 declared tests across the
 workspace; the kernel-side audit (`raxis/`) covers 356 of those files.
