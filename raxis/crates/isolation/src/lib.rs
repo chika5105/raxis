@@ -847,6 +847,55 @@ pub trait Session: Send + 'static {
     fn take_kernel_ipc_fd(&mut self) -> Option<std::os::unix::io::RawFd> {
         None
     }
+
+    /// **Optionally register a credential-proxy vsock-loopback
+    /// listener.** Substrates that run the agent inside an
+    /// isolation VM (Apple-VZ, Firecracker) bind credential
+    /// proxies on **host** `127.0.0.1:<host_loopback_port>` to
+    /// keep credential material out of the VM
+    /// (INV-SECRET-02 / INV-VM-CAP-04). The agent inside the VM
+    /// dials those URLs verbatim, but `127.0.0.1` resolves to the
+    /// guest's own loopback — nothing listens there. The
+    /// substrate fixes this transparently by registering a
+    /// per-VM AF_VSOCK listener on `vsock_port` that splices to
+    /// host `127.0.0.1:<host_loopback_port>`; the in-VM
+    /// forwarder (the existing `raxis-tproxy` binary) binds
+    /// `127.0.0.1:<vsock_port>` and dials
+    /// `(VMADDR_CID_HOST, vsock_port)` for every accepted TCP
+    /// connection.
+    ///
+    /// The kernel-side composer (`raxis-session-spawn`) calls
+    /// this method **once per credential proxy** after
+    /// [`Backend::spawn`] returns, before the in-VM forwarder
+    /// reads its env-stamped plan. Failures here MUST be
+    /// fail-closed: a session that could not register its
+    /// credential listeners cannot reach its proxies, so the
+    /// kernel tears down the VM.
+    ///
+    /// **Per-VM isolation.** Each isolation VM has its own
+    /// vsock device; the listener is bound on **that device**,
+    /// not on a shared host CID. A guest in a different session
+    /// dialing `(VMADDR_CID_HOST, vsock_port)` reaches its own
+    /// VM's listener (or none), never another session's. The
+    /// substrate's per-VM device boundary IS the per-session
+    /// isolation boundary.
+    ///
+    /// **Default impl returns `Err(IsolationError::Unsupported …)`**
+    /// — substrates that don't run the agent in a VM (e.g.
+    /// `SubprocessIsolation`) reject this call fail-closed; the
+    /// kernel must select a substrate that supports it for any
+    /// session that declared credentials.
+    fn register_loopback_listener(
+        &mut self,
+        _vsock_port:         u32,
+        _host_loopback_port: u16,
+    ) -> Result<(), IsolationError> {
+        Err(IsolationError::BackendInternal(
+            "session: register_loopback_listener is not supported by this substrate \
+             — credential proxies require an in-VM substrate (Apple-VZ / Firecracker)"
+                .to_owned(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

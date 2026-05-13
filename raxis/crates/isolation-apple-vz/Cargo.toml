@@ -42,11 +42,12 @@ repository.workspace  = true
 #     compiled against the trait, substrates are independent crates.
 
 [dependencies]
-raxis-isolation = { workspace = true }
-raxis-types     = { workspace = true }
-serde           = { workspace = true }
-serde_json      = { workspace = true }
-thiserror       = { workspace = true }
+raxis-isolation       = { workspace = true }
+raxis-types           = { workspace = true }
+raxis-vsock-loopback  = { workspace = true }
+serde                 = { workspace = true }
+serde_json            = { workspace = true }
+thiserror             = { workspace = true }
 # `base64` for the `raxis.envb64=` cmdline propagation envelope.
 # Single-purpose, no_std-friendly; pinned through the workspace
 # manifest so the substrate's link surface stays under tight
@@ -106,6 +107,12 @@ objc2-virtualization     = { version = "0.3", features = [
     "VZSocketDevice",
     "VZVirtioSocketDevice",
     "VZVirtioSocketConnection",
+    # VSock-loopback bridge — `VZVirtioSocketListener` accepts
+    # guest-initiated AF_VSOCK connections on the per-VM device
+    # so host-side credential proxies are reachable from inside
+    # the agent VM via stock `127.0.0.1:<guest_loopback_port>`
+    # URLs (INV-CRED-PROXY-VM-REACHABILITY-01).
+    "VZVirtioSocketListener",
     # Serial console (guest stdout / stderr capture for the
     # `VmSpec::guest_console_log` path — `VZFileHandleSerialPortAttachment`
     # writes the guest's `console=hvc0` output into a host-side file

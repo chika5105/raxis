@@ -324,6 +324,21 @@ impl Session for SubprocessSession {
         // the namespace / mock tier.
         SessionTransportId::Process { pid: self.pid }
     }
+
+    /// Test substrate stub: subprocess sessions have no isolation
+    /// VM, so the credential-proxy vsock-loopback bridge is a
+    /// no-op here. The test fakes' `127.0.0.1` already resolves to
+    /// the host's loopback (the agent process IS host-side), so
+    /// stock URLs hit the credential proxies directly. Real
+    /// substrates (Apple-VZ, Firecracker) implement this method
+    /// for the production fix.
+    fn register_loopback_listener(
+        &mut self,
+        _vsock_port:         u32,
+        _host_loopback_port: u16,
+    ) -> Result<(), IsolationError> {
+        Ok(())
+    }
 }
 
 impl Drop for SubprocessSession {

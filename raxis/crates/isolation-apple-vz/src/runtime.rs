@@ -256,6 +256,15 @@ mod stub {
             Err(RuntimeError::Unsupported)
         }
 
+        /// Always returns `LoopbackBridgeError::Unsupported`.
+        pub fn register_loopback_listener(
+            &mut self,
+            _vsock_port: u32,
+            _host_loopback_port: u16,
+        ) -> Result<(), crate::vsock_loopback_bridge::LoopbackBridgeError> {
+            Err(crate::vsock_loopback_bridge::LoopbackBridgeError::Unsupported)
+        }
+
         /// Translated config (test introspection).
         pub fn config(&self) -> &AvfConfig {
             &self.cfg
@@ -340,7 +349,27 @@ mod macos {
         /// pointer is queue-confined: we never call methods on it
         /// from arbitrary threads after the initial fd extraction.
         vsock_conn:  Option<VsockConnHandle>,
+        /// Per-session credential-proxy vsock-loopback listener
+        /// handles. Each handle owns a `VZVirtioSocketListener` +
+        /// delegate registered on the VM's `VZVirtioSocketDevice`
+        /// for one `(vsock_port, host_loopback_port)` pair. The
+        /// handles live until session teardown — Drop unregisters
+        /// the listener and releases the retained connections,
+        /// which closes AVF's vsock fds. See
+        /// [`crate::vsock_loopback_bridge`] for the protocol.
+        loopback_listeners: Vec<crate::vsock_loopback_bridge::LoopbackListenerHandle>,
     }
+
+    // SAFETY: `LoopbackListenerHandle::HandleInner` carries
+    // `Retained<...>` ObjC pointers; AVF's queue-confinement
+    // contract means we never call methods on those pointers off
+    // the substrate queue. The listener is registered/removed
+    // under `queue.exec_async` blocks. The `Send` bound on the
+    // runtime is required by `Backend::spawn` returning
+    // `Box<dyn Session>`. The `Vec<LoopbackListenerHandle>` is
+    // only populated/drained on the kernel-spawn thread, and the
+    // handles' Drop dispatches removal back onto the queue.
+    unsafe impl Send for crate::vsock_loopback_bridge::LoopbackListenerHandle {}
 
     /// `Send` wrapper around a retained `VZVirtioSocketConnection`.
     ///
@@ -600,12 +629,13 @@ mod macos {
             Self {
                 cfg,
                 queue,
-                config_obj:   None,
-                vm:           None,
-                started:      false,
-                last_error:   None,
-                console_pump: None,
-                vsock_conn:   None,
+                config_obj:        None,
+                vm:                None,
+                started:           false,
+                last_error:        None,
+                console_pump:      None,
+                vsock_conn:        None,
+                loopback_listeners: Vec::new(),
             }
         }
 
@@ -1328,6 +1358,107 @@ mod macos {
                     reason: "AVF connect_vsock single-shot dispatch timed out".to_owned(),
                 }),
             }
+        }
+
+        /// Register a vsock-loopback listener for the credential-proxy
+        /// fan-out. The listener accepts guest-initiated AF_VSOCK
+        /// connections on `vsock_port` and splices each one to a
+        /// fresh TCP connection on `127.0.0.1:host_loopback_port`.
+        ///
+        /// The substrate caller (`raxis-session-spawn`) invokes this
+        /// method once per credential proxy after `start()` succeeds
+        /// but before the in-VM forwarder reads the env-stamped
+        /// [`raxis_vsock_loopback::ENV_VAR_LOOPBACK_PLAN`]. AVF
+        /// retains the listener internally; the substrate retains
+        /// the handle in `loopback_listeners` so its Drop runs at
+        /// session teardown.
+        ///
+        /// Failures surface as
+        /// [`crate::vsock_loopback_bridge::LoopbackBridgeError`]:
+        ///
+        ///   * `InactiveVm` — `start()` was not yet called or the
+        ///     VM has no `VZVirtioSocketDevice`.
+        ///   * `DispatchTimeout` — the AVF serial queue is wedged
+        ///     (a hung `start` / `stop` would otherwise block this
+        ///     call indefinitely).
+        ///
+        /// **Idempotency.** Calling this twice with the same
+        /// `vsock_port` will silently install a second listener;
+        /// AVF stores the most-recently-registered listener for the
+        /// port and ignores the older one (per the framework's own
+        /// `setSocketListener:forPort:` semantics). The substrate
+        /// caller should not register duplicate ports — and the
+        /// wire-format layer rejects them in
+        /// `LoopbackPlan::from_env_string`.
+        pub fn register_loopback_listener(
+            &mut self,
+            vsock_port:         u32,
+            host_loopback_port: u16,
+        ) -> Result<(), crate::vsock_loopback_bridge::LoopbackBridgeError> {
+            let vm = self.vm.as_ref().ok_or_else(|| {
+                crate::vsock_loopback_bridge::LoopbackBridgeError::InactiveVm(
+                    "VM not started — start() must succeed before \
+                     register_loopback_listener".to_owned(),
+                )
+            })?;
+
+            // Extract the VZVirtioSocketDevice on the AVF queue
+            // (queue-confined property read). The Send-marked
+            // `DeviceHandle` newtype lets the strong reference
+            // cross threads back to the registering thread.
+            #[allow(clippy::type_complexity)]
+            let (tx, rx) = mpsc::sync_channel::<
+                Result<
+                    crate::vsock_loopback_bridge::macos::DeviceHandle,
+                    crate::vsock_loopback_bridge::LoopbackBridgeError,
+                >,
+            >(1);
+            let vm_for_dispatch = vm.clone_handle();
+            let tx_for_dispatch = tx.clone();
+            self.queue.exec_async(move || {
+                // SAFETY: queue-confined accessor.
+                let devices = unsafe { vm_for_dispatch.raw().socketDevices() };
+                if devices.is_empty() {
+                    let _ = tx_for_dispatch.send(Err(
+                        crate::vsock_loopback_bridge::LoopbackBridgeError::InactiveVm(
+                            "VZVirtualMachine has no VZVirtioSocketDevice; \
+                             check VmSpec::vsock_cid wiring".to_owned(),
+                        ),
+                    ));
+                    return;
+                }
+                let device_dyn: Retained<VZSocketDevice> = devices.objectAtIndex(0);
+                // SAFETY: V2 only ever wires VZVirtioSocketDevice as
+                // the substrate's socket device class.
+                let virtio_dev: Retained<VZVirtioSocketDevice> = unsafe {
+                    Retained::cast_unchecked::<VZVirtioSocketDevice>(device_dyn)
+                };
+                let _ = tx_for_dispatch.send(Ok(
+                    crate::vsock_loopback_bridge::macos::DeviceHandle::from_retained(
+                        virtio_dev,
+                    ),
+                ));
+            });
+            let dispatch_grace = Duration::from_secs(5);
+            let device_handle = rx
+                .recv_timeout(dispatch_grace)
+                .map_err(|_| {
+                    crate::vsock_loopback_bridge::LoopbackBridgeError::DispatchTimeout(
+                        dispatch_grace,
+                    )
+                })??;
+
+            let inner = crate::vsock_loopback_bridge::macos::register_listener(
+                &self.queue,
+                device_handle,
+                vsock_port,
+                host_loopback_port,
+                dispatch_grace,
+            )?;
+            self.loopback_listeners.push(
+                crate::vsock_loopback_bridge::LoopbackListenerHandle { inner },
+            );
+            Ok(())
         }
 
         /// Snapshot lifecycle state. When the VM is live, queries

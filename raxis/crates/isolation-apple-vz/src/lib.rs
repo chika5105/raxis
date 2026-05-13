@@ -53,6 +53,7 @@
 
 pub mod config;
 pub mod runtime;
+pub mod vsock_loopback_bridge;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -442,6 +443,46 @@ impl Session for AppleVzSession {
         let fd = self.vsock_fd;
         self.vsock_fd = -1;
         Some(fd)
+    }
+
+    /// Register a credential-proxy vsock-loopback listener on the
+    /// VM's `VZVirtioSocketDevice`. See the
+    /// [`Session::register_loopback_listener`] trait docs for the
+    /// architectural contract; the AVF substrate's host half lives
+    /// in [`crate::vsock_loopback_bridge`] and the in-guest
+    /// forwarder is `raxis-tproxy::loopback_forwarder`.
+    fn register_loopback_listener(
+        &mut self,
+        vsock_port:         u32,
+        host_loopback_port: u16,
+    ) -> Result<(), IsolationError> {
+        if self.terminated {
+            return Err(IsolationError::TransportFault(format!(
+                "{BACKEND_ID}: register_loopback_listener: session terminated",
+            )));
+        }
+        let runtime = self.runtime.as_mut().ok_or_else(|| {
+            IsolationError::BackendInternal(format!(
+                "{BACKEND_ID}: register_loopback_listener: runtime already taken",
+            ))
+        })?;
+        runtime
+            .register_loopback_listener(vsock_port, host_loopback_port)
+            .map_err(|e| match e {
+                crate::vsock_loopback_bridge::LoopbackBridgeError::Unsupported => {
+                    IsolationError::BackendInternal(format!("{BACKEND_ID}: {e}"))
+                }
+                crate::vsock_loopback_bridge::LoopbackBridgeError::InactiveVm(reason) => {
+                    IsolationError::BackendInternal(format!(
+                        "{BACKEND_ID}: register_loopback_listener: {reason}",
+                    ))
+                }
+                crate::vsock_loopback_bridge::LoopbackBridgeError::DispatchTimeout(d) => {
+                    IsolationError::TransportFault(format!(
+                        "{BACKEND_ID}: register_loopback_listener: AVF queue timeout {d:?}",
+                    ))
+                }
+            })
     }
 }
 
