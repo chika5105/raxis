@@ -39,8 +39,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use raxis_ipc::{read_frame, write_frame, FrameError};
-use raxis_types::{DnsQueryType, DnsResolveRequest, DnsResolveResponse, IpcMessage};
+use raxis_ipc::{read_frame, write_frame, FrameError, IpcMessage};
+use raxis_types::{DnsQueryType, DnsResolveRequest, DnsResolveResponse};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
