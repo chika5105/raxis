@@ -118,6 +118,21 @@ pub fn require_canonical_images() {
     ));
     let install_dir = PathBuf::from(&install_dir_raw);
     let kernel_version = env!("CARGO_PKG_VERSION");
+
+    // Auto-bake: if the canonical images are missing or are stub
+    // builds (no `/bin/bash` etc.), drive the full xtask pipeline
+    // (`bake-rootfs → dev-stage → build-all`) so the live-e2e harness
+    // is self-contained on a fresh dev host. Idempotent: re-runs
+    // skip every role whose .img already passes the cpio preflight.
+    //
+    // Opt-out via `RAXIS_LIVE_E2E_SKIP_AUTO_BAKE=1` for operators
+    // who manage canonical images themselves (e.g. CI machines that
+    // pre-populate `RAXIS_INSTALL_DIR` from a packaged tarball and
+    // do NOT have docker / podman / buildah on the host).
+    if std::env::var("RAXIS_LIVE_E2E_SKIP_AUTO_BAKE").is_err() {
+        ensure_canonical_images_baked(&install_dir, kernel_version);
+    }
+
     for role in &["orchestrator-core", "executor-starter", "reviewer-core"] {
         let img = install_dir.join("images")
             .join(format!("raxis-{role}-{kernel_version}.img"));
@@ -144,7 +159,7 @@ pub fn require_canonical_images() {
             // Orch + reviewer are intentionally binary-only today;
             // the planner binary is checked below.
         }
-        let entries = crate::extended_e2e_support::cpio_inspect::list_initramfs_paths(&img)
+        let entries = crate::common::cpio_inspect::list_initramfs_paths(&img)
             .unwrap_or_else(|e| panic!(
                 "failed to walk canonical image {}: {e}\n\
                  The cpio.gz may be corrupted; rebuild via:\n  \
@@ -222,6 +237,184 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
         other => panic!("unknown canonical role {other:?}; \
                          expected one of: orchestrator-core, \
                          executor-starter, reviewer-core"),
+    }
+}
+
+/// Drive the three-stage `xtask images` pipeline (`bake-rootfs →
+/// dev-stage → build-all`) for any canonical role whose
+/// `<install_dir>/images/raxis-<role>-<v>.img` is missing or is a
+/// binary-only stub. Idempotent: roles that already pass the cpio
+/// preflight are skipped — we never re-run the docker bake when a
+/// good image is already on disk.
+///
+/// This is the live-e2e harness's "self-contained on a fresh dev
+/// host" feature. Without it, every operator (and the iter-13
+/// fix-loop) had to remember to run six xtask invocations by hand
+/// before kicking the test off, and a forgotten `bake-rootfs` step
+/// surfaced as the iter-12 `BashTool: ENOENT` storm.
+///
+/// # Panics
+///
+/// On any pipeline-stage failure (bake / stage / pack / sign).
+/// We deliberately do NOT surface a `Result` — a test that cannot
+/// boot the kernel cannot proceed and a panic produces a clearer
+/// `cargo test` failure than a silent skip. The panic message
+/// includes the failed stage and the role.
+///
+/// # Workspace location
+///
+/// Resolves the workspace root by walking ancestors of `CARGO_MANIFEST_DIR`
+/// (set by Cargo for every crate) until a `Cargo.toml` containing
+/// `[workspace]` appears — same algorithm xtask uses for its own
+/// `workspace_root_from_cwd()`. We do NOT use `CWD` because Cargo
+/// runs integration tests from the per-crate manifest dir, not from
+/// the workspace root, and we want this helper to work whether the
+/// operator runs `cargo test --workspace` or `cd kernel && cargo test`.
+fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
+    let workspace_root = workspace_root_from_manifest_dir();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+
+    for role in &["orchestrator-core", "executor-starter", "reviewer-core"] {
+        let img = install_dir
+            .join("images")
+            .join(format!("raxis-{role}-{kernel_version}.img"));
+        let manifest = install_dir
+            .join("images")
+            .join(format!("raxis-{role}-{kernel_version}.manifest.toml"));
+
+        // Idempotency check: skip if BOTH the image and manifest
+        // exist AND the cpio walk finds every required binary. This
+        // matches the assertion `require_canonical_images` does next,
+        // so a green idempotency check guarantees no rebake.
+        if img.exists() && manifest.exists() && cpio_passes_preflight(&img, role) {
+            eprintln!(
+                "[live-e2e auto-bake] skip {role} (canonical image already complete at {})",
+                img.display(),
+            );
+            continue;
+        }
+
+        eprintln!(
+            "[live-e2e auto-bake] {role}: rebaking (img missing or stub at {})",
+            img.display(),
+        );
+
+        // ── 1. bake-rootfs ───────────────────────────────────────
+        // Roles with `required_binaries_for_canonical_role` empty
+        // (orch / reviewer today) ship binary-only by current spec
+        // — no Containerfile bake required, dev-stage's binary-only
+        // rootfs is sufficient. Skip the docker bake for those roles
+        // so the pipeline does not require docker on every harness
+        // run when only the executor image is at risk.
+        if !required_binaries_for_canonical_role(role).is_empty() {
+            run_xtask_or_panic(
+                &cargo, &workspace_root, role, "bake-rootfs",
+                &["--role", role],
+            );
+        } else {
+            eprintln!(
+                "[live-e2e auto-bake] skip bake-rootfs for {role} \
+                 (binary-only by spec; no Containerfile build needed)"
+            );
+        }
+
+        // ── 2. dev-stage ─────────────────────────────────────────
+        // For binary-only roles, pass --allow-stub so the post-stage
+        // guard does not fire; for executor-starter (which DID just
+        // bake the rootfs) the guard validates the bake worked.
+        let stage_args: Vec<&str> = if required_binaries_for_canonical_role(role).is_empty() {
+            vec!["--role", role, "--allow-stub"]
+        } else {
+            vec!["--role", role]
+        };
+        run_xtask_or_panic(
+            &cargo, &workspace_root, role, "dev-stage",
+            &stage_args,
+        );
+
+        // ── 3. build-all ────────────────────────────────────────
+        // Pack into the signed cpio.gz at <install_dir>/images/.
+        run_xtask_or_panic(
+            &cargo, &workspace_root, role, "build-all",
+            &[
+                "--role",        role,
+                "--install-dir", install_dir.to_str().unwrap_or_else(|| panic!(
+                    "install_dir contains non-utf8 bytes: {}", install_dir.display(),
+                )),
+            ],
+        );
+    }
+}
+
+/// Walk a candidate canonical image and report whether it contains
+/// every binary `require_canonical_images` will assert. Returns
+/// `false` on any I/O failure (treat unreadable images as
+/// preflight-failing so the auto-bake will rebuild them).
+fn cpio_passes_preflight(img: &Path, role: &str) -> bool {
+    let entries = match crate::common::cpio_inspect::list_initramfs_paths(img) {
+        Ok(e)  => e,
+        Err(_) => return false,
+    };
+    required_binaries_for_canonical_role(role)
+        .iter()
+        .all(|b| entries.contains_key(*b))
+}
+
+/// Walk ancestors of `CARGO_MANIFEST_DIR` looking for a `Cargo.toml`
+/// that contains `[workspace]`. Mirrors xtask's
+/// `workspace_root_from_cwd()` but anchored at the test's manifest
+/// dir so it works whether the operator runs the test from the
+/// workspace root or from `kernel/`.
+fn workspace_root_from_manifest_dir() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        let candidate = p.join("Cargo.toml");
+        if candidate.exists() {
+            if let Ok(s) = std::fs::read_to_string(&candidate) {
+                if s.contains("[workspace]") {
+                    return p;
+                }
+            }
+        }
+        if !p.pop() {
+            panic!(
+                "could not locate workspace root (no Cargo.toml with \
+                 [workspace] in any ancestor of {})",
+                env!("CARGO_MANIFEST_DIR"),
+            );
+        }
+    }
+}
+
+fn run_xtask_or_panic(
+    cargo:           &str,
+    workspace_root:  &Path,
+    role:            &str,
+    sub:             &str,
+    extra:           &[&str],
+) {
+    let mut argv: Vec<&str> = vec!["xtask", "images", sub];
+    argv.extend(extra);
+    eprintln!(
+        "[live-e2e auto-bake] {role}: running {} {}",
+        cargo, argv.join(" "),
+    );
+    let status = Command::new(cargo)
+        .current_dir(workspace_root)
+        .args(&argv)
+        .status()
+        .unwrap_or_else(|e| panic!(
+            "spawn `{cargo} {}`: {e}", argv.join(" "),
+        ));
+    if !status.success() {
+        panic!(
+            "live-e2e auto-bake stage `{sub}` failed for role {role:?} \
+             (exit {status}). Re-run manually for richer diagnostics:\n  \
+             {cargo} {}\n\
+             Set RAXIS_LIVE_E2E_SKIP_AUTO_BAKE=1 to disable auto-bake \
+             entirely (operator-managed canonical images).",
+            argv.join(" "),
+        );
     }
 }
 

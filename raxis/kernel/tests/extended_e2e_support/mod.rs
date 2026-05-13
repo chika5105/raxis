@@ -12,7 +12,6 @@
 
 pub mod audit_chain;
 pub mod concurrency;
-pub mod cpio_inspect;
 pub mod crash_recovery;
 pub mod credential_substitution_evidence;
 pub mod injection;

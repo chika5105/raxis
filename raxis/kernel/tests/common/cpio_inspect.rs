@@ -43,7 +43,14 @@ use flate2::read::GzDecoder;
 /// of the on-disk header `raxis-initramfs-builder::CpioEntry` writes,
 /// minus the data bytes (we never need to look at file contents from
 /// a preflight assertion).
+///
+/// `#[allow(dead_code)]` because some callers (the file-existence-only
+/// preflights in older test binaries) only consume the BTreeMap keys,
+/// not the per-entry fields. The fields are part of the helper's
+/// intentional public surface so future callers (BYO-image preflight,
+/// reviewer rg/grep audit) can reach them without re-parsing.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CpioEntry {
     /// Full path inside the archive, NOT including a leading `/`
     /// (matches `raxis-initramfs-builder`'s emitted shape).

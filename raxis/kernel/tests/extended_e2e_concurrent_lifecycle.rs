@@ -525,20 +525,11 @@ fn require_gateway_binary() -> PathBuf {
     p
 }
 
+/// Delegates to the shared driver's strengthened preflight (cpio
+/// content walk + auto-bake). Local one-liner kept as a stable
+/// in-binary symbol so older call sites do not need to re-import.
 fn require_canonical_images() {
-    let install_dir_raw = std::env::var("RAXIS_INSTALL_DIR").unwrap_or_else(|_| panic!(
-        "RAXIS_INSTALL_DIR env var is required",
-    ));
-    let install_dir = PathBuf::from(&install_dir_raw);
-    let kernel_version = env!("CARGO_PKG_VERSION");
-    for role in &["orchestrator-core", "executor-starter", "reviewer-core"] {
-        let img = install_dir.join("images")
-            .join(format!("raxis-{role}-{kernel_version}.img"));
-        let manifest = install_dir.join("images")
-            .join(format!("raxis-{role}-{kernel_version}.manifest.toml"));
-        assert!(img.exists(), "missing canonical image {}", img.display());
-        assert!(manifest.exists(), "missing canonical manifest {}", manifest.display());
-    }
+    extended_e2e_support::kernel_driver::require_canonical_images()
 }
 
 // ---------------------------------------------------------------------------

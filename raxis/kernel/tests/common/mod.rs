@@ -13,6 +13,7 @@
 //! follow-up work.
 
 pub mod browser;
+pub mod cpio_inspect;
 pub mod dashboard;
 pub mod kernel_harness;
 pub mod tier3_artifacts;

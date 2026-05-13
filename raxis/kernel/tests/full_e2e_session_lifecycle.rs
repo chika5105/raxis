@@ -509,6 +509,49 @@ fn require_canonical_images() {
             "missing canonical manifest {}; rebuild + sign per `system-requirements.md §3`",
             manifest.display(),
         );
+
+        // Iter-12 stub regression: walk the cpio.gz and assert
+        // every role-required binary is present. Without this the
+        // file-existence check above passes for binary-only stub
+        // images and the test fails 4 minutes in with `BashTool:
+        // ENOENT` instead of failing fast at preflight.
+        // See `tests/common/cpio_inspect.rs`.
+        let required: &[&str] = match *role {
+            "executor-starter"  => &[
+                "bin/bash",
+                "usr/bin/python3",
+                "usr/bin/git",
+                "usr/local/bin/raxis-executor",
+            ],
+            "orchestrator-core" => &["usr/local/bin/raxis-orchestrator"],
+            "reviewer-core"     => &["usr/local/bin/raxis-reviewer"],
+            _                   => unreachable!("role list is closed-set"),
+        };
+        let entries = common::cpio_inspect::list_initramfs_paths(&img)
+            .unwrap_or_else(|e| panic!(
+                "failed to walk canonical image {}: {e}", img.display(),
+            ));
+        let missing: Vec<&&'static str> = required
+            .iter()
+            .filter(|b| !entries.contains_key(**b))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "canonical {role} image is a stub — missing {n} required \
+             binar{plural} from {}:\n{lines}\n\
+             Rebuild via:\n  \
+             cargo xtask images bake-rootfs --role {role}\n  \
+             cargo xtask images dev-stage    --role {role}\n  \
+             cargo xtask images build-all    --role {role}",
+            img.display(),
+            n      = missing.len(),
+            plural = if missing.len() == 1 { "y" } else { "ies" },
+            lines  = missing
+                         .iter()
+                         .map(|b| format!("  - {b}"))
+                         .collect::<Vec<_>>()
+                         .join("\n"),
+        );
     }
 }
 
