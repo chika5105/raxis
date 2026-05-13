@@ -2699,6 +2699,137 @@ substitution_round_trip` witness in the realism extended e2e.
 
 ---
 
+## §11.9 — Dashboard surface (INV-DASHBOARD-* / INV-AUDIT-DASHBOARD-* / INV-AUDIT-OPERATOR-*)
+
+The dashboard is a privileged read surface over kernel state
+plus a narrow mutating surface (policy advance, mark-read).
+These invariants close the gap between "operator can see this"
+and "the audit chain records who saw what".
+
+### INV-DASHBOARD-STREAM-ENVELOPE-01 — Session SSE wire envelope is uniform
+
+**Statement.** Every data frame emitted on
+`GET /api/sessions/:id/stream` carries the full
+`{at_ms, kind, payload}` envelope as the SSE `data:` field
+with the default `message` event type. Control frames
+(`tail-complete`, `lagged`, `kernel-shutdown`, `ping`) retain
+explicit `event:` names. The frontend `EventSource` consumer
+attaches a single `onmessage` listener and decodes the
+envelope JSON — it does NOT subscribe per-kind.
+
+**Justification.** Per-kind `addEventListener` is a closed
+extensibility surface: every new audit kind the kernel
+introduces would otherwise need a paired frontend listener
+or the frame would silently disappear. The single-envelope
+contract makes the wire forward-compatible by construction —
+new kinds light up on the dashboard the moment the kernel
+emits them.
+
+**Canonical home.** `v2/dashboard-hardening.md §4.2`.
+
+### INV-DASHBOARD-STREAM-PRODUCER-01 — Audit emits feed the SSE pump
+
+**Statement.** The kernel's audit-sink chain MUST include a
+`raxis_dashboard_kernel::StreamingAuditSink` decorator that
+mirrors every emitted `AuditEvent` whose `session_id` is
+`Some(_)` into the matching `SessionStreamCapture`. The
+decorator wraps the `Arc<dyn AuditSink>` the rest of the
+kernel uses, so audit-chain order and session-stream order
+are identical for session-scoped events.
+
+**Justification.** Without this producer the session SSE
+surface is structurally dead: subscribers attach to capture
+channels nobody writes to. The decorator path keeps a single
+chain order between the canonical audit log and the live
+dashboard stream — the dashboard never reorders or invents
+events relative to the kernel-authoritative ordering.
+
+**Canonical home.** `v2/dashboard-hardening.md §4.1`.
+
+### INV-AUDIT-DASHBOARD-01 — Chain status comes from the kernel walker
+
+**Statement.** The dashboard surfaces audit-chain integrity
+exclusively via the kernel's own walker
+(`raxis_audit_tools::verify_chain_from`). The
+`GET /api/audit/chain-status` endpoint MUST return a verdict
+derived from a walker call; the frontend MUST NOT re-implement
+verification. Explicit `?reverify=true` requests bypass the
+kernel cache and force a fresh walk; otherwise the data layer
+honours a coarse TTL to keep idle page mounts from pinning a
+worker thread on chain re-walks.
+
+**Justification.** Two verifiers means two truths and two
+bugs to keep in sync. The chain's integrity contract is
+already proven by `verify_chain_full` (`INV-04`); reusing
+it as the single source of truth for the dashboard banner is
+strictly safer than a frontend re-implementation and trivially
+correct.
+
+**Canonical home.** `v2/dashboard-hardening.md §2.1`.
+
+### INV-AUDIT-OPERATOR-ACTION-01 — Every operator action emits an audit row
+
+**Statement.** Every operator-initiated dashboard handler —
+mutating OR privileged-read — emits exactly one structured
+`Operator*` audit event before returning success. The event
+carries:
+
+  * `operator_fingerprint` — the JWT-derived `fp-<8 hex>` of the
+    caller;
+  * resource correlation fields (`notification_id`,
+    `worktree_id`, `path`, `verdict`, `count`, etc.) appropriate
+    to the surface;
+  * `outcome` — one of `Accepted` / `RejectedValidation` /
+    `RejectedPermission` / `InternalError`.
+
+Failure paths (auth-rejected, schema-rejected, NotFound,
+internal-error) MUST also emit, with the rejection class on
+the `outcome` field. The audit emit MUST NOT precede
+mechanical validation (auth, role, schema, path-safety) on
+the success path. A failed audit emit on the success path
+MUST surface as `InternalError` to the operator — the
+invariant cannot be silently violated.
+
+**Justification.** Passive operator interactions — opening a
+worktree, viewing a diff, fetching a file, re-verifying the
+chain — are part of the same accountability surface as
+mutating actions. Without operator-action audit, the audit
+chain records the agent's behaviour with high fidelity and
+the operator's behaviour with none. The `Operator*` event
+family closes this gap.
+
+The `outcome` field is the surface dashboards use to
+distinguish "operator was rejected at the gate" from "operator
+clicked, action ran". A single-class enum keeps the
+discriminant small enough for dashboards to render directly.
+
+**Canonical home.** `v2/dashboard-hardening.md §2.2`.
+
+### INV-DASHBOARD-VALIDATE-01 — Validation precedes every side effect and privileged read
+
+**Statement.** Every dashboard endpoint validates
+auth + role + request schema + path safety BEFORE any side
+effect, privileged read, or audit emit on the success path.
+Validation failures return a structured `ApiError` envelope
+with a stable error code (`FAIL_DASHBOARD_*`). Internal-error
+messages MUST NOT leak to the wire — the `log_only` payload
+on `ApiError::Internal` is only routed to `tracing::error!`;
+the wire surface is a generic `internal error`.
+
+**Justification.** The dashboard is the operator's TCB
+boundary into the kernel. The route layer's validators —
+JWT verification, role gates, `validate_name` /
+`validate_relative_path`, query-parser typing — are the
+load-bearing safety net. Validation BEFORE side effect
+prevents path-traversal, auth-bypass-on-error-paths, and
+audit-noise-from-rejected-requests; structured error codes
+make every rejection mechanically classifiable so dashboards
+never have to grep stack traces for failure modes.
+
+**Canonical home.** `v2/dashboard-hardening.md §2.3`.
+
+---
+
 ## §12 — How invariants combine (composition map)
 
 Most security properties at the system level are emergent from

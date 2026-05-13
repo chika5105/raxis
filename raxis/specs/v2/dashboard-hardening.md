@@ -124,7 +124,144 @@ dashboard rather than panicking. The other kernel surfaces
 
 ---
 
-## 2. Boundaries the dashboard does NOT cross
+## 2. Audit surface contracts (V2.5 addendum)
+
+### 2.1 Chain status comes from the kernel walker (`INV-AUDIT-DASHBOARD-01`)
+
+`GET /api/audit/chain-status` surfaces the kernel's own
+integrity verdict via
+`raxis_audit_tools::verify_chain_from(audit_dir, 0)`. The
+dashboard does NOT re-implement the walk — there is exactly
+one source of truth for chain integrity, and it is the
+kernel binary's own audit-tools crate.
+
+Wire shape:
+
+```
+{
+  "fresh": true | false,
+  "status": "ok" | "broken" | "unknown",
+  "last_verified_seq": <u64>,
+  "total_records": <u64>,
+  "segment_count": <u64>,
+  "verified_at_ms": <u64>,
+  "last_error": <string | null>
+}
+```
+
+* `status = "ok"` ⇒ end-to-end walker pass.
+* `status = "broken"` ⇒ first walker error; `last_error`
+  carries the operator-safe short reason and
+  `last_verified_seq` carries the seq the break was
+  observed at.
+* `status = "unknown"` ⇒ verdict has not been produced
+  yet (the walker has not run since boot).
+
+Rate limit: explicit `?reverify=true` forces a fresh walk;
+otherwise the data layer honours a 30 s in-process TTL on
+the verdict cache so an idle dashboard cannot pin a worker
+thread on chain re-walks. The cache lives in
+`KernelDashboardData::chain_status_cache`.
+
+### 2.2 Every operator action is audited (`INV-AUDIT-OPERATOR-ACTION-01`)
+
+Every operator-initiated dashboard handler — mutating OR
+privileged-read — emits a structured `Operator*` audit
+event via `DashboardData::emit_operator_audit`. The event
+kinds are append-only on `raxis_audit_tools::AuditEventKind`:
+
+| Event kind                              | Surface                                              |
+|-----------------------------------------|------------------------------------------------------|
+| `OperatorNotificationMarkedRead`        | `PATCH /api/notifications/:id/read`                  |
+| `OperatorNotificationsMarkedAllRead`    | `POST /api/notifications/mark-all-read`              |
+| `OperatorWorktreeAccessed`              | `GET /api/git/worktrees/:name{,/log,/tree}`          |
+| `OperatorDiffViewed`                    | `GET /api/git/worktrees/:name/diff{,/<range>}`       |
+| `OperatorFileContentFetched`            | `GET /api/git/worktrees/:name/file?path=…`           |
+| `OperatorAuditChainReverified`          | `GET /api/audit/chain-status?reverify=true`          |
+| `OperatorNotificationViewed`            | (reserved for per-notification GET)                  |
+| `OperatorHealthQueried`                 | `GET /api/health/subsystems`                         |
+
+Every event carries:
+
+  * `operator_fingerprint` — JWT-derived `fp-<hex>` of the caller;
+  * resource correlation fields (id, path, refs, count, …);
+  * `outcome` — `Accepted` / `RejectedValidation` /
+    `RejectedPermission` / `InternalError`.
+
+Discipline (enforced by `routes::*`):
+
+  1. Validate auth + role + schema + path safety BEFORE any
+     side effect, privileged read, or audit emit on the
+     success path.
+  2. On the success path: audit AFTER the side effect / read,
+     BEFORE returning the Json response. An audit-emit
+     failure on the success path surfaces as `InternalError`
+     to the operator — the invariant cannot be silently
+     violated.
+  3. On every failure path (permission rejection,
+     validation rejection, NotFound, internal-error): audit
+     with the rejection class on `outcome` and the
+     resource correlation fields filled in as far as
+     validation got.
+
+Cache-hit reads on `chain-status` are NOT audited — that path
+is idempotent + read-only and would otherwise flood the chain
+on every page mount.
+
+### 2.3 Validation precedes side effects (`INV-DASHBOARD-VALIDATE-01`)
+
+Every dashboard handler:
+
+  1. Validates `Authorization: Bearer <jwt>` via the
+     `AuthorizedOperator` extractor (`server::AuthorizedOperator::from_request_parts`).
+  2. Re-resolves the operator's roles via
+     `data.lookup_operator_roles(&claims.fingerprint)`.
+  3. Gates on the required `DashboardRole` (`Read` /
+     `WritePolicy` / `Admin`).
+  4. Parses the request schema via typed extractors
+     (`Json<T>` / `Query<T>` / `Path<T>`) — malformed input
+     surfaces as a 400 from axum's parser, never a panic.
+  5. Runs surface-specific validators (`validate_name`,
+     `validate_relative_path`, range parser, …).
+  6. Only THEN touches the data layer.
+
+Every failure surfaces as a structured `ApiError` JSON
+envelope with a stable `code` (`FAIL_DASHBOARD_*`). The
+`Internal { log_only }` variant carries the operator-facing
+text to `tracing::error!` only — the wire body is a generic
+`"internal error"` so the dashboard cannot become a leak
+channel for kernel internals.
+
+### 2.4 Subsystem health is kernel-derived
+
+`GET /api/health/subsystems` enumerates the kernel-side
+`SUBSYSTEM_CATALOG`:
+
+  * `kernel_main_loop`
+  * `audit_writer`
+  * `credential_proxies`
+  * `egress_admission`
+  * `session_spawn_pool`
+  * `planner_registry`
+  * `observability_pusher`
+  * `git_worktree_pool`
+  * `dashboard_sse_pump`
+
+For each, the data layer derives a status (`ok` /
+`degraded` / `failing` / `unknown`) from a live signal —
+the dashboard does NOT invent statuses. The aggregate
+status returned alongside the per-card list is the
+worst-case wins: `failing > degraded > unknown > ok`.
+
+Grafana deep-links are surfaced per-card when the kernel
+boot detected `RAXIS_GRAFANA_BASE_URL` in the environment
+(the observability worker's `cargo xtask observability up`
+block sets this). When absent, the FE hides the button —
+no per-tile link is invented.
+
+---
+
+## 2.5. Boundaries the dashboard does NOT cross
 
 * **Authentication only — no authorization or policy
   enforcement.** The dashboard verifies an Ed25519
