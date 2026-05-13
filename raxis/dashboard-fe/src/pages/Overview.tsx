@@ -6,6 +6,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { Mono } from "@/components/Mono";
+import { auditBadgeClasses } from "@/lib/audit-tone";
 import { fmtRelative, fmtTokens, plural } from "@/lib/format";
 
 /// Operator landing page. Shows kernel health, top-level
@@ -348,7 +349,7 @@ export function OverviewPage() {
                 <span className="text-[11px] text-ink-subtle font-mono w-12 text-right">
                   #{a.seq}
                 </span>
-                <span className="badge bg-panel-high text-ink-muted border-edge-strong">
+                <span className={auditBadgeClasses(a.event_kind)}>
                   {a.event_kind}
                 </span>
                 {a.initiative_id && (

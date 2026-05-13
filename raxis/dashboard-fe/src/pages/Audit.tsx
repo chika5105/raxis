@@ -7,6 +7,7 @@ import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
+import { auditBadgeClasses } from "@/lib/audit-tone";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
 import type { AuditEntryView } from "@/types/api";
 
@@ -101,8 +102,7 @@ export function AuditPage() {
           <ul className="divide-y divide-edge/50">
             {all.map((a) => {
               const isOpen = expanded === a.event_id;
-              const toggle = () =>
-                setExpanded(isOpen ? null : a.event_id);
+              const toggle = () => setExpanded(isOpen ? null : a.event_id);
               // Outer row is a real interactive surface but
               // contains nested <a> links to the initiative /
               // task. Plain <button> would be invalid HTML
@@ -127,7 +127,7 @@ export function AuditPage() {
                     <span className="text-[11px] text-ink-subtle font-mono w-14 text-right">
                       #{a.seq}
                     </span>
-                    <span className="badge bg-panel-high text-ink-muted border-edge-strong">
+                    <span className={auditBadgeClasses(a.event_kind)}>
                       {a.event_kind}
                     </span>
                     {a.initiative_id && (
