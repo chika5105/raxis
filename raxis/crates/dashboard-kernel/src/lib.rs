@@ -872,8 +872,7 @@ impl DashboardData for KernelDashboardData {
         if !path.exists() {
             return Err(ApiError::NotFound { kind: "worktree-path".into() });
         }
-        git::log_entries(&path, limit.clamp(1, 200))
-            .map_err(|e| ApiError::Internal { log_only: format!("git log: {e}") })
+        git::log_entries(&path, limit.clamp(1, 200)).map_err(map_git_error_to_api)
     }
 
     fn worktree_diff_default(
@@ -892,8 +891,7 @@ impl DashboardData for KernelDashboardData {
             .ok_or(ApiError::NotFound { kind: "default-diff".into() })?;
         let to = git::head_sha(&path)
             .ok_or(ApiError::NotFound { kind: "head-sha".into() })?;
-        let files = git::diff_files(&path, &from, &to)
-            .map_err(|e| ApiError::Internal { log_only: format!("git diff: {e}") })?;
+        let files = git::diff_files(&path, &from, &to).map_err(map_git_error_to_api)?;
         Ok(WorktreeDiff {
             name: resolved.summary.name,
             from_sha: from,
@@ -913,8 +911,7 @@ impl DashboardData for KernelDashboardData {
         if !path.exists() {
             return Err(ApiError::NotFound { kind: "worktree-path".into() });
         }
-        let files = git::diff_files(&path, from_sha, to_sha)
-            .map_err(|e| ApiError::Internal { log_only: format!("git diff range: {e}") })?;
+        let files = git::diff_files(&path, from_sha, to_sha).map_err(map_git_error_to_api)?;
         Ok(WorktreeDiff {
             name: resolved.summary.name,
             from_sha: from_sha.to_owned(),
@@ -1247,6 +1244,71 @@ impl DashboardData for KernelDashboardData {
                 })
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Git-error → ApiError classification
+// ---------------------------------------------------------------------------
+
+/// Map a [`git::GitError`] to the most appropriate [`ApiError`].
+///
+/// Discrimination matters because the operator dashboard renders 5xx
+/// responses as a red "Internal Server Error" banner — every misclassified
+/// 4xx-class condition becomes an apparent kernel bug to the operator.
+/// The cases:
+///
+/// * [`git::GitError::NotARepo`] — the worktree slug points at a directory
+///   that exists on disk but is not (or no longer) a git repository.
+///   Common in V2 because the operator-allowed worktree root may name a
+///   parent directory of session worktrees rather than the main repo
+///   itself. Surfaced as `404 FAIL_DASHBOARD_NOT_FOUND` with
+///   `kind: "worktree-history"` so the frontend can render an empty-state
+///   page (no commits, no diffs) instead of an error.
+/// * [`git::GitError::MissingPath`] — the path itself is gone. 404 with
+///   `kind: "worktree-path"`.
+/// * [`git::GitError::Timeout`] — the git subprocess exceeded its hard
+///   wall-clock cap. Surface as a structured 500 with a `tracing::warn!`
+///   (not error) since this is an expected occasional failure mode under
+///   pathological inputs (corrupted pack file, fs stall) rather than a
+///   kernel bug.
+/// * [`git::GitError::Spawn`] / [`git::GitError::NonZero`] — kernel-side
+///   trouble. 500.
+fn map_git_error_to_api(err: git::GitError) -> ApiError {
+    match err {
+        git::GitError::NotARepo { path } => {
+            tracing::warn!(
+                target = "raxis_dashboard",
+                worktree_path = %path,
+                "git: worktree directory is not a repository; surfacing 404"
+            );
+            ApiError::NotFound {
+                kind: "worktree-history".into(),
+            }
+        }
+        git::GitError::MissingPath { path } => {
+            tracing::warn!(
+                target = "raxis_dashboard",
+                worktree_path = %path,
+                "git: worktree path missing; surfacing 404"
+            );
+            ApiError::NotFound {
+                kind: "worktree-path".into(),
+            }
+        }
+        git::GitError::Timeout { secs } => {
+            tracing::warn!(
+                target = "raxis_dashboard",
+                timeout_secs = secs,
+                "git: subprocess timed out"
+            );
+            ApiError::Internal {
+                log_only: format!("git timed out after {secs}s"),
+            }
+        }
+        e @ git::GitError::Spawn(_) | e @ git::GitError::NonZero { .. } => ApiError::Internal {
+            log_only: format!("git: {e}"),
+        },
     }
 }
 

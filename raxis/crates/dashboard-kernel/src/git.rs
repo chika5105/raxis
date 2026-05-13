@@ -66,7 +66,23 @@ pub enum GitError {
     /// `git` failed to spawn.
     #[error("git spawn failed: {0}")]
     Spawn(String),
-    /// `git` exited non-zero.
+    /// `git` reported the worktree directory is not (or no longer)
+    /// a git repository. Surfaced as a distinct variant so the
+    /// dashboard route layer can map it to a structured 4xx
+    /// instead of a 500 — e.g. a `main-0` slug pointing at a
+    /// parent directory of session worktrees that itself has no
+    /// `.git/`. The previous implementation flattened this into
+    /// `NonZero { code: 128, … }` and the call sites mapped that
+    /// to `ApiError::Internal`, so the operator UI rendered "500
+    /// Internal Server Error" on the worktree page for a perfectly
+    /// expected configuration.
+    #[error("worktree at {path} is not a git repository")]
+    NotARepo {
+        /// Worktree path that failed the repo probe.
+        path: String,
+    },
+    /// `git` exited non-zero (and the stderr did not match a known
+    /// 4xx-class condition handled above).
     #[error("git exited {code}: {stderr}")]
     NonZero {
         /// Process exit code.
@@ -86,6 +102,17 @@ pub enum GitError {
         /// Worktree path that failed to exist.
         path: String,
     },
+}
+
+/// Heuristic: `git` prints `fatal: not a git repository …` when
+/// invoked against a directory that lacks a `.git` (or that is
+/// not under one). The exact phrasing has been stable across git
+/// versions for over a decade; we still match case-insensitively
+/// and on the substring rather than the full line so a future
+/// minor copy edit does not regress the classification.
+fn stderr_is_not_a_git_repo(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("not a git repository")
 }
 
 /// Run `git -C <root> <args>` with a bounded timeout. Returns
@@ -184,6 +211,14 @@ pub fn ahead_behind(root: &Path, base: &str) -> Option<(u32, u32)> {
 
 /// `git log -n <limit> --pretty=format:%H%x09%an <%ae>%x09%at%x09%s`.
 /// Returns log entries newest-first.
+///
+/// Surfaces [`GitError::NotARepo`] when the worktree path is not (or
+/// no longer) a git repository. The route layer maps that variant to
+/// a 404 with a structured envelope; previously this case fell
+/// through as `NonZero { code: 128, … }` → `ApiError::Internal`
+/// (HTTP 500) and the operator UI rendered "internal error" on the
+/// worktree page for a perfectly expected configuration (e.g.
+/// `main-0` pointing at a parent directory of session worktrees).
 pub fn log_entries(root: &Path, limit: u32) -> Result<Vec<WorktreeLogEntry>, GitError> {
     let limit_str = limit.to_string();
     let (stdout, stderr, code) = run_git(
@@ -196,6 +231,11 @@ pub fn log_entries(root: &Path, limit: u32) -> Result<Vec<WorktreeLogEntry>, Git
         root,
     )?;
     if code != 0 {
+        if stderr_is_not_a_git_repo(&stderr) {
+            return Err(GitError::NotARepo {
+                path: root.display().to_string(),
+            });
+        }
         return Err(GitError::NonZero {
             code,
             stderr: stderr.chars().take(256).collect(),
@@ -232,6 +272,11 @@ pub fn diff_files(
         root,
     )?;
     if code != 0 {
+        if stderr_is_not_a_git_repo(&stderr) {
+            return Err(GitError::NotARepo {
+                path: root.display().to_string(),
+            });
+        }
         return Err(GitError::NonZero {
             code,
             stderr: stderr.chars().take(256).collect(),
@@ -242,6 +287,11 @@ pub fn diff_files(
         root,
     )?;
     if code2 != 0 {
+        if stderr_is_not_a_git_repo(&stderr2) {
+            return Err(GitError::NotARepo {
+                path: root.display().to_string(),
+            });
+        }
         return Err(GitError::NonZero {
             code: code2,
             stderr: stderr2.chars().take(256).collect(),
@@ -328,5 +378,81 @@ mod tests {
         let small = "abc".to_owned();
         let cut = truncate_hunk(small);
         assert_eq!(cut, "abc");
+    }
+
+    /// Stderr classification: matches the canonical phrasing
+    /// (`fatal: not a git repository (or any parent up to mount
+    /// point …`), case-insensitively, and ignores leading
+    /// whitespace + trailing detail.
+    #[test]
+    fn stderr_classifier_recognises_canonical_phrase() {
+        assert!(stderr_is_not_a_git_repo(
+            "fatal: not a git repository (or any of the parent directories): .git\n"
+        ));
+        assert!(stderr_is_not_a_git_repo(
+            "fatal: Not a git repository (or any parent up to mount point /)\n"
+        ));
+        assert!(stderr_is_not_a_git_repo(
+            "  prefix garbage\nfatal: not a git repository\n"
+        ));
+        assert!(!stderr_is_not_a_git_repo(""));
+        assert!(!stderr_is_not_a_git_repo("fatal: bad object HEAD\n"));
+        assert!(!stderr_is_not_a_git_repo(
+            "fatal: ambiguous argument 'main..feature': unknown revision"
+        ));
+    }
+
+    /// `log_entries` against a directory that exists but is not a
+    /// git repo MUST surface as [`GitError::NotARepo`] (route layer
+    /// maps to 404) rather than [`GitError::NonZero { code: 128, … }`]
+    /// (which the route layer maps to 500).
+    ///
+    /// Skipped on hosts without a working `git` binary on PATH —
+    /// the helper would surface `Spawn(_)` instead, which is a
+    /// distinct (and unrelated) failure mode.
+    #[test]
+    fn log_entries_returns_not_a_repo_for_non_git_dir() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = log_entries(dir.path(), 5).expect_err("should fail");
+        match err {
+            GitError::NotARepo { .. } => {}
+            other => panic!("expected NotARepo, got {other:?}"),
+        }
+    }
+
+    /// Same classification path for `diff_files`. Catches the
+    /// `worktree_diff_range` 500 we observed against a non-git
+    /// `main-0` slug.
+    #[test]
+    fn diff_files_returns_not_a_repo_for_non_git_dir() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Two hex SHAs of the right length so the route-layer
+        // `parse_range` validator is content; the actual git
+        // probe still fails before any commit lookup.
+        let from = "a".repeat(40);
+        let to = "b".repeat(40);
+        let err = diff_files(dir.path(), &from, &to).expect_err("should fail");
+        match err {
+            GitError::NotARepo { .. } => {}
+            other => panic!("expected NotARepo, got {other:?}"),
+        }
     }
 }
