@@ -570,6 +570,79 @@ acknowledges it explicitly. A toast-only treatment is
 non-conformant — toasts hide the reason after a few seconds and
 the operator has no way to recall what the rejection text said.
 
+### 5.7 Host-hygiene banner (`INV-HOST-HYGIENE-01`)
+
+Operator-experience contract for the parent-side disk-pressure
+surface: the dashboard MUST render a dismissible amber banner
+above every page when any operator-notification row carries
+`event_kind = "OperatorAttentionRequired"` AND
+`payload.attention_kind = "HostHygieneDiskPressure"`.
+
+The banner consumes the structured `HostPreflightError`
+payload defined in `raxis/crates/types/src/host_preflight.rs`
+(carried as a JSON string in the audit event's `details`
+field). Pinned wire shape:
+
+```json
+{
+  "pressure_kind": "DiskPressure",
+  "threshold_pct": 90,
+  "observed_volumes": [
+    { "mount": "/System/Volumes/Data", "used_pct": 92, "free_human": "64.0GiB" },
+    { "mount": "/private/tmp",         "used_pct": 78, "free_human": "199.0GiB" }
+  ],
+  "remediation_cmd": "cargo xtask hygiene",
+  "docs_url": "raxis/guides/operator/18-host-hygiene.md"
+}
+```
+
+The banner MUST:
+
+  * Render only the volumes whose `used_pct >= threshold_pct`
+    in the title row (under-threshold volumes are mute context).
+  * Carry a "Copy `<remediation_cmd>`" action button that
+    writes the command to `navigator.clipboard`.
+  * Carry a "Read more" link to `docs_url` when present.
+  * Be dismissible per session, with the dismissal keyed by
+    notification ID so a fresh disk-pressure event re-surfaces
+    the banner even if a previous one was dismissed.
+  * Render nothing on the happy path (zero chrome cost when
+    no host-hygiene notification is active).
+
+The filter contract is asymmetric: the dashboard MUST ignore
+`OperatorAttentionRequired` notifications whose `attention_kind`
+is anything other than `"HostHygieneDiskPressure"` (so the
+existing `DiskFull` / `FdLimitInsufficient` /
+`InitiativeStarvation` / `ArchiverLagging` events do not
+double-up on the hygiene banner — they remain inbox-only). The
+notifications page continues to surface all
+`OperatorAttentionRequired` rows; this banner is the
+focused-attention surface specifically for parent-side
+worktree disk pressure.
+
+**Producer side.** Today the producer is the live-e2e harness
+(`kernel/tests/extended_e2e_realistic_scenario.rs`) which emits
+the structured payload to stderr with the
+`OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+envelope before bailing the test. A future kernel-side
+preflight (running after bootstrap) MAY emit the same payload
+through the in-process `audit.emit` path with no FE changes —
+the JSON shape is identical, so the dashboard banner picks up
+the runtime emission and the pre-kernel emission alike.
+
+**Verification.**
+  * Component test:
+    `dashboard-fe/src/test/host-hygiene-banner.test.tsx` pins
+    title / volume / remediation rendering, dismiss persistence,
+    copy-button clipboard contract, and the
+    `attention_kind` filter against synthetic events.
+  * Wire-shape test:
+    `crates/types/src/host_preflight.rs::tests` pins the JSON
+    round-trip, the `pressure_kind` discriminator, the
+    `Display` rendering used by the live-e2e panic message
+    AND the banner tooltip, and the `ATTENTION_KIND` constant
+    against the dashboard filter string.
+
 ## 6. Rationale (why these bounds)
 
 * **30 s handler timeout.** Gives the audit-chain walk

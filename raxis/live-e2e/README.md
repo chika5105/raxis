@@ -122,14 +122,47 @@ service to start, which env var to set) on failure.
 
 ---
 
-## Harness preflight: auto-bring-up + bounded waits
+## Harness preflight: host disk hygiene + auto-bring-up + bounded waits
 
 The realistic-scenario kernel test
-(`kernel/tests/extended_e2e_realistic_scenario.rs`) verifies the
-docker-compose project `raxis-live-e2e-test` is up and healthy
-**before** any `seed_*` helper runs. The default behaviour is
-operator-ergonomic: if the stack is not running the harness
-auto-brings-it-up via
+(`kernel/tests/extended_e2e_realistic_scenario.rs`) runs three
+preflight gates **before** any `seed_*` helper runs:
+
+1. **Host disk hygiene** (`require_disk_hygiene` /
+   `INV-HOST-HYGIENE-01`) — sub-second `df -P` probe across the
+   repo volume, `/private/tmp`, and every `/var/folders/*` (AVF
+   guest dir). Refuses to run when any monitored volume is at
+   90% or above. On detected pressure the harness:
+     * Builds a structured
+       `raxis_types::HostPreflightError::DiskPressure { threshold_pct,
+       observed_volumes, remediation_cmd, docs_url }`.
+     * Emits one stable-prefixed stderr line —
+       `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}` —
+       which the dashboard banner
+       (`dashboard-fe/src/components/banners/HostHygieneBanner.tsx`,
+       `INV-DASHBOARD-FAILURE-VISIBILITY-01 §5.7`) consumes
+       without waiting for a kernel boot.
+     * Panics with the structured `Display` rendering, putting
+       the offending volume + `cargo xtask hygiene` remediation
+       command into the `cargo test` failure summary.
+   Converts what was a 31-min mid-flight `DiskFullHaltEntered`
+   (iter 16 of the motivating incident, every activation
+   rejected with `FailDiskFull`) into a sub-second skip with
+   the right next step embedded in the structured payload.
+2. **Docker compose stack** (`ensure_extended_stack_up_or_panic` /
+   `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`) — verifies the
+   docker-compose project `raxis-live-e2e-test` is up and
+   healthy.
+3. **Per-service reachability** + the rest of the existing
+   preflight ladder (TCP probes, env-var checks, gateway
+   binary presence, canonical-image bake).
+
+The first gate is the "INV-HOST-HYGIENE-01" preflight; the
+second is the "INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01"
+preflight described in the rest of this section.
+
+The default behaviour for the second gate is operator-ergonomic:
+if the stack is not running the harness auto-brings-it-up via
 
 ```bash
 docker compose -p raxis-live-e2e-test \
