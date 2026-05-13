@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError};
+use raxis_dashboard_kernel::notification_priority;
 use raxis_observability::ObservabilityHub;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
@@ -178,6 +179,18 @@ impl AuditSink for NotifyingAuditSink {
             .obs_hub
             .as_ref()
             .and_then(|_| bridge_kind_if_relevant(&kind));
+        // INV-NOTIF-SCOPE-01: classify the event for the operator's
+        // notification inbox BEFORE moving `kind` into `inner.emit`.
+        // `None` ⇒ audit-chain only (operator-passive action,
+        // routine session/proxy/credential lifecycle, high-volume
+        // metric emission). The audit chain ALWAYS records the
+        // event regardless — this gate is purely the notification
+        // projection.
+        //
+        // Computing here rather than after the inner emit lets us
+        // borrow `&kind` once (so a noisy kind avoids the clone /
+        // bundle snapshot / dispatch fan-out below).
+        let priority = notification_priority(&kind);
         let event = self.inner.emit(kind, session_id, task_id, initiative_id)?;
 
         // 1a. Bridge to the V3 §3 metric counter (egress admit/deny/
@@ -188,6 +201,15 @@ impl AuditSink for NotifyingAuditSink {
         //     when missing.
         if let (Some(hub), Some(bk)) = (self.obs_hub.as_ref(), bridge_kind) {
             bridge_audit_to_metric(hub, &bk);
+        }
+
+        // 1b. INV-NOTIF-SCOPE-01: drop events that should not reach
+        //     the operator's notification inbox. The audit chain
+        //     keeps the row (already written by the inner emit
+        //     above); we just skip the inbox / SQLite / channel
+        //     fan-out.
+        if priority.is_none() {
+            return Ok(event);
         }
 
         // 2. Snapshot the bundle once. Holding the reference across
@@ -310,6 +332,106 @@ mod tests {
         let raw   = std::fs::read_to_string(&inbox).unwrap_or_default();
         assert!(raw.contains("EscalationApproved"),
             "inbox MUST carry the dispatched event; got: {raw:?}");
+    }
+
+    /// `INV-NOTIF-SCOPE-01`: operator-passive dashboard actions
+    /// (mark-read, view-diff, view-file, view-worktree, chain-
+    /// reverify, view-health) emit cleanly through the inner audit
+    /// sink (the chain records them) but the wrapper MUST NOT fan
+    /// them out to the notification dispatcher. The acceptance
+    /// criterion is "no inbox.jsonl line lands for these events";
+    /// we wait briefly for any spawned dispatch to settle and
+    /// assert the file is empty.
+    #[tokio::test]
+    async fn operator_passive_action_does_not_create_notification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = inner.clone();
+        let sink = NotifyingAuditSink::new(
+            Arc::clone(&inner_dyn),
+            bundle(),
+            tmp.path().to_path_buf(),
+        );
+
+        let evt = sink
+            .emit(
+                AuditEventKind::OperatorNotificationMarkedRead {
+                    operator_fingerprint: "fp".into(),
+                    notification_id:      "n-1".into(),
+                    updated:              true,
+                    outcome:              "Accepted".into(),
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Audit chain MUST capture the event (forensic record).
+        assert_eq!(evt.event_kind, "OperatorNotificationMarkedRead");
+        assert_eq!(
+            inner.events().len(),
+            1,
+            "inner sink (audit chain) must capture every operator-passive event",
+        );
+
+        // Notification surface MUST NOT fan out — let any spawned
+        // task settle, then assert the inbox file does not exist
+        // (or is empty).
+        for _ in 0..5 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let inbox = PolicyBundle::inbox_path_for(tmp.path());
+        let raw = std::fs::read_to_string(&inbox).unwrap_or_default();
+        assert!(
+            raw.trim().is_empty(),
+            "operator-passive action must not create a notification (\
+             INV-NOTIF-SCOPE-01); inbox contents: {raw:?}"
+        );
+    }
+
+    /// `INV-NOTIF-SCOPE-01`: routine high-volume events (session
+    /// lifecycle / credential proxy / per-task transitions) MUST
+    /// be audit-only, never inbox-bound. Same acceptance criterion
+    /// as the operator-passive case above.
+    #[tokio::test]
+    async fn routine_lifecycle_event_does_not_create_notification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = inner.clone();
+        let sink = NotifyingAuditSink::new(
+            Arc::clone(&inner_dyn),
+            bundle(),
+            tmp.path().to_path_buf(),
+        );
+
+        sink.emit(
+            AuditEventKind::SessionCreated {
+                session_id: "s-1".into(),
+                role: "executor".into(),
+                lineage_id: "l-1".into(),
+                worktree_root: None,
+                initiative_id: None,
+                plan_bundle_sha256: None,
+                policy_epoch: None,
+                session_agent_type: None,
+            },
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let inbox = PolicyBundle::inbox_path_for(tmp.path());
+        let raw = std::fs::read_to_string(&inbox).unwrap_or_default();
+        assert!(
+            raw.trim().is_empty(),
+            "SessionCreated must not create a notification \
+             (audit-chain only); inbox contents: {raw:?}"
+        );
     }
 
     /// V3 §3 expansion bridge: when an `ObservabilityHub` is wired

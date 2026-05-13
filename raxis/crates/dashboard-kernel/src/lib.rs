@@ -66,9 +66,13 @@ use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
 mod git;
+pub mod notification_filter;
 pub mod stream_capture;
 pub mod streaming_audit;
 
+pub use notification_filter::{
+    notification_priority, notification_priority_for_kind_str, NotificationPriority,
+};
 pub use stream_capture::{CaptureConfig, SessionStreamCapture};
 pub use streaming_audit::StreamingAuditSink;
 

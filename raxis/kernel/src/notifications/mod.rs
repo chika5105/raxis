@@ -42,6 +42,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink};
+use raxis_dashboard_kernel::notification_priority_for_kind_str;
 use raxis_policy::{NotificationChannel, NotificationChannelKind, PolicyBundle};
 use raxis_store::Store;
 
@@ -82,6 +83,22 @@ pub fn dispatch(
     sidecar_registry: Option<Arc<SidecarRegistry>>,
     store:            Option<Arc<Store>>,
 ) {
+    // ── INV-NOTIF-SCOPE-01: defense-in-depth filter ─────────────────────
+    // The primary gate is `NotifyingAuditSink::emit` (which has the
+    // typed `AuditEventKind` and runs the exhaustive
+    // `notification_priority` match). This second gate uses the
+    // string-discriminator variant so a future direct caller (or a
+    // refactor that bypasses the wrapper) cannot accidentally route
+    // operator-passive / routine-volume events into the inbox.
+    //
+    // Drift safety: if a brand-new audit kind lands without a string
+    // arm in `notification_priority_for_kind_str`, the fallback is
+    // `None` — the SAFER default (drop OUT of the inbox rather than
+    // into it). The audit chain still records the event upstream of
+    // this function.
+    if notification_priority_for_kind_str(&event.event_kind).is_none() {
+        return;
+    }
     // ── Unconditional kernel-owned write ────────────────────────────────
     // Always write to inbox.jsonl AND SQLite regardless of routing.
     // This is the kernel's ground truth for "what notifications were
@@ -240,6 +257,11 @@ pub async fn dispatch_blocking_for_tests_with_registry(
     sidecar_registry: Option<&SidecarRegistry>,
     store:            Option<&Store>,
 ) {
+    // INV-NOTIF-SCOPE-01: mirror the production filter so test
+    // paths assert the same drop behaviour as the kernel.
+    if notification_priority_for_kind_str(&event.event_kind).is_none() {
+        return;
+    }
     // Mirror the production kernel-owned writes (inbox.jsonl + SQLite
     // `notifications` row) so test paths exercise the same ground truth.
     let human_summary = summary::render(&event);
