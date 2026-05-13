@@ -367,6 +367,7 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         | K::SessionVmRespawnAttempted { .. }
         | K::SessionVmScaleEvent { .. }
         | K::SessionVmScaleDeferred { .. }
+        | K::VmImageResolved { .. }
         | K::SessionCreated { .. }
         | K::SessionRevoked { .. } => None,
 

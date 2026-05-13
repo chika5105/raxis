@@ -3454,40 +3454,141 @@ fn handle_structured_output_initiative_scoped(
 /// `FAIL_POLICY_VIOLATION` and parks the activation row in
 /// `PendingActivation` so the operator sees the failure and can
 /// retry once policy is healed.
+/// Successful operator-image resolution.
+///
+/// `verified_oci_digest` is the canonical lower-hex `sha256:<...>`
+/// shape that the resolver byte-equality-verified against the
+/// on-disk rootfs; the caller stamps it into the
+/// `VmImageResolved` audit event so chain readers can confirm the
+/// digest the kernel saw matches the digest the policy declared
+/// (`INV-OPERATOR-CUSTOM-IMAGE-01`).
+struct VmImageResolutionOk {
+    verified:            raxis_isolation::VerifiedImage,
+    verified_oci_digest: String,
+}
+
+/// Structured failure modes for `resolve_vm_image_override`.
+///
+/// The activation handler maps every variant to
+/// `FAIL_POLICY_VIOLATION` on the wire, but `DigestMismatch` is
+/// special-cased to ALSO emit
+/// `SecurityViolationDetected { violation_kind:
+/// "OperatorImageDigestMismatch", ... }` to the audit chain
+/// (`INV-OPERATOR-CUSTOM-IMAGE-01`). Other failure variants only
+/// produce a structured stderr log (the operator-facing surface is
+/// the eventual `TaskFailed` event).
+enum VmImageResolveError {
+    /// Policy rotated between admission and activation; the alias
+    /// the admission step stamped is no longer in `[[vm_images]]`.
+    AliasDropped { alias: String },
+    /// `[[vm_images]]` entry exists but its `oci_digest` no longer
+    /// parses as `sha256:<64-hex>`. Defense-in-depth — the policy
+    /// loader rejects malformed digests at admission.
+    MalformedDigest { alias: String, raw: String, detail: String },
+    /// Resolver detected an on-disk byte mismatch against the
+    /// policy-declared digest. This is the `INV-OPERATOR-CUSTOM-IMAGE-01`
+    /// trigger; the activation handler emits
+    /// `SecurityViolationDetected` with the expected / actual hex
+    /// strings before failing the activation.
+    DigestMismatch {
+        alias:    String,
+        expected: String,
+        actual:   String,
+        path:     String,
+    },
+    /// Catch-all for the remaining `ImageResolverError` variants
+    /// (registry unreachable, auth, not-found, transient 5xx,
+    /// unsupported media type, cache-corrupt, I/O). The detail
+    /// string is the resolver's `Display` rendering.
+    ResolverFailure { alias: String, raw_digest: String, detail: String },
+}
+
+impl VmImageResolveError {
+    /// Single source of truth for the structured stderr log line
+    /// emitted on every failure variant. Keeps the activation
+    /// handler caller small.
+    fn log_to_stderr(&self, task_id: &str) {
+        match self {
+            VmImageResolveError::AliasDropped { alias } => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
+                     \"task_id\":\"{task_id}\",\"alias\":\"{alias}\",\
+                     \"reason\":\"AliasDropped\"}}"
+                );
+            }
+            VmImageResolveError::MalformedDigest { alias, raw, detail } => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
+                     \"task_id\":\"{task_id}\",\"alias\":\"{alias}\",\
+                     \"reason\":\"MalformedDigest\",\
+                     \"raw_digest\":\"{raw}\",\"detail\":\"{detail}\"}}"
+                );
+            }
+            VmImageResolveError::DigestMismatch { alias, expected, actual, path } => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
+                     \"task_id\":\"{task_id}\",\"alias\":\"{alias}\",\
+                     \"reason\":\"DigestMismatch\",\
+                     \"expected\":\"{expected}\",\"actual\":\"{actual}\",\
+                     \"path\":\"{path}\"}}"
+                );
+            }
+            VmImageResolveError::ResolverFailure { alias, raw_digest, detail } => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
+                     \"task_id\":\"{task_id}\",\"alias\":\"{alias}\",\
+                     \"reason\":\"ResolverFailure\",\
+                     \"oci_digest\":\"{raw_digest}\",\"detail\":\"{detail}\"}}"
+                );
+            }
+        }
+    }
+}
+
 async fn resolve_vm_image_override(
     policy: &raxis_policy::PolicyBundle,
     alias:  &str,
     ctx:    &Arc<HandlerContext>,
-) -> Result<raxis_isolation::VerifiedImage, String> {
+) -> Result<VmImageResolutionOk, VmImageResolveError> {
     use std::str::FromStr;
 
     let entry = policy.vm_image_by_name(alias).ok_or_else(|| {
-        format!(
-            "alias `{alias}` is no longer declared in [[vm_images]] \
-             (policy rotation between admission and activation?); \
-             admission stamped this alias against an earlier epoch"
-        )
+        VmImageResolveError::AliasDropped { alias: alias.to_owned() }
     })?;
     let digest = raxis_image_cache::OciDigest::from_str(&entry.oci_digest)
-        .map_err(|e| format!(
-            "[[vm_images]] entry `{alias}` carries malformed oci_digest \
-             {value:?}: {e}",
-            value = entry.oci_digest,
-        ))?;
+        .map_err(|e| VmImageResolveError::MalformedDigest {
+            alias:  alias.to_owned(),
+            raw:    entry.oci_digest.clone(),
+            detail: e.to_string(),
+        })?;
     let resolved = ctx
         .image_resolver
         .resolve(&digest, None)
         .await
-        .map_err(|e| format!(
-            "ImageResolver::resolve failed for alias `{alias}` \
-             (digest {digest}): {e}",
-            digest = entry.oci_digest,
-        ))?;
-    Ok(raxis_isolation::VerifiedImage {
-        kind:      raxis_isolation::ImageKind::RootfsErofs,
-        body:      raxis_isolation::ImageBody::Path(resolved.rootfs_image_path),
-        signature: raxis_isolation::ImageSignature(Vec::new()),
-        image_id:  alias.to_owned(),
+        .map_err(|e| match e {
+            raxis_image_cache::ImageResolverError::DigestMismatch {
+                expected, actual, path,
+            } => VmImageResolveError::DigestMismatch {
+                alias:    alias.to_owned(),
+                expected: expected.to_string(),
+                actual:   actual.to_string(),
+                path:     path.display().to_string(),
+            },
+            other => VmImageResolveError::ResolverFailure {
+                alias:      alias.to_owned(),
+                raw_digest: entry.oci_digest.clone(),
+                detail:     other.to_string(),
+            },
+        })?;
+    let verified_oci_digest = resolved.verified_digest.to_string();
+    Ok(VmImageResolutionOk {
+        verified: raxis_isolation::VerifiedImage {
+            kind:      raxis_isolation::ImageKind::RootfsErofs,
+            body:      raxis_isolation::ImageBody::Path(resolved.rootfs_image_path),
+            signature: raxis_isolation::ImageSignature(Vec::new()),
+            image_id:  alias.to_owned(),
+        },
+        verified_oci_digest,
     })
 }
 
@@ -3804,7 +3905,47 @@ async fn handle_activate_sub_task(
             &lookup.vm_image_alias,
             ctx,
         ).await {
-            Ok(verified) => Some(verified),
+            Ok(VmImageResolutionOk { verified, verified_oci_digest }) => {
+                // INV-OPERATOR-CUSTOM-IMAGE-02 / INV-IMAGE-RESOLUTION-PER-ROLE-01
+                // mechanical witness — the audit chain records every
+                // successful operator-image resolution with the alias
+                // the policy registered AND the SHA-256 the resolver
+                // byte-equality-verified, BEFORE the spawn step
+                // proceeds. Audit-after-resolve (NOT after a state
+                // mutation): the resolution itself is a fact worth
+                // recording even if the subsequent spawn fails for
+                // unrelated reasons (transient backend, etc.). Emit
+                // failures are logged but never block the activation
+                // — the audit chain getting full is operator-fixable;
+                // dropping a session because of an audit-full check
+                // here would be a much worse property.
+                if let Err(e) = ctx.audit.emit(
+                    raxis_audit_tools::AuditEventKind::VmImageResolved {
+                        session_id:    lookup.new_session_id.clone(),
+                        task_id:       Some(task_id_owned.clone()),
+                        initiative_id: lookup.initiative_id.clone(),
+                        alias:         lookup.vm_image_alias.clone(),
+                        oci_digest:    verified_oci_digest,
+                        // V2.5 only emits this for Executor activations
+                        // (Reviewer / Orchestrator bypass this path
+                        // entirely per INV-PLANNER-HARNESS-02 /
+                        // INV-PLANNER-HARNESS-05).
+                        agent_role:    "Executor".to_owned(),
+                    },
+                    Some(lookup.new_session_id.as_str()),
+                    Some(task_id_owned.as_str()),
+                    Some(lookup.initiative_id.as_str()),
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"VmImageResolved\",\
+                         \"audit_emit_failed\":\"{e}\",\
+                         \"task_id\":\"{task_id_owned}\",\
+                         \"alias\":\"{}\"}}",
+                        lookup.vm_image_alias,
+                    );
+                }
+                Some(verified)
+            }
             Err(e) => {
                 // The resolver surfaced a structured error
                 // (alias dropped from policy at this epoch, OCI
@@ -3812,11 +3953,40 @@ async fn handle_activate_sub_task(
                 // activation — the activation row stays
                 // `PendingActivation` so the operator can
                 // observe and retry once policy is healed.
-                eprintln!(
-                    "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
-                     \"task_id\":\"{}\",\"alias\":\"{}\",\"error\":\"{}\"}}",
-                    task_id_owned, lookup.vm_image_alias, e,
-                );
+                e.log_to_stderr(&task_id_owned);
+                // INV-OPERATOR-CUSTOM-IMAGE-01 — a digest mismatch
+                // is the supply-chain-tampering shape of failure;
+                // record it on the audit chain with the same
+                // `SecurityViolationDetected` taxonomy the canonical-
+                // image preflight uses, so dashboards and forensics
+                // see one consistent class for "operator declared
+                // digest D, on-disk bytes hashed to D'". The
+                // remaining failure variants (alias dropped,
+                // malformed digest, registry unreachable, etc.) are
+                // NOT security-boundary events — those surface on
+                // the eventual TaskFailed event via the
+                // `FailPolicyViolation` return below.
+                if let VmImageResolveError::DigestMismatch {
+                    expected, actual, path, ..
+                } = &e {
+                    if let Err(audit_err) = ctx.audit.emit(
+                        raxis_audit_tools::AuditEventKind::SecurityViolationDetected {
+                            violation_kind: "OperatorImageDigestMismatch".to_owned(),
+                            expected:       Some(expected.clone()),
+                            actual:         Some(actual.clone()),
+                            path:           Some(path.clone()),
+                        },
+                        Some(lookup.new_session_id.as_str()),
+                        Some(task_id_owned.as_str()),
+                        Some(lookup.initiative_id.as_str()),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"SecurityViolationDetected\",\
+                             \"audit_emit_failed\":\"{audit_err}\",\
+                             \"violation_kind\":\"OperatorImageDigestMismatch\"}}"
+                        );
+                    }
+                }
                 return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
             }
         }

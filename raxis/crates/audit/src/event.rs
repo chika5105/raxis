@@ -470,6 +470,94 @@ pub enum AuditEventKind {
         reason: String,
     },
 
+    /// V2.5 — emitted by
+    /// `kernel/src/handlers/intent.rs::handle_activate_sub_task`
+    /// AFTER an operator-declared `[[vm_images]]` alias has been
+    /// resolved through [`raxis_image_cache::ImageResolver::resolve`]
+    /// to a verified rootfs blob, BEFORE the session-spawn step
+    /// proceeds. This is the **mechanical witness** for the BYO
+    /// (bring-your-own-image) contract: the audit chain records
+    /// every successful operator-image resolution with the alias
+    /// the plan referenced AND the SHA-256 digest the resolver
+    /// verified, so downstream forensics can trace which VM image
+    /// any given session booted from without re-running the
+    /// resolver.
+    ///
+    /// **Pairing.** Single-class. The kernel emits this once per
+    /// successful resolution; the matching failure path emits
+    /// `SecurityViolationDetected { violation_kind:
+    /// "OperatorImageDigestMismatch" }` (digest tampering) or no
+    /// audit emit (other resolver errors which are surfaced as
+    /// `FAIL_*` codes via the `TaskFailed` chain). Canonical
+    /// (Orchestrator / Reviewer / Executor-starter) images do NOT
+    /// fire this event — they go through
+    /// `canonical_images_preflight.rs` which has its own emit
+    /// shape (`canonical_image_ok` for success;
+    /// `SecurityViolationDetected { kind: "ReviewerImageDigestMismatch"
+    /// | "OrchestratorImageDigestMismatch" }` for tamper).
+    ///
+    /// **Why a dedicated variant instead of decorating
+    /// `SessionVmSpawned`.** Image resolution happens BEFORE the
+    /// VM-spawn step; resolution can succeed AND the spawn can
+    /// still fail (e.g. transient backend error). Recording the
+    /// resolution as its own event lets the audit chain witness
+    /// "policy declared this digest" independent of "the VM
+    /// actually booted" — important for `INV-IMAGE-RESOLUTION-PER-ROLE-01`
+    /// (per-role image binding) and `INV-OPERATOR-CUSTOM-IMAGE-02`
+    /// (uniform plumbing) coverage in audit-replay.
+    ///
+    /// Cross-references: `specs/v2/canonical-images.md §3` (BYO
+    /// flow); `specs/invariants.md INV-IMAGE-RESOLUTION-PER-ROLE-01`,
+    /// `INV-OPERATOR-CUSTOM-IMAGE-01`,
+    /// `INV-OPERATOR-CUSTOM-IMAGE-02`; `specs/v2/image-cache.md §5`
+    /// (resolver trait the kernel calls).
+    VmImageResolved {
+        /// Session id the resolved image will back. References
+        /// `sessions.session_id`. The audit-chain reader can join
+        /// this against the subsequent `SessionVmSpawned` to confirm
+        /// the resolved digest is what actually booted.
+        session_id: String,
+        /// Owning task id. Always `Some` for an Executor activation
+        /// (Reviewer and Orchestrator activations bypass this path
+        /// because their images are kernel-canonical).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        /// Owning initiative id; pins the resolution into the
+        /// initiative's lineage.
+        initiative_id: String,
+        /// `[[vm_images]]` alias the resolver looked up. Operator-
+        /// facing identifier — sourced from either the plan task's
+        /// `[[tasks]] vm_image = "..."` field OR the policy
+        /// `[default_executor_image] alias = "..."` back-fill (the
+        /// activation handler observes both as a single
+        /// `lookup.vm_image_alias` after `validate_task_vm_images`
+        /// folds the default into the task in-place at admission).
+        alias: String,
+        /// `sha256:<64 lower-hex>` digest the resolver verified
+        /// against the on-disk rootfs bytes. Echoed verbatim from
+        /// `[[vm_images]] oci_digest` (the policy-validation step
+        /// guarantees lowercase canonical form). Forensics readers
+        /// join this against the `[[vm_images]]` snapshot at this
+        /// `policy_epoch` to recover the human-readable image
+        /// description.
+        oci_digest: String,
+        /// PascalCase agent-role label this resolution is binding
+        /// to. Closed set, mirrors `raxis_types::SessionAgentType`'s
+        /// V2 surface:
+        ///   * `"Executor"` — operator-published image backing an
+        ///     Executor activation. The only role that emits this
+        ///     event in V2.5 (Reviewer / Orchestrator activations
+        ///     bypass `resolve_vm_image_override` entirely because
+        ///     their images are kernel-canonical and
+        ///     non-operator-overridable per
+        ///     `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`).
+        /// `INV-IMAGE-RESOLUTION-PER-ROLE-01` requires that this
+        /// field is `"Executor"` for every emit; an audit-replay
+        /// reader observing any other value is observing a kernel
+        /// bug.
+        agent_role: String,
+    },
+
     /// A security boundary the kernel enforces was violated AT the
     /// moment a fail-closed guard surfaced the violation. Distinct
     /// from "policy admission rejected an operator's request"
@@ -499,6 +587,21 @@ pub enum AuditEventKind {
     /// is digest-shaped; both fields are `None` for non-digest
     /// violations to keep this variant useful as a forward-compatible
     /// umbrella for future `INV-*` enforcement seams.
+    ///
+    /// **Operator-image digest mismatch (`INV-OPERATOR-CUSTOM-IMAGE-01`).**
+    /// When `kernel/src/handlers/intent.rs::resolve_vm_image_override`
+    /// surfaces an `ImageResolverError::DigestMismatch` for a
+    /// `[[vm_images]]`-declared operator image (i.e. a BYO image
+    /// staged at `<data_dir>/oci-cache/`), this variant fires with
+    /// `violation_kind = "OperatorImageDigestMismatch"`. The
+    /// `expected` / `actual` fields carry the operator-declared
+    /// and on-disk SHA-256 digests; the activation is failed with
+    /// `FAIL_POLICY_VIOLATION` and the activation row stays in
+    /// `PendingActivation` so the operator can repair `policy.toml`
+    /// or re-stage the image. The trust contract (digest pinning at
+    /// resolution time, fail-closed on mismatch) is identical to the
+    /// canonical Reviewer / Orchestrator image checks above —
+    /// `INV-OPERATOR-CUSTOM-IMAGE-02` makes that uniformity normative.
     SecurityViolationDetected {
         /// PascalCase kind tag (closed set; see doc-comment above).
         violation_kind: String,
@@ -2840,6 +2943,7 @@ impl AuditEventKind {
             Self::SessionVmFailedFinal { .. } => "SessionVmFailedFinal",
             Self::SessionVmScaleEvent { .. } => "SessionVmScaleEvent",
             Self::SessionVmScaleDeferred { .. } => "SessionVmScaleDeferred",
+            Self::VmImageResolved { .. } => "VmImageResolved",
             Self::SecurityViolationDetected { .. } => "SecurityViolationDetected",
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",
