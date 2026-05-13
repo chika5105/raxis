@@ -293,7 +293,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut r = Tier3Reporter::new("smoke", tmp.path(), tmp.path().join("data"));
         r.add_worktree("primary", tmp.path().join("repo"));
-        r.set_dashboard_url("http://127.0.0.1:0/login");
+        // Use an RFC 2606 `.invalid` TLD so the operator (and any
+        // log-scraping tooling) can tell this is fixture data the
+        // moment they see it. A `127.0.0.1:0` URL leaks into the
+        // realistic-scenario stderr stream alongside real
+        // `[realism-e2e]` lines and is easily mistaken for a
+        // broken bind on the live kernel — it is not, it is THIS
+        // unit test's fixture (the test_label is "smoke" so an
+        // operator skimming `/tmp/raxis-e2e-realistic.log` can
+        // confirm by `rg '^\[smoke\]'`).
+        r.set_dashboard_url(
+            "http://test-fixture-not-a-real-dashboard.invalid/login",
+        );
         r.mark_success();
         // Track the fire count via a local Arc<Mutex<_>> — the
         // reporter does not expose the bit publicly, so we
