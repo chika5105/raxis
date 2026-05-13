@@ -38,7 +38,8 @@
 > `INV-VM-CAP-01..05`, `INV-PUSH-01..05`, `INV-KEY-01..08`,
 > `INV-MERGE-WORKTREE-RETAIN`, `INV-MERGE-CONSISTENCY`,
 > `INV-CAPACITY-01..06`, `INV-PROVIDER-01..10`,
-> `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`, `INV-DELEGATE-01`,
+> `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`, `INV-SECRET-01..05`
+> (canonical home: `v2/secrets-model.md`), `INV-DELEGATE-01`,
 > `INV-DISPATCH`, `INV-RUNTIME-CLASSIFICATION` (§12 of this file per
 > the V1 numbering, slated to become INV-09),
 > `INV-ELASTIC-01..07` (canonical home: `v2/elastic-vm-scaling.md`).
@@ -2584,6 +2585,120 @@ catches every stall regardless of root cause.
 
 ---
 
+## §11.X — Secrets model invariants
+
+The five invariants below form the V2 secrets-model surface. The
+canonical doctrinal text is `v2/secrets-model.md`; the formal
+statements live here.
+
+### INV-SECRET-01 — Operators never place raw secret material in worktrees
+
+The worktree is, by construction, the agent's read/write surface.
+Raw credential material (real passwords, real tokens, real signing
+keys, real kubeconfigs) MUST NOT appear in any file under any
+worktree the agent can mount. This rule is asserted on the
+*operator*: RAXIS does not police worktree contents on the
+operator's behalf — the operator's provisioning tooling owns this
+discipline. The kernel's role is to make the discipline
+*sufficient*.
+
+**Justification.** Mounting credentials into the worktree makes
+the kernel's protections vacuous: the secrets model presupposes
+the agent never has the bytes, not that the agent politely
+declines to read them.
+
+**Canonical home.** `v2/secrets-model.md §2.1`.
+
+### INV-SECRET-02 — Real credentials live in `CredentialBackend`, resolved host-side
+
+Real credential material is held by a `CredentialBackend` impl
+(`extensibility-traits.md §4`), resolved via `resolve(name,
+consumer)` from kernel address space only, and never crosses the
+VM boundary in any form (no VirtioFS mount, no env var, no
+generated config blob carrying real bytes). The bytes that DO
+cross the VM boundary are either non-sensitive (a loopback URL
+pointing at the proxy, an `AWS_CONTAINER_CREDENTIALS_FULL_URI`
+pointing at the in-VM AWS proxy, a placeholder string the
+operator deliberately staged) or a short-lived proxy-minted
+token whose lifetime is bounded by the upstream issuer.
+
+**Justification.** Resolution outside the VM is the structural
+boundary the threat model relies on. Anything inside the VM is
+inside the agent's reach and is therefore treated as
+exfiltratable.
+
+**Canonical home.** `v2/secrets-model.md §2.2`,
+`extensibility-traits.md §4`.
+
+### INV-SECRET-03 — Agents reach external services only via credential proxies
+
+The kernel-mediated egress allowlist (`vm-network-isolation.md`
+Tier 1 SNI + `credential-proxy.md` Tier 2 loopback) means the
+ONLY reachable network path from inside an agent VM to an
+authenticated upstream is the per-session credential proxy bound
+at `127.0.0.1:NNN`. Direct dials to the real upstream's IP / FQDN
+are denied at the in-guest tproxy with
+`TransparentProxyDenied { reason: "proxy_target_bypass" }`,
+surfaced in the audit chain.
+
+**Justification.** Without this invariant the proxy can be
+bypassed and the substitution discipline is voluntary. With it,
+the substitution discipline is the only path that *works*.
+
+**Canonical home.** `v2/secrets-model.md §2.4`, `credential-
+proxy.md`, `vm-network-isolation.md`.
+
+### INV-SECRET-04 — Mechanical enforcement, not agent compliance
+
+The kernel does not rely on agent compliance with policy text.
+Every protection in the secrets model is *mechanical*: structural
+enforcement at the proxy boundary, the egress-allowlist boundary,
+and the path-allowlist boundary. The LLM is treated as
+adversarial-by-design — a passing test based on "the agent
+politely refrained from doing X" is a categorical failure of
+test design, not evidence of safety.
+
+**Justification.** This invariant is the doctrinal anchor that
+keeps the threat model honest. The realistic-scenario e2e's
+`credential-substitution-canary` task is its current concrete
+witness; future tests that violate this invariant should be
+rejected at review.
+
+**Canonical home.** `v2/secrets-model.md §1, §4`.
+
+### INV-SECRET-05 — Credential-proxy substitutes placeholder credentials before forwarding upstream
+
+When an agent attempts authentication using operator-supplied
+placeholder credentials (e.g., a `.env` staged by the operator
+with deliberately fake user / password / token strings, or a
+plan-level env mount carrying placeholders), the credential
+proxy at the loopback target MUST substitute the real credential
+material — resolved via `CredentialBackend::resolve(...)` on the
+host — BEFORE forwarding to the real upstream. The placeholder
+credentials MUST NOT reach the upstream. The real credential
+material MUST NOT be visible to the agent in any form (env var,
+worktree file, audit envelope reachable from inside the VM, or
+wire byte the agent can observe).
+
+The proxy's `CredentialProxySubstituted { service,
+substitution_shape, real_resolved: true }` audit event pins this
+fact on the chain at the moment substitution takes effect.
+
+**Justification.** A jailbroken / hallucinating / prompt-injected
+LLM that exfiltrates everything it can observe leaks only the
+placeholder material — which the operator already treated as
+non-sensitive. The real credentials never enter the LLM's
+context. This invariant makes that property mechanically
+testable, and pairs with the
+`credential_substitution_evidence::assert_credential_
+substitution_round_trip` witness in the realism extended e2e.
+
+**Canonical home.** `v2/secrets-model.md §2.5`,
+`credential-proxy.md`,
+`kernel/tests/extended_e2e_support/credential_substitution_evidence.rs`.
+
+---
+
 ## §12 — How invariants combine (composition map)
 
 Most security properties at the system level are emergent from
@@ -2621,6 +2736,7 @@ Most security properties at the system level are emergent from
 | **Audit chain is verifiable without the kernel running** | INV-AUDIT-PAIRED-01 (every state change has a pending) + INV-AUDIT-PAIRED-02/03 (pairing integrity) + INV-AUDIT-PAIRED-04 (`last_committing_event_seq` disambiguates orphans) + INV-AUDIT-PAIRED-05 (offline verifier algorithm) + INV-AUDIT-PAIRED-06 (recovery is advisory) + INV-04 (chain hash linkage) — together these turn R-7 from a probabilistic "if recovery runs" guarantee into a structural "verifiable from frozen state alone" guarantee |
 | **Kernel cannot announce one mutation and commit another** | INV-AUDIT-PAIRED-02 (digest equality between pending's `intended_post_state_digest` and confirmed's `actual_post_state_digest`) + INV-04 (chain hash linkage prevents post-hoc edit) + INV-CERT-* (event signing prevents forgery) — a buggy or compromised kernel that diverges intent from effect is flagged as `Finding::DigestMismatch` by the offline verifier, with no kernel cooperation required |
 | **V3 cloud-credential exchange is structurally bounded** | INV-CLOUD-FWD-01 (construction-enforced egress allowlist) + INV-CLOUD-FWD-02 (audit redaction) + INV-CLOUD-FWD-05 (operator credentials never enter VM) + INV-VM-CAP-04 (no credential mounts in VM) — together these guarantee the V3 forwarding path can dial only the four known cloud control planes, cannot leak the operator's issuance material through audit / cache / response, and confines the long-lived secret to the kernel-host proxy process | |
+| **Secrets model is structurally sound against an adversarial LLM** | INV-SECRET-01 (operators never place raw secrets in worktrees) + INV-SECRET-02 (resolution host-side) + INV-SECRET-03 (proxy is the only egress path) + INV-SECRET-04 (no LLM-compliance dependence) + INV-SECRET-05 (proxy substitutes placeholders before upstream) + INV-VM-CAP-04 (no credential mounts in VM) — together these guarantee a jailbroken / prompt-injected / hallucinating LLM that exfiltrates everything it can observe leaks only the operator-staged placeholders. The real credential material never enters the LLM's context; the substitution discipline at the proxy boundary is the load-bearing mechanical guarantee, with the witness in `credential_substitution_evidence` pinning all five sub-properties on every realism e2e run |
 
 When auditing a code path, look for which combination of invariants
 governs it; a single invariant in isolation rarely tells the full
