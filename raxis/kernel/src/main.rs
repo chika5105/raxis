@@ -67,6 +67,83 @@ use raxis_audit_tools::{
 use raxis_policy::load_policy;
 use raxis_store::Store;
 
+// `concurrency-and-locking.md §INV-LOCK-07` — runtime deadlock
+// watcher. Forwards `parking_lot/deadlock_detection`'s lock-graph
+// tracker through a 2-second-cadence background thread so a cycle
+// across any kernel `parking_lot::Mutex` / `RwLock` is converted
+// into a `panic!` (and, with `panic = "abort"` pinned in
+// `raxis/Cargo.toml [profile.release]`, a non-zero process exit)
+// in less than 3 seconds — vs the historical "wait until the
+// 30-minute live-e2e wall-clock fires and the operator notices the
+// missing heartbeat" failure mode that motivated this surface.
+//
+// Inert when `runtime-deadlock-detection` is off (no thread, no
+// per-lock bookkeeping, no panic surface). The default feature set
+// turns it ON for dev / CI / live-e2e; production release builds
+// can opt out via `cargo build --release --no-default-features`
+// (see `raxis/kernel/Cargo.toml [features]` for the full
+// rationale).
+#[cfg(feature = "runtime-deadlock-detection")]
+fn spawn_deadlock_watcher() {
+    std::thread::Builder::new()
+        .name("raxis-deadlock-watcher".to_owned())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let deadlocks = parking_lot::deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
+            // Surface the cycle on stderr in the same JSON-line
+            // shape the rest of the kernel uses so log tail
+            // consumers (live-e2e harness `iter*.log`,
+            // `raxis status`, dashboard SSE) catch the cycle
+            // immediately. We DO NOT route through the audit
+            // sink: the sink itself takes locks
+            // (`NotifyingAuditSink::with_store` holds an
+            // `Arc<Store>`; `StreamingAuditSink` holds the
+            // per-session capture mutex), and any of those
+            // could be the very mutex that deadlocked. The
+            // watcher MUST be the one path that panics
+            // unconditionally, even from inside a wedged audit
+            // pipeline.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"deadlock_detected\",\
+                 \"cycle_count\":{}}}",
+                deadlocks.len(),
+            );
+            for (cycle_idx, threads) in deadlocks.iter().enumerate() {
+                for t in threads {
+                    eprintln!(
+                        "{{\"level\":\"error\",\
+                         \"event\":\"deadlock_cycle_member\",\
+                         \"cycle\":{cycle_idx},\
+                         \"thread_id\":{thread_id:?},\
+                         \"backtrace\":{backtrace}}}",
+                        thread_id = t.thread_id(),
+                        backtrace = serde_json::to_string(
+                            &format!("{:?}", t.backtrace())
+                        )
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                    );
+                }
+            }
+            // Hard-fail. With `panic = "abort"` the kernel
+            // process exits non-zero immediately; the supervisor
+            // (systemd / launchd / the live-e2e harness) sees
+            // the exit and the `iter*.log` carries the
+            // structured audit lines above. Without this panic
+            // the watcher would loop forever logging the same
+            // cycle while the wedged tokio workers stay parked
+            // — exactly the 30-minute wedge we are trying to
+            // shorten to <60 seconds.
+            panic!(
+                "deadlock_detected: {} cycle(s) — see kernel log for backtraces",
+                deadlocks.len(),
+            );
+        })
+        .expect("spawn raxis-deadlock-watcher thread");
+}
+
 /// Kernel data directory. Sourced from RAXIS_DATA_DIR env var, defaulting to ~/.raxis.
 fn data_dir() -> std::path::PathBuf {
     if let Ok(val) = std::env::var("RAXIS_DATA_DIR") {
@@ -85,6 +162,21 @@ async fn main() {
     } else {
         banner::print_boot_banner();
     }
+
+    // `concurrency-and-locking.md §INV-LOCK-07` — install the runtime
+    // deadlock watcher BEFORE any kernel subsystem takes its first
+    // `parking_lot::Mutex` (so the lock-graph tracker observes every
+    // acquire from cycle-1 onward) and BEFORE bootstrap mode short-
+    // circuits via `std::process::exit(0)` (so cert-mint / genesis
+    // ceremony failures that wedge on a re-entrant `Mutex<Connection>`
+    // are also covered, not just the long-running daemon path).
+    //
+    // The watcher itself is `cfg(feature = "runtime-deadlock-detection")`
+    // — release builds with the feature disabled get a no-op stub call
+    // (the inner function is `cfg`'d away entirely; the call site stays
+    // compiled but expands to nothing).
+    #[cfg(feature = "runtime-deadlock-detection")]
+    spawn_deadlock_watcher();
 
     // Step 1: Parse CLI flags and environment.
     let data_dir = data_dir();
@@ -1506,5 +1598,100 @@ async fn main() {
         std::process::exit(KernelError::SocketBind {
             reason: format!("dispatch loop exited unexpectedly: {}", shutdown.audit_reason()),
         }.exit_code());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `concurrency-and-locking.md §INV-LOCK-07` — deadlock-watcher self-test.
+//
+// Pinned `#[ignore]` because it INTENTIONALLY induces the panic the
+// watcher exists to surface — running it under `cargo test`'s normal
+// path would abort the test runner before any other test in the
+// binary could start. Run manually:
+//
+//   cargo test -p raxis-kernel --features runtime-deadlock-detection \
+//     raxis_deadlock_watcher_panics_on_intentional_cycle \
+//     -- --ignored --nocapture --test-threads=1
+//
+// The test forks (a) two contender threads each acquiring two
+// `parking_lot::Mutex`es in opposite order (the canonical AB / BA
+// deadlock shape), and (b) the production `spawn_deadlock_watcher`
+// thread. We then `sleep` past the watcher's 2-second cadence and
+// expect the test process to abort with the watcher's `panic!`
+// before the `sleep` returns. A clean wake-up (no abort within the
+// sleep window) is a regression — either the watcher feature was
+// silently disabled at the cargo level, or the parking_lot
+// `deadlock_detection` lock-graph tracker stopped seeing the cycle.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "runtime-deadlock-detection"))]
+mod deadlock_watcher_self_test {
+    use super::spawn_deadlock_watcher;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    #[ignore = "intentionally panics the test process; run with --ignored"]
+    fn raxis_deadlock_watcher_panics_on_intentional_cycle() {
+        // Install the production watcher first so it observes both
+        // contender threads' lock acquisitions.
+        spawn_deadlock_watcher();
+
+        let a: Arc<parking_lot::Mutex<()>> = Arc::new(parking_lot::Mutex::new(()));
+        let b: Arc<parking_lot::Mutex<()>> = Arc::new(parking_lot::Mutex::new(()));
+
+        let a1 = Arc::clone(&a);
+        let b1 = Arc::clone(&b);
+        let _t1 = thread::Builder::new()
+            .name("self-test-AB".to_owned())
+            .spawn(move || {
+                let _ga = a1.lock();
+                // Stagger so the second thread can grab `b` before
+                // we try to acquire it (the cycle requires both
+                // outer guards to be held when the inner acquires
+                // park).
+                thread::sleep(Duration::from_millis(50));
+                let _gb = b1.lock();
+                // Unreachable in the deadlock case; included so a
+                // missing-cycle regression doesn't double-panic.
+                drop(_gb);
+                drop(_ga);
+            })
+            .expect("spawn AB contender");
+
+        let a2 = Arc::clone(&a);
+        let b2 = Arc::clone(&b);
+        let _t2 = thread::Builder::new()
+            .name("self-test-BA".to_owned())
+            .spawn(move || {
+                let _gb = b2.lock();
+                thread::sleep(Duration::from_millis(50));
+                let _ga = a2.lock();
+                drop(_ga);
+                drop(_gb);
+            })
+            .expect("spawn BA contender");
+
+        // Sleep 5 seconds — well past the watcher's 2-second
+        // cadence. If the watcher is wired correctly the process
+        // aborts (panic = "abort" in the test profile too, see
+        // `[profile.release]` notes) before we wake.
+        //
+        // If we DO wake, the assert below fails: either the
+        // `runtime-deadlock-detection` feature wasn't really enabled
+        // at build time, or the parking_lot lock-graph tracker
+        // stopped surfacing this canonical cycle shape.
+        thread::sleep(Duration::from_secs(5));
+        panic!(
+            "raxis-deadlock-watcher did NOT panic within 5 seconds — \
+             either the `runtime-deadlock-detection` cargo feature \
+             was silently disabled, or parking_lot's lock-graph \
+             tracker no longer detects the canonical AB/BA cycle. \
+             Re-check `kernel/Cargo.toml [features]` and run \
+             `cargo tree -p raxis-kernel -i parking_lot --features \
+             runtime-deadlock-detection` to verify the feature \
+             reaches every consumer."
+        );
     }
 }

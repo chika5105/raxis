@@ -24,6 +24,42 @@ path = "src/main.rs"
 # (path to the just-built `target/release/raxis-gateway`).
 embedded-gateway = []
 
+# `concurrency-and-locking.md §INV-LOCK-07` — opt-in cargo feature
+# that forwards `parking_lot/deadlock_detection` into every
+# `parking_lot::{Mutex,RwLock,Condvar}` consumer in the build graph
+# (Cargo unifies features per (package, version), so enabling it on
+# the kernel binary's `parking_lot` 0.12 dep also enables it for
+# every other workspace crate that pulls the same parking_lot
+# version: `crates/session-spawn`, `crates/observability`,
+# `crates/dashboard{,-kernel}`, the kernel's own
+# `[dev-dependencies]` parking_lot, etc).
+#
+# When the feature is on, `kernel::main::spawn_deadlock_watcher`
+# launches a background thread that calls
+# `parking_lot::deadlock::check_deadlock()` every 2 seconds and
+# `panic!`s on detect — turning a kernel-process deadlock into an
+# IMMEDIATE non-zero exit instead of a 30-minute wedge that the
+# operator only spots from absent heartbeats. Live-e2e runs
+# inherit the feature because the realism harness's
+# `kernel_driver::spawn_kernel_normal` consumes the cargo-built
+# binary via `CARGO_BIN_EXE_raxis-kernel`, which Cargo builds with
+# whatever feature set the test invocation enabled.
+#
+# `default = ["runtime-deadlock-detection"]` is deliberate: dev
+# builds, `cargo test`, and the live-e2e harness all want the
+# watcher on by default. Production release builds opt out via
+# `cargo build --release --no-default-features` (or by enabling
+# only `embedded-gateway` explicitly), trading the per-mutex
+# bookkeeping cost for the kernel's hot-path latency budget.
+#
+# Spec parity: `concurrency-and-locking.md §INV-LOCK-07`
+# documents the watcher's role + the 2-second cadence + the
+# panic-on-detect contract. Spec edits ride the same commit as
+# this Cargo.toml change.
+runtime-deadlock-detection = ["parking_lot/deadlock_detection"]
+
+default = ["runtime-deadlock-detection"]
+
 [dependencies]
 # Workspace support crates (the six listed in Part 2.1)
 raxis-types       = { workspace = true }

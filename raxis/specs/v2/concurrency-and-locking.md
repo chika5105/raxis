@@ -128,6 +128,92 @@ V2 does not use `Condvar`. If a future PR introduces one,
 other locks held at the call site stay held. Document the
 order in `lock-audit-<date>.md`.
 
+## 7a. Runtime deadlock detection (`INV-LOCK-07`)
+
+`INV-LOCK-01..06` above are **structural** invariants — they
+make a deadlock unreachable by construction (single-lock-per-
+call, pinned global ordering, no `await` while holding a
+sync mutex, no `Condvar`). `INV-LOCK-07` is the **runtime
+backstop**: it accepts that a future contributor may regress
+one of `INV-LOCK-01..06` (or that a downstream crate's
+upgrade may introduce a third-party-mediated cycle), and it
+guarantees that the resulting wedge surfaces in <3 seconds
+instead of "however long the operator's wall-clock patience
+lasts".
+
+**Mechanism.** The kernel binary opts into the
+`parking_lot/deadlock_detection` cargo feature via the
+opt-in `runtime-deadlock-detection` feature in
+`raxis/kernel/Cargo.toml`. On boot, BEFORE any kernel
+subsystem takes its first `parking_lot::Mutex`, `main.rs`
+spawns a dedicated background thread named
+`raxis-deadlock-watcher`. Every 2 seconds the watcher calls
+`parking_lot::deadlock::check_deadlock()`; on a non-empty
+result it:
+
+  1. logs one `event = "deadlock_detected"` JSON line on
+     stderr carrying the cycle count (the same JSON shape the
+     rest of the kernel uses, so live-e2e harness `iter*.log`,
+     `raxis status`, and the dashboard SSE all surface it
+     immediately);
+  2. logs one `event = "deadlock_cycle_member"` line per
+     thread per cycle, carrying the `thread_id` and the full
+     `backtrace` of where the thread is parked;
+  3. `panic!`s. With `panic = "abort"` pinned at the workspace
+     root (`raxis/Cargo.toml [profile.release]`), the panic
+     becomes a non-zero process exit and the process supervisor
+     (systemd / launchd / the live-e2e harness) sees it.
+
+The watcher deliberately bypasses the audit sink (any of the
+sink decorators may itself be the wedged mutex) and emits
+straight to stderr.
+
+**Cadence.** 2 seconds. The cadence is the upper-bound
+detection latency — a cycle that forms at `t=0` is detected
+no later than `t=2 s` and the kernel exits no later than
+`t≈3 s` (panic propagation + abort overhead). The previous
+no-watcher baseline only surfaced a wedge when an external
+liveness probe (heartbeat / live-e2e wall-clock deadline)
+fired, which historically meant 30+ minutes per iteration.
+
+**Build matrix.**
+
+  * `runtime-deadlock-detection` is in `default = [...]` —
+    every `cargo test`, every dev `cargo build`, and the
+    live-e2e harness (which consumes the cargo-built binary
+    via `CARGO_BIN_EXE_raxis-kernel`) get the watcher on by
+    default.
+  * Production release builds opt out via
+    `cargo build --release --no-default-features` (or by
+    enabling only `embedded-gateway` explicitly), trading the
+    per-mutex bookkeeping cost for the kernel's hot-path
+    latency budget. Operators who want both the embedded
+    gateway AND the watcher in production set
+    `--features embedded-gateway,runtime-deadlock-detection`
+    explicitly.
+
+**Cross-crate propagation.** Cargo unifies features per
+`(package, version)`. The kernel binary's `parking_lot 0.12`
+feature flip is therefore visible to every workspace crate
+that depends on the same parking_lot version
+(`crates/session-spawn`, `crates/observability`,
+`crates/dashboard`, `crates/dashboard-kernel`, the kernel's
+own `[dev-dependencies]` block, …). No additional
+per-crate feature plumbing is required.
+
+**Self-test.** `kernel/src/main.rs` carries an
+`#[ignore]`-by-default unit test
+(`raxis_deadlock_watcher_panics_on_intentional_cycle`) that
+spawns two threads each acquiring two `parking_lot::Mutex`es
+in opposite order and verifies the watcher fires within
+~3 seconds. The test is `#[ignore]` because it intentionally
+panics the test process; run it manually with
+`cargo test -p raxis-kernel --features runtime-deadlock-detection
+raxis_deadlock_watcher_panics_on_intentional_cycle -- --ignored
+--nocapture` to validate the watcher pipeline after any
+parking_lot upgrade or refactor that touches the watcher
+function itself.
+
 ## 8. Verification protocol
 
 A new lock-bearing struct lands as a PR with:
