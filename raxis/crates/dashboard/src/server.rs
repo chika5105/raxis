@@ -311,7 +311,8 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
                 .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
         )
         // Health (admin sees full, read sees sanitized).
-        .route("/api/health",         get(health::health::<D>))
+        .route("/api/health",             get(health::health::<D>))
+        .route("/api/health/subsystems",  get(health::subsystems::<D>))
         // Initiatives.
         .route("/api/initiatives",                 get(initiatives::list::<D>))
         .route("/api/initiatives/:id",             get(initiatives::detail::<D>))

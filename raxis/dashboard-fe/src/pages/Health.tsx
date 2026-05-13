@@ -5,12 +5,21 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
+import type { SubsystemHealthCard } from "@/types/api";
 
 export function HealthPage() {
   const q = useQuery({
     queryKey: ["health"],
     queryFn: ({ signal }) => dashboardApi.health(signal),
     refetchInterval: 5_000,
+  });
+  // Subsystem cards are a separate endpoint so a slow per-card
+  // query never blocks the coarse `/api/health` summary.
+  const subQ = useQuery({
+    queryKey: ["health", "subsystems"],
+    queryFn: ({ signal }) => dashboardApi.subsystemHealth(signal),
+    refetchInterval: 10_000,
+    staleTime: 5_000,
   });
 
   if (q.isPending) return <PageSpinner />;
@@ -40,6 +49,40 @@ export function HealthPage() {
           {" · "}
           {fmtAbsolute(h.kernel_booted_at)}
         </div>
+      </section>
+
+      <section className="space-y-3">
+        <header className="flex items-end justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-ink">Subsystems</h2>
+            <p className="text-xs text-ink-muted">
+              Per-subsystem verdicts from the kernel. Auto-refresh 10s.
+            </p>
+          </div>
+          {subQ.data && (
+            <span
+              className={`badge ${aggregateBadge(subQ.data.aggregate_status)}`}
+              data-aggregate-status={subQ.data.aggregate_status}
+            >
+              {subQ.data.aggregate_status.toUpperCase()}
+            </span>
+          )}
+        </header>
+        {subQ.isPending && (
+          <div className="card p-4 text-sm text-ink-muted">
+            Loading subsystem cards…
+          </div>
+        )}
+        {subQ.error && !subQ.isPending && (
+          <ErrorBox error={subQ.error} onRetry={() => subQ.refetch()} />
+        )}
+        {subQ.data && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {subQ.data.cards.map((card) => (
+              <SubsystemCard key={card.id} card={card} />
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="card p-0 overflow-hidden">
@@ -86,6 +129,86 @@ export function HealthPage() {
         )}
       </section>
     </div>
+  );
+}
+
+function aggregateBadge(status: string): string {
+  switch (status) {
+    case "ok":
+      return "bg-ok-muted/30 border-ok text-ok";
+    case "degraded":
+      return "bg-warn-muted/30 border-warn text-warn";
+    case "failing":
+      return "bg-bad-muted/30 border-bad text-bad";
+    default:
+      return "bg-panel-high border-edge text-ink-muted";
+  }
+}
+
+function statusDotClass(status: string): string {
+  switch (status) {
+    case "ok":
+      return "bg-ok";
+    case "degraded":
+      return "bg-warn";
+    case "failing":
+      return "bg-bad";
+    default:
+      return "bg-ink-subtle";
+  }
+}
+
+function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
+  return (
+    <article
+      className="card p-3 space-y-2"
+      data-subsystem-id={card.id}
+      data-subsystem-status={card.status}
+    >
+      <header className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span
+            aria-hidden="true"
+            className={`w-2.5 h-2.5 rounded-full ${statusDotClass(card.status)}`}
+          />
+          <h3 className="text-sm font-semibold text-ink truncate">
+            {card.label}
+          </h3>
+        </div>
+        <span className={`badge ${aggregateBadge(card.status)}`}>
+          {card.status}
+        </span>
+      </header>
+      <p className="text-xs text-ink-muted leading-snug">{card.summary}</p>
+      {card.details.length > 0 && (
+        <dl className="text-[11px] text-ink-muted space-y-0.5">
+          {card.details.map((row) => (
+            <div key={row.label} className="flex gap-2">
+              <dt className="shrink-0 text-ink-subtle">{row.label}:</dt>
+              <dd className="truncate">{row.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <footer className="flex items-center justify-between gap-2 text-[11px] text-ink-subtle">
+        <Mono>{card.id}</Mono>
+        <div className="flex items-center gap-2">
+          {card.last_observed_at > 0 && (
+            <span>{fmtRelative(card.last_observed_at)}</span>
+          )}
+          {card.grafana_url && (
+            <a
+              href={card.grafana_url}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="text-accent hover:underline"
+            >
+              Grafana ↗
+            </a>
+          )}
+        </div>
+      </footer>
+    </article>
   );
 }
 

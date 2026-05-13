@@ -68,7 +68,8 @@ pub use config::{DashboardConfig, DEFAULT_DASHBOARD_ADDR, DEFAULT_DASHBOARD_PORT
 pub use data::{
     AuditEntryView, ChainStatusView, DashboardData, EscalationView,
     InMemoryDashboardData, InitiativeListEntry, InitiativeView, OperatorRole,
-    PolicySnapshotView, SessionView, TaskView, WorktreeFile, WorktreeTree,
+    PolicySnapshotView, SessionView, SubsystemDetailRow, SubsystemHealthCard,
+    SubsystemHealthResponse, TaskView, WorktreeFile, WorktreeTree,
     WorktreeTreeEntry,
 };
 pub use error::{ApiError, ApiResult};

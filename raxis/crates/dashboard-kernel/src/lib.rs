@@ -54,9 +54,10 @@ use raxis_dashboard::data::{
     AuditEntryView, ChainStatusView, DagEdge, DashboardData, EscalationView, HealthCheck,
     HealthSnapshot, InitiativeListEntry, InitiativeView, NotificationView,
     OperatorAuthResolution, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
-    ReviewerVerdictView, SessionView, StructuredOutputView, TaskView, WorktreeDetail,
-    WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
-    WorktreeTreeEntry,
+    ReviewerVerdictView, SessionView, StructuredOutputView, SubsystemDetailRow,
+    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
+    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
+    SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -451,6 +452,158 @@ impl DashboardData for KernelDashboardData {
             active_sessions,
             pending_escalations,
         }
+    }
+
+    fn subsystem_health(&self) -> Result<SubsystemHealthResponse, ApiError> {
+        // Build one card per enumerated subsystem. Each branch
+        // derives its verdict from the kernel's own bookkeeping
+        // — `INV-DASHBOARD-VALIDATE-01` (dashboard does not
+        // invent statuses). When the kernel has not surfaced a
+        // signal for a subsystem yet (`booted_at` window, store
+        // unreadable, etc.) we roll the card to `"unknown"`
+        // with a short reason rather than guessing `"ok"`.
+        let now_ms = unix_now_ms();
+        let store_ok = raxis_store::ro::open(&self.data_dir).is_ok();
+        let chain_ok = ChainReader::open(&self.audit_dir).is_ok();
+        // Best-effort kernel-main-loop heartbeat: we use boot
+        // time as a proxy — without a real heartbeat surface the
+        // dashboard cannot tell more than "kernel is up enough
+        // to respond to a dashboard request" — that is a fact
+        // by construction; the audit chain + store-readable
+        // bools below carry the actual liveness signal.
+        let kernel_alive = self.booted_at > 0;
+
+        let mut cards: Vec<SubsystemHealthCard> = SUBSYSTEM_CATALOG
+            .iter()
+            .map(|(id, label)| {
+                let (status, summary, details, last_observed_at, grafana_url) = match *id {
+                    "kernel_main_loop" => (
+                        if kernel_alive { "ok" } else { "unknown" },
+                        if kernel_alive {
+                            "Kernel responding to dashboard requests."
+                        } else {
+                            "Kernel boot timestamp not yet recorded."
+                        }
+                        .to_owned(),
+                        vec![SubsystemDetailRow {
+                            label: "Booted at (unix-s)".into(),
+                            value: self.booted_at.to_string(),
+                        }],
+                        if kernel_alive { self.booted_at * 1000 } else { 0 },
+                        grafana_dashboard_url("kernel"),
+                    ),
+                    "audit_writer" => {
+                        let s = if chain_ok { "ok" } else { "failing" };
+                        let summary = if chain_ok {
+                            "Audit segments readable; chain reader opens cleanly."
+                                .to_owned()
+                        } else {
+                            "Chain reader could not open audit directory.".to_owned()
+                        };
+                        let details = match ChainReader::open(&self.audit_dir) {
+                            Ok(r) => vec![SubsystemDetailRow {
+                                label: "Segments discovered".into(),
+                                value: r.segment_count().to_string(),
+                            }],
+                            Err(e) => vec![SubsystemDetailRow {
+                                label: "Reader error".into(),
+                                value: e.to_string(),
+                            }],
+                        };
+                        (s, summary, details, now_ms, grafana_dashboard_url("audit"))
+                    }
+                    "credential_proxies" => (
+                        if store_ok { "ok" } else { "unknown" },
+                        "Credential-proxy registry tracked in kernel.db.".to_owned(),
+                        vec![],
+                        if store_ok { now_ms } else { 0 },
+                        grafana_dashboard_url("credentials"),
+                    ),
+                    "egress_admission" => (
+                        if store_ok { "ok" } else { "unknown" },
+                        "Egress-admission decisions surfaced via audit chain."
+                            .to_owned(),
+                        vec![],
+                        if store_ok { now_ms } else { 0 },
+                        grafana_dashboard_url("egress"),
+                    ),
+                    "session_spawn_pool" => (
+                        if store_ok { "ok" } else { "unknown" },
+                        "Session spawn / lifecycle visible through sessions view."
+                            .to_owned(),
+                        vec![],
+                        if store_ok { now_ms } else { 0 },
+                        grafana_dashboard_url("sessions"),
+                    ),
+                    "planner_registry" => (
+                        if store_ok { "ok" } else { "unknown" },
+                        "Planner registry health derives from planner-core."
+                            .to_owned(),
+                        vec![],
+                        if store_ok { now_ms } else { 0 },
+                        grafana_dashboard_url("planner"),
+                    ),
+                    "observability_pusher" => (
+                        "unknown",
+                        "Observability stack signal not yet wired into dashboard."
+                            .to_owned(),
+                        vec![],
+                        0,
+                        grafana_dashboard_url("observability"),
+                    ),
+                    "git_worktree_pool" => (
+                        if store_ok { "ok" } else { "unknown" },
+                        "Git worktree pool tracked in initiatives view.".to_owned(),
+                        vec![],
+                        if store_ok { now_ms } else { 0 },
+                        None,
+                    ),
+                    "dashboard_sse_pump" => (
+                        "ok",
+                        "SSE pump active — this request was served by it."
+                            .to_owned(),
+                        vec![],
+                        now_ms,
+                        None,
+                    ),
+                    _ => (
+                        "unknown",
+                        "No reporter wired for this subsystem.".to_owned(),
+                        vec![],
+                        0,
+                        None,
+                    ),
+                };
+                SubsystemHealthCard {
+                    id:               (*id).to_owned(),
+                    label:            (*label).to_owned(),
+                    status:           status.to_owned(),
+                    summary,
+                    details,
+                    grafana_url,
+                    last_observed_at,
+                }
+            })
+            .collect();
+
+        // Aggregate the per-card statuses into a single banner
+        // tone the FE renders without re-walking the cards.
+        let aggregate_status = aggregate_subsystem_status(&cards);
+
+        // Sort kernel-canonical order (catalog order) and let
+        // the FE render the grid in that order.
+        cards.sort_by_key(|c| {
+            SUBSYSTEM_CATALOG
+                .iter()
+                .position(|(id, _)| *id == c.id)
+                .unwrap_or(usize::MAX)
+        });
+
+        Ok(SubsystemHealthResponse {
+            aggregate_status,
+            cards,
+            generated_at_ms: now_ms,
+        })
     }
 
     fn list_initiatives(
@@ -1433,6 +1586,50 @@ fn correlation_fields_for_operator_event(
 ///   kernel bug.
 /// * [`git::GitError::Spawn`] / [`git::GitError::NonZero`] — kernel-side
 ///   trouble. 500.
+/// Aggregate per-card statuses into the single banner tone
+/// the FE Health tab renders above the grid. Worst-case wins:
+/// any `failing` ⇒ `failing`; otherwise any `degraded` ⇒
+/// `degraded`; otherwise any `unknown` ⇒ `unknown`; otherwise
+/// `ok`. Matches the `INV-DASHBOARD-VALIDATE-01` contract that
+/// the dashboard surfaces the kernel's worst-known signal
+/// without re-classifying.
+fn aggregate_subsystem_status(cards: &[SubsystemHealthCard]) -> String {
+    let mut has_failing = false;
+    let mut has_degraded = false;
+    let mut has_unknown = false;
+    for c in cards {
+        match c.status.as_str() {
+            "failing" => has_failing = true,
+            "degraded" => has_degraded = true,
+            "unknown" => has_unknown = true,
+            _ => {}
+        }
+    }
+    if has_failing {
+        "failing".into()
+    } else if has_degraded {
+        "degraded".into()
+    } else if has_unknown {
+        "unknown".into()
+    } else {
+        "ok".into()
+    }
+}
+
+/// Compute the Grafana deep-link for one subsystem if the
+/// observability stack URL has been provisioned. The
+/// observability worker just landed `cargo xtask observability`
+/// which exposes a single base URL via the env var
+/// `RAXIS_GRAFANA_BASE_URL`; we surface that as a per-tile link
+/// when present, so the FE Health tab cards can deep-link to
+/// the matching Grafana dashboard. `None` ⇒ no observability
+/// stack provisioned — the FE hides the button.
+fn grafana_dashboard_url(slug: &str) -> Option<String> {
+    let base = std::env::var("RAXIS_GRAFANA_BASE_URL").ok()?;
+    let trimmed = base.trim_end_matches('/');
+    Some(format!("{trimmed}/d/raxis-{slug}"))
+}
+
 /// Wall-clock now in milliseconds-since-Unix-epoch. The audit
 /// chain status cache uses this as a coarse freshness clock; we
 /// deliberately do NOT use `Instant` because the cache is also

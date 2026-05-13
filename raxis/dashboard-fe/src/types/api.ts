@@ -159,6 +159,38 @@ export interface ChainStatusResponse extends ChainStatusView {
   fresh: boolean;
 }
 
+// `GET /api/health/subsystems` — per-subsystem health cards
+// for the dashboard Health tab. One card per kernel subsystem
+// the dashboard enumerates (see kernel-side `SUBSYSTEM_CATALOG`).
+// Verdicts come from the kernel's own bookkeeping — the FE
+// never invents a status (`INV-DASHBOARD-VALIDATE-01`).
+export type SubsystemHealthStatus =
+  | "ok"
+  | "degraded"
+  | "failing"
+  | "unknown";
+
+export interface SubsystemDetailRow {
+  label: string;
+  value: string;
+}
+
+export interface SubsystemHealthCard {
+  id: string;
+  label: string;
+  status: SubsystemHealthStatus;
+  summary: string;
+  details: SubsystemDetailRow[];
+  grafana_url: string | null;
+  last_observed_at: number;
+}
+
+export interface SubsystemHealthResponse {
+  aggregate_status: SubsystemHealthStatus;
+  cards: SubsystemHealthCard[];
+  generated_at_ms: number;
+}
+
 export interface NotificationView {
   notification_id: string;
   event_kind: string;

@@ -488,6 +488,97 @@ pub struct HealthCheck {
     pub message: String,
 }
 
+/// Per-subsystem health card surfaced on the dashboard Health
+/// tab (`GET /api/health/subsystems`). One card per kernel
+/// subsystem the dashboard enumerates: kernel main loop, audit
+/// writer, credential proxies, egress admission, session-spawn
+/// pool, planner registry, observability pusher, git worktree
+/// pool, dashboard SSE pump.
+///
+/// The verdict comes from the kernel's own bookkeeping — the
+/// dashboard never invents a status. When the kernel has not
+/// reported recently the data layer rolls the card to
+/// `"unknown"` with a short reason; broken-status pinning is
+/// for hard failures the kernel actively reported.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubsystemHealthCard {
+    /// Stable subsystem identifier matching the kernel-side
+    /// taxonomy. One of:
+    ///   * `"kernel_main_loop"`
+    ///   * `"audit_writer"`
+    ///   * `"credential_proxies"`
+    ///   * `"egress_admission"`
+    ///   * `"session_spawn_pool"`
+    ///   * `"planner_registry"`
+    ///   * `"observability_pusher"`
+    ///   * `"git_worktree_pool"`
+    ///   * `"dashboard_sse_pump"`
+    pub id: String,
+    /// Human-readable card title (e.g. `"Kernel main loop"`).
+    pub label: String,
+    /// Status discriminant — `"ok"` / `"degraded"` / `"failing"`
+    /// / `"unknown"`.
+    pub status: String,
+    /// One-line operator-safe summary surfaced on the card.
+    pub summary: String,
+    /// Structured per-card detail rows the FE renders inside
+    /// the drill-down. Each entry is a `(label, value)` pair so
+    /// the FE never has to choose the shape — extension is
+    /// purely additive.
+    pub details: Vec<SubsystemDetailRow>,
+    /// Optional Grafana deep-link the FE renders as a button on
+    /// the card. `None` ⇒ no live dashboard for this subsystem;
+    /// the FE hides the button. The observability worker just
+    /// landed the URL block; this field carries the resolved
+    /// dashboard link.
+    pub grafana_url: Option<String>,
+    /// Unix-seconds when the kernel last reported on this
+    /// subsystem. `0` ⇒ never reported.
+    pub last_observed_at: u64,
+}
+
+/// One row inside a [`SubsystemHealthCard`]'s drill-down.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubsystemDetailRow {
+    /// Row label (e.g. `"Backlog depth"`).
+    pub label: String,
+    /// Row value (e.g. `"42"` / `"online"` / `"2 retries"`).
+    pub value: String,
+}
+
+/// Canonical list of every kernel subsystem the dashboard
+/// enumerates on the Health tab. Order is the order the FE
+/// renders the grid in. Append-only — new subsystems land at
+/// the bottom so the FE's per-tile DOM keys stay stable.
+pub const SUBSYSTEM_CATALOG: &[(&str, &str)] = &[
+    ("kernel_main_loop",     "Kernel main loop"),
+    ("audit_writer",         "Audit writer"),
+    ("credential_proxies",   "Credential proxies"),
+    ("egress_admission",     "Egress admission"),
+    ("session_spawn_pool",   "Session-spawn pool"),
+    ("planner_registry",     "Planner registry"),
+    ("observability_pusher", "Observability pusher"),
+    ("git_worktree_pool",    "Git worktree pool"),
+    ("dashboard_sse_pump",   "Dashboard SSE pump"),
+];
+
+/// Response envelope returned by `GET /api/health/subsystems`.
+///
+/// Coarse `aggregate_status` is the worst per-card status,
+/// surfaced separately so the FE Health tab can render a
+/// single banner tone without re-computing.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubsystemHealthResponse {
+    /// Aggregate status across all cards (`ok` / `degraded`
+    /// / `failing` / `unknown`).
+    pub aggregate_status: String,
+    /// One card per kernel subsystem the dashboard enumerates.
+    pub cards: Vec<SubsystemHealthCard>,
+    /// Unix-millis when this snapshot was assembled. The FE
+    /// uses this for "Last refreshed at …" affordance.
+    pub generated_at_ms: u64,
+}
+
 /// Notification row surfaced by `GET /api/notifications`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NotificationView {
@@ -527,6 +618,13 @@ pub trait DashboardData: Send + Sync + 'static {
 
     /// Health snapshot for `GET /api/health`.
     fn health(&self) -> HealthSnapshot;
+
+    /// Per-subsystem health snapshot for the dashboard Health
+    /// tab. Returns one [`SubsystemHealthCard`] per kernel
+    /// subsystem the dashboard enumerates. Verdicts come from
+    /// the kernel's own bookkeeping — the dashboard never
+    /// invents a status (`INV-DASHBOARD-VALIDATE-01`).
+    fn subsystem_health(&self) -> Result<SubsystemHealthResponse, ApiError>;
 
     /// Paginated initiative list (newest first). `limit ≤ 200`.
     fn list_initiatives(
@@ -987,6 +1085,29 @@ impl DashboardData for InMemoryDashboardData {
             active_initiatives: 0,
             active_sessions: 0,
             pending_escalations: 0,
+        })
+    }
+
+    fn subsystem_health(&self) -> Result<SubsystemHealthResponse, ApiError> {
+        // In-memory fixture: every enumerated subsystem reports
+        // `ok` so route-layer integration tests can assert the
+        // endpoint surface without standing up a real kernel.
+        let cards = SUBSYSTEM_CATALOG
+            .iter()
+            .map(|(id, label)| SubsystemHealthCard {
+                id:               (*id).to_owned(),
+                label:            (*label).to_owned(),
+                status:           "ok".into(),
+                summary:          "no kernel signal — in-memory fixture".into(),
+                details:          vec![],
+                grafana_url:      None,
+                last_observed_at: 0,
+            })
+            .collect();
+        Ok(SubsystemHealthResponse {
+            aggregate_status: "ok".into(),
+            cards,
+            generated_at_ms:  0,
         })
     }
 

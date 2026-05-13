@@ -28,6 +28,7 @@ import type {
   PolicyAdvancement,
   PolicySnapshotView,
   SessionView,
+  SubsystemHealthResponse,
   TaskView,
   UnreadCountResponse,
   UpdatePolicyResponse,
@@ -191,6 +192,16 @@ export const authApi = {
 export const dashboardApi = {
   health: (signal?: AbortSignal): Promise<HealthSnapshot> =>
     apiFetch<HealthSnapshot>("/api/health", signal ? { signal } : {}),
+
+  // Per-subsystem health cards for the Health tab. The kernel
+  // owns every verdict — the FE only renders them.
+  subsystemHealth: (
+    signal?: AbortSignal,
+  ): Promise<SubsystemHealthResponse> =>
+    apiFetch<SubsystemHealthResponse>(
+      "/api/health/subsystems",
+      signal ? { signal } : {},
+    ),
 
   initiatives: {
     list: (
