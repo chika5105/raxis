@@ -83,6 +83,12 @@ pub struct Tier3Reporter {
     audit_dir: PathBuf,
     merged_worktrees: Vec<MergedWorktree>,
     dashboard_url: Option<String>,
+    /// Path to the checked-in `raxis/live-e2e/examples/` bundle,
+    /// when the caller has wired it. Surfaced in the artifact
+    /// block so operators always see "this is exactly what
+    /// configuration produced the iter" alongside the per-run
+    /// paths. See `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`.
+    examples_dir: Option<PathBuf>,
     surface_observability_urls: bool,
     succeeded: bool,
     fired: bool,
@@ -109,10 +115,24 @@ impl Tier3Reporter {
             audit_dir,
             merged_worktrees: Vec::new(),
             dashboard_url: None,
+            examples_dir: None,
             surface_observability_urls: false,
             succeeded: false,
             fired: false,
         }
+    }
+
+    /// Wire the checked-in `raxis/live-e2e/examples/` bundle path
+    /// for surfacing in the artifact block. Operators auditing
+    /// "what configuration produced the run?" land on this path
+    /// without needing to grep the harness source.
+    ///
+    /// See `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`
+    /// (`raxis/specs/invariants.md §11.10`) for the structural
+    /// guarantee the directory carries.
+    pub fn with_examples_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.examples_dir = Some(path.into());
+        self
     }
 
     /// Opt the reporter into emitting the Prometheus + Grafana
@@ -237,6 +257,19 @@ impl Tier3Reporter {
             eprintln!(
                 "[{label}] dashboard URL      : {}",
                 url,
+                label = self.test_label
+            );
+        }
+        if let Some(ex) = &self.examples_dir {
+            // INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 surface.
+            // Always printed (even when the path doesn't exist on
+            // disk yet) so an operator running the harness for the
+            // first time sees where the checked-in bundle would
+            // live and can pin it via `RAXIS_E2E_REFRESH_EXAMPLES=1`.
+            eprintln!(
+                "[{label}] examples bundle    : {} \
+                 (refresh via RAXIS_E2E_REFRESH_EXAMPLES=1; see README in that dir)",
+                ex.display(),
                 label = self.test_label
             );
         }

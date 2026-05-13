@@ -75,9 +75,9 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01 | 1 |
+| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
-| **Total** | | **76** |
+| **Total** | | **77** |
 
 ---
 
@@ -3928,6 +3928,120 @@ up + opt-out gate);
 poll fast-fail half of this invariant);
 `live-e2e/README.md` (operator-facing recipe + env-var
 documentation).
+
+---
+
+### INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 — Example-bundle refresh hook refuses to land real Anthropic credentials
+
+**Statement.** The realistic-scenario live-e2e harness's
+example-bundle auto-refresh hook
+([`extended_e2e_support::kernel_driver::maybe_refresh_examples`])
+MUST refuse to land a refreshed
+`raxis/live-e2e/examples/credentials/` directory if any file
+under it contains a byte sequence matching the real-Anthropic-key
+regex `sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}`. The witness
+function
+([`extended_e2e_support::kernel_driver::assert_no_real_anthropic_key`])
+runs as the LAST step of every refresh — AFTER each file is
+rewritten but BEFORE the harness returns control to the test
+driver, so a refresh that would carry a real key fails the whole
+iter BEFORE the kernel daemon spawns and no half-baked diff can
+be `git add`-ed.
+
+The witness's structural guarantee composes with two adjacent
+disciplines:
+
+1. **Hardcoded placeholder rewrite.** The refresh hook rewrites
+   `examples/credentials/anthropic.env.placeholder` from a
+   constant `ANTHROPIC_PLACEHOLDER_BODY` in
+   `kernel_driver.rs`, NOT from a copy of whatever real
+   `ANTHROPIC-API-DEV-KEY` value the harness loaded into
+   `<data_dir>/providers/anthropic-realism-e2e.toml` at
+   bootstrap. The real bytes never reach the refresh code path
+   — the only way they could leak is via a non-`maybe_refresh_examples`
+   call site that mistakenly writes them under
+   `examples/credentials/`, and the witness catches that case.
+2. **Commit-time guard.**
+   `raxis/scripts/check-no-real-anthropic-key.sh` runs the same
+   regex over `raxis/live-e2e/examples/` at the operator's
+   pre-commit hook (and in CI). A real key that somehow
+   bypassed the witness — e.g. via an operator hand-editing
+   the placeholder file — still rejects at `git commit` time.
+
+The example bundle's other credential files (`test-pg-dev.env`,
+`test-mongo-dev.env`, `test-redis-dev.env`,
+`test-smtp-dev.env`) are explicitly EXEMPT from this invariant
+because they only authenticate against the local docker-compose
+stack (loopback-only bindings) and the matching server-side
+credentials already commit in
+`raxis/live-e2e/docker-compose.extended.e2e.yml`. They have no
+production value and their commit is documented in
+`raxis/live-e2e/examples/README.md`.
+
+**Justification.** The point of `raxis/live-e2e/examples/` is
+to let an operator answer "what configuration produced the
+latest live-e2e iter?" without re-running the test or
+reconstructing it from Rust constants. The bundle is therefore a
+checked-in mirror of the harness's per-run tmpdir; the
+auto-refresh hook re-mirrors it on every green iter (gated on
+`RAXIS_E2E_REFRESH_EXAMPLES=1`). Without this invariant the
+refresh path is a credential-exfiltration footgun: a future
+maintainer adding "convenience" code that copies the real
+Anthropic credential from `<data_dir>/providers/` into
+`examples/credentials/` would silently leak the operator's
+production key into the repo on the next `git add`. The witness
+makes that mistake mechanically impossible to commit — even if
+the maintainer ALSO disables `ANTHROPIC_PLACEHOLDER_BODY`, the
+real-key regex still fires at refresh time and panics the
+harness before the kernel spawns, so the diff is never produced
+in the first place.
+
+**Scenario.** A future maintainer changes the hardcoded
+`ANTHROPIC_PLACEHOLDER_BODY` constant to read
+`std::fs::read_to_string(&data_dir.join("providers/anthropic-realism-e2e.toml"))`
+"for convenience". On the next iter where someone sets
+`RAXIS_E2E_REFRESH_EXAMPLES=1`, the refresh would normally write
+the real `api_key` into
+`examples/credentials/anthropic.env.placeholder`. With this
+invariant in force, `assert_no_real_anthropic_key` matches the
+regex against the rewritten file, panics with a copy-pastable
+remediation hint (including "ROTATE THE KEY IN YOUR ANTHROPIC
+CONSOLE IMMEDIATELY"), and the iter aborts before the kernel
+daemon spawns. The worktree is left clean (no `examples/`
+diff), and the maintainer's mistake is caught in seconds rather
+than weeks.
+
+**Witness.**
+[`extended_e2e_support::kernel_driver::tests::assert_no_real_anthropic_key_rejects_real_looking_key`](../kernel/tests/extended_e2e_support/kernel_driver.rs):
+synthesises a fixture credential file with a real-shape key
+(`sk-ant-api03-` + 32 chars of `[A-Za-z0-9_-]`, none of which
+came from any real Anthropic account) and asserts the witness
+panics with the `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01
+VIOLATED` token. Negative-direction pinned by
+[`…::find_real_anthropic_key_negative_cases`](../kernel/tests/extended_e2e_support/kernel_driver.rs)
+(single-digit version, body-too-short, unrelated `sk-ant-`
+prefixes, and the literal `PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY`
+string all MUST NOT trip the witness). The end-to-end refresh
+shape is pinned by
+[`…::refresh_examples_writes_plan_and_credentials_under_env_gate`](../kernel/tests/extended_e2e_support/kernel_driver.rs)
+which drives the full hook against a tmpdir fixture and asserts
+every output file matches the expected source byte-for-byte; the
+no-op default-off path is pinned by
+[`…::maybe_refresh_examples_default_off_is_no_op`](../kernel/tests/extended_e2e_support/kernel_driver.rs);
+the layout-drift fail-fast is pinned by
+[`…::maybe_refresh_examples_panics_when_examples_dir_missing`](../kernel/tests/extended_e2e_support/kernel_driver.rs).
+
+**Canonical home.**
+`kernel/tests/extended_e2e_support/kernel_driver.rs`
+(`maybe_refresh_examples` + `assert_no_real_anthropic_key` +
+`find_real_anthropic_key` + the regression test block);
+`raxis/scripts/check-no-real-anthropic-key.sh` (commit-time
+guard with the same regex);
+`raxis/live-e2e/examples/README.md` (operator-facing refresh
+contract + the rules for which credentials are OK to commit);
+`raxis/specs/v2/secrets-model.md §2.5` (operator-supplied-
+placeholder discipline that this invariant operationalises for
+the harness's own self-managed examples bundle).
 
 ---
 

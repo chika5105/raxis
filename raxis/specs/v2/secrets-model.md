@@ -155,6 +155,63 @@ A placeholder `.env` is a *test fixture* and a *prompt-injection
 honeypot*. Its purpose is to validate the substitution discipline by
 giving the agent something to attempt to exfiltrate.
 
+### 2.6 — Live-e2e example bundle: placeholder-only Anthropic credential
+
+The realistic-scenario live-e2e harness mirrors its per-run
+tmpdir into [`raxis/live-e2e/examples/`](../../live-e2e/examples/)
+on demand (gated on `RAXIS_E2E_REFRESH_EXAMPLES=1`) so an
+operator auditing "what configuration produced the latest
+live-e2e iter?" can answer without re-running the test. The
+mirror contains:
+
+* `policy.toml` — the full harness-time policy (genesis
+  bootstrap + harness overlay).
+* `plan_primary.toml` + `plan_sibling.toml` — both initiatives'
+  plan TOMLs.
+* `credentials/test-{pg,mongo,redis,smtp}-dev.env` — the
+  test-tenant credentials the harness's
+  [`kernel_driver::write_credentials`](../../kernel/tests/extended_e2e_support/kernel_driver.rs)
+  writes. These match the loopback-only docker-compose stack
+  credentials and have no production value (the matching
+  server-side credentials already commit in
+  `docker-compose.extended.e2e.yml`).
+* `credentials/anthropic.env.placeholder` — **placeholder ONLY**.
+  The real Anthropic API key MUST NEVER be checked in.
+
+The placeholder-file contract for Anthropic is structural, not
+cosmetic:
+
+* The auto-refresh hook
+  ([`kernel_driver::maybe_refresh_examples`](../../kernel/tests/extended_e2e_support/kernel_driver.rs))
+  rewrites `anthropic.env.placeholder` from a hardcoded constant
+  (`ANTHROPIC_PLACEHOLDER_BODY`), NOT from the live
+  `ANTHROPIC-API-DEV-KEY` value the harness loaded into
+  `<data_dir>/providers/anthropic-realism-e2e.toml`. The real
+  bytes never reach the refresh code path.
+* The end-of-refresh witness
+  ([`kernel_driver::assert_no_real_anthropic_key`](../../kernel/tests/extended_e2e_support/kernel_driver.rs))
+  scans `examples/credentials/` for the real-key regex
+  `sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}` and panics with a
+  copy-pastable remediation hint on match. The panic fires
+  BEFORE the kernel daemon spawns, so a refresh that would carry
+  a real key fails the whole iter and produces no diff to
+  `git add`.
+* The same regex is enforced at commit time by
+  [`raxis/scripts/check-no-real-anthropic-key.sh`](../../scripts/check-no-real-anthropic-key.sh),
+  installable as a local pre-commit hook (documented in
+  [`live-e2e/examples/README.md`](../../live-e2e/examples/README.md)).
+
+The formal invariant is `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`
+in [`specs/invariants.md §11.10`](../invariants.md).
+
+The shape of this discipline is identical to §2.5 above:
+operators MAY commit a placeholder-shape Anthropic credential
+file to document the expected filename + format, because the
+placeholder bytes are non-sensitive by construction (they look
+real to a hypothetical observer but authenticate against
+nothing). The structural enforcement keeps real-key bytes
+strictly outside the worktree.
+
 ---
 
 ## 3. Why content-scanning is NOT the protection

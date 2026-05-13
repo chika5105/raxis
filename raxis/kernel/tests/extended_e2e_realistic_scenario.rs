@@ -81,14 +81,16 @@ use extended_e2e_support::{
     kernel_driver::{
         bootstrap_with_custom_cert, build_operator_key,
         enable_gateway_in_policy, locate_executor_worktree_via_chain,
-        locate_session_id_for_task, poll_for_dual_lifecycle_completion,
+        locate_session_id_for_task, maybe_refresh_examples,
+        poll_for_dual_lifecycle_completion, realism_workspace_root,
         realistic_lifecycle_deadline, require_anthropic_dev_key,
         require_canonical_images, require_disk_hygiene,
         require_gateway_binary, require_gcp_adc, require_tcp_reachable,
         seed_realistic_main_repository, spawn_kernel_normal,
         spawn_otel_pusher_or_warn, walk_chain_or_panic, write_credentials,
-        write_provider_credentials, OperatorIpc, LIVE_E2E_GATE,
-        READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
+        write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
+        LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
+        SHUTDOWN_DEADLINE,
     },
     multi_initiative::{
         sibling_plan_toml, MultiInitiativeIsolationWitness,
@@ -225,6 +227,47 @@ fn realistic_session_lifecycle() {
     // to match the kernel's actual `worktrees/<session_id>/` layout.
     seed_realistic_main_repository(&data_dir);
 
+    // ── Example-bundle auto-refresh (INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01)
+    //
+    // Opt-in via `RAXIS_E2E_REFRESH_EXAMPLES=1`. When set, rewrites
+    // every file under `raxis/live-e2e/examples/` from the harness's
+    // authoritative source (the live policy.toml we just finished
+    // assembling above, the realistic + sibling plan TOMLs assembled
+    // from the same constants we'll submit to the kernel, the
+    // credential bodies that mirror `write_credentials`, the
+    // hardcoded Anthropic placeholder template, and a verbatim
+    // mirror of `live-e2e/seed/prompts/`). At end of refresh the
+    // witness `assert_no_real_anthropic_key` scans
+    // `examples/credentials/` for the real-Anthropic-key regex and
+    // panics with a copy-pastable remediation hint on match — so
+    // a refresh that would leak a real key fails the whole iter
+    // BEFORE the kernel daemon spawns, and no half-baked diff can
+    // land on the worktree.
+    //
+    // Default-off path: the env var is unset → `maybe_refresh_examples`
+    // returns `None` and the worktree is untouched.
+    let workspace_root = realism_workspace_root();
+    let plan_primary_pre   = realistic_plan_toml();
+    let plan_sibling_pre   = sibling_plan_toml();
+    if let Some(refreshed) = maybe_refresh_examples(ExampleRefreshInputs {
+        live_policy_toml:  &data_dir.join("policy").join("policy.toml"),
+        plan_primary_toml: &plan_primary_pre,
+        plan_sibling_toml: &plan_sibling_pre,
+        workspace_root:    &workspace_root,
+    }) {
+        eprintln!(
+            "[realism-e2e] RAXIS_E2E_REFRESH_EXAMPLES=1 → refreshed checked-in \
+             example bundle at {} (commit the diff alongside this iter's fix)",
+            refreshed.display(),
+        );
+    } else {
+        eprintln!(
+            "[realism-e2e] checked-in example bundle at {}/live-e2e/examples/ \
+             (refresh by setting RAXIS_E2E_REFRESH_EXAMPLES=1)",
+            workspace_root.display(),
+        );
+    }
+
     let install_dir = PathBuf::from(
         std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR"),
     );
@@ -240,7 +283,12 @@ fn realistic_session_lifecycle() {
     let mut tier3 = Tier3Reporter::new(
         "realism-e2e", &install_dir, &data_dir,
     )
-    .with_observability_urls();
+    .with_observability_urls()
+    // Surface the checked-in example bundle (per
+    // `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`) so operators
+    // scanning the post-run artifact block always see where to
+    // find "this is exactly what configuration produced the run".
+    .with_examples_dir(workspace_root.join("live-e2e/examples"));
 
     // Print the observability URL block at startup too so the
     // operator can paste a Grafana URL into their browser the
@@ -317,13 +365,17 @@ fn realistic_session_lifecycle() {
             &op_socket, &signing_key,
             REALISTIC_OPERATOR_SEED, &fingerprint,
         );
-        let plan_primary = realistic_plan_toml();
-        conn.submit_plan(&initiative_primary, &plan_primary);
+        // Reuse the plan strings pre-computed for the example-bundle
+        // refresh above so we're guaranteed to submit exactly the
+        // bytes the (possibly-refreshed) `examples/plan_*.toml`
+        // documents. Cheap pure-function call either way.
+        let plan_primary = &plan_primary_pre;
+        conn.submit_plan(&initiative_primary, plan_primary);
         eprintln!("[realism-e2e] primary plan submitted, initiative_id={initiative_primary}");
         conn.approve_plan(&initiative_primary, &fingerprint);
 
-        let plan_sibling = sibling_plan_toml();
-        conn.submit_plan(&initiative_sibling, &plan_sibling);
+        let plan_sibling = &plan_sibling_pre;
+        conn.submit_plan(&initiative_sibling, plan_sibling);
         eprintln!("[realism-e2e] sibling plan submitted, initiative_id={initiative_sibling} \
                    (lane={SIBLING_LANE_ID}, task={TASK_SIBLING_MATERIALIZE})");
         conn.approve_plan(&initiative_sibling, &fingerprint);

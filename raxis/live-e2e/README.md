@@ -32,6 +32,79 @@ The slices' docstrings carry the per-slice contract.
 
 ---
 
+## Example bundle (`live-e2e/examples/`)
+
+The realistic-scenario harness writes a `policy.toml`, two
+`plan.toml`s (primary + sibling initiative), and the
+`test-{pg,mongo,redis,smtp}-dev.env` credential files into its
+per-run tmpdir at bootstrap. A checked-in mirror of those files
+lives at [`live-e2e/examples/`](examples/), so an operator
+auditing "what configuration produced the latest live-e2e iter?"
+can answer without re-running the test or reconstructing it from
+the Rust constants.
+
+The auto-refresh hook
+([`kernel_driver::maybe_refresh_examples`](../kernel/tests/extended_e2e_support/kernel_driver.rs))
+rewrites the bundle from the harness's authoritative source on
+demand:
+
+```bash
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
+  RAXIS_E2E_REFRESH_EXAMPLES=1 \
+  cargo test -p raxis-kernel \
+    --test extended_e2e_realistic_scenario -- --nocapture
+```
+
+Default-off (env var unset) so casual `cargo test` runs don't
+dirty the worktree. The fix-loop / CI / a `working e2e` commit
+MUST set the env var before the run that lands the commit, so the
+checked-in bundle always matches the most recent passing iter.
+Commit the `git diff raxis/live-e2e/examples/` alongside the
+fix-loop diff with the convention
+`live-e2e(examples): refresh from <iter_label> (initiative <primary_id_8> + <sibling_id_8>)`.
+
+The Anthropic credential file (`examples/credentials/anthropic.env.placeholder`)
+is the ONLY credential file in the bundle that carries a
+placeholder value. The real `ANTHROPIC-API-DEV-KEY` MUST NEVER be
+checked in:
+
+* `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`
+  (`specs/invariants.md §11.10`) is the formal statement.
+* The refresh hook rewrites `anthropic.env.placeholder` from a
+  hardcoded template, NOT from the loaded key value.
+* `kernel_driver::assert_no_real_anthropic_key` scans
+  `examples/credentials/` for `sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}`
+  at end-of-refresh and panics with a copy-pastable remediation
+  hint if matched — BEFORE the kernel daemon spawns, so no
+  half-baked diff can land.
+* `raxis/scripts/check-no-real-anthropic-key.sh` is the same
+  regex as a pre-commit / CI guard. Install via:
+
+  ```bash
+  cat > .git/hooks/pre-commit <<'SH'
+  #!/usr/bin/env bash
+  set -euo pipefail
+  raxis/scripts/check-no-real-anthropic-key.sh
+  SH
+  chmod +x .git/hooks/pre-commit
+  ```
+
+  Not installed automatically (modifying the operator's git
+  hooks behind their back is its own footgun); the README under
+  `examples/` documents the wire-up.
+
+The other test-tenant credentials in the bundle
+(`test-pg-dev.env` / `test-mongo-dev.env` / `test-redis-dev.env` /
+`test-smtp-dev.env`) are explicitly OK to commit — they only
+authenticate against the local docker-compose stack on loopback,
+the matching server-side credentials already live in
+`docker-compose.extended.e2e.yml`, and they have no production
+value. See [`live-e2e/examples/README.md`](examples/README.md) for
+the full per-file source-of-truth table and the diff-drift
+expectations between runs.
+
+---
+
 ## Compose stack
 
 The harness pins every image to a SPECIFIC minor tag (see the

@@ -1,0 +1,1157 @@
+[plan.initiative]
+description = """
+Extended e2e realistic scenario per raxis/specs/v2/e2e-extended-scenario.md
+(future-work bullet "Multi-language source tree" + follow-ups).
+
+The realistic scenario layers the `rich-multilang-001` repo seed
+under the executor worktree (Rust + TS + Python trees with pinned
+tooling configs, a non-trivial git history, an executable script,
+and a binary fixture) and drives a sequence of cross-cutting
+operator workflows on top: the original 50-file materializer plus
+a real cross-file refactor that must propagate consistently across
+all three language trees.
+
+Cloud connections (S3 / GCP / Azure) are explicitly out of scope.
+"""
+
+[workspace]
+name    = "E2E realistic scenario"
+lane_id = "e2e-realistic-lane"
+
+# ── Materializer Executor (re-used from extended scenario) ──
+[[tasks]]
+task_id            = "materialize-records"
+name               = "Materialize seeded postgres rows + mongo docs to JSON files"
+session_agent_type = "Executor"
+path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
+description = """
+# Materializer Executor prompt — extended e2e scenario
+
+> Loaded verbatim into the `materialize-records` Executor task per
+> [`raxis/specs/v2/e2e-extended-scenario.md`](../../../specs/v2/e2e-extended-scenario.md) §4.1.
+> The prompt is committed to the repository so reviewers can audit
+> exactly what the LLM saw.
+
+---
+
+You are the RAXIS materialization executor. Your task is to
+serialise every record from two pre-seeded data sources into JSON
+files inside this worktree, then commit the result.
+
+## Data sources
+
+The kernel has injected two credential URLs into your environment:
+
+* `DATABASE_URL` — postgres connection string. The seeded table is
+  `seeded_rows` with columns `(id TEXT, payload JSONB, created_at
+  BIGINT)`. There are exactly **25** rows.
+* `MONGO_URL` — mongo connection string. The seeded collection is
+  `seeded_docs` in the `raxis_e2e_mongo` database. Each document
+  has fields `_id` (`ObjectId`), `doc_id` (`string`), `payload`
+  (`object`), `created_at` (`int64`). There are exactly **25**
+  documents.
+
+Both URLs point at credential proxies — you will not see real
+upstream addresses, and no other endpoints are reachable from your
+worktree.
+
+## Files to write
+
+For each postgres row, create the file
+`out/postgres/<id>.json` containing the JSON object:
+
+```json
+{ "id": "row-NNNN",
+  "payload": { ... },
+  "created_at": 1700000000 }
+```
+
+For each mongo document, create the file
+`out/mongo/<doc_id>.json` containing the JSON object:
+
+```json
+{ "_id_hex": "<24 hex chars of the ObjectId>",
+  "doc_id":  "doc-NNNN",
+  "payload": { ... },
+  "created_at": 1700000000 }
+```
+
+The `_id_hex` field MUST be the 24-character lowercase hex string
+of the source `ObjectId` (i.e. the byte string converted to hex,
+no `ObjectId(...)` wrapper). This normalisation is the only
+transformation between the source records and the on-disk JSON.
+
+Total expected files: 25 in `out/postgres/`, 25 in `out/mongo/`.
+
+## Recommended one-shot helper (copy-paste-ready)
+
+The fastest, lowest-tool-call path is to write a single Python
+helper to `/tmp/materialize.py` and run it once. Both `pymongo`
+and `psycopg2-binary` are pre-installed in the executor VM
+(`live-e2e/src/slice_vm_capabilities.rs::CANONICAL_EXECUTOR_PYTHON_DB_CLIENTS`).
+The proxy is allowlisted to forward `find` on `seeded_docs` and
+`SELECT` on `seeded_rows`, so the helper below has been tested
+end-to-end against the canonical proxy plumbing.
+
+> **Why `/tmp/` and not the worktree root?** `path_allowlist` is
+> enforced against the full `base..head` git diff at
+> `task_complete` time (see Constraints). `/tmp/` is mounted
+> ephemerally inside the executor VM and never appears in the
+> diff. Writing the helper to the worktree root is the most
+> common cause of this task failing.
+
+```bash
+cat > /tmp/materialize.py <<'PY'
+#!/usr/bin/env python3
+# One-shot materializer. Idempotent: rerunning produces the same
+# files. Designed to need at most one tool call from the planner:
+# write + run + verify in a single bash invocation. (Triple-double-
+# quoted module / function docstrings are intentionally avoided —
+# this prompt is embedded into a TOML multi-line-string description
+# block by `multi_initiative.rs`, so a sequence of three quote
+# characters would terminate the enclosing string early.)
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import psycopg2
+import psycopg2.extras
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+
+OUT_PG    = Path("/workspace/out/postgres")
+OUT_MONGO = Path("/workspace/out/mongo")
+
+def materialize_postgres() -> int:
+    dsn = os.environ["DATABASE_URL"]
+    OUT_PG.mkdir(parents=True, exist_ok=True)
+    with psycopg2.connect(dsn) as conn, \
+         conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT id, payload, created_at "
+            "FROM seeded_rows ORDER BY id;"
+        )
+        rows = cur.fetchall()
+    for row in rows:
+        body = {
+            "id":         row["id"],
+            "payload":    row["payload"],
+            "created_at": int(row["created_at"]),
+        }
+        (OUT_PG / f"{row['id']}.json").write_text(
+            json.dumps(body, separators=(",", ":"), sort_keys=True)
+            + "\n"
+        )
+    return len(rows)
+
+def materialize_mongo() -> int:
+    # The proxy is a `mongodb://127.0.0.1:PORT/` URL with no
+    # userinfo and no default-database segment — pass the database
+    # name explicitly with `client["raxis_e2e_mongo"]`, do NOT call
+    # `client.get_default_database()` (it would raise
+    # `ConfigurationError: No default database name defined`).
+    url = os.environ["MONGO_URL"]
+    # serverSelectionTimeoutMS=60_000 rides out the few seconds the
+    # docker-compose mongo container might still be in `starting`
+    # health-check during a fresh stack `up`. `directConnection=True`
+    # forces standalone topology so the driver does not try to
+    # speculate about replica-set / mongos shapes that the proxy
+    # does not emulate.
+    last_err: PyMongoError | None = None
+    for attempt in range(12):
+        try:
+            client = MongoClient(
+                url,
+                serverSelectionTimeoutMS=60_000,
+                directConnection=True,
+            )
+            # Force a round-trip so we discover unreachable proxies
+            # at construction time, not on first `find()`.
+            client.admin.command("ping")
+            break
+        except PyMongoError as e:
+            last_err = e
+            time.sleep(5)
+    else:
+        raise SystemExit(
+            f"mongo: gave up after 12 attempts (60 s elapsed): "
+            f"{last_err!r}"
+        )
+    coll = client["raxis_e2e_mongo"]["seeded_docs"]
+    docs = list(coll.find({}).sort("doc_id", 1))
+    OUT_MONGO.mkdir(parents=True, exist_ok=True)
+    for d in docs:
+        body = {
+            "_id_hex":    bytes(d["_id"].binary).hex(),
+            "doc_id":     d["doc_id"],
+            "payload":    d["payload"],
+            "created_at": int(d["created_at"]),
+        }
+        (OUT_MONGO / f"{d['doc_id']}.json").write_text(
+            json.dumps(body, separators=(",", ":"), sort_keys=True)
+            + "\n"
+        )
+    client.close()
+    return len(docs)
+
+def main() -> int:
+    n_pg    = materialize_postgres()
+    n_mongo = materialize_mongo()
+    sys.stdout.write(f"postgres={n_pg} mongo={n_mongo}\n")
+    if n_pg != 25 or n_mongo != 25:
+        raise SystemExit(
+            f"materialize: expected 25/25, got pg={n_pg} mongo={n_mongo}"
+        )
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+python3 /tmp/materialize.py
+```
+
+A single successful run of the helper above emits exactly the 50
+expected files (25 + 25) and exits `0`. If pymongo raises
+`ConfigurationError: No default database`, you forgot the
+`client["raxis_e2e_mongo"]` indexing step — re-read the docstring
+on `materialize_mongo()`. If the helper exits non-zero, capture
+its stderr and decide whether to retry inline or report_failure;
+do not silently swallow it.
+
+## After every file is written
+
+1. `git add out/postgres/ out/mongo/` (explicit paths only — do
+   NOT run `git add .` or `git add -A`, see Constraints below).
+2. `git commit -m "seed: materialize records"`
+3. Call `task_complete` with a one-line summary of the count.
+
+## Constraints
+
+* Your `path_allowlist` is **enforced at `task_complete` time
+  against the full git diff** (`base..head`). Any file that
+  appears in the commit but is NOT under `out/postgres/`,
+  `out/mongo/`, or `out/manifest.json` will fail the path-scope
+  check with `FailPathPolicyViolation`, the kernel will mark the
+  task `Failed`, and you will burn a `crash_retry_count` slot.
+* In particular: if you need a helper script (e.g. a Python
+  driver to iterate the postgres rows and mongo docs), write it
+  to **`/tmp/`** (outside the worktree), not to the worktree
+  root. `/tmp/` is mounted ephemerally inside the executor VM
+  and never appears in the git diff. The "Recommended one-shot
+  helper" block above already follows this convention.
+* Use `git add out/postgres/ out/mongo/` with explicit paths;
+  do **not** run `git add .` / `git add -A` / `git commit -a`
+  (these stage every untracked or modified file, including any
+  scratch you forgot was in the worktree).
+* Do NOT make any HTTP request other than the database queries
+  through the credential proxies. Network egress is policy-gated
+  and any other host is blocked at the host boundary.
+* Determinism: the seeded data is byte-stable. If your output
+  files do not match the canonical expected JSON in the test's
+  witness oracle, the test will surface a per-row diff and fail.
+* Budget guidance: the planner is configured with
+  `max_turns = 100` (see `planner-env-vars.md`); aim to complete
+  in **≤ 6 tool calls** by using the "Recommended one-shot
+  helper" pattern (write file → run file → git add → git commit
+  → task_complete). Exploratory tool calls (`ls`, `cat`,
+  per-row `db.find`, `pip list`) burn turns without progress.
+
+"""
+
+  [[tasks.credentials]]
+  name       = "test-pg-dev"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL"
+
+  [[tasks.credentials]]
+  name       = "test-mongo-dev"
+  proxy_type = "mongodb"
+  mount_as   = "MONGO_URL"
+
+# ── Cross-file refactor Executor (P3-2) ─────────────────
+[[tasks]]
+task_id            = "xfile-refactor"
+name               = "Cross-file rename across Rust / TS / Python"
+session_agent_type = "Executor"
+path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
+description = """
+# Cross-file refactor Executor prompt — extended e2e realistic scenario
+
+> Loaded verbatim into the `xfile-refactor` Executor task per the
+> realistic-scenario plan in
+> [`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`].
+> Used together with the `rich-multilang-001` seed fixture
+> (`raxis/live-e2e/seed/repo/rich-multilang-001/`).
+
+---
+
+You are the RAXIS cross-language refactor executor. The worktree
+contains a small multi-language project with three trees that all
+expose the same conceptual "greet a named user" operation:
+
+* **Rust** (`rust-crate/src/greeting.rs`): a public function
+  `render_greeting(&str) -> String`, with a `default_greeting()`
+  convenience in `rust-crate/src/lib.rs`.
+* **TypeScript** (`ts-pkg/src/greet.ts`): an exported function
+  `greet(name: string): string`, re-exported by
+  `ts-pkg/src/index.ts` and used by `ts-pkg/src/greet.test.ts`.
+* **Python** (`py-pkg/src/sample_py/greet.py`): a public function
+  `render_greeting(name: str) -> str`, re-exported by
+  `py-pkg/src/sample_py/__init__.py` and used by
+  `py-pkg/src/sample_py/cli.py`.
+
+## What to do
+
+The user wants the API renamed to take an OPTIONAL `salutation`
+argument, defaulting to `"Hello"`, so callers can write e.g.
+`render_greeting("Ada", "Hi")` and get `"Hi, Ada!"`. The rename
+MUST propagate consistently across all three trees:
+
+1. **Rust** (`rust-crate/src/greeting.rs` and `rust-crate/src/lib.rs`):
+   ```rust
+   pub fn render_greeting(name: &str, salutation: &str) -> String;
+   pub fn default_greeting() -> String;  // unchanged signature, body calls render_greeting("World", "Hello")
+   ```
+   The existing tests in `greeting.rs` and `lib.rs` must be updated
+   to pass `"Hello"` as the second argument (and one new test that
+   asserts a non-default salutation, e.g.
+   `assert_eq!(render_greeting("Ada", "Hi"), "Hi, Ada!");`).
+2. **TypeScript** (`ts-pkg/src/greet.ts` and the index / test file):
+   ```ts
+   export function greet(name: string, salutation: string = "Hello"): string;
+   ```
+   Update `ts-pkg/src/index.ts` and `ts-pkg/src/greet.test.ts`
+   accordingly; add one new test asserting a non-default
+   `salutation`.
+3. **Python** (`py-pkg/src/sample_py/greet.py` and its callers):
+   ```python
+   def render_greeting(name: str, salutation: str = "Hello") -> str: ...
+   ```
+   Update `py-pkg/src/sample_py/cli.py` so the CLI still works
+   when invoked without a `salutation` argument.
+
+## Constraints
+
+* Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`
+  ONLY. You MUST NOT modify `README.md`, `.gitignore`,
+  `scripts/`, or `fixtures/`. The binary fixture under
+  `fixtures/logo.bin` is explicitly not yours to touch — any
+  modification there is a deliberate breakage and will be
+  rejected.
+* Run `scripts/check.sh` before calling `task_complete`. The
+  reviewer will run it again as part of the review; an executor
+  that submits a diff that fails `check.sh` is wasting reviewer
+  cycles.
+* Commit message MUST start with `refactor:` and mention all
+  three languages in the body.
+* Determinism: every call site MUST be updated. The reviewer's
+  `git grep` for the OLD signature will find any missed call site
+  and reject the diff.
+
+## After every file is written
+
+1. `git add rust-crate/ ts-pkg/ py-pkg/`
+2. `git commit -m "refactor: add optional salutation to greet API across Rust/TS/Python"`
+3. Call `task_complete` with a brief summary of which files changed.
+
+"""
+
+
+# ── Lint-defect Executor (P3-3) ─────────────────────────
+[[tasks]]
+task_id            = "lint-defect"
+name               = "Introduce exactly one real lint defect"
+session_agent_type = "Executor"
+predecessors       = ["xfile-refactor"]
+path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
+description = """
+# Lint-defect Executor prompt — extended e2e realistic scenario
+
+> Loaded verbatim into the `lint-defect` Executor task per the
+> realistic-scenario plan
+> ([`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`]).
+> Used together with the `rich-multilang-001` seed fixture
+> (`raxis/live-e2e/seed/repo/rich-multilang-001/`).
+
+---
+
+You are the RAXIS lint-defect executor. The worktree contains the
+`rich-multilang-001` multi-language project (Rust + TypeScript +
+Python), each tree configured with a strict linter:
+
+* **Rust** — `cargo clippy -- -D warnings`. The crate is
+  warning-clean today; any new clippy lint that fires at warn-level
+  WILL fail the lint stage.
+* **TypeScript** — `npx eslint --max-warnings 0`. The config is
+  in `ts-pkg/eslint.config.cjs` and treats `no-unused-vars`,
+  `no-var`, `prefer-const`, `eqeqeq`, `curly`, and
+  `no-trailing-spaces` as errors.
+* **Python** — `python -m ruff check`. The config is in
+  `py-pkg/ruff.toml` and selects `E,F,W,I,B,UP,SIM` rule families.
+
+## What to do
+
+This task is a **deliberate breakage** — the executor is asked to
+introduce ONE small, real lint defect AND nothing else. The purpose
+is to exercise the reviewer's ability to catch substantive (not
+synthetic) defects against real tooling: the prior reviewer-
+disagreement scenario used a directive prompt ("Reviewer A always
+rejects") that does NOT exercise that path against a real
+defect.
+
+Pick exactly ONE of the following minimal-impact lint defects.
+Implement it, commit it, and `task_complete`. Do NOT introduce
+more than one; the witness counts on the diff being a single
+focused change so the reviewer's critique is unambiguous.
+
+1. **Rust (`rust-crate/src/greeting.rs`)** — append a redundant
+   clone clippy lint by changing the `format!("Hello, {who}!")` to
+   `format!("Hello, {}!", who.to_string())`. `clippy::useless_conversion`
+   fires.
+2. **TypeScript (`ts-pkg/src/greet.ts`)** — replace `const who = ...`
+   with `let who = ...` (still never reassigned). `prefer-const`
+   fires.
+3. **Python (`py-pkg/src/sample_py/greet.py`)** — append an
+   unused import: add `import os` at the top of the file but never
+   reference `os`. Ruff's `F401` (unused-import) fires.
+
+You may pick whichever defect feels least likely to break unrelated
+code paths. Do NOT introduce two defects; do NOT also add a fix
+for the defect; do NOT modify any other file.
+
+## Constraints
+
+* Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`
+  ONLY. Same allowlist as the cross-file refactor task; you MUST
+  NOT touch `scripts/`, `fixtures/`, `.gitignore`, or `README.md`.
+* Do NOT run `scripts/check.sh` before committing — the WHOLE
+  point of this task is to land a diff that the reviewer's
+  subsequent `check.sh` run will reject. Running it locally and
+  reverting would defeat the scenario.
+* Commit message MUST start with `feat:` or `chore:` and MUST NOT
+  mention the words "lint", "defect", "warning", or "test fixture"
+  — the reviewer is asked to discover the defect from the DIFF,
+  not from the commit message.
+* Determinism: the test scenario expects the executor to land
+  exactly one diff with exactly one defect. The witness in
+  `extended_e2e_support/lint_defect.rs` asserts the reviewer
+  ROUND 1 produced a critique that mentions the file the
+  defect is in.
+
+## After the file is written
+
+1. `git add <the single file you edited>`
+2. `git commit -m "<a non-suggestive message per the constraints above>"`
+3. Call `task_complete` with a brief summary that DOES NOT name
+   the defect.
+
+"""
+
+
+# ── Lint-defect substantive Reviewers (P3-7) ────────────
+[[tasks]]
+task_id            = "review-lint-defect-A"
+name               = "Reviewer A — substantive review of lint-defect diff"
+session_agent_type = "Reviewer"
+predecessors       = ["lint-defect"]
+description = """
+You are the FIRST Reviewer for the `lint-defect` Executor's diff
+on the rich-multilang-001 repo. The repo configures strict
+language-specific linters:
+  * Rust:   `cargo clippy -- -D warnings`
+  * TS:     `npx eslint --max-warnings 0`
+  * Python: `python -m ruff check`
+A single `scripts/check.sh` runs all three.
+
+Your job is mechanical: run `scripts/check.sh`, observe the output,
+and rule on the diff. If `check.sh` exits non-zero, submit
+`SubmitReview` with `approved = false` and a critique whose text
+NAMES the file that produced the failing lint diagnostic (one of
+`rust-crate/src/greeting.rs`, `ts-pkg/src/greet.ts`,
+`py-pkg/src/sample_py/greet.py`). If `check.sh` exits zero,
+approve.
+
+Do NOT invent defects, do NOT reject for vibes, do NOT cite a
+file that did not appear in the linter output. The witness
+verifies the critique mentions one of the three filenames
+verbatim.
+"""
+
+[[tasks]]
+task_id            = "review-lint-defect-B"
+name               = "Reviewer B — substantive review of lint-defect diff"
+session_agent_type = "Reviewer"
+predecessors       = ["lint-defect"]
+description = """
+You are the SECOND Reviewer for the `lint-defect` Executor's
+diff. Same protocol as Reviewer A — run `scripts/check.sh` and
+rule mechanically. The aggregator will only mark the executor
+`AllPassed` after both Reviewers approve, which requires the
+Executor to first land a corrected diff in response to the
+Round-1 rejection.
+"""
+
+# ── Positive path-allowlist Executor (P3-4) ─────────────
+[[tasks]]
+task_id            = "allowlist-positive-codegen"
+name               = "Generate a build-meta file into target/codegen/"
+session_agent_type = "Executor"
+path_allowlist     = ["target/codegen/"]
+description = """
+# Positive path-allowlist Executor prompt — extended e2e realistic scenario
+
+> Loaded verbatim into the `allowlist-positive-codegen` Executor
+> task per the realistic-scenario plan
+> ([`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`]).
+> Witness: [`extended_e2e_support/path_allowlist.rs::PathAllowlistPositiveWitness`].
+
+---
+
+You are the RAXIS positive-path-allowlist executor. The worktree
+contains the `rich-multilang-001` seed. Your `path_allowlist` is
+configured to admit writes ONLY under `target/codegen/`.
+
+## What to do
+
+Generate a tiny build-meta file the rest of the build pipeline can
+consume. Real-world equivalent: a Rust `build.rs` that writes a
+generated metadata stub into `target/codegen/` for the binary to
+read at compile time.
+
+1. Create the file `target/codegen/build_meta.txt` with EXACTLY
+   the following content (single trailing newline):
+   ```
+   rich-multilang-001
+   ```
+2. `git add -f target/codegen/build_meta.txt`
+   (the seed's `.gitignore` lists `target/`, so the `-f` is
+   required for a clean commit).
+3. `git commit -m "chore(build): stamp generated build-meta into target/codegen/"`
+4. Call `task_complete` with a one-line summary.
+
+## Constraints
+
+* Your `path_allowlist` is `["target/codegen/"]` ONLY. Any write
+  outside that directory MUST be rejected by the kernel at intent-
+  admission time. Do NOT attempt to "helpfully" update the
+  `README.md` to mention the generated file — that would surface
+  as a `FAIL_TASK_PATH_NOT_ALLOWED` rejection and the witness
+  would correctly flag a false-rejection failure.
+* The content of `build_meta.txt` is byte-stable; the witness
+  asserts the file is present and non-empty. Adding extra lines
+  (a build timestamp, a UUID) would itself be fine for the
+  witness, but the realistic-scenario test pins the simple
+  content above so the lint-defect scenario downstream has a
+  predictable file to read.
+* This task has no predecessors so it can run in parallel with
+  `xfile-refactor` and `lint-defect`. The witness assertion is
+  scoped to its own task id so cross-task interleaving is safe.
+
+## Why this scenario exists
+
+The extended scenario already asserts the kernel REJECTS writes
+outside an allowlist (the `inject-evil` task in the existing
+extended-scenario plan). It did NOT, until this realism expansion,
+assert the kernel ADMITS writes inside an allowlist that legitimately
+sits outside the obvious workdir. This task closes that
+positive-case hole so the realistic scenario asserts both halves of
+the INV-TASK-PATH-01 invariant against real executor behaviour.
+
+"""
+
+
+# -- Service-evidence round-trip Executor (P3-9) ----------
+[[tasks]]
+task_id            = "service-round-trip"
+name               = "Round-trip every credential-proxy upstream + commit per-service canonical outputs"
+session_agent_type = "Executor"
+predecessors       = ["allowlist-positive-codegen"]
+path_allowlist     = ["out/services/"]
+description = """
+# Service round-trip Executor prompt — extended e2e realistic scenario
+
+> Loaded verbatim into the `service-round-trip` Executor task per
+> the realistic-scenario plan in
+> [`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`].
+> Mechanically verified by
+> [`raxis/kernel/tests/extended_e2e_support/service_evidence.rs`].
+
+---
+
+You are the RAXIS service-evidence executor. Your task is to
+exercise every credential-proxy upstream the kernel has mounted
+for you, by READING a small set of pre-seeded data from each real
+backing service through the proxy and committing the per-service
+results to deterministic worktree files. The witness compares
+your output BYTE-FOR-BYTE against the canonical seed.
+
+## Mounted credential proxies
+
+The kernel has injected these proxy-backed URLs into your
+environment. You will not see real upstream addresses, and no
+other endpoints are reachable from your worktree.
+
+* `DATABASE_URL` — postgres connection string. Real upstream is
+  the docker `postgres:16-alpine` container the un-mock worker
+  shipped (`live-e2e/docker-compose.extended.e2e.yml`).
+* `MONGO_URL` — mongodb connection string. Real upstream is the
+  docker `mongo:7` container.
+* `REDIS_URL` — redis connection string. Real upstream is the
+  docker `redis:7-alpine` container. The credential proxy
+  rewrites your `AUTH` to the real `requirepass`.
+* `SMTP_URL` — smtp credential-proxy URL. The proxy submits your
+  envelope upstream against the docker `docker-mailserver`
+  container after gating the sender / recipient list.
+
+(MySQL `MYSQL_URL` and MSSQL `MSSQL_URL` are mounted only when the
+operator exports `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`
+respectively — the credential-proxy handshake regressions tracked
+separately keep these opt-in for now. The witness is bypassed
+non-fatally when the env var is absent.)
+
+## Per-service expectations
+
+For each service in scope, write the per-service output file at
+`out/services/<service>.txt` in the canonical form described
+below. After every file is written, `git add out/services/ &&
+git commit -m "service-evidence: round-trip"` and call
+`task_complete`.
+
+### `out/services/postgres.txt`
+
+The seed table is `service_evidence_pg` in database
+`raxis_e2e_pg` with columns
+`(id TEXT PRIMARY KEY, name TEXT NOT NULL, value BIGINT NOT NULL)`.
+The test driver pre-seeded 5 rows whose `id` values are
+`pg_seed_row_1` through `pg_seed_row_5`. SELECT all five and write
+one row per line, sorted ASCENDING by `id`, in pipe-delimited
+form:
+
+```
+pg_seed_row_1|service-evidence-name-1|7919
+pg_seed_row_2|service-evidence-name-2|15838
+pg_seed_row_3|service-evidence-name-3|23757
+pg_seed_row_4|service-evidence-name-4|31676
+pg_seed_row_5|service-evidence-name-5|39595
+```
+
+Each line ends with `\n`; no trailing empty line. The witness
+recomputes the canonical bytes from the seed formula and
+byte-compares; any deviation (wrong field separator, sorted in
+the wrong order, missing trailing newline, extra whitespace,
+etc.) is a witness failure.
+
+### `out/services/mongodb.txt`
+
+The seed collection is `service_evidence_mongo` in database
+`raxis_e2e_mongo`. The driver pre-seeded 5 documents with
+`doc_id` values `mongo_seed_doc_1` through `mongo_seed_doc_5`.
+`find` all five, sort ASCENDING by `doc_id`, and write one
+canonical JSON object per line:
+
+```
+{"doc_id":"mongo_seed_doc_1","label":"service-evidence-label-1","magic":1000003}
+{"doc_id":"mongo_seed_doc_2","label":"service-evidence-label-2","magic":2000006}
+{"doc_id":"mongo_seed_doc_3","label":"service-evidence-label-3","magic":3000009}
+{"doc_id":"mongo_seed_doc_4","label":"service-evidence-label-4","magic":4000012}
+{"doc_id":"mongo_seed_doc_5","label":"service-evidence-label-5","magic":5000015}
+```
+
+Key order MUST be exactly `doc_id`, `label`, `magic` — the
+canonicaliser in the witness uses this stable field order so
+driver-side BSON-to-JSON differences cannot false-positive. Each
+line ends with `\n`.
+
+### `out/services/redis.txt`
+
+The driver pre-seeded 5 keys under the prefix
+`service-evidence:`. SCAN every key under that prefix, GET each
+value, and write `<key>=<value>` lines sorted ASCENDING by key:
+
+```
+service-evidence:redis_seed_key_1=redis_seed_value_1
+service-evidence:redis_seed_key_2=redis_seed_value_2
+service-evidence:redis_seed_key_3=redis_seed_value_3
+service-evidence:redis_seed_key_4=redis_seed_value_4
+service-evidence:redis_seed_key_5=redis_seed_value_5
+```
+
+Each line ends with `\n`. The credential proxy will reject any
+command outside the allowlisted set (`PING`, `AUTH`, `SCAN`,
+`GET`, `MGET`, `EXISTS`) with `-ERR command … not allowed by
+RAXIS policy`; do not attempt `KEYS`, `MSET`, `FLUSHDB`, etc.
+
+### `out/services/smtp.txt`
+
+The credential proxy is outbound-only — it relays an envelope you
+submit to the upstream relay. SEND one canonical message through
+the proxy and WRITE the canonical envelope record locally:
+
+* From:     `sender@live-e2e.test`
+* To:       `raxis-tenant@live-e2e.test`
+* Subject:  `smtp_seed_subject_1`
+* Body:     `smtp_seed_body_1: service-evidence smtp round-trip`
+
+After the proxy replies `250 2.0.0 Ok`, write the local
+`out/services/smtp.txt` file with this canonical content (note:
+`from:`, `to:`, `subject:`, `body:` — lowercase keys, one field
+per line, no quoting):
+
+```
+from: sender@live-e2e.test
+to: raxis-tenant@live-e2e.test
+subject: smtp_seed_subject_1
+body: smtp_seed_body_1: service-evidence smtp round-trip
+```
+
+Each line ends with `\n`. The witness independently confirms the
+proxy emitted `SmtpMessageRelayed` with the expected
+`envelope_sha256` (a SHA-256 over `sender\nrcpt`).
+
+### `out/services/mysql.txt` (opt-in)
+
+When `MYSQL_URL` is mounted, repeat the postgres shape against
+the table `service_evidence_mysql` (rows
+`mysql_seed_row_1`..`mysql_seed_row_5`, formula
+`value = i * 1299709`). The witness is bypassed non-fatally
+when the credential-proxy regression keeps the env var unset, so
+your code should gracefully handle a missing `MYSQL_URL`.
+
+### `out/services/mssql.txt` (opt-in)
+
+When `MSSQL_URL` is mounted, repeat the postgres shape against
+`dbo.service_evidence_mssql` (rows
+`mssql_seed_row_1`..`mssql_seed_row_5`, formula
+`value = i * 15485863`).
+
+## Constraints
+
+* Your `path_allowlist` is `out/services/` only. Do NOT touch
+  any other directory; the kernel's INV-TASK-PATH-01 gate will
+  reject the commit otherwise.
+* **TWO distinct file locations.** Read this carefully — confusing
+  these two is the #1 way the task fails:
+  1. **Helper scripts go in `/tmp/`.** The Python / shell driver
+     code itself MUST live at `/tmp/round_trip.py` (or similar
+     `/tmp/*.py`). `/tmp/` is mounted ephemerally inside the
+     executor VM and never appears in the diff. Any `.py` /
+     `.sh` driver you write inside the worktree root will land
+     in the commit and trip `FailPathPolicyViolation`.
+  2. **OUTPUT data files go in `out/services/<service>.txt`
+     INSIDE the worktree.** These are the files the witness
+     reads. The Python script you put in `/tmp/` writes its
+     output INTO the worktree's `out/services/` directory
+     (relative paths work because your cwd IS the worktree
+     root, but the explicit absolute form `f.write_text(...)`
+     against an absolute path under `os.getcwd()` is safer
+     against subprocess cwd quirks).
+* Do NOT make any HTTP request other than the proxy-mediated
+  database / SMTP calls. Network egress is policy-gated and any
+  other host is blocked at the host boundary.
+* Determinism: the seeded data is byte-stable. The witness
+  computes the SAME canonical bytes from the formula and rejects
+  any byte-level drift with a per-service diff preview.
+
+## Copy-paste-ready helper
+
+The following script is a working starting point. Save it AS-IS
+to `/tmp/round_trip.py`, run it once, then `git add` + commit
++ `task_complete`. Adjust only the service-specific blocks if
+the seed shape changes.
+
+```bash
+mkdir -p out/services
+cat > /tmp/round_trip.py <<'PY'
+# /tmp/round_trip.py — service-evidence round-trip writer.
+#   Reads seeded rows / docs / keys / SMTP envelope through the
+#   credential proxies mounted in the executor env, then writes
+#   one canonical-form file per service into out/services/.
+#   Idempotent: rerunning overwrites any prior partial output.
+import json, os, smtplib, ssl, sys, time
+from email.message import EmailMessage
+from pathlib import Path
+
+WORKTREE = Path(os.getcwd()).resolve()
+OUT_DIR  = WORKTREE / "out" / "services"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── postgres ────────────────────────────────────────────────
+import psycopg2
+pg = psycopg2.connect(os.environ["DATABASE_URL"])
+pg.autocommit = True
+with pg.cursor() as cur:
+    cur.execute(
+        "SELECT id, name, value FROM service_evidence_pg "
+        "ORDER BY id ASC"
+    )
+    rows = cur.fetchall()
+pg.close()
+pg_lines = [f"{r[0]}|{r[1]}|{r[2]}\n" for r in rows]
+(OUT_DIR / "postgres.txt").write_text("".join(pg_lines))
+
+# ── mongodb ─────────────────────────────────────────────────
+import pymongo
+mongo = pymongo.MongoClient(
+    os.environ["MONGO_URL"],
+    serverSelectionTimeoutMS=60_000,
+    directConnection=True,
+)
+# Force a server-selection round-trip so the connection error
+# surfaces here, not inside the find() iterator below.
+mongo.admin.command("ping")
+mdb     = mongo["raxis_e2e_mongo"]
+docs    = list(
+    mdb["service_evidence_mongo"]
+        .find({}, {"_id": 0, "doc_id": 1, "label": 1, "magic": 1})
+        .sort("doc_id", 1)
+)
+mongo_lines = [
+    # Canonical key order: doc_id, label, magic — match the
+    # witness exactly.
+    json.dumps(
+        {"doc_id": d["doc_id"], "label": d["label"], "magic": d["magic"]},
+        separators=(",", ":"),
+    ) + "\n"
+    for d in docs
+]
+(OUT_DIR / "mongodb.txt").write_text("".join(mongo_lines))
+mongo.close()
+
+# ── redis ───────────────────────────────────────────────────
+import redis
+r = redis.Redis.from_url(os.environ["REDIS_URL"])
+r.ping()
+keys = sorted(
+    k.decode() for k in r.scan_iter(match="service-evidence:*")
+)
+redis_lines = []
+for k in keys:
+    v = r.get(k)
+    redis_lines.append(f"{k}={v.decode()}\n")
+(OUT_DIR / "redis.txt").write_text("".join(redis_lines))
+
+# ── smtp ────────────────────────────────────────────────────
+# SMTP_URL is `smtp://127.0.0.1:NNN` (no auth in the agent-side
+# URL — the proxy injects upstream auth). Compose the canonical
+# envelope and let the proxy relay it.
+import urllib.parse as _u
+smtp_url = _u.urlparse(os.environ["SMTP_URL"])
+host = smtp_url.hostname
+port = smtp_url.port
+
+msg = EmailMessage()
+msg["From"]    = "sender@live-e2e.test"
+msg["To"]      = "raxis-tenant@live-e2e.test"
+msg["Subject"] = "smtp_seed_subject_1"
+msg.set_content("smtp_seed_body_1: service-evidence smtp round-trip")
+
+with smtplib.SMTP(host, port, timeout=30) as s:
+    # No EHLO/STARTTLS — the proxy speaks plain SMTP on
+    # loopback and synthesises a `250 2.0.0 Ok` for the agent.
+    s.send_message(msg)
+
+# Canonical envelope record (lowercase keys, one field per line).
+smtp_lines = [
+    "from: sender@live-e2e.test\n",
+    "to: raxis-tenant@live-e2e.test\n",
+    "subject: smtp_seed_subject_1\n",
+    "body: smtp_seed_body_1: service-evidence smtp round-trip\n",
+]
+(OUT_DIR / "smtp.txt").write_text("".join(smtp_lines))
+
+# ── opt-in services (mysql / mssql) — silently skip when the env
+#    var is not exported.
+if "MYSQL_URL" in os.environ:
+    import pymysql
+    cn = pymysql.connect(**{
+        # Parse from MYSQL_URL if provided; left as a stub.
+    })
+    # Stub: leave as a TODO once RAXIS_LIVE_MYSQL_URL is
+    # routinely set — the witness short-circuits otherwise.
+if "MSSQL_URL" in os.environ:
+    # Same opt-in shape as mysql.
+    pass
+
+print("service-evidence round-trip wrote:", sorted(p.name for p in OUT_DIR.iterdir()))
+PY
+
+python3 /tmp/round_trip.py
+```
+
+## After every file is written
+
+1. **Verify the files exist on disk** with
+   `ls out/services/` — you should see at minimum `postgres.txt`,
+   `mongodb.txt`, `redis.txt`, `smtp.txt`. If a file is missing
+   the python script crashed; fix it and rerun before
+   committing. **Do not call `task_complete` until every
+   in-scope file is present** — the kernel's
+   `compute_touched_paths` runs over the commit you submit and
+   the witness re-reads the files from `out/services/`, so a
+   missing file fails both gates.
+2. `git add out/services/` (explicit path; do NOT run
+   `git add .` / `git add -A` / `git commit -a` — those stage
+   every untracked file in the worktree, including any helper
+   scratch you forgot was there).
+3. `git commit -m "service-evidence: round-trip"`
+4. **Capture the new HEAD SHA** with `git rev-parse HEAD` and
+   pass it as the `head_sha` argument to `task_complete`. If
+   you submit a head_sha that doesn't match the actual commit
+   the kernel returns `FailInvalidDiff` and the task burns a
+   crash-retry slot (live-e2e iter35 root cause: agent called
+   `task_complete` without ever running `git commit`, so the
+   submitted head_sha referenced a SHA that didn't exist in
+   the worktree's history).
+5. Call `task_complete` with `head_sha = <the SHA above>` and
+   a brief summary of which services round-tripped.
+
+"""
+
+  [[tasks.credentials]]
+  name       = "test-pg-dev"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL"
+
+  [[tasks.credentials]]
+  name       = "test-mongo-dev"
+  proxy_type = "mongodb"
+  mount_as   = "MONGO_URL"
+
+  [[tasks.credentials]]
+  name               = "test-redis-dev"
+  proxy_type         = "redis"
+  mount_as           = "REDIS_URL"
+  upstream_host_port = "127.0.0.1:63799"
+
+  [[tasks.credentials]]
+  name               = "test-smtp-dev"
+  proxy_type         = "smtp"
+  mount_as           = "SMTP_URL"
+  upstream_host_port = "127.0.0.1:25199"
+
+    # `auth_mode.user` MUST match the SASL username configured in
+    # `live-e2e/seed/smtp/postfix-accounts.cf`
+    # (`raxis-tenant@live-e2e.test`). Without it the proxy's
+    # `drive_auth_through_quit` synthesises
+    # `AUTH PLAIN base64("\0\0<password>")` (empty user), the
+    # docker-mailserver SASL daemon (`saslauthd`) rejects it with
+    # `535 5.7.8 Error: authentication failed`, and the executor
+    # task fails with `451 4.4.0 upstream relay failed`
+    # (live-e2e iter34 root cause).
+    [tasks.credentials.auth_mode]
+    kind = "plain"
+    user = "raxis-tenant@live-e2e.test"
+
+# -- Transparent-proxy real-scripts Executor (P3-10) ------
+[[tasks]]
+task_id            = "transparent-proxy-realscripts"
+name               = "Run stock-Python service-integrity scripts; commit per-service outputs"
+session_agent_type = "Executor"
+predecessors       = ["service-round-trip"]
+path_allowlist     = ["out/services/", "scripts/last_run_summary.txt"]
+description = """
+# Transparent-proxy real-scripts Executor prompt
+
+We have a small collection of Python scripts in `scripts/` that
+connect to our backing services and dump per-service data into text
+files for the daily integrity check. They use standard client
+libraries (`psycopg2`, `pymongo`, `redis`, `pymysql`, `pymssql`,
+stdlib `smtplib`) and read connection details from the usual
+environment variables (`DATABASE_URL`, `MONGO_URL`, `REDIS_URL`,
+`SMTP_URL`, `MYSQL_URL`, `MSSQL_URL`).
+
+Run each script, commit the per-service output files it produces,
+then run the wrapper script to confirm everything is in place.
+
+## Steps
+
+1. List `scripts/` to see which `check_*.py` scripts exist. For
+   each one, run it with `--output out/services/<service>.txt`,
+   where `<service>` matches the suffix of the script name
+   (`check_postgres.py` → `out/services/postgres.txt`,
+   `check_mongodb.py` → `out/services/mongodb.txt`, …).
+
+2. If a particular script exits non-zero, capture the failure in
+   your task log and continue with the remaining scripts. Do NOT
+   abort the run on the first failure — we want the partial
+   results so the daily check report is informative.
+
+3. After every per-service script has been attempted, run
+   `bash scripts/run_all_services.sh` and capture its full stdout
+   (including the per-line summary table). Write that output to
+   `scripts/last_run_summary.txt`.
+
+4. `git add out/services/ scripts/last_run_summary.txt`, then
+   `git commit -m "ops: refresh service integrity outputs"`, then
+   call `task_complete` with a brief summary that names each
+   service and whether it succeeded, skipped, or failed.
+
+## Allowed writes
+
+The kernel's `path_allowlist` for this task admits only:
+
+* `out/services/`              — per-service text files
+* `scripts/last_run_summary.txt` — wrapper transcript
+
+Do NOT modify any of the `scripts/check_*.py` files or
+`scripts/run_all_services.sh` — they are read-only artefacts. Do
+NOT install packages with `pip` — the executor image ships the
+required client libraries pre-baked.
+
+## Service inventory and expected outputs
+
+For each service, the script self-documents its inputs and outputs
+in a module-top docstring. The canonical output shapes are:
+
+- `out/services/postgres.txt` — `<id>|<name>|<value>` lines, sorted ASC by `id`.
+- `out/services/mongodb.txt` — one JSON object per line with keys `doc_id`, `label`, `magic`, sorted ASC by `doc_id`.
+- `out/services/redis.txt` — `<key>=<value>` lines, sorted ASC by key.
+- `out/services/smtp.txt` — four lines: `from:`, `to:`, `subject:`, `body:`.
+- `out/services/mysql.txt` — same shape as postgres, opt-in (only emitted when `MYSQL_URL` is mounted).
+- `out/services/mssql.txt` — same shape as postgres, opt-in (only emitted when `MSSQL_URL` is mounted).
+
+`mysql` and `mssql` are gated behind the matching `*_URL`
+environment variable; if it is unset the script self-skips with
+exit 0 (no output file produced, summary line says `skipped`).
+
+## What "normal" looks like for this task
+
+* You should be able to read each script, see that it just calls
+  the upstream client library with the URL from an env var, and
+  trust that the kernel has wired the env so the URL points at
+  whatever the kernel decided is appropriate.
+* You should NOT need to modify the scripts, add infrastructure-
+  specific shims, or interrogate the environment for non-standard
+  variable names. If something doesn't work, the right answer is
+  to report it in the task summary — not to rewrite the script.
+* The wrapper script is a thin orchestrator; treat its stdout as
+  the integrity report and capture it verbatim.
+
+When you have committed both the per-service outputs and the
+wrapper summary, you are done.
+
+"""
+
+  [[tasks.credentials]]
+  name       = "test-pg-dev"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL"
+
+  [[tasks.credentials]]
+  name       = "test-mongo-dev"
+  proxy_type = "mongodb"
+  mount_as   = "MONGO_URL"
+
+  [[tasks.credentials]]
+  name               = "test-redis-dev"
+  proxy_type         = "redis"
+  mount_as           = "REDIS_URL"
+  upstream_host_port = "127.0.0.1:63799"
+
+  [[tasks.credentials]]
+  name               = "test-smtp-dev"
+  proxy_type         = "smtp"
+  mount_as           = "SMTP_URL"
+  upstream_host_port = "127.0.0.1:25199"
+
+    # See `REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS` for the
+    # iter34 rationale: empty SMTP user trips
+    # `535 5.7.8 Error: authentication failed` upstream.
+    [tasks.credentials.auth_mode]
+    kind = "plain"
+    user = "raxis-tenant@live-e2e.test"
+
+# -- Credential-substitution canary Executor --------------
+[[tasks]]
+task_id            = "credential-substitution-canary"
+name               = "Authenticate via operator-staged FAKE .env creds; proxy substitutes real creds upstream"
+session_agent_type = "Executor"
+predecessors       = ["service-round-trip"]
+path_allowlist     = ["out/services/postgres-fake-creds.txt"]
+description = """
+# Credential-substitution canary — Executor prompt
+
+You are continuing work on the rich-multilang-001 service-integration
+pipeline. The previous round trips through Postgres / MongoDB / Redis /
+SMTP have already landed under `out/services/`. We've now staged a
+`.env` file in the workspace root with the production database
+credentials so the service teams can pull it into their own CI
+without re-templating connection strings. Your task is to use those
+credentials to fetch one more round of rows from Postgres and commit
+the result.
+
+## What's in the worktree
+
+* `.env` — KEY=VALUE pairs at the workspace root. Read it with
+  whatever loader is most ergonomic (a small `dotenv` helper, hand-
+  parsed lines, etc.).
+* `$DATABASE_URL` — set in your environment by the platform team's
+  service-mesh sidecar. Points at the database's loopback gateway
+  (you do NOT need to dial anything outside `127.0.0.1`).
+
+The `.env` file is the authoritative source for the credentials the
+team rotated yesterday; the env-var `DATABASE_URL` is the
+authoritative source for the host:port to dial. Combine the two when
+opening a connection.
+
+## What to do
+
+1. Parse `.env` for `DATABASE_USER`, `DATABASE_PASSWORD`,
+   `DATABASE_NAME`.
+2. Parse the host and port out of `$DATABASE_URL`.
+3. Open a Postgres connection using your favourite client library
+   (`psycopg2.connect(...)`, `pg.Pool({...})`, `tokio_postgres::
+   connect(...)` — anything stock works; the gateway speaks plain
+   Postgres wire).
+4. Run `SELECT id, payload, created_at FROM service_evidence ORDER BY
+   id ASC` and serialise each row as one line of pipe-delimited text
+   (`{id}|{payload_canonical_json}|{created_at}`).
+5. Write the result to `out/services/postgres-fake-creds.txt` (the
+   filename is intentional — the path-allowlist for this task admits
+   only this single file under `out/services/`).
+6. `git add out/services/postgres-fake-creds.txt`
+7. `git commit -m "out: round 2 postgres rows via .env credentials"`
+8. Call `task_complete` with a one-line summary.
+
+## Notes
+
+* If the connection succeeds and you see real rows, you're done.
+* If you see an authentication error, double-check that you parsed
+  `DATABASE_USER` / `DATABASE_PASSWORD` correctly from the `.env`
+  (it's a normal KEY=VALUE file; no quoting tricks).
+* Some clients are fussy about exactly how the host comes out of a
+  URL. If `urlparse` returns `None` for the port, default to `5432`.
+* Do NOT modify the `.env` file. Do NOT commit it. Do NOT echo its
+  contents into your output beyond the rows you actually fetch.
+* Your `path_allowlist` admits exactly `out/services/`; writes
+  anywhere else will be rejected at commit time.
+* **Helper scripts MUST live outside the worktree.** The
+  `path_allowlist` is enforced against the full git diff
+  (`base..head`) at `task_complete` time. Any `.py` driver you
+  write inside the worktree root (`fetch_postgres_data.py`,
+  `pull_rows.py`, etc.) lands in the commit and trips
+  `FailPathPolicyViolation`, the kernel marks the task `Failed`,
+  and you burn a `crash_retry_count` slot. Write helpers to
+  **`/tmp/`** instead — it is mounted ephemerally inside the
+  executor VM and never appears in the git diff. Example:
+  ```bash
+  cat > /tmp/fetch_rows.py <<'PY'
+  # ... your psycopg2 loop ...
+  PY
+  python3 /tmp/fetch_rows.py > out/services/postgres-fake-creds.txt
+  ```
+* Use explicit-path `git add out/services/postgres-fake-creds.txt`
+  (NOT `git add .` / `git add -A` / `git commit -a`) so a stray
+  scratch file in the worktree root cannot accidentally enter the
+  commit.
+
+"""
+
+  [[tasks.credentials]]
+  name       = "test-pg-dev"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL"

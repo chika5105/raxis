@@ -1053,7 +1053,10 @@ pub fn seed_realistic_main_repository(data_dir: &Path) {
 /// scripts, etc.). `CARGO_MANIFEST_DIR` for the integration-test
 /// binary points at `raxis/kernel/`, so the workspace root is its
 /// parent.
-fn realism_workspace_root() -> PathBuf {
+///
+/// `pub` so the realistic-scenario test driver can pass it to
+/// [`maybe_refresh_examples`] without re-deriving the same path.
+pub fn realism_workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(Path::to_path_buf)
@@ -1321,6 +1324,438 @@ fn write_with_mode_0600(path: &Path, body: &[u8]) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|e| panic!("chmod 0600 {}: {e}", path.display()));
+}
+
+// ---------------------------------------------------------------------------
+// Auto-refresh of the checked-in `raxis/live-e2e/examples/` bundle
+// (INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01).
+//
+// The checked-in `raxis/live-e2e/examples/` directory mirrors what
+// the realistic-scenario harness writes into its per-run tmpdir at
+// bootstrap, so an operator auditing "what policy.toml / plan.toml /
+// credential files produced this iter?" can answer without re-running
+// the test. The auto-refresh hook here is what keeps the mirror
+// up-to-date.
+//
+// The hook is **opt-in** via `RAXIS_E2E_REFRESH_EXAMPLES=1`. Default-
+// off keeps casual `cargo test` runs from dirtying the worktree.
+// The fix-loop / CI / a `working e2e` commit MUST set the env var
+// before the run that lands the commit so the checked-in bundle
+// always matches the most recent passing iter. See
+// `raxis/live-e2e/examples/README.md` for the full contract.
+//
+// The Anthropic credential rule is structural, not cosmetic: the
+// hook (a) rewrites `anthropic.env.placeholder` from a hardcoded
+// template (NOT a copy of whatever real `ANTHROPIC-API-DEV-KEY` the
+// harness loaded into the kernel's `providers/` dir), so the real
+// bytes never enter the refresh path; (b) at end of refresh,
+// `assert_no_real_anthropic_key` scans every file under
+// `examples/credentials/` for the real-key regex and panics with a
+// copy-pastable remediation hint if a match is found.
+//
+// The hook is wired into `realistic_session_lifecycle` AFTER the
+// run's TOMLs are assembled but BEFORE the kernel daemon starts, so
+// a refresh failure short-circuits the whole iter instead of landing
+// a half-baked diff. The same hook is exercised by a unit test
+// against a tmpdir fixture (see `tests::refresh_examples_*`) so a
+// regression in the refresh shape is caught on every
+// `cargo test -p raxis-kernel` even without the live docker stack.
+// ---------------------------------------------------------------------------
+
+/// Opt-in env var that gates the example-bundle auto-refresh.
+/// Default-off keeps casual `cargo test` runs from dirtying the
+/// worktree.
+pub const REFRESH_EXAMPLES_ENV: &str = "RAXIS_E2E_REFRESH_EXAMPLES";
+
+/// Hardcoded template body for `examples/credentials/anthropic.env.placeholder`.
+/// This is the single source of truth — the refresh hook rewrites
+/// the file from this constant on every refresh, so the real
+/// Anthropic key bytes never enter the refresh code path. Any
+/// future drift between this string and what
+/// `examples/credentials/anthropic.env.placeholder` contains on
+/// disk is a real signal — either the README contract changed or
+/// the hook regressed. The initial-seed commit's on-disk file
+/// matches this template byte-for-byte.
+const ANTHROPIC_PLACEHOLDER_BODY: &str = r#"# Live-e2e Anthropic API credential — PLACEHOLDER ONLY
+#
+# This file documents the expected format + filename of the Anthropic
+# credential that the planner-core HTTP fetcher reads at runtime. The
+# real API key MUST NOT be checked in; it lives in:
+#
+#   ~/.config/raxis/credentials/anthropic.env
+#
+# (or whatever path your operator deployment sources via the
+# `RAXIS_ANTHROPIC_KEY_PATH` env var).
+#
+# The realistic-scenario live-e2e harness instead sources its key
+# from `<workspace>/raxis/.env` (line `ANTHROPIC-API-DEV-KEY=...`)
+# via `kernel_driver::write_provider_credentials` and writes
+# `<data_dir>/providers/anthropic-realism-e2e.toml` (mode 0600) at
+# kernel-bootstrap time. The `.env` itself is `.gitignore`d.
+#
+# Format:
+#   ANTHROPIC_API_KEY=sk-ant-api03-...
+#
+# The harness has a witness — `assert_no_real_anthropic_key` in
+# `kernel/tests/extended_e2e_support/kernel_driver.rs` — that
+# REJECTS the run if this file contains anything matching the
+# real-key regex:
+#
+#   sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}
+#
+# The same regex is enforced by the pre-commit guard at
+# `raxis/scripts/check-no-real-anthropic-key.sh`. Together they
+# prevent accidental key leakage via `git add` of a refreshed
+# examples bundle.
+#
+# See `raxis/live-e2e/examples/README.md` for the full refresh
+# contract; `raxis/specs/v2/secrets-model.md §2.5` for the
+# operator-supplied-placeholder discipline; and
+# `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01` in
+# `raxis/specs/invariants.md §11.10`.
+
+ANTHROPIC_API_KEY=PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY
+"#;
+
+/// Per-credential body the harness writes via `write_credentials`.
+/// Mirrors the literals in [`write_credentials`] verbatim so a
+/// future change there is caught by the
+/// `refresh_examples_writes_plan_and_credentials_under_env_gate`
+/// unit test (the test reads both sides and asserts they match
+/// byte-for-byte).
+pub const EXAMPLE_PG_CRED:    &str = "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e_pg";
+pub const EXAMPLE_MONGO_CRED: &str = "mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e_mongo?authSource=admin";
+pub const EXAMPLE_REDIS_CRED: &str = "raxis_test_pass";
+pub const EXAMPLE_SMTP_CRED:  &str = "live-e2e-upstream-secret";
+
+/// Pre-bundled prompt filenames the auto-refresh mirrors from
+/// `raxis/live-e2e/seed/prompts/` into `examples/seed/prompts/`.
+/// Kept in lock-step with what `plan_realistic.rs` /
+/// `multi_initiative.rs` actually `include_str!`. A new prompt
+/// added to the realistic plan WITHOUT being added here would
+/// leave the examples mirror incomplete — the
+/// `refresh_examples_mirrors_seed_prompts` unit test pins the
+/// list.
+const EXAMPLE_SEED_PROMPTS: &[&str] = &[
+    "allowlist_positive.md",
+    "credential_substitution_canary.md",
+    "cross_file_refactor.md",
+    "injection_payloads.toml",
+    "lint_defect.md",
+    "materializer.md",
+    "service_round_trip.md",
+    "transparent_proxy_real_scripts.md",
+];
+
+/// Bundle of paths the auto-refresh hook needs. Built once per
+/// iter so the harness call site stays a single function call.
+#[derive(Debug, Clone)]
+pub struct ExampleRefreshInputs<'a> {
+    /// Path to the kernel's live `policy.toml`
+    /// (`<data_dir>/policy/policy.toml`). Copied verbatim into
+    /// `examples/policy.toml`.
+    pub live_policy_toml: &'a Path,
+    /// The realistic-plan primary TOML body the harness submits.
+    /// Pre-computed by the caller via
+    /// [`crate::extended_e2e_support::plan_realistic::realistic_plan_toml`].
+    pub plan_primary_toml: &'a str,
+    /// The sibling-plan TOML body. Pre-computed by the caller via
+    /// [`crate::extended_e2e_support::multi_initiative::sibling_plan_toml`].
+    pub plan_sibling_toml: &'a str,
+    /// Workspace root containing the canonical
+    /// `raxis/live-e2e/seed/prompts/` source the mirror copies
+    /// from. Mirrors [`realism_workspace_root`].
+    pub workspace_root: &'a Path,
+}
+
+/// Optionally refresh the checked-in
+/// `raxis/live-e2e/examples/` bundle.
+///
+/// Behaviour:
+///
+///   * **Default (env unset / != "1"):** returns `None` immediately;
+///     the worktree is left untouched.
+///   * **Opt-in (`RAXIS_E2E_REFRESH_EXAMPLES=1`):** locates the
+///     repo's `raxis/live-e2e/examples/` directory, rewrites every
+///     file from the harness's authoritative source (`live_policy_toml`
+///     for `policy.toml`, the pre-built plan TOMLs, the
+///     [`write_credentials`]-mirroring credential bodies, the
+///     hardcoded Anthropic placeholder template, the verbatim copy
+///     of `live-e2e/seed/prompts/`), and at end of refresh runs
+///     [`assert_no_real_anthropic_key`] over
+///     `examples/credentials/`. Returns the absolute path of the
+///     refreshed directory so the harness can surface it in the
+///     post-run Tier-3 artifact block.
+///
+/// **Where in the harness this runs:** AFTER plan TOMLs are
+/// assembled but BEFORE the kernel daemon starts. A refresh
+/// failure (missing examples/ dir, real-key match in the
+/// placeholder, etc.) short-circuits the whole iter — no
+/// half-baked examples diff can land.
+///
+/// # Panics
+///
+/// * If `RAXIS_E2E_REFRESH_EXAMPLES=1` but the
+///   `raxis/live-e2e/examples/` directory does not exist in the
+///   workspace. This means the layout changed and the harness
+///   needs an update; we deliberately fail loudly rather than
+///   silently `mkdir -p` because the new layout is a real signal.
+/// * If `assert_no_real_anthropic_key` finds a real-key match.
+///   The panic message carries a copy-pastable remediation hint.
+/// * On any I/O error while writing the refreshed files. The
+///   refresh is intentionally `panic!`-on-error so the failure
+///   mode is identical to every other harness invariant.
+pub fn maybe_refresh_examples(inputs: ExampleRefreshInputs<'_>) -> Option<PathBuf> {
+    if std::env::var(REFRESH_EXAMPLES_ENV).as_deref() != Ok("1") {
+        return None;
+    }
+    let examples_dir = inputs.workspace_root.join("live-e2e/examples");
+    assert!(
+        examples_dir.is_dir(),
+        "[realism-e2e] {REFRESH_EXAMPLES_ENV}=1 set but {} does not exist; \
+         the layout changed and `maybe_refresh_examples` needs an update. \
+         (Or run the refresh from a checkout that has the examples bundle.)",
+        examples_dir.display(),
+    );
+    refresh_examples_inner(&examples_dir, inputs);
+    Some(examples_dir)
+}
+
+/// Inner refresh — extracted so the unit test can drive it
+/// against a tmpdir fixture WITHOUT depending on the
+/// `RAXIS_E2E_REFRESH_EXAMPLES` env var (env-var
+/// side-effects across parallel tests are notoriously brittle).
+/// Pub-crate so the test can call it; the public API is
+/// [`maybe_refresh_examples`].
+pub(crate) fn refresh_examples_inner(
+    examples_dir: &Path,
+    inputs:       ExampleRefreshInputs<'_>,
+) {
+    // 1. policy.toml — copy verbatim from the kernel's live file.
+    let dest_policy = examples_dir.join("policy.toml");
+    let policy_body = std::fs::read(inputs.live_policy_toml).unwrap_or_else(|e| {
+        panic!(
+            "[realism-e2e] refresh_examples: read live policy.toml {}: {e}",
+            inputs.live_policy_toml.display(),
+        )
+    });
+    std::fs::write(&dest_policy, &policy_body).unwrap_or_else(|e| {
+        panic!(
+            "[realism-e2e] refresh_examples: write {}: {e}",
+            dest_policy.display(),
+        )
+    });
+
+    // 2. plan_primary.toml + plan_sibling.toml — pre-assembled by
+    // the caller from the same constants the harness submits, so
+    // there's no byte drift risk between the example and what the
+    // kernel actually saw.
+    std::fs::write(
+        examples_dir.join("plan_primary.toml"),
+        inputs.plan_primary_toml,
+    )
+    .unwrap_or_else(|e| panic!(
+        "[realism-e2e] refresh_examples: write plan_primary.toml: {e}",
+    ));
+    std::fs::write(
+        examples_dir.join("plan_sibling.toml"),
+        inputs.plan_sibling_toml,
+    )
+    .unwrap_or_else(|e| panic!(
+        "[realism-e2e] refresh_examples: write plan_sibling.toml: {e}",
+    ));
+
+    // 3. credentials/*.env — mirror what `write_credentials` writes.
+    let creds_dir = examples_dir.join("credentials");
+    std::fs::create_dir_all(&creds_dir).unwrap_or_else(|e| {
+        panic!("[realism-e2e] refresh_examples: mkdir {}: {e}", creds_dir.display())
+    });
+    for (name, body) in [
+        ("test-pg-dev.env",    EXAMPLE_PG_CRED),
+        ("test-mongo-dev.env", EXAMPLE_MONGO_CRED),
+        ("test-redis-dev.env", EXAMPLE_REDIS_CRED),
+        ("test-smtp-dev.env",  EXAMPLE_SMTP_CRED),
+    ] {
+        let p = creds_dir.join(name);
+        std::fs::write(&p, body).unwrap_or_else(|e| {
+            panic!("[realism-e2e] refresh_examples: write {}: {e}", p.display())
+        });
+    }
+
+    // 4. anthropic.env.placeholder — rewritten from the hardcoded
+    // template. The real Anthropic key value at
+    // `<data_dir>/providers/anthropic-realism-e2e.toml` is NOT
+    // consulted; the placeholder body is the same constant on
+    // every refresh, so a real key can never leak through the
+    // refresh path.
+    let anth = creds_dir.join("anthropic.env.placeholder");
+    std::fs::write(&anth, ANTHROPIC_PLACEHOLDER_BODY).unwrap_or_else(|e| {
+        panic!("[realism-e2e] refresh_examples: write {}: {e}", anth.display())
+    });
+
+    // 5. seed/prompts/* — verbatim copy of the canonical seed
+    // prompts the realistic plan `include_str!`s. Keeping the
+    // mirror in lock-step lets an operator skimming `examples/`
+    // see the complete bundle without cross-referencing
+    // `live-e2e/seed/prompts/` separately.
+    let dest_prompts = examples_dir.join("seed").join("prompts");
+    std::fs::create_dir_all(&dest_prompts).unwrap_or_else(|e| {
+        panic!(
+            "[realism-e2e] refresh_examples: mkdir {}: {e}",
+            dest_prompts.display(),
+        )
+    });
+    let src_prompts = inputs.workspace_root.join("live-e2e/seed/prompts");
+    for name in EXAMPLE_SEED_PROMPTS {
+        let src = src_prompts.join(name);
+        let dst = dest_prompts.join(name);
+        let body = std::fs::read(&src).unwrap_or_else(|e| {
+            panic!(
+                "[realism-e2e] refresh_examples: read seed prompt {}: {e}",
+                src.display(),
+            )
+        });
+        std::fs::write(&dst, body).unwrap_or_else(|e| {
+            panic!(
+                "[realism-e2e] refresh_examples: write seed prompt {}: {e}",
+                dst.display(),
+            )
+        });
+    }
+
+    // 6. Witness: scan everything under `credentials/` for the
+    // real Anthropic-key regex. If a match is found we panic
+    // with a copy-pastable remediation hint BEFORE the kernel
+    // daemon starts, so the failed iter never produces an
+    // examples diff that could be `git add`-ed.
+    assert_no_real_anthropic_key(examples_dir);
+}
+
+/// INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 witness. Scans every
+/// file under `<examples_dir>/credentials/` for the real
+/// Anthropic-key regex
+/// `sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}` and panics with a
+/// copy-pastable remediation hint on the first match. Called by
+/// [`refresh_examples_inner`] as the LAST step of the refresh,
+/// so a real key in any credential file fails the whole iter
+/// before the kernel even spawns.
+///
+/// Implementation note: we deliberately do NOT depend on the
+/// `regex` crate here. The pattern is simple enough to scan
+/// byte-by-byte, and avoiding the dep keeps `kernel_driver.rs`'s
+/// build graph minimal. The same regex is enforced by
+/// `raxis/scripts/check-no-real-anthropic-key.sh` at commit
+/// time; that script does use `rg`/`grep -P`.
+pub fn assert_no_real_anthropic_key(examples_dir: &Path) {
+    let creds_dir = examples_dir.join("credentials");
+    if !creds_dir.is_dir() {
+        // The refresh hook creates the dir before calling us, so
+        // a missing dir here means a caller invoked the witness
+        // independently against an empty examples_dir. That is
+        // not a security failure — there is nothing to check.
+        return;
+    }
+    let entries = std::fs::read_dir(&creds_dir).unwrap_or_else(|e| {
+        panic!(
+            "[realism-e2e] assert_no_real_anthropic_key: read_dir {}: {e}",
+            creds_dir.display(),
+        )
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "[realism-e2e] assert_no_real_anthropic_key: dir entry under {}: {e}",
+                creds_dir.display(),
+            )
+        });
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let body = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "[realism-e2e] assert_no_real_anthropic_key: read {}: {e}",
+                path.display(),
+            )
+        });
+        if let Some(hit) = find_real_anthropic_key(&body) {
+            panic!(
+                "[realism-e2e] INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 \
+                 VIOLATED: real-looking Anthropic API key found in {}:\n\
+                 \n  matched bytes: `{}`\n\n\
+                 The only allowed Anthropic-credential file in \
+                 examples/credentials/ is anthropic.env.placeholder, and \
+                 its value MUST NOT match the real-key regex \
+                 sk-ant-api[0-9]{{2}}-[A-Za-z0-9_-]{{20,}}.\n\n\
+                 Remediation:\n  \
+                   1. git checkout {}\n  \
+                   2. Inspect maybe_refresh_examples in \
+                 kernel/tests/extended_e2e_support/kernel_driver.rs — \
+                 a regression there is the only way a real key reaches \
+                 this code path (the refresh rewrites the file from a \
+                 hardcoded template, NOT from the loaded \
+                 ANTHROPIC-API-DEV-KEY value).\n  \
+                   3. If you intentionally pasted a real key into this \
+                 file, ROTATE THE KEY IN YOUR ANTHROPIC CONSOLE \
+                 IMMEDIATELY — assume it is compromised the moment it \
+                 touched the worktree.",
+                path.display(),
+                hit,
+                path.display(),
+            );
+        }
+    }
+}
+
+/// Byte-scan helper for [`assert_no_real_anthropic_key`].
+///
+/// Searches `body` for the regex
+/// `sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}` and returns the
+/// matching substring on the first hit. We hand-roll this
+/// instead of pulling in `regex` because the kernel test crate's
+/// build graph already pays a heavy compile-time tax and adding
+/// `regex` for one literal-prefix scan is wildly out of
+/// proportion.
+fn find_real_anthropic_key(body: &[u8]) -> Option<String> {
+    const PREFIX: &[u8] = b"sk-ant-api";
+    let mut i = 0;
+    while i + PREFIX.len() < body.len() {
+        if !body[i..].starts_with(PREFIX) {
+            i += 1;
+            continue;
+        }
+        let after_prefix = i + PREFIX.len();
+        // Two ASCII digits.
+        if after_prefix + 2 >= body.len()
+            || !body[after_prefix].is_ascii_digit()
+            || !body[after_prefix + 1].is_ascii_digit()
+        {
+            i += 1;
+            continue;
+        }
+        let dash = after_prefix + 2;
+        if body[dash] != b'-' {
+            i += 1;
+            continue;
+        }
+        // Body: at least 20 chars of `[A-Za-z0-9_-]`.
+        let body_start = dash + 1;
+        let mut end = body_start;
+        while end < body.len() && is_key_body_char(body[end]) {
+            end += 1;
+        }
+        if end - body_start >= 20 {
+            let slice = &body[i..end];
+            return Some(String::from_utf8_lossy(slice).into_owned());
+        }
+        i += 1;
+    }
+    None
+}
+
+#[inline]
+fn is_key_body_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
 // ---------------------------------------------------------------------------
@@ -2275,5 +2710,301 @@ mod tests {
             &["a", "b"],
         );
         assert!(hit.is_none(), "missing-file must be a no-op, got {hit:?}");
+    }
+
+    // ─── INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 ───────────────
+    //
+    // Regression tests for the example-bundle auto-refresh hook
+    // (`maybe_refresh_examples` / `refresh_examples_inner`) and
+    // the real-Anthropic-key witness
+    // (`assert_no_real_anthropic_key`). The witness is the
+    // structural guarantee that a refreshed bundle can NEVER
+    // carry a real key, even if the harness or fix-loop worker
+    // makes a future mistake elsewhere.
+
+    /// Build a complete tmpdir fixture that looks like a freshly
+    /// initialised `raxis/live-e2e/examples/` checkout, with the
+    /// matching `live-e2e/seed/prompts/` source the hook copies
+    /// from. Returns the workspace-root path so the test can
+    /// drive `refresh_examples_inner` against it.
+    fn build_examples_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().expect("fixture tempdir");
+        let workspace = tmp.path().to_path_buf();
+        let examples = workspace.join("live-e2e/examples");
+        let creds    = examples.join("credentials");
+        let prompts  = examples.join("seed/prompts");
+        let src_prompts = workspace.join("live-e2e/seed/prompts");
+        for d in [&examples, &creds, &prompts, &src_prompts] {
+            std::fs::create_dir_all(d).expect("mkdir fixture subdir");
+        }
+        // Stage prompt sources mirroring the real layout — every
+        // file the EXAMPLE_SEED_PROMPTS list mentions must exist.
+        for name in EXAMPLE_SEED_PROMPTS {
+            std::fs::write(
+                src_prompts.join(name),
+                format!("# fixture prompt body for {name}\n"),
+            ).expect("write fixture prompt");
+        }
+        (tmp, workspace)
+    }
+
+    /// Happy path: a fresh fixture, a valid live policy.toml, two
+    /// pre-assembled plan strings — the hook must rewrite every
+    /// file in `examples/` AND leave the witness happy.
+    #[test]
+    fn refresh_examples_writes_plan_and_credentials_under_env_gate() {
+        let (_tmp, workspace) = build_examples_fixture();
+        let examples = workspace.join("live-e2e/examples");
+
+        // Live policy.toml — minimal but non-empty so we can
+        // assert the copy is byte-for-byte.
+        let live_policy = workspace.join("policy.toml");
+        std::fs::write(&live_policy, b"# live policy.toml fixture\n[meta]\nepoch = 1\n")
+            .expect("write fixture policy.toml");
+
+        let inputs = ExampleRefreshInputs {
+            live_policy_toml:  &live_policy,
+            plan_primary_toml: "# primary plan fixture\n[plan.initiative]\n",
+            plan_sibling_toml: "# sibling plan fixture\n[plan.initiative]\n",
+            workspace_root:    &workspace,
+        };
+        refresh_examples_inner(&examples, inputs);
+
+        // policy.toml — byte-for-byte from the live source.
+        let copied_policy = std::fs::read(examples.join("policy.toml"))
+            .expect("read refreshed policy.toml");
+        let live_policy_body = std::fs::read(&live_policy)
+            .expect("read live policy.toml");
+        assert_eq!(
+            copied_policy, live_policy_body,
+            "refreshed policy.toml must be byte-for-byte from the live source",
+        );
+
+        // Plans — pre-assembled body, written verbatim.
+        let primary = std::fs::read_to_string(examples.join("plan_primary.toml"))
+            .expect("read refreshed plan_primary.toml");
+        assert!(primary.contains("primary plan fixture"));
+        let sibling = std::fs::read_to_string(examples.join("plan_sibling.toml"))
+            .expect("read refreshed plan_sibling.toml");
+        assert!(sibling.contains("sibling plan fixture"));
+
+        // Credentials — match the EXAMPLE_*_CRED constants verbatim.
+        let creds = examples.join("credentials");
+        for (name, want) in [
+            ("test-pg-dev.env",    EXAMPLE_PG_CRED),
+            ("test-mongo-dev.env", EXAMPLE_MONGO_CRED),
+            ("test-redis-dev.env", EXAMPLE_REDIS_CRED),
+            ("test-smtp-dev.env",  EXAMPLE_SMTP_CRED),
+        ] {
+            let got = std::fs::read_to_string(creds.join(name))
+                .unwrap_or_else(|e| panic!("read {name}: {e}"));
+            assert_eq!(
+                got, want,
+                "refreshed {name} must match the EXAMPLE_*_CRED constant",
+            );
+        }
+
+        // Anthropic placeholder — rewritten from the hardcoded
+        // template; MUST NOT contain anything matching the
+        // real-key regex.
+        let anth = std::fs::read_to_string(creds.join("anthropic.env.placeholder"))
+            .expect("read refreshed anthropic.env.placeholder");
+        assert_eq!(
+            anth, ANTHROPIC_PLACEHOLDER_BODY,
+            "refreshed anthropic.env.placeholder must match the hardcoded template",
+        );
+        assert!(
+            find_real_anthropic_key(anth.as_bytes()).is_none(),
+            "refreshed anthropic.env.placeholder must NOT contain anything \
+             matching the real-key regex",
+        );
+
+        // Seed prompts mirror — every file in EXAMPLE_SEED_PROMPTS
+        // copied verbatim from the source.
+        for name in EXAMPLE_SEED_PROMPTS {
+            let got = std::fs::read_to_string(
+                examples.join("seed/prompts").join(name),
+            )
+            .unwrap_or_else(|e| panic!("read seed/prompts/{name}: {e}"));
+            assert!(
+                got.contains(&format!("# fixture prompt body for {name}")),
+                "refreshed seed/prompts/{name} must be the verbatim source body",
+            );
+        }
+    }
+
+    /// `maybe_refresh_examples` is the env-gated wrapper. Without
+    /// `RAXIS_E2E_REFRESH_EXAMPLES=1` it must return `None` and
+    /// must NOT touch the worktree. The unit test sets the var
+    /// to an explicit `"0"` so it neutralises any ambient value
+    /// the shell might carry.
+    #[test]
+    fn maybe_refresh_examples_default_off_is_no_op() {
+        let (_tmp, workspace) = build_examples_fixture();
+        let examples = workspace.join("live-e2e/examples");
+
+        // Pre-place a sentinel file in examples/ so we can prove
+        // the no-op path didn't touch the dir.
+        std::fs::write(examples.join("policy.toml"), b"SENTINEL_DO_NOT_OVERWRITE")
+            .expect("write sentinel");
+
+        let live_policy = workspace.join("policy.toml");
+        std::fs::write(&live_policy, b"# live policy fixture\n")
+            .expect("write fixture live policy");
+
+        // Save + restore the env var so we don't poison other
+        // tests in the same process. `std::env::set_var` is
+        // unsafe for parallel tests in general, but the harness
+        // already serialises every test that touches the env via
+        // `acquire_test_lock`; this micro-test does not interact
+        // with the kernel, so a brief overwrite is OK.
+        let prior = std::env::var(REFRESH_EXAMPLES_ENV).ok();
+        std::env::set_var(REFRESH_EXAMPLES_ENV, "0");
+        let result = maybe_refresh_examples(ExampleRefreshInputs {
+            live_policy_toml:  &live_policy,
+            plan_primary_toml: "primary",
+            plan_sibling_toml: "sibling",
+            workspace_root:    &workspace,
+        });
+        match prior {
+            Some(v) => std::env::set_var(REFRESH_EXAMPLES_ENV, v),
+            None    => std::env::remove_var(REFRESH_EXAMPLES_ENV),
+        }
+        assert!(result.is_none(), "no-op path must return None");
+
+        let sentinel = std::fs::read_to_string(examples.join("policy.toml"))
+            .expect("read sentinel back");
+        assert_eq!(sentinel, "SENTINEL_DO_NOT_OVERWRITE",
+            "default-off path must NOT touch the worktree");
+    }
+
+    /// The witness must REJECT a credential file that contains a
+    /// real-looking Anthropic key. The synthetic key uses the
+    /// `sk-ant-api03-` prefix + 32 chars of `[A-Za-z0-9_-]` body
+    /// so it matches the regex without involving any real
+    /// credential material.
+    #[test]
+    #[should_panic(expected = "INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 VIOLATED")]
+    fn assert_no_real_anthropic_key_rejects_real_looking_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let examples = tmp.path().join("examples");
+        let creds    = examples.join("credentials");
+        std::fs::create_dir_all(&creds).expect("mkdir credentials");
+        // Synthetic 32-char body of `[A-Za-z0-9_-]` — enough to
+        // satisfy the 20+ minimum length. The key does NOT come
+        // from any real Anthropic account; the bytes were
+        // hand-typed to mimic the shape.
+        std::fs::write(
+            creds.join("anthropic.env.placeholder"),
+            b"ANTHROPIC_API_KEY=sk-ant-api03-AAAA1111BBBB2222CCCC3333DDDDEEEE\n",
+        ).expect("write fixture key");
+        assert_no_real_anthropic_key(&examples);
+    }
+
+    /// The witness must ACCEPT the canonical placeholder body —
+    /// it carries the literal `PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY`
+    /// which obviously does not match the real-key regex.
+    #[test]
+    fn assert_no_real_anthropic_key_accepts_canonical_placeholder() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let examples = tmp.path().join("examples");
+        let creds    = examples.join("credentials");
+        std::fs::create_dir_all(&creds).expect("mkdir credentials");
+        std::fs::write(
+            creds.join("anthropic.env.placeholder"),
+            ANTHROPIC_PLACEHOLDER_BODY,
+        ).expect("write canonical placeholder");
+        // The other credential files in the bundle are real test-
+        // tenant secrets for the local docker-compose stack and
+        // do not match the Anthropic regex. Stage them too so the
+        // witness scans a realistic set.
+        for (name, body) in [
+            ("test-pg-dev.env",    EXAMPLE_PG_CRED),
+            ("test-mongo-dev.env", EXAMPLE_MONGO_CRED),
+            ("test-redis-dev.env", EXAMPLE_REDIS_CRED),
+            ("test-smtp-dev.env",  EXAMPLE_SMTP_CRED),
+        ] {
+            std::fs::write(creds.join(name), body).expect("write cred fixture");
+        }
+        assert_no_real_anthropic_key(&examples);
+    }
+
+    /// The witness's regex MUST NOT false-positive on prefixes
+    /// that look like but do not match the real-key shape:
+    /// `sk-ant-apiX-` (single digit), `sk-ant-api03-short`
+    /// (body shorter than 20 chars), arbitrary `sk-ant-` strings
+    /// in unrelated contexts. A false positive here would
+    /// reject legitimate placeholder/documentation text and
+    /// degrade operator trust in the witness.
+    #[test]
+    fn find_real_anthropic_key_negative_cases() {
+        // Single-digit version: regex requires `[0-9]{2}`.
+        assert!(find_real_anthropic_key(
+            b"sk-ant-api3-AAAA1111BBBB2222CCCC3333"
+        ).is_none());
+        // Body too short: regex requires `{20,}`.
+        assert!(find_real_anthropic_key(
+            b"sk-ant-api03-tooshort"
+        ).is_none());
+        // `sk-ant-` without the `api` infix.
+        assert!(find_real_anthropic_key(
+            b"sk-ant-other-AAAA1111BBBB2222CCCC3333"
+        ).is_none());
+        // The literal placeholder string.
+        assert!(find_real_anthropic_key(
+            b"PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY"
+        ).is_none());
+    }
+
+    /// Positive sanity: a real-shape key buried in a longer body
+    /// must surface (the harness uses this to fail-fast at refresh
+    /// time so the operator sees the offending bytes verbatim in
+    /// the panic message).
+    #[test]
+    fn find_real_anthropic_key_positive_case() {
+        let body = b"prefix junk\nANTHROPIC_API_KEY=sk-ant-api03-AAAA1111BBBB2222CCCC3333DDDDEEEE\nsuffix";
+        let hit = find_real_anthropic_key(body)
+            .expect("real-shape key must surface");
+        assert!(hit.starts_with("sk-ant-api03-"),
+            "hit must include the leading regex match: {hit}");
+        assert!(hit.len() >= "sk-ant-api03-".len() + 20,
+            "hit must include the full key body: {hit}");
+    }
+
+    /// The refresh hook is intentionally pinned to a specific
+    /// repo layout. If `raxis/live-e2e/examples/` doesn't exist
+    /// — meaning the layout changed and the hook needs an update
+    /// — the refresh MUST panic loudly rather than `mkdir -p` and
+    /// produce a half-baked diff. Drive the panic via
+    /// `maybe_refresh_examples` with the env gate ON against a
+    /// workspace_root whose `live-e2e/examples/` is absent.
+    #[test]
+    #[should_panic(expected = "does not exist")]
+    fn maybe_refresh_examples_panics_when_examples_dir_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().to_path_buf();
+        // Deliberately do NOT create `live-e2e/examples/`.
+        let live_policy = workspace.join("policy.toml");
+        std::fs::write(&live_policy, b"# fixture\n").expect("write live policy");
+
+        let prior = std::env::var(REFRESH_EXAMPLES_ENV).ok();
+        std::env::set_var(REFRESH_EXAMPLES_ENV, "1");
+        let _capture = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            maybe_refresh_examples(ExampleRefreshInputs {
+                live_policy_toml:  &live_policy,
+                plan_primary_toml: "primary",
+                plan_sibling_toml: "sibling",
+                workspace_root:    &workspace,
+            });
+        }));
+        match prior {
+            Some(v) => std::env::set_var(REFRESH_EXAMPLES_ENV, v),
+            None    => std::env::remove_var(REFRESH_EXAMPLES_ENV),
+        }
+        // Re-raise the captured panic with the expected message so
+        // `#[should_panic(expected = "does not exist")]` matches.
+        if let Err(e) = _capture {
+            std::panic::resume_unwind(e);
+        }
     }
 }
