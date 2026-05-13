@@ -3,13 +3,33 @@
 // Two operator-facing entry points are exposed via `cargo xtask`:
 //
 //   * `cargo xtask hygiene [--dry-run] [--max-age-days N]
-//                          [--keep BRANCH ...]`
+//                          [--keep BRANCH ...] [--main-ref REF]`
 //
 //     Sweep `git worktree list` and remove every parent-side
-//     worktree whose branch tip is reachable from `origin/main`
-//     AND whose files are not actively held open by any process.
-//     The main checkout, anything passed to `--keep`, and the
-//     worktree the xtask was invoked from are always retained.
+//     worktree whose branch tip is reachable from the resolved
+//     "main" ref AND whose files are not actively held open by
+//     any process. The main checkout, anything passed to
+//     `--keep`, and the worktree the xtask was invoked from are
+//     always retained.
+//
+//     The merge-base reference is resolved as follows so the
+//     sweep works for forks / repos with a renamed default
+//     branch (`master` / `trunk` / `develop`) and not just the
+//     literal `origin/main`:
+//
+//       1. If the operator passes `--main-ref REF`, use REF
+//          verbatim (no parsing — caller owns the format, e.g.
+//          `origin/develop` or `refs/remotes/origin/develop`).
+//       2. Otherwise auto-detect via
+//          `git symbolic-ref --short refs/remotes/origin/HEAD`
+//          (returns e.g. `origin/main` / `origin/master`).
+//       3. If auto-detect fails (no remote, detached, etc.),
+//          fall back to the literal `origin/main`.
+//
+//     The chosen ref + its source is logged at sweep start as
+//     `[hygiene] main_ref=<ref> (auto|--main-ref override|fallback)`
+//     so the operator can audit which branch the merge-base
+//     check ran against.
 //
 //   * `cargo xtask hygiene-check [--threshold-pct N]`
 //
@@ -113,6 +133,14 @@ pub struct HygieneOpts {
     pub dry_run: bool,
     pub max_age_days: Option<u64>,
     pub keep_branches: HashSet<String>,
+    /// Operator-supplied override for the merge-base reference.
+    ///
+    /// `None` means "auto-detect via
+    /// `git symbolic-ref --short refs/remotes/origin/HEAD`,
+    /// fall back to `origin/main` if auto-detect fails";
+    /// `Some(REF)` pins the literal value passed on the CLI.
+    /// See [`resolve_main_ref`] for the resolution order.
+    pub main_ref: Option<String>,
 }
 
 impl HygieneOpts {
@@ -120,6 +148,7 @@ impl HygieneOpts {
         let mut dry_run = false;
         let mut max_age_days = None;
         let mut keep_branches: HashSet<String> = HashSet::new();
+        let mut main_ref: Option<String> = None;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -145,10 +174,25 @@ impl HygieneOpts {
                     keep_branches.insert(val.clone());
                     i += 2;
                 }
+                "--main-ref" => {
+                    let val = args.get(i + 1).ok_or_else(|| {
+                        anyhow!(
+                            "--main-ref requires a git ref (e.g. \
+                             origin/main, origin/develop, \
+                             refs/remotes/origin/master)"
+                        )
+                    })?;
+                    if val.is_empty() {
+                        bail!("--main-ref REF must be non-empty");
+                    }
+                    main_ref = Some(val.clone());
+                    i += 2;
+                }
                 other => bail!(
                     "unknown flag for `hygiene`: {other:?}\n\
                      usage: cargo xtask hygiene [--dry-run] \
-                     [--max-age-days N] [--keep BRANCH ...]"
+                     [--max-age-days N] [--keep BRANCH ...] \
+                     [--main-ref REF]"
                 ),
             }
         }
@@ -156,8 +200,96 @@ impl HygieneOpts {
             dry_run,
             max_age_days,
             keep_branches,
+            main_ref,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Default-branch ref resolution (auto-detect + fallback).
+// ---------------------------------------------------------------------------
+
+/// Source of the resolved main-ref value, surfaced in the
+/// `[hygiene] main_ref=<ref> (<source>)` log line so the
+/// operator can audit which branch the merge-base check ran
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainRefSource {
+    /// `--main-ref REF` was supplied by the operator.
+    OperatorOverride,
+    /// `git symbolic-ref --short refs/remotes/origin/HEAD`
+    /// returned a usable value.
+    AutoDetected,
+    /// Auto-detect failed (no remote, detached, repo with no
+    /// `origin/HEAD`, etc.) — fell back to the literal
+    /// `origin/main`.
+    Fallback,
+}
+
+impl MainRefSource {
+    fn label(self) -> &'static str {
+        match self {
+            MainRefSource::OperatorOverride => "--main-ref override",
+            MainRefSource::AutoDetected => "auto",
+            MainRefSource::Fallback => "fallback",
+        }
+    }
+}
+
+/// Parse the raw output of `git symbolic-ref --short
+/// refs/remotes/origin/HEAD` into a bare ref name. Returns
+/// `None` on empty / whitespace-only output.
+///
+/// `--short` is supposed to strip the `refs/remotes/` prefix
+/// already, but we defensively strip it again so a future git
+/// version (or a caller that swaps `--short` for the long form)
+/// still produces a clean `origin/<branch>` value.
+pub fn parse_symbolic_ref_output(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("refs/remotes/")
+        .unwrap_or(trimmed);
+    if stripped.is_empty() {
+        return None;
+    }
+    Some(stripped.to_string())
+}
+
+/// Try to discover the host repo's default-branch ref via
+/// `git symbolic-ref --short refs/remotes/origin/HEAD`.
+/// Returns `None` if the call fails (no `origin/HEAD`, repo has
+/// no `origin` remote, detached state, etc.) — caller is
+/// expected to fall back to `origin/main`.
+fn auto_detect_main_ref(repo_root: &Path) -> Option<String> {
+    let raw = run_git(
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        repo_root,
+    )
+    .ok()?;
+    parse_symbolic_ref_output(&raw)
+}
+
+/// Resolution order for the merge-base reference, applied in
+/// `sweep_worktrees`:
+///
+///   1. Operator override (`--main-ref REF`) if set;
+///   2. Auto-detect via `git symbolic-ref` if the repo has a
+///      configured `origin/HEAD`;
+///   3. Literal `origin/main` fallback.
+///
+/// Returns `(resolved_ref, source)` so the caller can both log
+/// the chosen value AND tag its provenance.
+fn resolve_main_ref(opts: &HygieneOpts, repo_root: &Path) -> (String, MainRefSource) {
+    if let Some(r) = opts.main_ref.as_deref() {
+        return (r.to_string(), MainRefSource::OperatorOverride);
+    }
+    if let Some(r) = auto_detect_main_ref(repo_root) {
+        return (r, MainRefSource::AutoDetected);
+    }
+    ("origin/main".to_string(), MainRefSource::Fallback)
 }
 
 // ---------------------------------------------------------------------------
@@ -349,18 +481,30 @@ pub struct SweepSummary {
 
 fn sweep_worktrees(opts: &HygieneOpts) -> anyhow::Result<SweepSummary> {
     let repo_root = repo_root_for_cwd()?;
+
+    let (resolved_main_ref, main_ref_source) = resolve_main_ref(opts, &repo_root);
+    eprintln!(
+        "[hygiene] main_ref={resolved_main_ref} ({})",
+        main_ref_source.label(),
+    );
+
     let porcelain = run_git(&["worktree", "list", "--porcelain"], &repo_root)?;
     let entries = parse_worktree_list(&porcelain);
     let self_dir = std::env::current_dir().ok();
 
     let disk_free_before_bytes = volume_free_bytes(&repo_root).unwrap_or(0);
 
+    // Bind a `&str` outside the closure so the captured
+    // reference lives as long as `ctx` (the closure literal
+    // borrows by reference, and `&str` is `Copy`).
+    let main_ref_for_closure: &str = resolved_main_ref.as_str();
+
     let ctx = ClassifyContext {
         keep_branches: &opts.keep_branches,
         self_dir: self_dir.as_deref(),
         is_ancestor_of_main: &|head| {
             run_git(
-                &["merge-base", "--is-ancestor", head, "origin/main"],
+                &["merge-base", "--is-ancestor", head, main_ref_for_closure],
                 &repo_root,
             )
             .is_ok()
@@ -844,5 +988,155 @@ branch refs/heads/worker/landed-empty
         assert_eq!(decisions[3], Decision::Keep(KeepReason::OnKeepList));
         assert_eq!(decisions[4], Decision::Keep(KeepReason::SelfInvocation));
         assert_eq!(decisions[5], Decision::Remove);
+    }
+
+    // -----------------------------------------------------------------
+    // --main-ref REF + auto-detect coverage (INV-HOST-HYGIENE-01).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn opts_default_main_ref_is_none() {
+        let opts = HygieneOpts::parse(&[]).expect("parse with no args");
+        assert!(
+            opts.main_ref.is_none(),
+            "no --main-ref means auto-detect at sweep time, not a hardcoded literal"
+        );
+    }
+
+    #[test]
+    fn opts_parser_accepts_main_ref_long_form() {
+        let args = vec![
+            "--main-ref".to_string(),
+            "refs/remotes/origin/develop".to_string(),
+        ];
+        let opts = HygieneOpts::parse(&args).expect("parse --main-ref");
+        assert_eq!(
+            opts.main_ref.as_deref(),
+            Some("refs/remotes/origin/develop"),
+            "operator override stored verbatim — caller owns the format"
+        );
+    }
+
+    #[test]
+    fn opts_parser_accepts_main_ref_short_form() {
+        let args = vec![
+            "--main-ref".to_string(),
+            "origin/master".to_string(),
+        ];
+        let opts = HygieneOpts::parse(&args).expect("parse --main-ref");
+        assert_eq!(opts.main_ref.as_deref(), Some("origin/master"));
+    }
+
+    #[test]
+    fn opts_parser_main_ref_combines_with_other_flags() {
+        let args = vec![
+            "--dry-run".to_string(),
+            "--main-ref".to_string(),
+            "origin/trunk".to_string(),
+            "--keep".to_string(),
+            "worker/keep-me".to_string(),
+            "--max-age-days".to_string(),
+            "3".to_string(),
+        ];
+        let opts = HygieneOpts::parse(&args).expect("parse mixed flags");
+        assert!(opts.dry_run);
+        assert_eq!(opts.main_ref.as_deref(), Some("origin/trunk"));
+        assert_eq!(opts.max_age_days, Some(3));
+        assert!(opts.keep_branches.contains("worker/keep-me"));
+    }
+
+    #[test]
+    fn opts_parser_rejects_main_ref_without_value() {
+        let args = vec!["--main-ref".to_string()];
+        let err = HygieneOpts::parse(&args).expect_err("missing value should fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--main-ref requires"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn opts_parser_rejects_empty_main_ref() {
+        let args = vec!["--main-ref".to_string(), "".to_string()];
+        let err = HygieneOpts::parse(&args).expect_err("empty value should fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--main-ref REF must be non-empty"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_symbolic_ref_output_short_form_main() {
+        // `git symbolic-ref --short refs/remotes/origin/HEAD` typically
+        // emits `origin/main\n` on a vanilla github repo.
+        assert_eq!(
+            parse_symbolic_ref_output("origin/main\n"),
+            Some("origin/main".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_symbolic_ref_output_short_form_master_or_develop() {
+        // Forks / older repos with the previous default-branch
+        // convention; what `master` looks like is exactly what
+        // we need to NOT hardcode against.
+        assert_eq!(
+            parse_symbolic_ref_output("origin/master\n"),
+            Some("origin/master".to_string())
+        );
+        assert_eq!(
+            parse_symbolic_ref_output("origin/develop\n"),
+            Some("origin/develop".to_string())
+        );
+        assert_eq!(
+            parse_symbolic_ref_output("origin/trunk\n"),
+            Some("origin/trunk".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_symbolic_ref_output_strips_long_refs_remotes_prefix() {
+        // Defensive: if a future git version (or a caller that
+        // drops `--short`) emits the long form, we still
+        // produce a clean `origin/<branch>` value.
+        assert_eq!(
+            parse_symbolic_ref_output("refs/remotes/origin/main\n"),
+            Some("origin/main".to_string())
+        );
+        assert_eq!(
+            parse_symbolic_ref_output("refs/remotes/origin/develop"),
+            Some("origin/develop".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_symbolic_ref_output_handles_trailing_whitespace() {
+        assert_eq!(
+            parse_symbolic_ref_output("  origin/main  \n"),
+            Some("origin/main".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_symbolic_ref_output_returns_none_for_empty_or_whitespace() {
+        // Mirror the failure modes of the underlying git call:
+        // detached worktree with no `origin/HEAD`, or a repo
+        // that never set up a remote — both surface as empty
+        // stdout. Caller falls back to the literal `origin/main`.
+        assert!(parse_symbolic_ref_output("").is_none());
+        assert!(parse_symbolic_ref_output("\n").is_none());
+        assert!(parse_symbolic_ref_output("   \t  \n").is_none());
+    }
+
+    #[test]
+    fn main_ref_source_label_is_stable() {
+        // Pinned: the log line
+        // `[hygiene] main_ref=<ref> (<source>)` is the only
+        // operator-visible audit hook for the resolved ref.
+        assert_eq!(MainRefSource::OperatorOverride.label(), "--main-ref override");
+        assert_eq!(MainRefSource::AutoDetected.label(), "auto");
+        assert_eq!(MainRefSource::Fallback.label(), "fallback");
     }
 }

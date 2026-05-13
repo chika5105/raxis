@@ -3666,10 +3666,11 @@ cannot satisfy the V2 disk-watchdog contract
 
 **Statement.** Every host running Raxis worker agents MUST
 have a worktree-hygiene mechanism that prunes git worktrees
-whose branches have landed to `origin/main` AND whose files
-are not actively held open. The live-e2e harness MUST refuse
-to run when host disk usage exceeds 90% on the repo volume,
-`/private/tmp`, or `/var/folders/*`.
+whose branches have landed to the host repo's resolved
+default-branch ref AND whose files are not actively held
+open. The live-e2e harness MUST refuse to run when host
+disk usage exceeds 90% on the repo volume, `/private/tmp`,
+or `/var/folders/*`.
 
 The reference implementation is `cargo xtask hygiene` (sweep)
 + `cargo xtask hygiene-check --threshold-pct N` (read-only
@@ -3680,14 +3681,38 @@ systemd unit `raxis/systemd/raxis-hygiene.{service,timer}`
 are the supported defaults — see
 `guides/operator/18-host-hygiene.md`).
 
+The merge-base reference used by the classifier is
+**operator-configurable / auto-detected, NOT hardcoded** so
+the invariant holds for any Raxis-based repo regardless of
+default-branch name (`main` / `master` / `trunk` /
+`develop` / etc.):
+
+1. If the operator passes `--main-ref REF`, that value is
+   used verbatim.
+2. Otherwise the resolver runs
+   `git symbolic-ref --short refs/remotes/origin/HEAD` and
+   uses whatever ref it returns (e.g. `origin/main` on a
+   vanilla clone, `origin/develop` on a fork).
+3. If auto-detect fails (no `origin/HEAD` configured,
+   detached state, etc.), the resolver falls back to the
+   literal `origin/main`.
+
+The chosen ref + its provenance MUST be logged at sweep
+start as `[hygiene] main_ref=<ref> (<source>)` where
+`<source>` is one of `auto`, `--main-ref override`, or
+`fallback`. The auto-detect parser is unit-tested
+(`xtask/src/hygiene.rs::tests::parse_symbolic_ref_output_*`)
+to ensure forks with renamed default branches produce a
+clean ref value.
+
 The classifier rule is mechanical:
 
 * REMOVABLE only when ALL of: (a) the worktree is NOT the
   main checkout, (b) the worktree is NOT on the operator's
   `--keep` allowlist, (c) the worktree is NOT the current
   `cargo xtask` invocation's own dir, (d) the branch tip is
-  reachable from `origin/main` (`git merge-base
-  --is-ancestor <tip> origin/main`), AND (e) no process
+  reachable from the resolved main ref (`git merge-base
+  --is-ancestor <tip> <main-ref>`), AND (e) no process
   holds files open under the worktree (lsof CWD evidence
   on macOS / Linux).
 * KEEP otherwise. The classifier surfaces a typed
@@ -3733,10 +3758,13 @@ the six landed worktrees disappear, and re-runs the test —
 clean.
 
 **Canonical home.** `xtask/src/hygiene.rs` header (sweep
-mechanism), `guides/operator/18-host-hygiene.md` (operator
-recipe). The structured-error payload is pinned in
-`crates/types/src/host_preflight.rs`; the dashboard banner
-contract is pinned in `dashboard-hardening.md §6`.
+mechanism + `resolve_main_ref` / `parse_symbolic_ref_output`
+default-branch resolver), `guides/operator/18-host-hygiene.md`
+"Default-branch resolution" section (operator recipe + the
+`--main-ref` override example). The structured-error payload
+is pinned in `crates/types/src/host_preflight.rs`; the
+dashboard banner contract is pinned in
+`dashboard-hardening.md §6`.
 
 ---
 

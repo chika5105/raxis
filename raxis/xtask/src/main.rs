@@ -124,11 +124,17 @@ fn main() -> anyhow::Result<()> {
         }
         Some("hygiene") => {
             // `cargo xtask hygiene [--dry-run] [--max-age-days N]
-            //                      [--keep BRANCH ...]`
+            //                      [--keep BRANCH ...] [--main-ref REF]`
             // — sweep `git worktree list` and prune parent-side
-            //   worktrees whose branch tip has landed to
-            //   `origin/main` AND whose files are not actively
-            //   held open. See `INV-HOST-HYGIENE-01` and
+            //   worktrees whose branch tip has landed to the
+            //   resolved "main" ref AND whose files are not
+            //   actively held open. The merge-base reference is
+            //   auto-detected from
+            //   `git symbolic-ref --short refs/remotes/origin/HEAD`
+            //   (so forks / repos with a renamed default branch
+            //   Just Work) and falls back to `origin/main` when
+            //   no `origin/HEAD` is configured. Pass `--main-ref`
+            //   to override. See `INV-HOST-HYGIENE-01` and
             //   `xtask/src/hygiene.rs` header for the motivation
             //   (the multi-GiB `target/` per worktree that filled
             //   902 GiB and tripped `DiskFullHaltEntered`).
@@ -192,7 +198,7 @@ fn main() -> anyhow::Result<()> {
              dev-keys init  [--dir <PATH>] [--force]   — emit local-build signing keypair\n                                                 (release-and-distribution.md §8)\n  \
              dev-codesign   [--profile <P>]            — ad-hoc codesign target/<P>/raxis-kernel\n                 [--entitlements <PATH>]    against release/raxis.entitlements\n                 [--binary <NAME>]          (macOS only; no-op on Linux)\n                                                 (system-requirements.md §5.2)\n  \
              dev-prereqs    [--install]                 — verify / install AVF demo prerequisites\n                 [--scope user|workspace]   (Homebrew, musl-cross, openssl@3,\n                 [--arch aarch64|x86_64]    rustup musl target, codesign, cargo);\n                 [--skip-cargo-config]     idempotently patches\n                                                 ~/.cargo/config.toml linker pin.\n                                                 (demo-e2e-sample/AVF_DEMO.md §0)\n  \
-             hygiene        [--dry-run]                — prune parent-side `git worktree`s whose\n                 [--max-age-days N]                       branch tip has landed to origin/main\n                 [--keep BRANCH ...]                      AND whose files are not actively held\n                                                          open. Skips the main checkout, anything\n                                                          on --keep, and the worktree the xtask\n                                                          itself was invoked from. Prints disk-\n                                                          before / disk-after to stderr.\n                                                          (INV-HOST-HYGIENE-01)\n  \
+             hygiene        [--dry-run]                — prune parent-side `git worktree`s whose\n                 [--max-age-days N]                       branch tip has landed to the resolved\n                 [--keep BRANCH ...]                      \"main\" ref AND whose files are not\n                 [--main-ref REF]                          actively held open. The main ref is\n                                                          auto-detected via `git symbolic-ref` so\n                                                          forks / non-`main` default branches Just\n                                                          Work; --main-ref overrides. Skips the\n                                                          main checkout, anything on --keep, and\n                                                          the worktree the xtask itself was invoked\n                                                          from. Prints disk-before / disk-after\n                                                          to stderr. (INV-HOST-HYGIENE-01)\n  \
              hygiene-check  [--threshold-pct N]         — read-only `df -P` probe across the repo\n                                                          volume, /private/tmp, and /var/folders/*.\n                                                          Exits non-zero when any volume exceeds\n                                                          --threshold-pct (default 85). Used as\n                                                          live-e2e preflight at 90%.\n                                                          (INV-HOST-HYGIENE-01)\n  \
              hygiene-install-timer                      — install the periodic hygiene-sweep timer\n                 [--system]                                  (every 6h via launchd on macOS or\n                 [--uninstall]                               systemd on Linux; user-scope by default,\n                 [--dry-run]                                 --system for shared hosts).\n                                                          (INV-HOST-HYGIENE-01,\n                                                           guides/operator/18-host-hygiene.md)\n  \
              dev-reset notifications                    — wipe the operator-notifications inbox\n                 [--data-dir <PATH>]                       projection (kernel.db::notifications\n                 [--dry-run]                               table + notifications/inbox.jsonl)\n                                                           so the next kernel boot starts empty\n                                                           AFTER the notification_priority\n                                                           filter took effect. The audit chain\n                                                           at <data_dir>/audit/ is NEVER touched\n                                                           (INV-NOTIF-SCOPE-01).\n  \

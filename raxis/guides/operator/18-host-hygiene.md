@@ -28,13 +28,69 @@ of the following hold:
 3. It is NOT the directory the running `cargo xtask` was
    invoked from.
 4. It is NOT `git worktree lock`-ed.
-5. Its branch tip IS reachable from `origin/main`
-   (`git merge-base --is-ancestor <tip> origin/main`).
+5. Its branch tip IS reachable from the resolved "main" ref
+   (`git merge-base --is-ancestor <tip> <main-ref>`). The ref
+   is auto-detected — see [Default-branch resolution](#default-branch-resolution)
+   below.
 6. NO live process holds files open under the worktree
    (`lsof -d cwd` evidence).
 
 Anything else is KEPT, with a typed `KeepReason` printed to
 `stderr` so the dry-run output is auditable.
+
+---
+
+## Default-branch resolution
+
+The merge-base reference (the "what counts as landed?" check
+on rule 5 above) is resolved at sweep time, not hardcoded, so
+forks and repos with a renamed default branch
+(`master` / `trunk` / `develop`) Just Work without surgery.
+
+Resolution order (first match wins):
+
+1. **Operator override** — if you pass `--main-ref REF`, that
+   value is used verbatim. Both short (`origin/develop`) and
+   long (`refs/remotes/origin/develop`) forms are accepted.
+2. **Auto-detect** — `git symbolic-ref --short refs/remotes/origin/HEAD`.
+   This is the same ref `git remote show origin` reports as
+   `HEAD branch`. On a vanilla `aegis-ai` clone it returns
+   `origin/main`; on a fork that renamed the default branch
+   to `develop` it returns `origin/develop`.
+3. **Fallback** — the literal `origin/main`. Used only when
+   auto-detect fails (no `origin` remote, no `origin/HEAD`
+   configured, detached state, etc.). Configure
+   `origin/HEAD` once with `git remote set-head origin -a`
+   to silence the fallback path.
+
+The chosen ref + its provenance is logged at sweep start so
+the operator can audit which branch the merge-base check ran
+against:
+
+```text
+[hygiene] main_ref=origin/main (auto)
+[hygiene] main_ref=origin/develop (--main-ref override)
+[hygiene] main_ref=origin/main (fallback)
+```
+
+### Example: running against a non-`main` repo
+
+```bash
+# A fork whose default branch is `develop`. No flag needed —
+# `cargo xtask hygiene` auto-detects via `git symbolic-ref`
+# and prints `main_ref=origin/develop (auto)` at sweep start.
+cd /path/to/my-fork
+cargo xtask hygiene --dry-run
+
+# A repo with no `origin/HEAD` configured (e.g. a freshly
+# `git init` clone) where you still want to sweep against
+# the `master` branch.
+cargo xtask hygiene --dry-run --main-ref origin/master
+
+# Long-form refs are also accepted; useful when the
+# operator wants to be unambiguous about the remote.
+cargo xtask hygiene --main-ref refs/remotes/origin/trunk
+```
 
 ---
 
@@ -54,6 +110,12 @@ cargo xtask hygiene --keep worker/some-feature --keep worker/other
 # 4) Optional: only sweep worktrees whose head commit is older
 #    than N days. Useful on shared hosts.
 cargo xtask hygiene --max-age-days 1
+
+# 5) Optional: pin the merge-base reference (default: auto-detect
+#    via `git symbolic-ref refs/remotes/origin/HEAD`, fallback
+#    `origin/main`). Use this on forks / repos with a renamed
+#    default branch — see "Default-branch resolution" below.
+cargo xtask hygiene --main-ref origin/develop
 ```
 
 The sweep prints a `[hygiene] removed=X kept=Y disk_free_before=...
