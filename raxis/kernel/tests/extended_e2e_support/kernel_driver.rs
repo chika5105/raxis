@@ -125,6 +125,103 @@ pub fn require_canonical_images() {
             .join(format!("raxis-{role}-{kernel_version}.manifest.toml"));
         assert!(img.exists(), "missing canonical image {}", img.display());
         assert!(manifest.exists(), "missing canonical manifest {}", manifest.display());
+
+        // ── Cpio content preflight ────────────────────────────────
+        //
+        // Iter-12 surfaced canonical-image stub regression: the
+        // manifest verified, the file existed, but the cpio
+        // contained nothing but the cross-compiled planner binary.
+        // `BashTool` returned `ENOENT` for every command the
+        // executor LLM tried to spawn. Walk the cpio.gz and assert
+        // every role-required binary is present BEFORE the kernel
+        // even boots — the test fails fast with an actionable
+        // remediation instead of timing out 4 minutes in.
+        //
+        // Fix: `cargo xtask images bake-rootfs --role <ROLE>`. The
+        // remediation in the panic message points at it.
+        let required = required_binaries_for_canonical_role(role);
+        if required.is_empty() {
+            // Orch + reviewer are intentionally binary-only today;
+            // the planner binary is checked below.
+        }
+        let entries = crate::extended_e2e_support::cpio_inspect::list_initramfs_paths(&img)
+            .unwrap_or_else(|e| panic!(
+                "failed to walk canonical image {}: {e}\n\
+                 The cpio.gz may be corrupted; rebuild via:\n  \
+                 cargo xtask images bake-rootfs --role {role}\n  \
+                 cargo xtask images dev-stage    --role {role}\n  \
+                 cargo xtask images build-all    --role {role}",
+                img.display(),
+            ));
+        let missing: Vec<&&'static str> = required
+            .iter()
+            .filter(|bin| !entries.contains_key(**bin))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "canonical {role} image is a stub — missing {n} required \
+             binar{plural} from {img}:\n{lines}\n\
+             \n\
+             This usually means `cargo xtask images bake-rootfs --role {role}` \
+             was skipped before `dev-stage` / `build-all`. The dev-host \
+             pipeline now bakes the rootfs FROM the canonical \
+             images/{role}/Containerfile via docker / podman / buildah; \
+             without that step the cpio.gz contains only the \
+             cross-compiled planner binary and `BashTool` returns ENOENT \
+             for every LLM-issued shell command (the iter-12 failure \
+             mode). Remediation:\n  \
+             cargo xtask images bake-rootfs --role {role}\n  \
+             cargo xtask images dev-stage    --role {role}\n  \
+             cargo xtask images build-all    --role {role}\n\
+             then re-run this test.",
+            n      = missing.len(),
+            plural = if missing.len() == 1 { "y" } else { "ies" },
+            img    = img.display(),
+            lines  = missing
+                         .iter()
+                         .map(|b| format!("  - {b}"))
+                         .collect::<Vec<_>>()
+                         .join("\n"),
+        );
+    }
+}
+
+/// Per-role inventory of cpio paths that MUST be present in the
+/// canonical signed initramfs. Mirrors xtask's `required_os_binaries`
+/// (the dev-stage stub guard) so a test failure here points at a
+/// pipeline regression in the same row of the same table.
+///
+/// The lists are deliberately tight (role-required, not nice-to-have)
+/// so they never go out of step with the canonical Containerfiles.
+/// Adding entries here without amending the Containerfile would
+/// surface as a pipeline regression rather than catching one.
+fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
+    match role {
+        // Executor LLM writes `psycopg2` / `pymongo` / `redis` /
+        // `smtplib` scripts and runs them via `bash -c 'python3 -c
+        // "..."'`; a missing bash, python3, or git here is the
+        // iter-12 failure mode. The planner binary itself is
+        // overlaid by `dev-stage` and lands at usr/local/bin/.
+        "executor-starter" => &[
+            "bin/bash",
+            "usr/bin/python3",
+            "usr/bin/git",
+            "usr/local/bin/raxis-executor",
+        ],
+        // Orchestrator + Reviewer are binary-only by current spec
+        // (INV-PLANNER-HARNESS-02 minimalism) — only the planner
+        // PID-1 binary is required to ship in the canonical cpio.
+        // Branch B follow-up will enrich orch / reviewer Containerfiles
+        // and update this table in lockstep.
+        "orchestrator-core" => &[
+            "usr/local/bin/raxis-orchestrator",
+        ],
+        "reviewer-core" => &[
+            "usr/local/bin/raxis-reviewer",
+        ],
+        other => panic!("unknown canonical role {other:?}; \
+                         expected one of: orchestrator-core, \
+                         executor-starter, reviewer-core"),
     }
 }
 

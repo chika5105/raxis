@@ -202,6 +202,13 @@ hex           = { workspace = true }
 tokio-util    = { version = "0.7", features = ["io"] }
 futures-util  = "0.3"
 parking_lot   = "0.12"
+# Used by `tests/extended_e2e_support/cpio_inspect.rs` to walk the
+# canonical role's signed cpio.gz initramfs and assert the role's
+# Containerfile-promised binaries are actually present (catches the
+# iter-12 binary-only stub regression at preflight time, before the
+# kernel even boots). Workspace-pinned to match the version
+# `raxis-initramfs-builder` (the producer-side crate) uses.
+flate2        = { workspace = true }
 # Dev-only — used by `tests/full_e2e_session_lifecycle.rs` to mint a
 # zero-UUID for the synthetic `AuditEvent` projection of the genesis
 # chain row. The genesis row has no `event_id` (it's a different
