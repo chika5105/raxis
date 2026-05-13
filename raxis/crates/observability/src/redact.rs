@@ -149,6 +149,23 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     // rejected the intent). The matching `reason` label is already
     // covered by the generic `reason` schema above.
     ("admissible",        AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
+    // iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01`: the
+    // `KernelRespawn{Total,Duration}` family carries a closed
+    // `trigger` lexicon
+    // { `deadlock`, `sigsegv`, `sigabrt`, `exit_70`, `other` }
+    // disambiguating the operator-visible cause of every
+    // supervisor-driven kernel respawn. Outcome (`ok` /
+    // `refused_ceiling` / `refused_other`) reuses the generic
+    // `outcome` schema above. `message_kind` (4b) and `role` (4b)
+    // are also closed lexicons whose schemas already exist
+    // (`reason`/`role`).
+    ("trigger",           AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
+    // iter44 slice 4b — `KernelSubstrateIpc*` family carries a
+    // closed `message_kind` lexicon
+    // { `ksb_update`, `tool_call`, `tool_result`, `intent_submit`,
+    //   `intent_response`, `exit_notification`, `other` } per
+    // `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`.
+    ("message_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
 ];
 
 /// Explicit denylist. Defense-in-depth: even if a key accidentally

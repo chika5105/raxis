@@ -87,8 +87,8 @@
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
-| Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01 | 1 |
-| **Total** | | **106** |
+| Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01 | 2 |
+| **Total** | | **107** |
 
 ---
 
@@ -5828,6 +5828,113 @@ recognises it as the agent-disagreement code path, and moves on.
 
 **Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
 row for `IsolationRespawnAttemptedTotal`).
+
+### INV-OBS-KERNEL-RESPAWN-COVERAGE-01 — Every supervisor-driven kernel respawn has a paired metric emission
+
+**Statement.** Every `KernelRespawnedBySupervisor` audit event the
+supervisor writes (via the sentinel-file → kernel-boot rehydration
+path documented in `v2/self-healing-supervisor.md §3.3`) MUST be
+paired with one `KernelRespawnTotal` counter increment AND one
+`KernelRespawnDuration` histogram observation, both emitted from
+the kernel-boot codepath the next time the kernel boots and reads
+the supervisor sentinel. Symmetrically, every kernel boot that
+observes a `Halted` sentinel (the operator manually bypassed the
+supervisor after a circuit-open / forced-stop episode) MUST emit
+one `SupervisorRefusedRestartTotal` counter increment.
+
+The label vocabularies are CLOSED:
+* `KernelRespawnTotal.trigger` ∈ `{ "deadlock", "sigsegv",
+  "sigabrt", "exit_70", "other" }`.
+* `KernelRespawnTotal.outcome` ∈ `{ "ok", "refused_ceiling",
+  "refused_other" }`. (Today the kernel-boot path only emits `ok`;
+  `refused_*` are reserved for a future supervisor-side emission
+  expansion — the supervisor crate is intentionally
+  observability-isolated and would have to grow a hub binding to
+  emit `refused_*` directly.)
+* `KernelRespawnDuration.trigger` — same closed set as above.
+* `SupervisorRefusedRestartTotal.reason` ∈ `{ "circuit_open",
+  "operator_stop", "operator_stop_forced", "supervisor_gone",
+  "other" }`.
+
+Adding a new value to any of these lexicons is a spec change to
+`v3/otel-observability.md §8` AND a code change to
+`kernel/src/observability.rs::RESPAWN_*_CLOSED_SET` /
+`REFUSED_REASON_CLOSED_SET`.
+
+**Justification.** The supervisor crate (`crates/supervisor/`) is
+deliberately process-isolated from the kernel and takes ZERO
+`raxis-*` dependencies — its design contract (per
+`crates/supervisor/src/lib.rs` module-doc) is "spawn child /
+classify exit / decide restart-or-not, with the audit chain owned
+by the kernel and the sentinel file owned by the supervisor".
+That single-responsibility design is load-bearing for the
+crash-loop story: even a kernel-side crate-graph regression must
+not be able to break the supervisor's ability to spawn the kernel.
+Keeping the supervisor observability-isolated mirrors that
+constraint: the operator dashboard's "Self-healing supervisor"
+panels are fed by the kernel-side rehydration path, which is the
+structural witness for every supervisor-driven restart episode
+(the kernel cannot boot WITHOUT reading the sentinel; reading the
+sentinel is what produces the metric).
+
+Pre-iter44 the audit chain was the only operator-visible record of
+self-healing activity. Operators who wanted "what is the kernel
+respawn rate over the last hour?" had to grep the audit chain or
+write SQL against the supervisor's circuit-breaker file. The
+dashboard panel "Self-healing supervisor" in
+`grafana/dashboards/00-overview.json` (rows 31, 32, 33) renders
+the rate-by-trigger, latency p50/p95/p99, and refused-restart rate
+without operator-side joins.
+
+**Scenario.** A canonical-images preflight regression sends the
+kernel into a tight crash-loop on every boot. The supervisor
+restarts it three times in 30 seconds, then trips its circuit
+breaker and writes `Halted (CircuitOpen)`. The operator notices
+their CLI commands hanging, logs in, sees the `Halted` sentinel,
+and starts the kernel directly (`raxis-kernel` instead of
+`raxis-supervisor`) to investigate. With this invariant:
+
+  1. The first three boots each emit one `KernelRespawnTotal{
+     trigger="deadlock", outcome="ok"}` increment and one
+     `KernelRespawnDuration{trigger="deadlock"}` observation
+     (the supervisor sentinel was `Restarting` each time).
+  2. The fourth boot — operator-bypassed — emits one
+     `SupervisorRefusedRestartTotal{reason="circuit_open"}`
+     increment.
+
+The dashboard's "Kernel respawn rate by trigger" panel shows a
++3 spike on the `deadlock` series; "Supervisor refused-restart
+rate" shows a +1 on `circuit_open`. The operator immediately
+recognises the pattern (deadlock → circuit-trip → manual bypass)
+without opening the audit log or the supervisor's stderr file.
+
+**Witness.** Five unit tests in
+`kernel/src/observability.rs::kernel_respawn_tests`:
+* `every_trigger_outcome_pair_emits_paired_metrics` — drives
+  `record_kernel_respawn` once per (trigger, outcome) pair drawn
+  from the closed lexicons and asserts both the counter and the
+  histogram observation land with the matching labels and that
+  the histogram uses the iter44 wide-bucket override (not the
+  hub's global default).
+* `missing_duration_emits_counter_only` — covers the older
+  supervisor binary case (sentinel does not surface
+  `last_restart_unix_ts`); only the counter fires.
+* `closed_sets_match_spec_tables` — pins the trigger / outcome /
+  reason lexemes against this invariant text.
+* `classify_respawn_trigger_is_total_and_in_closed_set` — pins
+  the supervisor `last_restart_reason` × `prev_run_exit_code` →
+  `trigger` mapping table verbatim from this invariant.
+* `supervisor_refused_reason_is_total_and_in_closed_set` — pins
+  the supervisor sentinel `sub_state` → `reason` mapping.
+* `refused_restart_emits_counter` — drives every
+  `REFUSED_REASON_CLOSED_SET` value through
+  `record_supervisor_refused_restart`, asserts the counter and
+  the closed-set membership of the `reason` label.
+
+**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+rows for `KernelRespawnTotal` / `KernelRespawnDuration` /
+`SupervisorRefusedRestartTotal`) + cross-ref from
+`v2/self-healing-supervisor.md §9`.
 
 ---
 

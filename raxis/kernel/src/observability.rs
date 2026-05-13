@@ -955,6 +955,443 @@ mod respawn_kind_tests {
 }
 
 // ---------------------------------------------------------------------------
+// iter44 perf-metrics — `INV-OBS-KERNEL-RESPAWN-COVERAGE-01`.
+//
+// `KernelRespawn{Total,Duration}` + `SupervisorRefusedRestartTotal`
+// are the operator-visible counterpart to the supervisor's audit
+// events `KernelRespawnedBySupervisor` /
+// `KernelBootedFromSupervisorRestart` /
+// `KernelCrashedBySignal` / `KernelTerminatedByOperator` /
+// `SupervisorRefusedRestart` / `SupervisorRestartCeilingExceeded`.
+//
+// **Recording site rationale.** The supervisor crate
+// (`crates/supervisor/`) is deliberately process-isolated from the
+// kernel and intentionally takes ZERO `raxis-*` dependencies (per
+// `crates/supervisor/src/lib.rs` module-doc + `Cargo.toml` comment).
+// Linking `raxis-observability` into the supervisor would (a) break
+// that single-responsibility design, (b) introduce a second
+// observability ring file owned by the supervisor process, and (c)
+// require the supervisor to carry a `parking_lot` + JSONL exporter
+// surface it does not otherwise need. The pragmatic alternative —
+// recording from the kernel-boot codepath that already reads the
+// supervisor's `kernel_lifecycle_status.json` sentinel — keeps the
+// audit chain (durable, supervisor-written) the source of truth and
+// uses the kernel's existing `ObservabilityHub` for the dashboard
+// fast-path.
+//
+// **Coverage.** The kernel-boot path is a structural witness for
+// every `KernelBootedFromSupervisorRestart` (the supervisor wrote
+// `Restarting`, the kernel boots, sees the sentinel, emits the
+// metric). The `refused_*` outcomes of `KernelRespawnTotal` are
+// emitted from the same boot path when the kernel observes a
+// `Halted (CircuitOpen)` sentinel — the operator manually bypassed
+// the supervisor after a circuit-open episode (forensic-completeness
+// counterpart to the supervisor's `SupervisorRefusedRestart` audit
+// event the previous run wrote on its way out).
+//
+// **Closed lexicons.**
+//   * `trigger ∈ { deadlock, sigsegv, sigabrt, exit_70, other }` —
+//     mapped from the supervisor's `last_restart_reason` PascalCase
+//     classification (`DeadlockDetected` / `SignalCrash` /
+//     `OomKilled` / `PanicAbort`) plus the prior kernel's
+//     `prev_run_exit_code` (128 + signal for signaled exits, the
+//     literal exit code for normal exits).
+//   * `outcome  ∈ { ok, refused_ceiling, refused_other }` — from
+//     the kernel-boot path the value is always `ok` (the kernel did
+//     boot, so the respawn succeeded); the `refused_*` outcomes are
+//     a future expansion point if the supervisor later links
+//     observability cleanly.
+//   * `reason   ∈ { circuit_open, operator_stop, operator_stop_forced,
+//                   supervisor_gone, other }` — drawn from the
+//     supervisor sentinel's `sub_state` field for `Halted` rows.
+// ---------------------------------------------------------------------------
+
+/// Trigger lexicon — every `KernelRespawn{Total,Duration}` emission
+/// carries `trigger` drawn from this closed set. The dashboard at
+/// `grafana/dashboards/00-overview.json` ("Self-healing supervisor")
+/// pivots on this label.
+pub const RESPAWN_TRIGGER_DEADLOCK: &str = "deadlock";
+/// Crash signal SIGSEGV / SIGBUS — load-bearing dashboard label for
+/// "the kernel crashed under us, not a deadlock".
+pub const RESPAWN_TRIGGER_SIGSEGV: &str = "sigsegv";
+/// Crash signal SIGABRT — assertion failure / `panic = abort`.
+pub const RESPAWN_TRIGGER_SIGABRT: &str = "sigabrt";
+/// Process exit code 70 — the deadlock watcher's classifier exit.
+/// Distinguished from `deadlock` because the supervisor's
+/// `PanicAbort` classifier maps any non-zero non-70 exit to
+/// `PanicAbort{n}`; `exit_70` lets the dashboard separate
+/// "watcher-triggered exit" from "kernel deadlock detected by other
+/// means".
+pub const RESPAWN_TRIGGER_EXIT_70: &str = "exit_70";
+/// Anything not covered above — OOM-kill (SIGKILL), SIGHUP, signaled
+/// exits whose signal number is unknown.
+pub const RESPAWN_TRIGGER_OTHER: &str = "other";
+
+/// Closed set of every `trigger` lexeme the kernel may emit.
+pub const RESPAWN_TRIGGER_CLOSED_SET: &[&str] = &[
+    RESPAWN_TRIGGER_DEADLOCK,
+    RESPAWN_TRIGGER_SIGSEGV,
+    RESPAWN_TRIGGER_SIGABRT,
+    RESPAWN_TRIGGER_EXIT_70,
+    RESPAWN_TRIGGER_OTHER,
+];
+
+/// Outcome lexicon — `KernelRespawnTotal` only.
+/// `ok` is the only value emitted from the kernel-boot path (the
+/// kernel did boot); `refused_ceiling` / `refused_other` are
+/// reserved for a future supervisor-side expansion.
+pub const RESPAWN_OUTCOME_OK: &str = "ok";
+/// Reserved — supervisor-side emission (circuit-breaker tripped).
+pub const RESPAWN_OUTCOME_REFUSED_CEILING: &str = "refused_ceiling";
+/// Reserved — supervisor-side emission (any other refusal path).
+pub const RESPAWN_OUTCOME_REFUSED_OTHER: &str = "refused_other";
+
+/// Closed set of every `outcome` lexeme `KernelRespawnTotal` may
+/// carry. The witness test pins these so a future emit site that
+/// adds a fifth value without a spec change fails CI.
+pub const RESPAWN_OUTCOME_CLOSED_SET: &[&str] = &[
+    RESPAWN_OUTCOME_OK,
+    RESPAWN_OUTCOME_REFUSED_CEILING,
+    RESPAWN_OUTCOME_REFUSED_OTHER,
+];
+
+/// `SupervisorRefusedRestartTotal` — `reason` lexicon. Drawn from
+/// the supervisor sentinel's `sub_state` field for `Halted` rows;
+/// `other` is the fallback for forward-compat with future supervisor
+/// revisions that may invent new sub-states.
+pub const REFUSED_REASON_CIRCUIT_OPEN:         &str = "circuit_open";
+/// Operator initiated the stop (`raxis-supervisor stop` / SIGTERM /
+/// SIGINT). Recorded so the dashboard can distinguish "supervisor
+/// halted us because the breaker tripped" from "operator
+/// deliberately stopped the supervisor".
+pub const REFUSED_REASON_OPERATOR_STOP:        &str = "operator_stop";
+/// Operator forced the stop (`raxis-supervisor stop --force` /
+/// SIGKILL).
+pub const REFUSED_REASON_OPERATOR_STOP_FORCED: &str = "operator_stop_forced";
+/// Supervisor process is gone — the dashboard's
+/// `kernel_lifecycle_status.json` handler synthesises this when the
+/// sentinel is stale + the supervisor PID is missing
+/// (`SentinelSubState::SupervisorGone`).
+pub const REFUSED_REASON_SUPERVISOR_GONE:      &str = "supervisor_gone";
+/// Anything else — forward-compat fallback for sub-state values not
+/// covered above.
+pub const REFUSED_REASON_OTHER:                &str = "other";
+
+/// Closed set of every `reason` lexeme `SupervisorRefusedRestartTotal`
+/// may carry.
+pub const REFUSED_REASON_CLOSED_SET: &[&str] = &[
+    REFUSED_REASON_CIRCUIT_OPEN,
+    REFUSED_REASON_OPERATOR_STOP,
+    REFUSED_REASON_OPERATOR_STOP_FORCED,
+    REFUSED_REASON_SUPERVISOR_GONE,
+    REFUSED_REASON_OTHER,
+];
+
+/// Histogram bucket boundaries (ms) for `KernelRespawnDuration`.
+/// Wide spread per the prompt — kernel respawn ranges from
+/// sub-second auto-restart through 5 minute crash-loop back-off.
+/// The hub's global default
+/// (`[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]`)
+/// would lose all resolution past 10 seconds.
+pub const RESPAWN_DURATION_BUCKETS_MS: &[f64] = &[
+    10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 30000.0, 60000.0, 300000.0,
+];
+
+/// Map a supervisor `last_restart_reason` (PascalCase, see
+/// `crates/supervisor/src/classify.rs::Outcome::reason_str`) plus the
+/// prior kernel's `prev_run_exit_code` to the closed `trigger`
+/// lexicon.
+///
+/// Decision table (mirror of
+/// `crates/supervisor/src/classify.rs` + the Linux signal-number
+/// shell convention `128 + signal`):
+///
+/// | supervisor reason     | prev_run_exit_code | trigger    |
+/// |-----------------------|--------------------|------------|
+/// | `DeadlockDetected`    | (any; always 70)   | `deadlock` |
+/// | `SignalCrash`         | 139 = 128+11       | `sigsegv`  |
+/// | `SignalCrash`         | 134 = 128+6        | `sigabrt`  |
+/// | `SignalCrash`         | 135 = 128+7  (BUS) | `sigsegv`  |
+/// | `SignalCrash`         | 138 = 128+10 (BUS) | `sigsegv`  |
+/// | `SignalCrash`         | other              | `other`    |
+/// | `PanicAbort`          | 70                 | `exit_70`  |
+/// | `PanicAbort`          | other              | `other`    |
+/// | `OomKilled`           | (always 137)       | `other`    |
+/// | `CleanExit`           | (any)              | `other`    |
+/// | `OperatorSignalExit`  | (any)              | `other`    |
+/// | unknown / absent      | (any)              | `other`    |
+///
+/// The function is total over both inputs — every (reason,
+/// exit_code) pair maps to one of [`RESPAWN_TRIGGER_CLOSED_SET`].
+pub fn classify_respawn_trigger(
+    supervisor_reason: Option<&str>,
+    prev_run_exit_code: Option<i32>,
+) -> &'static str {
+    match supervisor_reason {
+        Some("DeadlockDetected") => RESPAWN_TRIGGER_DEADLOCK,
+        Some("SignalCrash") => match prev_run_exit_code {
+            // SIGSEGV (11), SIGBUS (7 on Linux, 10 on some BSDs).
+            Some(139) | Some(135) | Some(138) => RESPAWN_TRIGGER_SIGSEGV,
+            // SIGABRT (6).
+            Some(134) => RESPAWN_TRIGGER_SIGABRT,
+            _ => RESPAWN_TRIGGER_OTHER,
+        }
+        Some("PanicAbort") if prev_run_exit_code == Some(70) => RESPAWN_TRIGGER_EXIT_70,
+        Some("PanicAbort") => RESPAWN_TRIGGER_OTHER,
+        _ => RESPAWN_TRIGGER_OTHER,
+    }
+}
+
+/// Map a supervisor `Halted` sentinel `sub_state` to the closed
+/// `reason` lexicon for `SupervisorRefusedRestartTotal`. Total
+/// function — every input (including `None` and unknown values)
+/// maps to one of [`REFUSED_REASON_CLOSED_SET`].
+pub fn supervisor_refused_reason(sub_state: Option<&str>) -> &'static str {
+    match sub_state {
+        Some("CircuitOpen")        => REFUSED_REASON_CIRCUIT_OPEN,
+        Some("OperatorStop")       => REFUSED_REASON_OPERATOR_STOP,
+        Some("OperatorStopForced") => REFUSED_REASON_OPERATOR_STOP_FORCED,
+        Some("SupervisorGone")     => REFUSED_REASON_SUPERVISOR_GONE,
+        _                           => REFUSED_REASON_OTHER,
+    }
+}
+
+/// `raxis.kernel.respawn.{total,duration}` — emit one counter
+/// increment plus one histogram observation for a single
+/// supervisor-driven kernel respawn. Called from `kernel/src/main.rs`
+/// boot-path Step 8a' after `rehydrate_restart_context` confirms the
+/// sentinel said `Restarting`.
+///
+/// `trigger` MUST be drawn from [`RESPAWN_TRIGGER_CLOSED_SET`];
+/// `outcome` MUST be drawn from [`RESPAWN_OUTCOME_CLOSED_SET`].
+/// `duration_ms` is the wall-clock supervisor-decision → kernel-up
+/// (computed by the caller from the sentinel's
+/// `last_restart_unix_ts` and the kernel's wallclock at the call
+/// site); pass `None` when the sentinel did not surface a
+/// `last_restart_unix_ts` (older supervisor binaries) — only the
+/// counter is emitted in that case.
+pub fn record_kernel_respawn(
+    hub:         &ObservabilityHub,
+    trigger:     &str,
+    outcome:     &str,
+    duration_ms: Option<i64>,
+) {
+    if !hub.enabled() { return; }
+    let labels_total = redact::attrs([
+        ("trigger", trigger),
+        ("outcome", outcome),
+    ]);
+    hub.record_counter(MetricName::KernelRespawnTotal, labels_total, 1.0);
+    if let Some(ms) = duration_ms {
+        let labels_dur = redact::attrs([("trigger", trigger)]);
+        hub.record_histogram_with_buckets(
+            MetricName::KernelRespawnDuration,
+            labels_dur,
+            ms.max(0) as f64,
+            RESPAWN_DURATION_BUCKETS_MS.to_vec(),
+        );
+    }
+}
+
+/// `raxis.supervisor.refused_restart.total` — emit one counter
+/// increment when the kernel boots and observes a `Halted` sentinel
+/// (`CircuitOpen` / `OperatorStop` / `OperatorStopForced` /
+/// `SupervisorGone`). One bump per kernel boot — the kernel-boot
+/// path is the structural witness for "an operator manually bypassed
+/// a halted supervisor", which is the operationally interesting
+/// event the operator dashboard wants to surface.
+pub fn record_supervisor_refused_restart(
+    hub:    &ObservabilityHub,
+    reason: &str,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([("reason", reason)]);
+    hub.record_counter(MetricName::SupervisorRefusedRestartTotal, labels, 1.0);
+}
+
+#[cfg(test)]
+mod kernel_respawn_tests {
+    use super::*;
+    use raxis_observability::{
+        exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
+        ObservabilityExporter, ObservabilityHub,
+    };
+    use std::sync::Arc;
+
+    fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled:     true,
+            sample_rate: 1.0,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
+        (hub, exp)
+    }
+
+    /// `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` witness #1: every
+    /// (`trigger`, `outcome`) pair drawn from the closed lexicons
+    /// emits BOTH the counter and the histogram observation, with
+    /// the labels the dashboard pivots on.
+    #[test]
+    fn every_trigger_outcome_pair_emits_paired_metrics() {
+        for &trigger in RESPAWN_TRIGGER_CLOSED_SET {
+            for &outcome in RESPAWN_OUTCOME_CLOSED_SET {
+                let (hub, exp) = enabled_hub();
+                record_kernel_respawn(hub.as_ref(), trigger, outcome, Some(1234));
+                hub.flush();
+                let metrics = exp.metrics();
+                assert_eq!(
+                    metrics.len(), 2,
+                    "expected counter+histogram pair for trigger={trigger} outcome={outcome}",
+                );
+                let counter = metrics.iter().find(|m| m.name == MetricName::KernelRespawnTotal)
+                    .expect("KernelRespawnTotal present");
+                let histogram = metrics.iter().find(|m| m.name == MetricName::KernelRespawnDuration)
+                    .expect("KernelRespawnDuration present");
+                assert!(matches!(
+                    counter.datapoint,
+                    DataPoint::Sum { value } if (value - 1.0).abs() < 1e-9,
+                ));
+                match counter.labels.get("trigger").unwrap() {
+                    AttrValue::Str(s) => assert_eq!(s, trigger),
+                    other            => panic!("trigger must be Str, got {other:?}"),
+                }
+                match counter.labels.get("outcome").unwrap() {
+                    AttrValue::Str(s) => assert_eq!(s, outcome),
+                    other            => panic!("outcome must be Str, got {other:?}"),
+                }
+                match histogram.labels.get("trigger").unwrap() {
+                    AttrValue::Str(s) => assert_eq!(s, trigger),
+                    other            => panic!("histogram trigger must be Str, got {other:?}"),
+                }
+                // Histogram's bucket spread must use the iter44
+                // wide-bucket override, not the hub's global default.
+                if let DataPoint::Histo { ref buckets, .. } = histogram.datapoint {
+                    assert_eq!(buckets, RESPAWN_DURATION_BUCKETS_MS,
+                        "histogram MUST use the wide kernel-respawn buckets");
+                } else {
+                    panic!("histogram datapoint must be Histo, got {:?}", histogram.datapoint);
+                }
+            }
+        }
+    }
+
+    /// `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` witness #2: when the
+    /// sentinel does not surface `last_restart_unix_ts` (older
+    /// supervisor binaries pre-iter44) the counter still fires but
+    /// the histogram observation is skipped — better to surface the
+    /// rate than to lie about latency.
+    #[test]
+    fn missing_duration_emits_counter_only() {
+        let (hub, exp) = enabled_hub();
+        record_kernel_respawn(
+            hub.as_ref(),
+            RESPAWN_TRIGGER_DEADLOCK,
+            RESPAWN_OUTCOME_OK,
+            None,
+        );
+        hub.flush();
+        let metrics = exp.metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].name, MetricName::KernelRespawnTotal);
+    }
+
+    /// Defence-in-depth: the closed sets MUST contain exactly the
+    /// lexemes the spec §8 table enumerates.
+    #[test]
+    fn closed_sets_match_spec_tables() {
+        let trigger_expected = ["deadlock", "sigsegv", "sigabrt", "exit_70", "other"];
+        assert_eq!(RESPAWN_TRIGGER_CLOSED_SET.len(), trigger_expected.len());
+        for &e in &trigger_expected {
+            assert!(RESPAWN_TRIGGER_CLOSED_SET.contains(&e));
+        }
+        let outcome_expected = ["ok", "refused_ceiling", "refused_other"];
+        assert_eq!(RESPAWN_OUTCOME_CLOSED_SET.len(), outcome_expected.len());
+        for &e in &outcome_expected {
+            assert!(RESPAWN_OUTCOME_CLOSED_SET.contains(&e));
+        }
+        let reason_expected = [
+            "circuit_open", "operator_stop", "operator_stop_forced",
+            "supervisor_gone", "other",
+        ];
+        assert_eq!(REFUSED_REASON_CLOSED_SET.len(), reason_expected.len());
+        for &e in &reason_expected {
+            assert!(REFUSED_REASON_CLOSED_SET.contains(&e));
+        }
+    }
+
+    /// `classify_respawn_trigger` is total — the function must
+    /// return one of the closed-set lexemes for every supervisor
+    /// reason / exit code combination, including `None`.
+    #[test]
+    fn classify_respawn_trigger_is_total_and_in_closed_set() {
+        let cases: &[(Option<&str>, Option<i32>, &str)] = &[
+            (Some("DeadlockDetected"), Some(70),  RESPAWN_TRIGGER_DEADLOCK),
+            (Some("DeadlockDetected"), None,      RESPAWN_TRIGGER_DEADLOCK),
+            (Some("SignalCrash"),      Some(139), RESPAWN_TRIGGER_SIGSEGV),
+            (Some("SignalCrash"),      Some(134), RESPAWN_TRIGGER_SIGABRT),
+            (Some("SignalCrash"),      Some(135), RESPAWN_TRIGGER_SIGSEGV),
+            (Some("SignalCrash"),      Some(138), RESPAWN_TRIGGER_SIGSEGV),
+            (Some("SignalCrash"),      Some(137), RESPAWN_TRIGGER_OTHER),
+            (Some("PanicAbort"),       Some(70),  RESPAWN_TRIGGER_EXIT_70),
+            (Some("PanicAbort"),       Some(1),   RESPAWN_TRIGGER_OTHER),
+            (Some("OomKilled"),        Some(137), RESPAWN_TRIGGER_OTHER),
+            (Some("CleanExit"),        Some(0),   RESPAWN_TRIGGER_OTHER),
+            (Some("OperatorSignalExit"), Some(143), RESPAWN_TRIGGER_OTHER),
+            (None,                     None,      RESPAWN_TRIGGER_OTHER),
+            (Some("UnknownFutureValue"), Some(42), RESPAWN_TRIGGER_OTHER),
+        ];
+        for (reason, exit, want) in cases {
+            let got = classify_respawn_trigger(*reason, *exit);
+            assert_eq!(got, *want,
+                "classify_respawn_trigger({reason:?}, {exit:?}) → {got}, want {want}");
+            assert!(RESPAWN_TRIGGER_CLOSED_SET.contains(&got));
+        }
+    }
+
+    /// `supervisor_refused_reason` is total — every input maps to a
+    /// closed-set lexeme.
+    #[test]
+    fn supervisor_refused_reason_is_total_and_in_closed_set() {
+        let cases: &[(Option<&str>, &str)] = &[
+            (Some("CircuitOpen"),        REFUSED_REASON_CIRCUIT_OPEN),
+            (Some("OperatorStop"),       REFUSED_REASON_OPERATOR_STOP),
+            (Some("OperatorStopForced"), REFUSED_REASON_OPERATOR_STOP_FORCED),
+            (Some("SupervisorGone"),     REFUSED_REASON_SUPERVISOR_GONE),
+            (Some("UnknownFuture"),      REFUSED_REASON_OTHER),
+            (None,                       REFUSED_REASON_OTHER),
+        ];
+        for (sub, want) in cases {
+            let got = supervisor_refused_reason(*sub);
+            assert_eq!(got, *want);
+            assert!(REFUSED_REASON_CLOSED_SET.contains(&got));
+        }
+    }
+
+    /// `record_supervisor_refused_restart` emits one counter
+    /// increment per call, with the closed-lexicon `reason` label.
+    #[test]
+    fn refused_restart_emits_counter() {
+        for &reason in REFUSED_REASON_CLOSED_SET {
+            let (hub, exp) = enabled_hub();
+            record_supervisor_refused_restart(hub.as_ref(), reason);
+            hub.flush();
+            let metrics = exp.metrics();
+            assert_eq!(metrics.len(), 1);
+            assert_eq!(metrics[0].name, MetricName::SupervisorRefusedRestartTotal);
+            match metrics[0].labels.get("reason").unwrap() {
+                AttrValue::Str(s) => assert_eq!(s, reason),
+                other            => panic!("reason must be Str, got {other:?}"),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // iter44 perf-metrics — `IntentAdmitPredicateEvaluatedTotal`.
 //
 // Every kernel-side admit-predicate evaluation (currently the

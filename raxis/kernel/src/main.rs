@@ -731,6 +731,66 @@ async fn main() {
             );
         }
 
+        // iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` — emit the
+        // self-healing supervisor metrics paired with the audit
+        // events the rehydration above just wrote. Reads the
+        // sentinel a second time (fresh — the rehydration call
+        // consumed the moved value) regardless of status so we can
+        // distinguish:
+        //
+        //   * sentinel.status == "Restarting" → the supervisor just
+        //     restarted us; emit one `KernelRespawnTotal` increment
+        //     plus one `KernelRespawnDuration` observation. The
+        //     duration is wallclock from sentinel
+        //     `last_restart_unix_ts` to `unix_now` — supervisor
+        //     decision-to-kernel-up.
+        //
+        //   * sentinel.status == "Halted" → the supervisor
+        //     previously refused to spawn us (`CircuitOpen`) or was
+        //     deliberately stopped by the operator
+        //     (`OperatorStop[Forced]`); the operator manually
+        //     started this kernel by-passing the halted supervisor.
+        //     Emit one `SupervisorRefusedRestartTotal` increment so
+        //     the dashboard surfaces the operational fact.
+        //
+        //   * sentinel.status == "Healthy" or sentinel absent → the
+        //     supervisor is in steady state (or never ran); no
+        //     metric to emit. The next `Healthy` sentinel write the
+        //     supervisor performs after this kernel-up establishes
+        //     dashboard ground truth via the existing
+        //     `kernel_lifecycle_status.json` handler.
+        let any_status_sentinel = restart_lifecycle::read_sentinel_any_status(&sentinel_path);
+        if let Some(s) = any_status_sentinel {
+            match s.status.as_str() {
+                "Restarting" => {
+                    let trigger = observability::classify_respawn_trigger(
+                        s.last_restart_reason.as_deref(),
+                        s.prev_run_exit_code,
+                    );
+                    let unix_now_i64 = unix_now as i64;
+                    let duration_ms = s.last_restart_unix_ts.map(|ts| {
+                        unix_now_i64.saturating_sub(ts).saturating_mul(1000)
+                    });
+                    observability::record_kernel_respawn(
+                        observability_hub.as_ref(),
+                        trigger,
+                        observability::RESPAWN_OUTCOME_OK,
+                        duration_ms,
+                    );
+                }
+                "Halted" => {
+                    let reason = observability::supervisor_refused_reason(
+                        s.sub_state.as_deref(),
+                    );
+                    observability::record_supervisor_refused_restart(
+                        observability_hub.as_ref(),
+                        reason,
+                    );
+                }
+                _ => {}
+            }
+        }
+
         // Step 8a''' (V2.5 `self-healing-supervisor.md §3.5`,
         // `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`):
         // supervisor-aware auto-resume sweep.

@@ -421,6 +421,31 @@ pub enum MetricName {
     // ── Process / host ──────────────────────────────────────────────
     /// `raxis.kernel.uptime.seconds` — Gauge.
     KernelUptimeSeconds,
+
+    // ── iter44: kernel self-healing supervisor metrics ──────────────
+    //
+    // Counterparts to the supervisor-emitted audit events
+    // (`KernelRespawnedBySupervisor`, `KernelBootedFromSupervisorRestart`,
+    // `KernelCrashedBySignal`, `KernelTerminatedByOperator`,
+    // `SupervisorRefusedRestart`, `SupervisorRestartCeilingExceeded`).
+    // Spec: `v3/otel-observability.md §8` rows added under iter44 +
+    // cross-ref from `v2/self-healing-supervisor.md §9`.
+    /// `raxis.kernel.respawn.total` — Counter (per supervisor-driven
+    /// kernel respawn). Labels: `trigger`, `outcome`.
+    KernelRespawnTotal,
+    /// `raxis.kernel.respawn.duration` — Histogram (ms). Labels:
+    /// `trigger`. Wall-clock from supervisor restart-decision (sentinel
+    /// `last_restart_unix_ts`) through to kernel-up-and-rehydrated. Wide
+    /// bucket spread per `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` because
+    /// the operation can range from sub-second auto-restarts to
+    /// minutes of crash-loop back-off.
+    KernelRespawnDuration,
+    /// `raxis.supervisor.refused_restart.total` — Counter. Labels:
+    /// `reason`. Bumped when the kernel boots and observes a
+    /// supervisor sentinel in `Halted (CircuitOpen)` / `Halted
+    /// (OperatorStop[Forced])` state, indicating the supervisor
+    /// previously refused to spawn another kernel.
+    SupervisorRefusedRestartTotal,
 }
 
 impl MetricName {
@@ -506,6 +531,10 @@ impl MetricName {
             Self::GitCommitTotal                       => "raxis.git.commit.total",
 
             Self::KernelUptimeSeconds                  => "raxis.kernel.uptime.seconds",
+
+            Self::KernelRespawnTotal                   => "raxis.kernel.respawn.total",
+            Self::KernelRespawnDuration                => "raxis.kernel.respawn.duration",
+            Self::SupervisorRefusedRestartTotal        => "raxis.supervisor.refused_restart.total",
         }
     }
 
@@ -536,7 +565,8 @@ impl MetricName {
             | Self::ReviewerReviewDuration
             | Self::ReviewRevisionRound
             | Self::GitWorktreeProvisionDuration
-            | Self::GitMergeDuration => MetricType::Histogram,
+            | Self::GitMergeDuration
+            | Self::KernelRespawnDuration => MetricType::Histogram,
 
             Self::CircuitBreakerState
             | Self::SessionsActive
@@ -580,7 +610,9 @@ impl MetricName {
             | Self::DashboardSseEventTotal
             | Self::ReviewerOutcomeTotal
             | Self::ReviewerDisagreementTotal
-            | Self::GitCommitTotal => MetricType::Counter,
+            | Self::GitCommitTotal
+            | Self::KernelRespawnTotal
+            | Self::SupervisorRefusedRestartTotal => MetricType::Counter,
         }
     }
 
@@ -610,7 +642,8 @@ impl MetricName {
             | Self::DashboardSseLagDuration
             | Self::ReviewerReviewDuration
             | Self::GitWorktreeProvisionDuration
-            | Self::GitMergeDuration => Unit::Milliseconds,
+            | Self::GitMergeDuration
+            | Self::KernelRespawnDuration => Unit::Milliseconds,
 
             Self::TokensConsumed
             | Self::PlannerInferenceTokensTotal => Unit::Tokens,

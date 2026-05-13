@@ -231,6 +231,14 @@ key that is not on the list drops the entire metric and bumps
 | `raxis.kernel.uptime.seconds`                  | Gauge          | (none) |
 | `raxis.observability.dropped.total`            | Counter        | `drop_reason` |
 
+### 3.11 Self-healing supervisor (iter44)
+
+| Metric (OTel) | Type | Attributes |
+|---|---|---|
+| `raxis.kernel.respawn.total`                   | Counter        | `trigger`, `outcome` |
+| `raxis.kernel.respawn.duration`                | Histogram (ms) | `trigger` |
+| `raxis.supervisor.refused_restart.total`       | Counter        | `reason` |
+
 ## 4. Grafana dashboards
 
 Ten dashboards live under

@@ -322,7 +322,9 @@ impl ObservabilityHub {
         self.submit_metric(m);
     }
 
-    /// Record one observation into a histogram.
+    /// Record one observation into a histogram. Uses the hub-wide
+    /// default bucket boundaries from
+    /// [`HubConfig::histogram_buckets`].
     pub fn record_histogram(
         &self,
         name:   MetricName,
@@ -330,7 +332,55 @@ impl ObservabilityHub {
         value:  f64,
     ) {
         if !self.cfg.enabled { return; }
-        let buckets = self.cfg.histogram_buckets.clone();
+        self.record_histogram_with_buckets_inner(
+            name,
+            labels,
+            value,
+            self.cfg.histogram_buckets.clone(),
+        );
+    }
+
+    /// Record one observation into a histogram with explicit
+    /// per-call bucket boundaries.
+    ///
+    /// The V3 spec (`v3/otel-observability.md §8.1`) keeps the
+    /// hub-wide `[observability.metrics.histogram_buckets]` setting
+    /// as the single global default. iter44 (slices 3 + 4a + 4b)
+    /// introduces a small set of metrics whose latency profile
+    /// spans several decades wider than the global default — kernel
+    /// respawn (10 ms cold-restart through 5 minute crash-loop
+    /// back-off), kernel↔substrate vsock IPC round-trips
+    /// (sub-millisecond ksb-update probes through multi-second
+    /// planner-fetch tool calls), operator IPC (sub-millisecond
+    /// `RetryTask` through a few seconds for `CreateInitiative`).
+    ///
+    /// Emit sites that need a tighter / wider boundary set call
+    /// this method with explicit `buckets`; the redactor enforces
+    /// the same shape invariants
+    /// (`raxis_observability::redact::Redactor::sanitize_metric`)
+    /// regardless of the boundary source. The global default
+    /// remains the single source of truth for every metric that
+    /// does NOT call this method, so existing dashboards keep
+    /// rendering against the same cumulative buckets they always
+    /// have.
+    pub fn record_histogram_with_buckets(
+        &self,
+        name:    MetricName,
+        labels:  AttrMap,
+        value:   f64,
+        buckets: Vec<f64>,
+    ) {
+        if !self.cfg.enabled { return; }
+        self.record_histogram_with_buckets_inner(name, labels, value, buckets);
+    }
+
+    fn record_histogram_with_buckets_inner(
+        &self,
+        name:    MetricName,
+        labels:  AttrMap,
+        value:   f64,
+        buckets: Vec<f64>,
+    ) {
         let mut counts = vec![0u64; buckets.len() + 1];
         let mut idx = buckets.len();
         for (i, b) in buckets.iter().enumerate() {

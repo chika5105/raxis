@@ -673,6 +673,7 @@ Launchd / systemd spawns `raxis-kernel` directly; the in-kernel deadlock detecto
 | Persistent JWT secret | `raxis/crates/dashboard/src/jwt_secret.rs` |
 | `JwtSigner::load_or_mint` + `gen` claim | `raxis/crates/dashboard/src/auth.rs` |
 | Rotation CLI | `raxis/cli/src/commands/dashboard.rs::run_rotate_jwt_secret` |
+| Self-healing kernel respawn metrics (iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01`) | `raxis/kernel/src/observability.rs::record_kernel_respawn` + `record_supervisor_refused_restart` (kernel-boot rehydration emit; supervisor crate intentionally observability-isolated). Spec rows: `v3/otel-observability.md §8` (`KernelRespawn{Total,Duration}`, `SupervisorRefusedRestartTotal`). |
 
 ---
 

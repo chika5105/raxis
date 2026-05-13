@@ -99,6 +99,52 @@
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Self-healing supervisor",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Kernel respawn rate by trigger (5m)",
+      "description": "raxis.kernel.respawn.total — one increment per supervisor-driven kernel respawn observed at boot. trigger ∈ { deadlock, sigsegv, sigabrt, exit_70, other }; closed lexicon per INV-OBS-KERNEL-RESPAWN-COVERAGE-01.",
+      "gridPos": { "x": 0, "y": 21, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sum by (trigger) (rate(raxis_kernel_respawn_total[5m]))", "legendFormat": "{{trigger}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Kernel respawn duration p50/p95/p99 (ms, 5m)",
+      "description": "raxis.kernel.respawn.duration — wall-clock from supervisor restart-decision to kernel-up-and-rehydrated. Wide histogram bucket spread (10ms → 5min) per the kernel-respawn slow-operation profile.",
+      "gridPos": { "x": 8, "y": 21, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(raxis_kernel_respawn_duration_milliseconds_bucket[5m])))", "legendFormat": "p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_kernel_respawn_duration_milliseconds_bucket[5m])))", "legendFormat": "p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(raxis_kernel_respawn_duration_milliseconds_bucket[5m])))", "legendFormat": "p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Supervisor refused-restart rate by reason (5m)",
+      "description": "raxis.supervisor.refused_restart.total — kernel observed a Halted sentinel at boot (operator manually bypassed the supervisor). reason ∈ { circuit_open, operator_stop, operator_stop_forced, supervisor_gone, other }.",
+      "gridPos": { "x": 16, "y": 21, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sum by (reason) (rate(raxis_supervisor_refused_restart_total[5m]))", "legendFormat": "{{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     }
   ]
 }

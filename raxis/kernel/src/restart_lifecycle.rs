@@ -59,6 +59,24 @@ pub struct SentinelView {
     pub attempt_n: Option<u32>,
     #[serde(default)]
     pub max_attempts: Option<u32>,
+    /// iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` — wall-clock
+    /// (unix seconds) of the supervisor's restart decision. Used by
+    /// `kernel/src/main.rs` to compute the
+    /// `KernelRespawnDuration` histogram observation
+    /// (supervisor-decision → kernel-up). `serde(default)` keeps
+    /// older sentinels (pre-iter44 supervisors that don't write the
+    /// field) working — the metric falls back to the kernel-side
+    /// boot-recovery sweep approximation in that case.
+    #[serde(default)]
+    pub last_restart_unix_ts: Option<i64>,
+    /// iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` — present on
+    /// `Halted` sentinels; the supervisor's `OperatorStop` /
+    /// `OperatorStopForced` / `CircuitOpen` sub-state distinguishes
+    /// "supervisor refused to restart" from "supervisor was asked to
+    /// stop". Mapped to a closed `reason` lexicon by
+    /// `kernel/src/observability.rs::supervisor_refused_reason`.
+    #[serde(default)]
+    pub sub_state: Option<String>,
 }
 
 /// Read + parse the supervisor sentinel file. Returns `None` when
@@ -69,6 +87,24 @@ pub struct SentinelView {
 /// silently ignored (`serde(default)`); a malformed file logs a
 /// warn line on stderr and returns `None`.
 pub fn read_sentinel_for_restart(sentinel_path: &Path) -> Option<SentinelView> {
+    match read_sentinel_any_status(sentinel_path) {
+        Some(v) if v.status == "Restarting" => Some(v),
+        _ => None,
+    }
+}
+
+/// iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` — read + parse the
+/// supervisor sentinel file regardless of status. Used by the
+/// kernel-boot metric-emission path so the operator dashboard can
+/// distinguish a `Restarting` kernel-up event (counted as a
+/// successful respawn) from a `Halted (CircuitOpen)` sentinel
+/// observed after the operator manually bypassed a halted
+/// supervisor (counted as a `SupervisorRefusedRestart`).
+///
+/// `read_sentinel_for_restart` is the rehydration filter on top of
+/// this primitive — both paths share the same parse + warn-on-bad
+/// JSON behaviour so a malformed file never crashes the kernel.
+pub fn read_sentinel_any_status(sentinel_path: &Path) -> Option<SentinelView> {
     let bytes = match std::fs::read(sentinel_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -81,8 +117,7 @@ pub fn read_sentinel_for_restart(sentinel_path: &Path) -> Option<SentinelView> {
         }
     };
     match serde_json::from_slice::<SentinelView>(&bytes) {
-        Ok(v) if v.status == "Restarting" => Some(v),
-        Ok(_) => None,
+        Ok(v) => Some(v),
         Err(e) => {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"kernel_lifecycle_sentinel_parse_failed\",\
