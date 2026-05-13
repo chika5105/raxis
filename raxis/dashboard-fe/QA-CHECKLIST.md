@@ -347,9 +347,135 @@ Clicking the row labelled "worktrees" routes to `/git/main-0`,
 which works. The 404 was the subagent typing the URL by
 hand; do not re-flag in subsequent runs.
 
-### Run 2 — pending
+### Run 2 — `extended_e2e_realistic_scenario` (kernel @ port 9820, JWT exp ~18:13 PDT 2026-05-12)
 
-Waiting for the next full-lifecycle test cycle to drive a Git
-+ Worktree Detail tour with real files in the seeded repo.
-Will also drive at least one SessionStream into `live` and
-watch ≥5 frames flow live.
+Tour driver: direct `cursor-ide-browser` MCP against a temp Vite
+on `127.0.0.1:5173` proxying to the live realistic kernel at
+`127.0.0.1:9820` (genesis default — predates my `813b912` fix
+that re-binds to `19820` for the next iteration). Authentication
+worked end-to-end: minted a JWT manually using a 64-hex seed file
+of `[0xD0; 32]` (the realistic test's `REALISTIC_OPERATOR_SEED`)
+piped through `raxis auth sign --json` against
+`/api/auth/challenge`, then `POST /api/auth/verify`, then built
+the `parseAutologinHash`-shaped URL and pasted it into the
+browser. The React `LoginPage::useEffect` mirrored everything to
+`localStorage` and `window.location.assign("/")` redirected
+cleanly — same exact flow my `common::dashboard::open_dashboard_with_autologin`
+will do automatically on the next iteration once `813b912` lands
+in the fix-loop's next rebase.
+
+Snapshot of kernel state at tour time (via REST + Overview KPIs):
+- 2 active `Executing` initiatives
+  - primary: `019e1eda-4703-7943-9aff-d2cf23279916` (10 realistic
+    tasks: allowlist-positive-codegen, lint-defect, materialize-records,
+    review-lint-defect-A, review-lint-defect-B, secrets-handling,
+    service-round-trip, transparent-proxy-realscripts, xfile-refactor,
+    plus the orchestrator root)
+  - sibling: `019e1eda-4703-7943-9aff-d2dedf209be4`
+    (sibling-materialize-records on `e2e-realistic-sibling-lane`)
+- 4 active sessions (a87386f8, 126cc0cf, 19ae3299, 589057e3)
+- 48 unread notifications
+- 0 pending escalations
+- 50+ audit events streamed live (SessionVmSpawned, SessionCreated,
+  DatabaseQueryCompleted, MongoCommandExecuted, CredentialAccessed,
+  CredentialProxyUpstreamConnected — all the new V3 service-evidence
+  variants)
+
+Per-view results during the live window (~14 min uptime → 900s
+worktree-deadline panic at 18:16:53):
+
+- Overview / `/`           PASS (kernel ok+booted-14-min, both
+  initiatives, all 4 sessions, full Recent Activity stream;
+  the new `auditBadgeClasses` from `e66073e` correctly toned
+  the badges by suffix — `SessionVmSpawned` rendered as `info`,
+  `MongoCommandExecuted`/`DatabaseQueryCompleted`/`CredentialAccessed`
+  as `info`, `CredentialProxyUpstreamConnected` as `ok`. No
+  `bad`/`warn` events fired in this window because every task
+  was still `Admitted` — no failures yet.)
+- Initiatives / `/initiatives`             PASS (both initiatives
+  listed, search + state-filter dropdown rendered)
+- Initiative Detail / `/initiatives/019e1eda-4703-7943-9aff-d2cf23279916`
+  PASS (header, "Full DAG view →", DAG with 10 tasks all in
+  `Admitted` state, Tasks table mirrored DAG, Task detail aside
+  showed the "Select a task" empty state with the right copy)
+- Sessions / `/sessions`                   PASS (4 rows, role
+  filter rendered)
+- Audit / `/audit`                         FLAKY — DURING
+  KERNEL TEARDOWN. Returned `HTTP_500 / Internal Server Error`
+  with the "Retry" button. Cross-referenced via network panel:
+  `/api/audit?limit=50`, `/api/escalations`, and
+  `/api/notifications/unread-count` all returned 500 in the
+  same 14-second window. Wall-clock check confirmed this was
+  during the kernel's panic + drop sequence (page 18:16:53 vs
+  test panic timestamp 18:16:53). Not a dashboard bug — the
+  kernel was tearing down. The `ErrorBox` UI copy was clean
+  and the Retry CTA was correctly wired. **Re-test on the next
+  iteration.**
+- Health / `/health`                       not reached this run
+  (kernel died before navigation)
+- Inbox / `/inbox`                         not reached this run
+- Notifications / `/notifications`         not reached this run
+- Escalations / `/escalations`             not reached this run
+- Git list / `/git`                        not reached this run
+- Git Worktree Detail / `/git/:name`       not reached this run
+- Policy / `/policy`                       not reached this run
+
+Console messages during the live window: clean.
+Vite HMR chatter + React-DevTools hint only. The two warning
+lines were the cursor-ide-browser native-dialog override
+notice and the standard React-DevTools install nudge — neither
+is a dashboard issue.
+
+Theme tour: NOT performed this run (kernel teardown
+intervened). Will retry on Run 3.
+
+DAG / SessionStream / RepoBrowser: NOT exercised this run for
+the same reason. Run 3 priority.
+
+#### Issue surfaced
+
+- **R2-1** `dashboard-fe/QA-CHECKLIST.md` (this section): the
+  `[realism-e2e]` driver in `extended_e2e_realistic_scenario.rs`
+  was not minting an autologin URL despite the kernel's dashboard
+  binding at `9820` correctly (per `kernel.stderr.log`'s
+  `RAXIS dashboard: http://127.0.0.1:9820` line). The QA worker
+  had to manually construct the URL via `raxis auth sign` against
+  the realistic operator's seed (`[0xD0; 32]`). **FIXED** in the
+  parent commit `813b912 kernel(e2e): mount dashboard in
+  realistic-scenario harness so operator can observe live state`
+  — adds a new `tests/common/dashboard.rs` module with the
+  shared port-config + policy-mutation + JWT-mint + URL-build
+  helpers (extracted from the lifecycle test), wires
+  `mutate_dashboard_block_in_policy(&data_dir)` and
+  `open_dashboard_with_autologin(&signing_key, port,
+  "realism-e2e")` into the realistic test's bootstrap, and
+  threads the resulting URL into `tier3.set_dashboard_url(...)`
+  so it ALSO appears in the post-run artifact block. Next
+  iteration will print the URL automatically and bind the
+  dashboard at `19820` (matching the lifecycle test + the
+  Vite proxy default).
+- **R2-2** `kernel/tests/common/tier3_artifacts.rs`: the unit
+  test `reporter_fires_emit_block_on_drop_once` was using
+  `r.set_dashboard_url("http://127.0.0.1:0/login")` as fixture
+  data, which then leaked into the realistic-scenario stderr
+  stream and was repeatedly mistaken for a "Tier-3 reporter
+  port=0 bug" by both operators and AI assistants tailing
+  `/tmp/raxis-e2e-realistic.log`. **FIXED** in `1a2737b` —
+  fixture URL now reads
+  `http://test-fixture-not-a-real-dashboard.invalid/login`
+  (RFC 2606 reserved TLD; unmistakable on first read).
+
+### Run 3 — pending
+
+Waiting for the fix-loop worker to rebase onto `813b912` and
+re-run the realistic scenario. Run 3 will:
+1. Auto-attach via the kernel-printed `[realism-e2e] dashboard
+   autologin URL: …` line (no manual JWT mint).
+2. Complete the tour items Run 2 didn't reach (Health, Inbox,
+   Notifications, Escalations, Git list, Worktree Detail with
+   the seeded `rich-multilang-001` repo, Policy).
+3. Drive the DAG view + at least one SessionStream into `live`
+   while watching the audit-tone badges from `e66073e` light
+   up under load.
+4. Theme-toggle mid-stream + re-screenshot for theme-flip
+   regression detection.
