@@ -69,6 +69,38 @@ The volumes are wiped only by `docker compose down -v` or
 Operators wanting a clean baseline before a regression bisect set
 `RAXIS_E2E_OBS_FRESH=1` (see `live-e2e/README.md`).
 
+Both compose files
+(`live-e2e/docker-compose.e2e.yml` +
+`live-e2e/docker-compose.extended.e2e.yml`) pin the project
+namespace via the top-level `name: raxis-live-e2e-test` field so
+the auto-generated network and volume prefix is stable regardless
+of which directory `docker compose -f` is invoked from. Per-service
+`container_name:` directives keep the short brand prefix
+(`raxis-e2e-pg`, `raxis-e2e-mongo`, …) for the actual containers.
+
+### 2.1a Prometheus external_labels (cluster tag)
+
+`raxis/observability/prometheus/prometheus.yml` sets one global
+`external_label` on every series Prometheus emits:
+
+```yaml
+global:
+  external_labels:
+    cluster: raxis-live-e2e-test
+```
+
+The `cluster=raxis-live-e2e-test` label MUST match the compose
+project namespace exactly. Grafana dashboards and the live-e2e
+validation matrix (`observability/measurements/`) both filter on
+this label to scope every series to the live-e2e harness and
+distinguish it from a future production-side Prometheus that may
+scrape the same metric names against a different `cluster` value.
+Operators forking the compose stack onto a non-test namespace MUST
+update BOTH the compose `name:` field AND the
+`prometheus.yml::external_labels.cluster` value in lockstep — they
+are the canonical identifier of "this is the live-e2e namespace"
+across the substrate.
+
 ### 2.2 Auto-open landing pages
 
 When `RAXIS_E2E_OPEN_OBSERVABILITY=1` is set in the live-e2e run
