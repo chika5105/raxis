@@ -353,6 +353,7 @@ async fn sessions_list_with_initiative_id_filter_narrows_results() {
         output_tokens: 0,
         created_at:    1_700_000_000,
         updated_at:    1_700_000_000,
+        failure:       None,
     };
     let sess_beta = SessionView {
         session_id:    "sess-beta".into(),
@@ -366,6 +367,7 @@ async fn sessions_list_with_initiative_id_filter_narrows_results() {
         output_tokens: 0,
         created_at:    1_700_000_001,
         updated_at:    1_700_000_001,
+        failure:       None,
     };
     data.push_session(sess_alpha)
         .push_session(sess_beta);

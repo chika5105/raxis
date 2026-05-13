@@ -26,6 +26,169 @@ use crate::auth::DashboardRole;
 use crate::error::ApiError;
 use crate::stream::{SimpleStreamSource, StreamEvent, StreamSubscription};
 
+// ---------------------------------------------------------------------------
+// Operator failure visibility — INV-DASHBOARD-FAILURE-VISIBILITY-01
+// ---------------------------------------------------------------------------
+
+/// Structured failure detail surfaced alongside any entity the
+/// dashboard renders in a `Failed` / `Rejected` / `Denied` state.
+///
+/// `INV-DASHBOARD-FAILURE-VISIBILITY-01` (see
+/// `raxis/specs/invariants.md`): every failure or rejection event
+/// surfaced via the dashboard MUST display its reason to the
+/// operator. This shape is the wire-side carrier — the FE consumes
+/// it through a single `<FailureReasonPanel>` component so every
+/// failure surface in the dashboard renders the SAME way (kind,
+/// message, structured fields, artifact links, copy-blob).
+///
+/// Shape rationale:
+///   * `kind` — the audit-event discriminant or substrate-side
+///     classification (`"SessionVmFailedFinal"`, `"PushFailed"`,
+///     `"WitnessRejected"`, …). Stable, PascalCase. Operators
+///     filter / group on this.
+///   * `message` — the raw free-form message the kernel captured.
+///     Operator-safe text — already truncated at the audit-event
+///     emission site to 4 KiB max, and FORENSIC FIDELITY: the
+///     dashboard MUST NOT re-truncate it (the operator needs the
+///     whole reason to act).
+///   * `fields` — definition-list rows for the structured payload
+///     (`exit_code`, `target_host`, `worktree_path`, …). Each row
+///     is a `(label, value)` pair so the FE never has to choose
+///     the shape — extension is purely additive.
+///   * `artifacts` — operator-actionable links (`kernel.stderr.log`,
+///     audit-chain row, worktree path). Each is a
+///     `(label, href)` pair. `href` is whatever the operator's
+///     environment understands — relative dashboard paths
+///     (`/audit#seq=42`), file-scheme paths
+///     (`file:///var/raxis/sessions/.../kernel.stderr.log`), or
+///     plain anchor text the FE renders as a non-link.
+///   * `event_id` — when this failure is anchored to a specific
+///     audit-chain row, the chain's `event_id` so the FE can deep-
+///     link `/audit#evt=<id>`. None when the failure is synthesised
+///     from a non-audit source (e.g. a substrate-side spawn
+///     fail-final the dashboard reconstructed from kernel state).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FailureInfo {
+    /// Stable kind / class discriminant (`"SessionVmFailedFinal"`,
+    /// `"PushFailed"`, …). Always present.
+    pub kind: String,
+    /// Free-form operator-safe message. Always present (the kernel
+    /// MUST supply a reason; an empty string indicates a kernel
+    /// bug the FE surfaces as "No reason supplied — kernel bug").
+    pub message: String,
+    /// Structured payload rows (`(label, value)`). Empty when the
+    /// failure has no structured fields beyond the message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<FailureField>,
+    /// Operator-actionable links (`(label, href)`). Empty when the
+    /// failure has no artifact references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<FailureArtifact>,
+    /// Audit-chain `event_id` (when the failure was projected from
+    /// an audit row). `None` for substrate-side synthesised
+    /// failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    /// Audit-chain `seq` (when the failure was projected from an
+    /// audit row). `None` when `event_id` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Unix-seconds when the failure was observed. `0` if unknown
+    /// (the FE hides the timestamp row in that case).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub observed_at: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// One row inside [`FailureInfo::fields`]. Always a
+/// `(label, value)` pair so the FE renders a uniform `<dl>`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FailureField {
+    /// Row label (e.g. `"Exit code"`, `"Target host"`).
+    pub label: String,
+    /// Row value rendered as plain text (e.g. `"137"`,
+    /// `"api.example.com"`).
+    pub value: String,
+}
+
+/// One row inside [`FailureInfo::artifacts`]. The FE renders these
+/// as anchor links when `href` looks navigable; plain text
+/// otherwise. The dashboard MUST NOT validate / resolve hrefs —
+/// they are operator-environment-specific.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FailureArtifact {
+    /// Link label (e.g. `"kernel.stderr.log"`,
+    /// `"Audit chain row"`).
+    pub label: String,
+    /// Link target. Forward-slash separated when relative; full
+    /// URL/URI when absolute.
+    pub href: String,
+}
+
+impl FailureInfo {
+    /// Minimal constructor: just a kind + message. Operators see
+    /// the `kind` as a badge and the `message` as the body. Used
+    /// by call sites that don't have structured fields or
+    /// artifacts to attach.
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+            fields: Vec::new(),
+            artifacts: Vec::new(),
+            event_id: None,
+            seq: None,
+            observed_at: 0,
+        }
+    }
+
+    /// Builder: attach a structured field row.
+    pub fn with_field(
+        mut self,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.fields.push(FailureField {
+            label: label.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Builder: attach an operator-actionable artifact link.
+    pub fn with_artifact(
+        mut self,
+        label: impl Into<String>,
+        href: impl Into<String>,
+    ) -> Self {
+        self.artifacts.push(FailureArtifact {
+            label: label.into(),
+            href: href.into(),
+        });
+        self
+    }
+
+    /// Builder: pin this failure to a specific audit-chain row.
+    pub fn with_audit(
+        mut self,
+        event_id: impl Into<String>,
+        seq: u64,
+    ) -> Self {
+        self.event_id = Some(event_id.into());
+        self.seq = Some(seq);
+        self
+    }
+
+    /// Builder: stamp the observation timestamp (unix seconds).
+    pub fn at(mut self, observed_at: u64) -> Self {
+        self.observed_at = observed_at;
+        self
+    }
+}
+
 /// Operator role decoded from the cert. Mirrors
 /// [`DashboardRole`] but lives on the data layer so impls can
 /// surface their own role strings without a dependency cycle.
@@ -72,6 +235,13 @@ pub struct InitiativeView {
     pub tasks: Vec<TaskView>,
     /// Predecessor → successor adjacency for the DAG view.
     pub edges: Vec<DagEdge>,
+    /// Structured failure detail when the initiative is in a
+    /// terminal `Failed` / `Aborted` / `Quarantined` state.
+    /// `None` when the initiative is healthy. The FE renders
+    /// this through a single `<FailureReasonPanel>` component;
+    /// see `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureInfo>,
 }
 
 /// One DAG edge.
@@ -106,6 +276,20 @@ pub struct TaskView {
     pub created_at: u64,
     /// Unix-seconds latest-update timestamp.
     pub updated_at: u64,
+    /// Structured failure detail when the task is in a terminal
+    /// `Failed` / `Blocked` state. `None` when the task is
+    /// healthy. The FE renders this through a single
+    /// `<FailureReasonPanel>` component; see
+    /// `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureInfo>,
+    /// Downstream task ids that are `Blocked` / `Pending` because
+    /// of this task's failure. Empty when the task is healthy OR
+    /// when no downstream task is currently blocked on it. The
+    /// FE surfaces this on the DAG side-panel so an operator can
+    /// see the failure cascade without re-walking the graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_downstream: Vec<String>,
 }
 
 /// Reviewer verdict surface for the dashboard.
@@ -157,6 +341,24 @@ pub struct SessionView {
     pub created_at: u64,
     /// Unix-seconds latest-update timestamp.
     pub updated_at: u64,
+    /// Structured failure detail when the session is in a
+    /// terminal `Failed` / `Revoked` state. `None` when the
+    /// session is healthy. The FE renders this through a single
+    /// `<FailureReasonPanel>` component; see
+    /// `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
+    ///
+    /// Common kinds the kernel populates here:
+    ///   * `"SessionVmFailedFinal"` — VM scaling exhausted retries.
+    ///     `fields` carries `(failure_class, total_attempts,
+    ///     final_reason)`; `artifacts` carries the
+    ///     `kernel.stderr.log` path when available.
+    ///   * `"SessionVmExited"` — non-graceful guest exit.
+    ///     `fields` carries `(signal_class, exit_code,
+    ///     backend_error)`.
+    ///   * `"SessionRevoked"` — operator-initiated revocation.
+    ///     `fields` carries `(revoked_by, revoked_by_display_name)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureInfo>,
 }
 
 /// Pending escalation visible to operators.
@@ -535,6 +737,19 @@ pub struct SubsystemHealthCard {
     /// Unix-seconds when the kernel last reported on this
     /// subsystem. `0` ⇒ never reported.
     pub last_observed_at: u64,
+    /// Operator-safe error string when the subsystem is
+    /// `degraded` / `failing`. `None` on `ok` / `unknown`.
+    ///
+    /// `INV-DASHBOARD-FAILURE-VISIBILITY-01`: a degraded or
+    /// failing subsystem MUST surface a reason — the FE renders
+    /// this through the `<FailureReasonPanel>` shared component
+    /// inside the card body. An empty / missing `last_error`
+    /// when `status != "ok"` is operator-actionable: the kernel
+    /// bookkeeping owes a reason and the FE surfaces
+    /// `"No reason supplied — kernel bug"` so the gap is
+    /// visible rather than silently swallowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// One row inside a [`SubsystemHealthCard`]'s drill-down.
@@ -1111,6 +1326,7 @@ impl DashboardData for InMemoryDashboardData {
                 details:          vec![],
                 grafana_url:      None,
                 last_observed_at: 0,
+                last_error:       None,
             })
             .collect();
         Ok(SubsystemHealthResponse {
@@ -1609,6 +1825,8 @@ mod tests {
                     path_allowlist: vec!["src/".into()],
                     created_at: 100,
                     updated_at: 150,
+                    failure: None,
+                    blocked_downstream: vec![],
                 },
                 TaskView {
                     task_id: format!("{id}-t2"),
@@ -1621,10 +1839,127 @@ mod tests {
                     path_allowlist: vec!["src/".into()],
                     created_at: 150,
                     updated_at: 200,
+                    failure: None,
+                    blocked_downstream: vec![],
                 },
             ],
             edges: vec![DagEdge { from: format!("{id}-t1"), to: format!("{id}-t2") }],
+            failure: None,
         }
+    }
+
+    // --- INV-DASHBOARD-FAILURE-VISIBILITY-01 wire-shape tests ------------
+
+    /// `FailureInfo::new` produces a minimal-but-renderable shape:
+    /// kind + message present; everything else defaulted to empty
+    /// so the FE's empty-state copy paths are exercised.
+    #[test]
+    fn failure_info_new_carries_minimum_fields() {
+        let f = FailureInfo::new("PushFailed", "remote rejected push");
+        assert_eq!(f.kind, "PushFailed");
+        assert_eq!(f.message, "remote rejected push");
+        assert!(f.fields.is_empty());
+        assert!(f.artifacts.is_empty());
+        assert!(f.event_id.is_none());
+        assert!(f.seq.is_none());
+        assert_eq!(f.observed_at, 0);
+    }
+
+    /// Builder chaining attaches structured fields + artifact
+    /// links + audit-row anchor + timestamp. The FE consumes all
+    /// of these — every one of them has to round-trip through
+    /// `serde_json::to_value`.
+    #[test]
+    fn failure_info_builder_round_trips_through_serde() {
+        let f = FailureInfo::new("SessionVmFailedFinal", "Permanent")
+            .with_field("Failure class", "Permanent")
+            .with_field("Total attempts", "3")
+            .with_artifact(
+                "kernel.stderr.log",
+                "file:///var/raxis/sessions/abc/kernel.stderr.log",
+            )
+            .with_audit("ev-42", 42)
+            .at(1_700_000_000);
+        let v = serde_json::to_value(&f).expect("serialises");
+        assert_eq!(v["kind"], "SessionVmFailedFinal");
+        assert_eq!(v["message"], "Permanent");
+        assert_eq!(v["fields"][0]["label"], "Failure class");
+        assert_eq!(v["fields"][0]["value"], "Permanent");
+        assert_eq!(v["fields"][1]["label"], "Total attempts");
+        assert_eq!(v["artifacts"][0]["label"], "kernel.stderr.log");
+        assert_eq!(v["event_id"], "ev-42");
+        assert_eq!(v["seq"], 42);
+        assert_eq!(v["observed_at"], 1_700_000_000_u64);
+    }
+
+    /// Empty optional fields are dropped from the wire so a
+    /// freshly-constructed `FailureInfo::new(...)` doesn't ship
+    /// noise (`"fields":[]`, `"event_id":null`, …) to the FE.
+    /// `skip_serializing_if` keeps the JSON shape tight.
+    #[test]
+    fn failure_info_empty_optional_fields_skipped() {
+        let f = FailureInfo::new("PushFailed", "boom");
+        let s = serde_json::to_string(&f).expect("serialises");
+        assert!(!s.contains("\"fields\""));
+        assert!(!s.contains("\"artifacts\""));
+        assert!(!s.contains("\"event_id\""));
+        assert!(!s.contains("\"seq\""));
+        assert!(!s.contains("\"observed_at\""));
+    }
+
+    /// A `failure = None` on the wire must omit the field
+    /// entirely so consumers that pre-date the addition (older
+    /// FE bundles, CLI tooling that mirrors the wire shape) keep
+    /// parsing the response without panicking on the new key.
+    #[test]
+    fn task_view_omits_failure_field_when_none() {
+        let t = TaskView {
+            task_id: "t-1".into(),
+            initiative_id: "i-1".into(),
+            title: "t".into(),
+            state: "Completed".into(),
+            session_id: None,
+            reviewer_verdicts: vec![],
+            structured_outputs: vec![],
+            path_allowlist: vec![],
+            created_at: 0,
+            updated_at: 0,
+            failure: None,
+            blocked_downstream: vec![],
+        };
+        let s = serde_json::to_string(&t).expect("serialises");
+        assert!(!s.contains("\"failure\""));
+        assert!(!s.contains("\"blocked_downstream\""));
+    }
+
+    /// A `failure = Some(_)` carries through to the JSON wire so
+    /// the FE's `<FailureReasonPanel>` has every audit-projected
+    /// field available without a second roundtrip.
+    #[test]
+    fn task_view_with_failure_serialises_full_shape() {
+        let t = TaskView {
+            task_id: "t-1".into(),
+            initiative_id: "i-1".into(),
+            title: "t".into(),
+            state: "Failed".into(),
+            session_id: None,
+            reviewer_verdicts: vec![],
+            structured_outputs: vec![],
+            path_allowlist: vec![],
+            created_at: 0,
+            updated_at: 0,
+            failure: Some(
+                FailureInfo::new("WitnessRejected", "reviewer flagged path scope")
+                    .with_field("Reviewer", "rev-1")
+                    .with_audit("ev-9", 9),
+            ),
+            blocked_downstream: vec!["t-2".into()],
+        };
+        let v = serde_json::to_value(&t).expect("serialises");
+        assert_eq!(v["failure"]["kind"], "WitnessRejected");
+        assert_eq!(v["failure"]["message"], "reviewer flagged path scope");
+        assert_eq!(v["failure"]["event_id"], "ev-9");
+        assert_eq!(v["blocked_downstream"][0], "t-2");
     }
 
     #[test]

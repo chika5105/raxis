@@ -574,6 +574,20 @@ impl DashboardData for KernelDashboardData {
                         None,
                     ),
                 };
+                // `last_error` mirrors the subsystem's hard-failure
+                // reason when the kernel has one. V2 reporters route
+                // their human-readable failure string through the
+                // `summary` field; we promote it to `last_error` on
+                // `failing` / `degraded` cards so the FE's shared
+                // `<FailureReasonPanel>` renders a uniform surface
+                // (`INV-DASHBOARD-FAILURE-VISIBILITY-01`). Healthy /
+                // unknown cards keep `last_error = None`.
+                let last_error = match status {
+                    "failing" | "degraded" if !summary.is_empty() => {
+                        Some(summary.clone())
+                    }
+                    _ => None,
+                };
                 SubsystemHealthCard {
                     id:               (*id).to_owned(),
                     label:            (*label).to_owned(),
@@ -582,6 +596,7 @@ impl DashboardData for KernelDashboardData {
                     details,
                     grafana_url,
                     last_observed_at,
+                    last_error,
                 }
             })
             .collect();
@@ -704,6 +719,14 @@ impl DashboardData for KernelDashboardData {
         } else {
             title
         };
+        // INV-DASHBOARD-FAILURE-VISIBILITY-01: when the initiative
+        // is in a terminal-failure state, surface the most recent
+        // failure-bearing audit row as `failure`. V2.5 ships the
+        // wire shape; the kernel-side projection is best-effort —
+        // V3 will widen this to a richer audit-chain walker. Until
+        // then, `None` here causes the FE to render "No reason
+        // supplied — kernel bug" so the gap is visible.
+        let failure = None;
         Ok(InitiativeView {
             summary: InitiativeListEntry {
                 initiative_id: row.initiative_id.clone(),
@@ -721,6 +744,7 @@ impl DashboardData for KernelDashboardData {
             policy_epoch: bundle.epoch(),
             tasks,
             edges,
+            failure,
         })
     }
 
@@ -790,6 +814,15 @@ impl DashboardData for KernelDashboardData {
                 output_tokens: 0,
                 created_at: s.created_at,
                 updated_at: s.created_at,
+                // INV-DASHBOARD-FAILURE-VISIBILITY-01: V2.5 ships
+                // the wire shape; a Revoked session here lacks an
+                // explicit reason string in the store-side view,
+                // so the kernel emits `None` and the FE renders
+                // "No reason supplied — kernel bug" so the gap is
+                // visible. V3 widens this to walk the audit chain
+                // for the matching `SessionRevoked` /
+                // `SessionVmFailedFinal` row.
+                failure: None,
             })
             .collect())
     }
@@ -817,6 +850,11 @@ impl DashboardData for KernelDashboardData {
                 output_tokens: 0,
                 created_at: s.created_at,
                 updated_at: s.created_at,
+                // INV-DASHBOARD-FAILURE-VISIBILITY-01: see
+                // `list_sessions` for the V2.5 best-effort
+                // rationale. V3 promotes this to a real audit
+                // chain walk.
+                failure: None,
             })
             .ok_or(ApiError::NotFound { kind: "session".into() })
     }
@@ -1970,6 +2008,14 @@ fn task_row_to_view(
         path_allowlist,
         created_at: t.admitted_at,
         updated_at: t.transitioned_at,
+        // INV-DASHBOARD-FAILURE-VISIBILITY-01: V2.5 ships the
+        // wire shape; the kernel-side projection that walks the
+        // audit chain for the matching `TaskBlockedForRecovery` /
+        // `WitnessRejected` / `VerifierProcessFailed` row lands
+        // in V3. Until then `None` here causes the FE to render
+        // "No reason supplied — kernel bug" so the gap is visible.
+        failure: None,
+        blocked_downstream: Vec::new(),
     }
 }
 
