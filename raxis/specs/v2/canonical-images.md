@@ -428,7 +428,7 @@ For copy-pasteable end-to-end recipes, see:
 ## §6 — In-VM capability discovery (`vm_capabilities`)
 
 This section anchors `INV-EXEC-DISCOVERY-01`
-(`invariants.md §10`).
+(`invariants.md §10.4a`).
 
 ### §6.1 — Why this exists
 

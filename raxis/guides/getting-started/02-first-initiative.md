@@ -364,7 +364,7 @@ operator-pinned BYO images
 The full schema and redaction rules live in
 [`specs/v2/canonical-images.md §6`](../../specs/v2/canonical-images.md);
 the invariant that pins the contract is `INV-EXEC-DISCOVERY-01`
-([`specs/invariants.md §10`](../../specs/invariants.md)).
+([`specs/invariants.md §10.4a`](../../specs/invariants.md)).
 
 ---
 

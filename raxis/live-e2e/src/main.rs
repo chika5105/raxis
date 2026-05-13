@@ -117,6 +117,25 @@
 //!     path under `allow_read_only`), and that `insert`
 //!     returns `ok: 0.0` with `code: 13` (deny path).
 //!
+//!   * `vm-capabilities` — drive the real
+//!     `raxis_planner_core::vm_capabilities` probe against this
+//!     Linux process. Asserts the structural invariants pinned by
+//!     `INV-EXEC-DISCOVERY-01` (`canonical-images.md §6` /
+//!     `planner-harness.md §10.6`): the in-guest probe returns a
+//!     populated manifest, kernel-private env vars
+//!     (`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`,
+//!     sidecar HMAC secret, `*SECRET*` / `*API_KEY*` / `*_TOKEN`)
+//!     are redacted (sentinel value MUST NOT appear in the
+//!     serialised manifest), credential-proxy URLs surface
+//!     verbatim, and the system-prompt hint carries the env-var
+//!     NAMES but never their VALUES (so the LLM provider's
+//!     prompt cache is value-stable across sessions). The
+//!     canonical-image Python DB-client subset
+//!     (`psycopg2-binary` / `pymongo` / `redis` / `PyMySQL` /
+//!     `pymssql`) assertion is gated behind
+//!     `RAXIS_LIVE_CANONICAL_EXECUTOR_IMAGE=1` so it runs only
+//!     where the canonical pip surface is present.
+//!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
 //!
@@ -161,6 +180,7 @@ mod slice_postgres_proxy_table_allowlists;
 mod slice_redis_proxy;
 mod slice_session_spawn;
 mod slice_smtp_proxy;
+mod slice_vm_capabilities;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -304,6 +324,27 @@ enum Slice {
     /// and that the cursor cap truncates the upstream's
     /// `firstBatch` AND zeros `cursor.id` per `§7.4`.
     MongodbProxyCollectionAllowlists,
+    /// Drive the real `raxis_planner_core::vm_capabilities` probe
+    /// against this Linux process. Asserts the structural
+    /// invariants pinned by `INV-EXEC-DISCOVERY-01`: the in-guest
+    /// PATH walk + `--version` probes return a populated
+    /// manifest; kernel-private env vars
+    /// (`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`,
+    /// sidecar HMAC secret, anything matching `*SECRET*` /
+    /// `*API_KEY*` / `*_TOKEN`) are redacted (sentinel value
+    /// MUST NOT appear anywhere in the serialised manifest);
+    /// credential-proxy URLs (`DATABASE_URL`, `MONGO_URL`,
+    /// `REDIS_URL`, `SMTP_URL`) surface verbatim; and the
+    /// system-prompt hint coheres with the manifest (carries
+    /// the `## VM Environment` header, the egress warning,
+    /// and the proxy env-var NAMES — but never their VALUES,
+    /// to keep the prompt cache value-stable). The
+    /// canonical-image Python DB-client subset
+    /// (`psycopg2-binary` / `pymongo` / `redis` / `PyMySQL` /
+    /// `pymssql`) assertion is gated behind
+    /// `RAXIS_LIVE_CANONICAL_EXECUTOR_IMAGE=1` so it runs only
+    /// where the canonical pip surface is present.
+    VmCapabilities,
     /// Run every slice in order.
     All,
 }
@@ -382,6 +423,7 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::MongodbProxy               => slice_mongodb_proxy::run().await,
         Slice::MongodbProxyCollectionAllowlists =>
             slice_mongodb_proxy_collection_allowlists::run().await,
+        Slice::VmCapabilities             => slice_vm_capabilities::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -425,6 +467,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice mongodb-proxy")?;
             slice_mongodb_proxy_collection_allowlists::run().await
                 .context("slice mongodb-proxy-collection-allowlists")?;
+            slice_vm_capabilities::run().await
+                .context("slice vm-capabilities")?;
             Ok(())
         }
     }

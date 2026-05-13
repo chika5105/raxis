@@ -414,6 +414,10 @@ BYO-image semantics: [`specs/v2/canonical-images.md
 | `specs/v2/canonical-images.md §3`                                | The trust-contract spec.                                        |
 | `specs/v2/image-cache.md §4`                                     | The cache layout your rootfs lands in.                          |
 | `specs/invariants.md §10.5` (`INV-OPERATOR-CUSTOM-IMAGE-01,02`)  | The normative trust contracts this recipe upholds.              |
+| `specs/invariants.md §10.4a` (`INV-EXEC-DISCOVERY-01`)           | In-guest capability probe — what surfaces your image to the LLM. |
+| `specs/v2/canonical-images.md §6`                                | `vm_capabilities` schema, redaction allowlist, perf budget.     |
+| `crates/planner-core/src/vm_capabilities.rs`                     | Probe + `OnceLock` cache + manifest projection + hint formatter. |
+| `crates/planner-core/src/tools_vm_capabilities.rs`               | LLM-callable `vm_capabilities` tool wrapper.                    |
 | [`policy/11-vm-images-section`](../policy/11-vm-images-section.md) | Field-by-field schema reference for `[[vm_images]]`.            |
 | [`setup/09-default-executor-image`](../setup/09-default-executor-image.md) | Wiring `[default_executor_image]`.                              |
 | [`ops/10-publish-executor-image`](./10-publish-executor-image.md) | The simpler `raxis verifiers` CLI workflow for routine images.  |

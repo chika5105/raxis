@@ -36,6 +36,7 @@ raxis-genesis-tools        = { path = "../crates/genesis-tools" }
 raxis-test-support         = { path = "../crates/test-support" }
 raxis-audit-tools          = { path = "../crates/audit" }
 raxis-types                = { path = "../crates/types" }
+raxis-planner-core         = { path = "../crates/planner-core" }
 
 tokio       = { workspace = true }
 # Outbound HTTPS client for the V3-readiness real-endpoint cloud

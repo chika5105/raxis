@@ -192,6 +192,15 @@ tempfile    = "3"
 # stay in `[dev-dependencies]`, never `[dependencies]` (per
 # `raxis-test-support` crate-level docs).
 raxis-test-support = { path = "../crates/test-support" }
+# Dev-only — used by `tests/extended_e2e_vm_capabilities.rs` to
+# exercise the in-process probe + `vm_capabilities` LLM tool wrapper
+# from the same crate the planner-executor binary boots with. Pins
+# `INV-EXEC-DISCOVERY-01` smoke-mode wiring (probe + cache + tool
+# JSON shape + system-prompt hint formatter) without re-implementing
+# any of it test-side. MUST stay in `[dev-dependencies]`; the kernel
+# binary itself never imports `planner-core` (planner roles boot the
+# planner binary as PID 1 of an isolated VM).
+raxis-planner-core = { workspace = true }
 # Dashboard integration tests link these directly so we exercise
 # the same wiring the kernel binary uses, without spawning the
 # binary (no kernel boot ceremony in unit-test scope).
