@@ -332,7 +332,155 @@ no per-tile link is invented.
 
 ---
 
-## 5. Rationale (why these bounds)
+## 5. Failure-visibility rendering contract (`INV-DASHBOARD-FAILURE-VISIBILITY-01`)
+
+Operator-experience contract: every failure or rejection event
+surfaced by the dashboard MUST display its reason to the
+operator. A bare red badge with no reason text is a contract
+violation — the operator never has to grep `kernel.stderr.log`
+or open devtools to figure out why something failed.
+
+### 5.1 Failure-bearing entity surfaces
+
+The following entity view shapes carry an optional
+`failure: FailureInfo | null` field. The kernel-side projection
+walks the audit chain on construction and attaches the most
+recent failure event corresponding to the entity's terminal
+state (V3 step — V2.5 ships the wire shape with `failure: None`
+for every entity, plus the FE empty-state affordance below):
+
+| View                            | Terminal-failure states                                                            | Source events                                                                                                          |
+|---------------------------------|------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| `SessionView.failure`           | `Failed` / `VmFailedFinal` / `Errored`                                             | `SessionVmFailedFinal` / `SessionVmExited` / `WorktreeProvisionFailed`                                                  |
+| `TaskView.failure`              | `Failed` / `Aborted` / `Cancelled` / `BlockedRecoveryPending`                      | `TaskStateChanged` (terminal) / `TaskBlockedForRecovery` / `WitnessRejected` / `ReviewerRejected`                       |
+| `InitiativeView.failure`        | `Failed` / `Aborted`                                                               | `InitiativeAborted` / aggregated `TaskFailed`                                                                            |
+| `SubsystemHealthCard.last_error`| `failing` / `degraded`                                                             | Most recent reporter `summary` when the reporter is unhealthy                                                            |
+
+`TaskView` additionally carries `blocked_downstream: Vec<String>`
+populated for terminal-failure tasks so the FE can render the
+cascade in the DAG side panel without re-walking the graph.
+
+### 5.2 `FailureInfo` wire shape
+
+```rust
+pub struct FailureInfo {
+    pub kind: String,                       // PascalCase audit kind
+    pub message: String,                    // free-form, NOT truncated
+    pub fields: Vec<FailureField>,          // (label, value) rows
+    pub artifacts: Vec<FailureArtifact>,    // (label, href) links
+    pub event_id: Option<String>,           // audit-chain anchor
+    pub seq: Option<u64>,                   // audit-chain anchor
+    pub observed_at: u64,                   // unix-seconds
+}
+```
+
+All optional fields use
+`#[serde(default, skip_serializing_if = …)]` so additions are
+append-only — pre-existing FE bundles and CLI tooling that mirror
+the wire shape keep parsing the response without panicking on the
+new key. `Option<FailureInfo>` is dropped entirely from the JSON
+when `None`, so a healthy entity ships the same bytes it did
+before V2.5.
+
+### 5.3 Audit-event surfaces
+
+Every failure-bearing audit event surfaced through the
+Notifications / Audit / SSE wire carries its reason directly in
+the payload (`reason`, `final_reason`, `block_reason`, `detail`,
+`exit_code`, `failure_class`, …). The frontend extracts a
+`FailureInfo`-shaped view from the payload via
+`dashboard-fe/src/lib/failure-extract.ts::failureFromAuditEvent`
+so the same rendering surface (`<FailureReasonPanel>` /
+`<FailurePill>`) renders consistently across pages.
+
+Failure-bearing audit kinds (cross-referenced against
+`crates/audit/src/event.rs`):
+
+  * **Lifecycle.** `SessionVmFailedFinal`, `SessionVmExited`,
+    `TaskBlockedForRecovery`, `InitiativeAborted`,
+    `WorktreeProvisionFailed`.
+  * **Review.** `WitnessRejected`, `ReviewerRejected`,
+    `ReviewerDisagreement`, `VerifierProcessFailed`.
+  * **Egress / proxy.** `TransparentProxyDenied`,
+    `SessionEgressDenied`, `SessionEgressStallDetected`,
+    `CredentialProxyUpstreamFailed`,
+    `CredentialProxyConnectionFailed`.
+  * **Approval / escalation.** `EscalationDenied`,
+    `OperatorApprovalDenied`.
+  * **Policy.** `PolicyAdvanceRejected`, `PolicyAdvanceFailed`,
+    `ReplayRejected`.
+  * **Git.** `PushFailed`, `MergeFastForwardFailed`.
+  * **Runtime.** `GatewayCrashed`, `GatewayQuarantined`,
+    `GatewaySignalFailed`, `NotificationDeliveryFailed`.
+  * **Intent.** `IntentRejected`.
+  * **Operator-action rejections.** Every `Operator*` event whose
+    `outcome != Accepted`.
+
+### 5.4 Frontend rendering contract
+
+`<FailureReasonPanel>` (full panel, used on detail pages + DAG
+side panel) and `<FailurePill>` (one-line companion, used on list
+rows + audit ribbons) live in
+`dashboard-fe/src/components/FailureReasonPanel.tsx`. Every page
+that renders a failure-bearing entity MUST compose one of these
+rather than render a bespoke red badge. Specifically:
+
+  * **List surfaces.** `<FailurePill failed reason={…}>` stacked
+    beneath the `<StateBadge>` in the state column. Tooltip
+    carries the full reason.
+  * **Detail surfaces.** `<FailureReasonPanel reason={…}>` block
+    immediately beneath the page header. Always renders on a
+    terminal-failure entity, even when `reason === null` — the
+    empty-state affordance (§5.5) covers the gap.
+  * **DAG side panel.** `<FailureReasonPanel reason={…} collapsible>`
+    inside the focused-task aside, plus a "Blocks N downstream
+    tasks" tally driven by `TaskView.blocked_downstream`.
+  * **Audit chain.** Failure-bearing rows ship a compact pill in
+    the row header and a full panel above the JSON dump when
+    expanded.
+  * **Notifications.** Failure-bearing rows render a compact pill
+    beneath the body line; mutation failures (Mark-read,
+    Mark-all-read) render an inline `<ActionFailureBanner>` at
+    the top of the page.
+  * **Audit chain banner.** `Re-verify chain` failures render an
+    inline `<ReverifyFailureRow>` directly beneath the banner so
+    the audit-tools error message lands where the operator clicked.
+  * **Health.** `failing` / `degraded` subsystem cards render
+    `last_error` as a red inline-error band beneath the status
+    pill.
+
+### 5.5 Empty-reason rule
+
+When a failure-bearing entity ships `failure: null` /
+`last_error: null`, the dashboard MUST render
+`"No reason supplied — kernel bug"` (not a blank state, not the
+status colour alone). The string is operator-actionable: the
+originating kernel reporter SHOULD always supply a reason, and a
+missing reason is a bug to file rather than expected behaviour.
+
+`<FailureReasonPanel>` exposes three `whenMissing` modes:
+
+  * `missing-reason-bug` (default for Failed entities) — emit the
+    kernel-bug affordance.
+  * `absent` — return `null`; used by parents that aren't sure
+    whether the entity is failed yet.
+  * `no-error-reported` — render `"No error reported"`; used on
+    surfaces where a missing reason is plausibly normal (e.g.
+    in-flight `Running` sessions).
+
+### 5.6 Action-failure rule
+
+When a dashboard mutation rejects (`Approve` → `RejectedPermission`,
+`Mark all read` → `InternalError`, `Re-verify chain` →
+`FAIL_DASHBOARD_AUDIT_*`, …), the dashboard MUST render the
+`ApiError.code` + `ApiError.detail` inline at the surface that
+initiated the action. The error is dismissible (via
+`mutation.reset()` / setter callback) so the operator
+acknowledges it explicitly. A toast-only treatment is
+non-conformant — toasts hide the reason after a few seconds and
+the operator has no way to recall what the rejection text said.
+
+## 6. Rationale (why these bounds)
 
 * **30 s handler timeout.** Gives the audit-chain walk
   cap headroom under cold-cache conditions while still

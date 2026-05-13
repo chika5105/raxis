@@ -2828,6 +2828,93 @@ never have to grep stack traces for failure modes.
 
 **Canonical home.** `v2/dashboard-hardening.md §2.3`.
 
+### INV-DASHBOARD-FAILURE-VISIBILITY-01 — Every failure surfaced by the dashboard MUST display its reason
+
+**Statement.** Every failure-bearing or rejection-bearing entity
+surfaced through the dashboard MUST display its REASON to the
+operator, not merely a status colour. The set of failure-bearing
+surfaces is enumerated in `v2/dashboard-hardening.md §5` and
+includes (non-exhaustive):
+
+  * Lifecycle terminals — `SessionView.failure`, `TaskView.failure`,
+    `InitiativeView.failure` (terminal `Failed` / `Aborted` /
+    `Cancelled` / `Revoked` / `VmFailedFinal` /
+    `BlockedRecoveryPending` states).
+  * Subsystem health — `SubsystemHealthCard.last_error` for every
+    card whose `status` is `degraded` or `failing`.
+  * Review rejections — `ReviewerRejected` /
+    `ReviewerDisagreement` audit events.
+  * Operator-action rejections — every `Operator*` audit event with
+    `outcome != Accepted`.
+  * Egress / proxy — `TransparentProxyDenied`,
+    `SessionEgressDenied`, `SessionEgressStallDetected`,
+    `CredentialProxyConnectionFailed`,
+    `CredentialProxyUpstreamFailed`.
+  * Approval / escalation — `EscalationDenied`,
+    `OperatorApprovalDenied`.
+  * Worktree / git — `WorktreeProvisionFailed`, `PushFailed`,
+    `MergeFastForwardFailed`.
+  * Runtime — `GatewayCrashed`, `GatewayQuarantined`,
+    `GatewaySignalFailed`, `VerifierProcessFailed`.
+
+A "reason" comprises (where the kernel supplies it):
+
+  * **`kind`** — the PascalCase error class
+    (`SessionVmFailedFinal`, `WorktreeProvisionFailed`, …).
+  * **`message`** — the free-form human-readable reason
+    (`final_reason`, `reason`, `detail`). NOT truncated. NOT
+    sanitised.
+  * **Structured fields** — `exit_code`, `failure_class`,
+    `target_host`, `chokepoint`, `block_count_in_window`, etc.
+    Rendered as a definition list.
+  * **Artifact links** — `kernel.stderr.log`, worktree path,
+    deep link to the originating audit-chain row, etc.
+
+The frontend renders this through the shared
+`<FailureReasonPanel>` component on detail pages and the
+companion `<FailurePill>` on list / ribbon surfaces. Failure
+pills MUST NOT show only a status colour — they MUST surface the
+reason via inline text, expansion, tooltip, or modal.
+
+**Operator-action rejections.** When a dashboard mutation
+(approve, mark-read, re-verify, policy-advance, …) fails, the
+frontend MUST render the API `code` + `detail` inline at the
+click site rather than as a generic toast that hides the reason.
+The dashboard surface that initiated the action is responsible
+for rendering its own action-failure block.
+
+**Empty-reason rule.** A failure-bearing entity whose
+backend-shipped reason is `null` is an operator-actionable bug
+(the originating kernel reporter SHOULD always include a reason).
+The dashboard MUST render the string
+`"No reason supplied — kernel bug"` on the affected surface, with
+a tooltip directing the operator to file a bug, rather than
+silently rendering an empty state that hides the gap.
+
+**Justification.** The operator-experience bar for a privileged
+operational dashboard is: the operator never has to grep
+`kernel.stderr.log` (nor open devtools) to find out why something
+in the dashboard failed. A bare red badge with no reason
+forces exactly that — operators interpret it as either an
+unrecoverable kernel error (panicked → restart) or as
+"something's wrong but I don't know what" (paged → on-call).
+Both outcomes are worse than the structural truth: every kernel
+failure event in the audit chain carries enough detail for the
+operator to either fix the issue (approve a path expansion,
+re-issue an egress allowlist entry, restart a fluky proxy) or
+correctly route to engineering (`exit_code=139 in worker
+foo_session_abc.log` is a real bug report; "Failed" is not).
+
+The empty-reason rule keeps the invariant from being a one-way
+ratchet: a future kernel reporter that ships a `*Failed` event
+without populating a `reason` field is observable AT THE
+DASHBOARD — the operator sees `"No reason supplied — kernel bug"`
+and files it. Without the rule the gap is invisible — both the
+operator and the engineering team see the same red badge they'd
+see for any other failure.
+
+**Canonical home.** `v2/dashboard-hardening.md §5`.
+
 ---
 
 ## §12 — How invariants combine (composition map)
