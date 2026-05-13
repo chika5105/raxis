@@ -5,6 +5,7 @@
 >
 > **Cross-references:**
 > - `credential-proxy.md §1b` — TCP vs HTTP proxy distinction
+> - `credential-proxy.md §12a` — VM↔host loopback plumbing (vsock-loopback bridge) that makes the stock `127.0.0.1:<port>` URLs the credential proxy stamps into the VM env block actually reach the host-bound proxies; backed by `INV-CRED-PROXY-VM-REACHABILITY-01` (the contract) and `INV-CRED-PROXY-VM-REACHABILITY-02` (every in-tree isolation backend implements the bridge fail-closed)
 > - `credential-proxy.md §13` — Intra-VM loopback and dev servers
 > - `credential-proxy.md` (full spec) — Tier-2 (authenticated) egress with HTTP-granular URL/method enforcement
 > - ~~`kernel-mediated-egress.md`~~ — DEPRECATED in V2 in favor of unified two-tier egress
@@ -37,13 +38,19 @@ When the plan declares `[[tasks.credentials]] proxy_type = "postgres"`, the Kern
 2. Sets `DATABASE_URL=postgresql://raxis@localhost:5432/mydb` in the VM
 
 The agent's database connection string already points to the credential proxy.
-No network interception is needed — the connection goes to `localhost:5432` which is
-intra-VM and already the correct endpoint. The credential proxy handles auth to the
-real DB transparently.
+No iptables interception is needed for the egress allowlist — but inside an
+isolation VM, the literal `127.0.0.1` resolves to the **guest's** loopback,
+not the host's, so the substrate ships a per-session vsock-loopback bridge to
+splice `127.0.0.1:5432` (guest) ↔ `127.0.0.1:5432` (host, where the proxy is
+bound). The credential proxy then handles auth to the real DB transparently.
 
 **Problem this solves:** The agent's `psycopg2.connect(os.environ["DATABASE_URL"])`
-connects to `localhost:5432` → credential proxy → real DB with auth. No iptables,
-no interception, no vsock needed for this traffic.
+connects to `localhost:5432` → in-guest forwarder → AF_VSOCK → host-side
+listener on the per-VM `VZVirtioSocketDevice` (Apple-VZ) or per-session UDS
+multiplexer (Firecracker) → host `127.0.0.1:5432` → credential proxy → real
+DB with auth. iptables is NOT the load-bearing piece here; the vsock-loopback
+bridge is. See `credential-proxy.md §12a` for the full plumbing and
+`INV-CRED-PROXY-VM-REACHABILITY-01` / `-02` for the contract.
 
 ### Class 2 — External HTTP/HTTPS calls (requires transparent proxy)
 
