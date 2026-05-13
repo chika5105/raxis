@@ -162,9 +162,17 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     ("trigger",           AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
     // iter44 slice 4b — `KernelSubstrateIpc*` family carries a
     // closed `message_kind` lexicon
-    // { `ksb_update`, `tool_call`, `tool_result`, `intent_submit`,
-    //   `intent_response`, `exit_notification`, `other` } per
-    // `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`.
+    // { `intent_request`, `witness_submission`, `escalation_request`,
+    //   `planner_fetch_request`, `unexpected` } pinned by
+    // `kernel/src/observability.rs::KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET`
+    // and the exhaustive match arm in `kernel_substrate_ipc_route`
+    // per `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`. The lexeme is the
+    // snake_case projection of the dispatched `IpcMessage` request
+    // variant; every non-dispatched variant collapses to
+    // `unexpected` so the dashboard pivots on a stable set even as
+    // new wire variants are added. Paired with `role` (`planner` /
+    // `verifier` / `gateway` / `unknown`) on counter + histogram
+    // emit sites; gauge sites carry `role` only.
     ("message_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
 ];
 

@@ -246,9 +246,30 @@ key that is not on the list drops the entire metric and bumps
 | `raxis.operator.ipc.duration`                  | Histogram (ms) | `command_kind`, `accepted` |
 | `raxis.operator.ipc.total`                     | Counter        | `command_kind`, `accepted` |
 
+### 3.13 Kernel↔substrate IPC (iter44 slice 4b)
+
+| Metric (OTel) | Type | Attributes |
+|---|---|---|
+| `raxis.kernel.substrate.ipc.roundtrip.duration` | Histogram (ms) | `role`, `message_kind` |
+| `raxis.kernel.substrate.ipc.messages.total`     | Counter        | `role`, `message_kind` |
+| `raxis.kernel.substrate.ipc.inflight`           | Gauge          | `role` |
+
+`role` is a closed allow-list of `{ "planner", "verifier",
+"gateway", "unknown" }`. `message_kind` is a closed allow-list of
+`{ "intent_request", "witness_submission", "escalation_request",
+"planner_fetch_request", "unexpected" }` — the snake_case
+projection of every dispatched `IpcMessage` request variant in
+`kernel/src/ipc/server.rs::drive_planner_stream`, plus an
+`unexpected` collapse for the catch-all arm. Pinned by
+`INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`; full discussion in
+`invariants.md §11.13`. The histogram uses the iter44 IPC bucket
+override `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]`
+ms — substrate IPC round-trips span sub-millisecond ksb-update
+probes through multi-second `planner_fetch_request` tool calls.
+
 ## 4. Grafana dashboards
 
-Ten dashboards live under
+Eleven dashboards live under
 `raxis/observability/grafana/dashboards/` and are auto-provisioned
 into the Grafana container under the `raxis` folder:
 
@@ -256,6 +277,7 @@ into the Grafana container under the `raxis` folder:
 |---|---|---|
 | `00-overview.json`           | `raxis-00-overview`        | Mission-control entry point |
 | `10-isolation.json`          | `raxis-10-isolation`       | VM cold-boot four-tier histograms |
+| `15-ipc.json`                | `raxis-15-ipc`             | Operator + kernel↔substrate IPC (iter44) |
 | `20-lifecycle.json`          | `raxis-20-lifecycle`       | Sessions / initiatives / lifecycle transitions |
 | `30-audit.json`              | `raxis-30-audit`           | Append latency, chain length, lag, fsync failures |
 | `40-planner.json`            | `raxis-40-planner`         | Inference latency / tokens / tool calls / retries |

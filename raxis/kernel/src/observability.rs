@@ -1998,3 +1998,649 @@ mod operator_ipc_tests {
         assert!(!operator_response_accepted(&err));
     }
 }
+
+// ---------------------------------------------------------------------------
+// iter44 perf-metrics — `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`.
+//
+// Three metrics covering every kernel↔substrate IPC frame the planner-
+// socket dispatcher (`kernel/src/ipc/server.rs::drive_planner_stream`)
+// consumes — the convergence point for both production vsock streams
+// (AVF / Firecracker substrate per
+// `crate::session_spawn_orchestrator::spawn_planner_dispatcher`) and
+// the in-process Unix-socket test stream (`accept_planner_loop`).
+//
+//   * `KernelSubstrateIpcRoundtripDuration` (Histogram, ms) — labels:
+//     `role` (closed allow-list = [`KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET`]),
+//     `message_kind` (closed allow-list =
+//     [`KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET`]). Wall-clock
+//     from frame-received to response-frame-written (or, for the
+//     `unexpected` arm, from frame-received to drop). Bucket override
+//     [`KERNEL_SUBSTRATE_IPC_BUCKETS_MS`] = `[1, 5, 10, 25, 50, 100,
+//     250, 500, 1000, 2500, 5000]` ms — substrate IPC round-trips are
+//     typically sub-millisecond (ksb-update probes) through a few
+//     hundred ms (PlannerFetchRequest tool calls to LLM providers via
+//     gateway).
+//   * `KernelSubstrateIpcMessagesTotal`     (Counter)       — same
+//     labels. One increment per dispatched frame regardless of
+//     handler outcome — the `unexpected` arm increments too, proving
+//     the closed lexicon stays total over [`raxis_ipc::IpcMessage`].
+//   * `KernelSubstrateIpcInflight`          (Gauge)         — labels:
+//     `role` only. Module-global counter that increments before the
+//     per-variant handler runs and decrements after the response
+//     frame is written, regardless of handler outcome. Re-emitted on
+//     every increment / decrement so the gauge tracks actual
+//     concurrency across all live planner streams.
+//
+// **Closed `role` lexicon.** Every dispatched `IpcMessage` variant
+// maps to one of `{ "planner", "verifier", "gateway", "unknown" }`.
+// `planner` covers IntentRequest, EscalationRequest, and
+// PlannerFetchRequest (the orchestrator subprocess's three outbound
+// frame kinds). `verifier` covers WitnessSubmission (verifier
+// subprocesses route through the same dispatcher per
+// `v2/peripherals.md §2.2`). `gateway` is reserved for a future
+// gateway-side dispatcher migration (slice 4c+); zero emission today
+// keeps the closed lexicon stable. `unknown` is the forward-compat
+// fallback for variants that arrive on planner.sock without an
+// expected handler (`KernelIntentResponse`, `OperatorRequest`, etc.
+// — wire-shape oddities that the dispatcher logs but does not
+// process).
+//
+// **Closed `message_kind` lexicon.** Every dispatched `IpcMessage`
+// variant maps to one of `{ "intent_request", "witness_submission",
+// "escalation_request", "planner_fetch_request", "unexpected" }`.
+// The lexeme is a `snake_case` projection of the request variant
+// name; every non-dispatched variant collapses to `unexpected` so
+// the dashboard's "Messages by kind" panel can pivot on a stable
+// set even as new wire variants are added.
+//
+// **Inflight semantics.** The dispatcher increments the gauge before
+// calling the handler and decrements it after writing the response
+// frame, regardless of handler outcome — including frame-decode
+// errors propagated via `?` from `write_frame`. The RAII guard
+// [`KernelSubstrateIpcRoundtrip`] enforces this by emitting the
+// histogram + counter + decrement in its `Drop`; any path that
+// drops the guard (normal return, early `?` propagation, panic
+// unwind) flushes the metrics.
+// ---------------------------------------------------------------------------
+
+/// Closed `role` lexicon for the kernel↔substrate IPC family. Every
+/// dispatched [`raxis_ipc::IpcMessage`] variant maps to exactly one
+/// of these values via [`kernel_substrate_ipc_route`].
+pub const IPC_ROLE_PLANNER:  &str = "planner";
+/// Verifier-subprocess role. Pairs with `message_kind =
+/// witness_submission`.
+pub const IPC_ROLE_VERIFIER: &str = "verifier";
+/// Reserved for a future gateway-side dispatcher migration (slice
+/// 4c+). Pinned in the closed set so the dashboard PromQL stays
+/// stable when the gateway dispatcher starts emitting.
+pub const IPC_ROLE_GATEWAY:  &str = "gateway";
+/// Forward-compat fallback for any [`raxis_ipc::IpcMessage`] variant
+/// that arrives on the planner socket without an expected handler.
+/// Pairs with `message_kind = unexpected`.
+pub const IPC_ROLE_UNKNOWN:  &str = "unknown";
+
+/// Closed set of every `role` lexeme the kernel↔substrate IPC
+/// dispatcher may emit. The dashboard PromQL pivots on this set;
+/// an emit site that smuggled in a free-form value would show up as
+/// a stray series.
+pub const KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET: &[&str] = &[
+    IPC_ROLE_PLANNER,
+    IPC_ROLE_VERIFIER,
+    IPC_ROLE_GATEWAY,
+    IPC_ROLE_UNKNOWN,
+];
+
+/// Closed `message_kind` lexicon. The lexeme is the snake_case
+/// projection of the dispatched [`raxis_ipc::IpcMessage`] request
+/// variant; every non-dispatched variant collapses to
+/// [`IPC_MSG_KIND_UNEXPECTED`].
+pub const IPC_MSG_KIND_INTENT_REQUEST:        &str = "intent_request";
+/// Pairs with `role = verifier`. Witness submission from a verifier
+/// subprocess.
+pub const IPC_MSG_KIND_WITNESS_SUBMISSION:    &str = "witness_submission";
+/// Pairs with `role = planner`. Escalation request from the
+/// orchestrator subprocess.
+pub const IPC_MSG_KIND_ESCALATION_REQUEST:    &str = "escalation_request";
+/// Pairs with `role = planner`. Gateway-mediated egress request.
+pub const IPC_MSG_KIND_PLANNER_FETCH_REQUEST: &str = "planner_fetch_request";
+/// Pairs with `role = unknown`. Any [`raxis_ipc::IpcMessage`]
+/// variant that arrives on planner.sock without an expected handler
+/// (response variants, operator-socket variants routed to the wrong
+/// socket, etc.). Keeps the closed lexicon stable across future
+/// wire-variant additions.
+pub const IPC_MSG_KIND_UNEXPECTED:            &str = "unexpected";
+
+/// Closed set of every `message_kind` lexeme the kernel↔substrate
+/// IPC dispatcher may emit.
+pub const KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET: &[&str] = &[
+    IPC_MSG_KIND_INTENT_REQUEST,
+    IPC_MSG_KIND_WITNESS_SUBMISSION,
+    IPC_MSG_KIND_ESCALATION_REQUEST,
+    IPC_MSG_KIND_PLANNER_FETCH_REQUEST,
+    IPC_MSG_KIND_UNEXPECTED,
+];
+
+/// Histogram bucket boundaries (ms) for
+/// `KernelSubstrateIpcRoundtripDuration`. Substrate IPC round-trips
+/// span sub-millisecond ksb-update probes through multi-second
+/// `PlannerFetchRequest` tool calls (LLM provider invocations via
+/// the gateway). The 2.5s / 5s tail buckets cover provider stalls
+/// and crash-loop pathologies.
+pub const KERNEL_SUBSTRATE_IPC_BUCKETS_MS: &[f64] = &[
+    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+];
+
+/// Map an [`raxis_ipc::IpcMessage`] to its closed-lexicon `(role,
+/// message_kind)` pair. The match arm is exhaustive over the wire
+/// enum; adding a new variant produces a compile error here, which
+/// is the structural guarantee that the closed lexicons stay total.
+pub fn kernel_substrate_ipc_route(
+    msg: &raxis_ipc::IpcMessage,
+) -> (&'static str, &'static str) {
+    use raxis_ipc::IpcMessage as M;
+    match msg {
+        // ── Dispatched on planner.sock ──
+        M::IntentRequest(_)         => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_INTENT_REQUEST),
+        M::WitnessSubmission(_)     => (IPC_ROLE_VERIFIER, IPC_MSG_KIND_WITNESS_SUBMISSION),
+        M::EscalationRequest(_)     => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_ESCALATION_REQUEST),
+        M::PlannerFetchRequest(_)   => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_PLANNER_FETCH_REQUEST),
+
+        // ── Response variants, operator-socket variants, tproxy /
+        //    dns admission variants — all wire-shape oddities on
+        //    planner.sock that the dispatcher logs but does not
+        //    handle. `role = unknown` (no caller attribution),
+        //    `message_kind = unexpected` (stable bucket).
+        M::KernelIntentResponse(_)
+        | M::KernelEscalationResponse(_)
+        | M::KernelPlannerFetchResponse(_)
+        | M::WitnessAck { .. }
+        | M::OperatorRequest(_)
+        | M::OperatorResponse(_)
+        | M::TproxyAdmissionRequest(_)
+        | M::KernelTproxyAdmissionResponse(_)
+        | M::DnsResolveRequest(_)
+        | M::KernelDnsResolveResponse(_) => (IPC_ROLE_UNKNOWN, IPC_MSG_KIND_UNEXPECTED),
+    }
+}
+
+// ── Inflight gauge state ────────────────────────────────────────────
+//
+// Per-role atomic counters tracking the number of in-flight
+// kernel↔substrate IPC handlers across all live planner streams.
+// Module-global because the gauge semantic is "total in-flight
+// across all concurrent streams" — a per-stream local counter would
+// undercount whenever two streams overlap. The atomics are i64 so
+// the underflow guard `max(0)` in the gauge emit is purely defensive
+// (counted increments / decrements are always balanced by the
+// RAII guard's start/Drop pairing).
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+static INFLIGHT_PLANNER:  AtomicI64 = AtomicI64::new(0);
+static INFLIGHT_VERIFIER: AtomicI64 = AtomicI64::new(0);
+static INFLIGHT_GATEWAY:  AtomicI64 = AtomicI64::new(0);
+static INFLIGHT_UNKNOWN:  AtomicI64 = AtomicI64::new(0);
+
+fn inflight_counter_for(role: &str) -> &'static AtomicI64 {
+    match role {
+        IPC_ROLE_PLANNER  => &INFLIGHT_PLANNER,
+        IPC_ROLE_VERIFIER => &INFLIGHT_VERIFIER,
+        IPC_ROLE_GATEWAY  => &INFLIGHT_GATEWAY,
+        _                 => &INFLIGHT_UNKNOWN,
+    }
+}
+
+/// `raxis.kernel.substrate.ipc.inflight` — emit one gauge sample
+/// with the post-update count for `role`. Called by the RAII guard
+/// in both `start` and `Drop`; exposed separately so tests can
+/// observe the gauge shape without going through the static
+/// counters.
+pub fn record_kernel_substrate_ipc_inflight(
+    hub:   &ObservabilityHub,
+    role:  &str,
+    count: i64,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([("role", role)]);
+    hub.record_gauge(
+        MetricName::KernelSubstrateIpcInflight,
+        labels,
+        count.max(0) as f64,
+    );
+}
+
+/// `raxis.kernel.substrate.ipc.{messages.total, roundtrip.duration}`
+/// — emit one counter increment plus one histogram observation
+/// covering a single dispatched frame. Called by the RAII guard in
+/// `Drop`; exposed separately so tests can verify the metric shape
+/// without managing the inflight counter.
+///
+/// `role` MUST be drawn from
+/// [`KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET`]. `message_kind` MUST be
+/// drawn from [`KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET`].
+/// `duration_ms` is the wall-clock round-trip in milliseconds.
+pub fn record_kernel_substrate_ipc_roundtrip(
+    hub:          &ObservabilityHub,
+    role:         &str,
+    message_kind: &str,
+    duration_ms:  i64,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([
+        ("role",         role),
+        ("message_kind", message_kind),
+    ]);
+    hub.record_counter(
+        MetricName::KernelSubstrateIpcMessagesTotal,
+        labels.clone(),
+        1.0,
+    );
+    hub.record_histogram_with_buckets(
+        MetricName::KernelSubstrateIpcRoundtripDuration,
+        labels,
+        duration_ms.max(0) as f64,
+        KERNEL_SUBSTRATE_IPC_BUCKETS_MS.to_vec(),
+    );
+}
+
+/// RAII guard instrumenting one kernel↔substrate IPC round-trip.
+/// Constructed at the top of each [`raxis_ipc::IpcMessage`] dispatch
+/// arm in `kernel/src/ipc/server.rs::drive_planner_stream`; held
+/// until the response frame is written (or the match arm exits via
+/// `?` propagation).
+///
+/// `start` increments the module-global per-role inflight counter
+/// and emits the post-increment gauge sample. `Drop` emits the
+/// counter + histogram with the wall-clock round-trip duration,
+/// decrements the inflight counter, and emits the post-decrement
+/// gauge sample — in that order so the dashboard sees the
+/// "completion" data point before the "freed slot" gauge update.
+///
+/// The RAII shape is load-bearing: it gives the dispatcher
+/// "regardless of handler outcome" instrumentation for free. Any
+/// path that drops the guard (normal return, early `?` propagation
+/// from `write_frame`, panic unwind) flushes the full metric tuple
+/// exactly once.
+pub struct KernelSubstrateIpcRoundtrip<'a> {
+    hub:          &'a ObservabilityHub,
+    role:         &'static str,
+    message_kind: &'static str,
+    started:      std::time::Instant,
+}
+
+impl<'a> KernelSubstrateIpcRoundtrip<'a> {
+    /// Begin instrumenting one kernel↔substrate IPC frame. Bumps
+    /// the inflight gauge and starts the wall-clock timer.
+    ///
+    /// `role` and `message_kind` MUST be the static lexemes from
+    /// [`kernel_substrate_ipc_route`]; the function takes `&'static
+    /// str` precisely to make this guarantee load-bearing — a
+    /// caller cannot pass a heap string and accidentally smuggle
+    /// in a free-form lexeme.
+    pub fn start(
+        hub:          &'a ObservabilityHub,
+        role:         &'static str,
+        message_kind: &'static str,
+    ) -> Self {
+        if hub.enabled() {
+            let cur = inflight_counter_for(role).fetch_add(1, Ordering::Relaxed) + 1;
+            record_kernel_substrate_ipc_inflight(hub, role, cur);
+        }
+        Self {
+            hub,
+            role,
+            message_kind,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for KernelSubstrateIpcRoundtrip<'_> {
+    fn drop(&mut self) {
+        if !self.hub.enabled() { return; }
+        let duration_ms = self.started.elapsed().as_millis() as i64;
+        record_kernel_substrate_ipc_roundtrip(
+            self.hub,
+            self.role,
+            self.message_kind,
+            duration_ms,
+        );
+        let cur = inflight_counter_for(self.role).fetch_sub(1, Ordering::Relaxed) - 1;
+        record_kernel_substrate_ipc_inflight(self.hub, self.role, cur);
+    }
+}
+
+/// Test-only: zero every per-role inflight counter so a test that
+/// asserts "gauge returned to 0 after N round-trips" starts from a
+/// clean baseline. Production code MUST NEVER call this — the
+/// counters are append-only state that mirrors the dispatcher's
+/// in-flight handlers.
+#[cfg(test)]
+pub fn reset_kernel_substrate_ipc_inflight_for_test() {
+    INFLIGHT_PLANNER.store(0, Ordering::Relaxed);
+    INFLIGHT_VERIFIER.store(0, Ordering::Relaxed);
+    INFLIGHT_GATEWAY.store(0, Ordering::Relaxed);
+    INFLIGHT_UNKNOWN.store(0, Ordering::Relaxed);
+}
+
+/// Test-only: snapshot the current per-role inflight count. Used by
+/// the inline witness tests to assert the gauge returns to zero
+/// after every round-trip Drop.
+#[cfg(test)]
+pub fn kernel_substrate_ipc_inflight_snapshot(role: &str) -> i64 {
+    inflight_counter_for(role).load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod substrate_ipc_tests {
+    use super::*;
+    use raxis_observability::{
+        exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
+        ObservabilityExporter, ObservabilityHub,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// Tests share the module-global static atomics, so they MUST
+    /// be serialised. A small process-local `Mutex` is enough —
+    /// `serial_test` would be overkill and pulls in an extra dev-
+    /// dep we don't otherwise need.
+    fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        match LOCK.lock() {
+            Ok(g)  => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled:     true,
+            sample_rate: 1.0,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
+        (hub, exp)
+    }
+
+    /// Fixture set covering the four dispatched variants plus a
+    /// representative non-dispatched variant. The compiler-
+    /// exhaustive match arm in [`kernel_substrate_ipc_route`]
+    /// guarantees totality over the full `IpcMessage` enum; the
+    /// runtime fixtures only need to cover the two route classes
+    /// (`dispatched` and `unexpected`) to pin the lexicon mapping.
+    fn fixture_ipc_messages() -> Vec<raxis_ipc::IpcMessage> {
+        use raxis_ipc::IpcMessage as M;
+        use raxis_types::{
+            IntentKind, IntentRequest, EscalationClass, EscalationRequest,
+            PlannerFetchRequest, PlannerFetchKind, RequestedEscalationScope,
+            WitnessSubmission, WitnessResultClass, GateType, CommitSha, TaskId,
+            CapabilityClass,
+        };
+
+        let task = TaskId::parse("task-substrate-ipc").unwrap();
+        let evaluation_sha = CommitSha::parse(&"a".repeat(40)).unwrap();
+
+        vec![
+            // ── Dispatched: planner / IntentRequest ──
+            M::IntentRequest(IntentRequest {
+                session_token:           "tok".into(),
+                sequence_number:         1,
+                envelope_nonce:          "00000000000000000000000000000001".into(),
+                intent_kind:             IntentKind::SingleCommit,
+                task_id:                 task.clone(),
+                base_sha:                None,
+                head_sha:                None,
+                submitted_claims:        vec![],
+                justification:           None,
+                idempotency_key:         None,
+                approval_token:          None,
+                approved:                None,
+                critique:                None,
+                resolved_via_escalation: None,
+                tokens_used:             None,
+                structured_output:       None,
+            }),
+            // ── Dispatched: verifier / WitnessSubmission ──
+            M::WitnessSubmission(WitnessSubmission {
+                verifier_token: "v-tok".into(),
+                task_id:        task.clone(),
+                gate_type:      GateType::parse("TestCoverage").unwrap(),
+                evaluation_sha,
+                result_class:   WitnessResultClass::Pass,
+                body:           serde_json::json!({}),
+            }),
+            // ── Dispatched: planner / EscalationRequest ──
+            M::EscalationRequest(EscalationRequest {
+                session_token:   "tok".into(),
+                task_id:         task.clone(),
+                class:           EscalationClass::CapabilityUpgrade,
+                requested_scope: RequestedEscalationScope::CapabilityUpgrade {
+                    capability: CapabilityClass::WriteSecrets,
+                },
+                justification:   "test fixture".into(),
+                idempotency_key: uuid::Uuid::nil(),
+            }),
+            // ── Dispatched: planner / PlannerFetchRequest ──
+            M::PlannerFetchRequest(PlannerFetchRequest {
+                request_id:    uuid::Uuid::nil(),
+                session_token: "tok".into(),
+                fetch_kind:    PlannerFetchKind::Inference,
+                url:           "https://example.invalid/v1/messages".into(),
+                method:        "POST".into(),
+                headers:       vec![],
+                body_bytes:    vec![],
+                timeout_ms:    30_000,
+            }),
+            // ── Unexpected: a wire-shape oddity that hits the
+            //    catch-all arm. WitnessAck is convenient because it
+            //    is a struct variant (different syntactic shape
+            //    from the tuple variants) so the test exercises the
+            //    full match-arm syntax.
+            M::WitnessAck {
+                verifier_run_id: uuid::Uuid::nil(),
+                accepted:        true,
+                reason:          None,
+            },
+        ]
+    }
+
+    /// `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01` witness #1: every
+    /// [`raxis_ipc::IpcMessage`] variant maps to a closed-lexicon
+    /// `(role, message_kind)` pair via [`kernel_substrate_ipc_route`].
+    /// The match arm is exhaustive over the wire enum, so the
+    /// compiler enforces the invariant at every variant-addition
+    /// refactor; this runtime test pins the lexicon membership for
+    /// the dispatched-arm fixtures + the representative
+    /// `unexpected` variant.
+    #[test]
+    fn every_variant_maps_to_closed_lexicons() {
+        for msg in fixture_ipc_messages() {
+            let (role, kind) = kernel_substrate_ipc_route(&msg);
+            assert!(
+                KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET.contains(&role),
+                "role {role:?} for {msg:?} not in closed set",
+            );
+            assert!(
+                KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.contains(&kind),
+                "message_kind {kind:?} for {msg:?} not in closed set",
+            );
+        }
+    }
+
+    /// `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01` witness #2: the four
+    /// dispatched variants map to their canonical `(role,
+    /// message_kind)` pair; every other variant collapses to
+    /// `(unknown, unexpected)`.
+    #[test]
+    fn dispatched_variants_have_canonical_route() {
+        for msg in fixture_ipc_messages() {
+            let (role, kind) = kernel_substrate_ipc_route(&msg);
+            match &msg {
+                raxis_ipc::IpcMessage::IntentRequest(_) => {
+                    assert_eq!(role, IPC_ROLE_PLANNER);
+                    assert_eq!(kind, IPC_MSG_KIND_INTENT_REQUEST);
+                }
+                raxis_ipc::IpcMessage::WitnessSubmission(_) => {
+                    assert_eq!(role, IPC_ROLE_VERIFIER);
+                    assert_eq!(kind, IPC_MSG_KIND_WITNESS_SUBMISSION);
+                }
+                raxis_ipc::IpcMessage::EscalationRequest(_) => {
+                    assert_eq!(role, IPC_ROLE_PLANNER);
+                    assert_eq!(kind, IPC_MSG_KIND_ESCALATION_REQUEST);
+                }
+                raxis_ipc::IpcMessage::PlannerFetchRequest(_) => {
+                    assert_eq!(role, IPC_ROLE_PLANNER);
+                    assert_eq!(kind, IPC_MSG_KIND_PLANNER_FETCH_REQUEST);
+                }
+                _ => {
+                    assert_eq!(role, IPC_ROLE_UNKNOWN,
+                        "unexpected variant {msg:?} must map to role=unknown");
+                    assert_eq!(kind, IPC_MSG_KIND_UNEXPECTED,
+                        "unexpected variant {msg:?} must map to message_kind=unexpected");
+                }
+            }
+        }
+    }
+
+    /// `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01` witness #3: each
+    /// (role, message_kind) emit pair produces exactly one
+    /// counter increment + one histogram observation with the
+    /// iter44 bucket override.
+    #[test]
+    fn record_roundtrip_emits_paired_metrics() {
+        let _g = serial_guard();
+        for &role in KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET {
+            for &kind in KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET {
+                let (hub, exp) = enabled_hub();
+                record_kernel_substrate_ipc_roundtrip(
+                    hub.as_ref(), role, kind, 42,
+                );
+                hub.flush();
+                let metrics = exp.metrics();
+                assert_eq!(
+                    metrics.len(), 2,
+                    "expected counter+histogram pair for role={role} kind={kind}",
+                );
+                let counter = metrics.iter()
+                    .find(|m| m.name == MetricName::KernelSubstrateIpcMessagesTotal)
+                    .expect("KernelSubstrateIpcMessagesTotal present");
+                let histogram = metrics.iter()
+                    .find(|m| m.name == MetricName::KernelSubstrateIpcRoundtripDuration)
+                    .expect("KernelSubstrateIpcRoundtripDuration present");
+                assert!(matches!(
+                    counter.datapoint,
+                    DataPoint::Sum { value } if (value - 1.0).abs() < 1e-9,
+                ));
+                match counter.labels.get("role").unwrap() {
+                    AttrValue::Str(s) => assert_eq!(s, role),
+                    other            => panic!("role must be Str, got {other:?}"),
+                }
+                match counter.labels.get("message_kind").unwrap() {
+                    AttrValue::Str(s) => assert_eq!(s, kind),
+                    other            => panic!("message_kind must be Str, got {other:?}"),
+                }
+                if let DataPoint::Histo { ref buckets, .. } = histogram.datapoint {
+                    assert_eq!(buckets, KERNEL_SUBSTRATE_IPC_BUCKETS_MS,
+                        "histogram MUST use the iter44 IPC bucket override");
+                } else {
+                    panic!("histogram datapoint must be Histo, got {:?}", histogram.datapoint);
+                }
+            }
+        }
+    }
+
+    /// `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01` witness #4: the RAII
+    /// guard increments the inflight counter on `start`, emits one
+    /// gauge sample with the post-increment value, then on `Drop`
+    /// emits the counter + histogram + a gauge sample with the
+    /// post-decrement value. After N completed round-trips the
+    /// per-role inflight counter MUST return to its pre-test
+    /// baseline (zero, modulo the reset call).
+    #[test]
+    fn raii_guard_round_trips_inflight_to_zero() {
+        let _g = serial_guard();
+        reset_kernel_substrate_ipc_inflight_for_test();
+        let (hub, exp) = enabled_hub();
+
+        // Drive 5 round-trips across the planner role.
+        const N: usize = 5;
+        for _ in 0..N {
+            let _guard = KernelSubstrateIpcRoundtrip::start(
+                hub.as_ref(),
+                IPC_ROLE_PLANNER,
+                IPC_MSG_KIND_INTENT_REQUEST,
+            );
+            // Guard drops at end of iteration — emits the counter,
+            // histogram, and post-decrement gauge.
+        }
+        hub.flush();
+
+        // Per-role inflight counter MUST be back to 0.
+        assert_eq!(
+            kernel_substrate_ipc_inflight_snapshot(IPC_ROLE_PLANNER),
+            0,
+            "inflight counter must return to 0 after N balanced round-trips",
+        );
+
+        // Metric tape MUST contain exactly 2N gauge samples (one
+        // per start, one per Drop) + N counters + N histograms.
+        let metrics = exp.metrics();
+        let n_gauges = metrics.iter()
+            .filter(|m| m.name == MetricName::KernelSubstrateIpcInflight)
+            .count();
+        let n_counters = metrics.iter()
+            .filter(|m| m.name == MetricName::KernelSubstrateIpcMessagesTotal)
+            .count();
+        let n_histograms = metrics.iter()
+            .filter(|m| m.name == MetricName::KernelSubstrateIpcRoundtripDuration)
+            .count();
+        assert_eq!(n_gauges, 2 * N,
+            "expected {} gauge samples (start+drop per round-trip), got {n_gauges}", 2 * N);
+        assert_eq!(n_counters, N,
+            "expected {N} counter increments, got {n_counters}");
+        assert_eq!(n_histograms, N,
+            "expected {N} histogram observations, got {n_histograms}");
+
+        // Final gauge sample MUST be 0.
+        let last_gauge = metrics.iter()
+            .rev()
+            .find(|m| m.name == MetricName::KernelSubstrateIpcInflight)
+            .expect("at least one gauge sample present");
+        match last_gauge.datapoint {
+            DataPoint::Sum { value } => assert!(
+                (value - 0.0).abs() < 1e-9,
+                "final inflight gauge MUST be 0, got {value}",
+            ),
+            ref other => panic!("gauge datapoint must be Sum, got {other:?}"),
+        }
+    }
+
+    /// Defence-in-depth: the closed sets MUST contain exactly the
+    /// lexemes the spec §8 table (`INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`)
+    /// enumerates.
+    #[test]
+    fn closed_sets_match_spec_tables() {
+        let role_expected: &[&str] = &["planner", "verifier", "gateway", "unknown"];
+        assert_eq!(KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET.len(), role_expected.len());
+        for &e in role_expected {
+            assert!(KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET.contains(&e),
+                "role lexeme {e:?} missing from closed set");
+        }
+        let kind_expected: &[&str] = &[
+            "intent_request",
+            "witness_submission",
+            "escalation_request",
+            "planner_fetch_request",
+            "unexpected",
+        ];
+        assert_eq!(KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.len(), kind_expected.len());
+        for &e in kind_expected {
+            assert!(KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.contains(&e),
+                "message_kind lexeme {e:?} missing from closed set");
+        }
+    }
+}

@@ -414,9 +414,26 @@ where
             }
         };
 
+        // iter44 perf-metrics slice 4b — `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`.
+        // The RAII guard owns the inflight gauge + duration histogram
+        // + counter for this frame. It is constructed at the top of
+        // each match arm with the canonical `(role, message_kind)`
+        // static-str pair drawn from
+        // `crate::observability::{IPC_ROLE_*, IPC_MSG_KIND_*}` — the
+        // same closed lexicon that
+        // `crate::observability::kernel_substrate_ipc_route` returns
+        // for the borrowed-message witness path. The guard is held
+        // until the arm returns or `?`-propagates an error; Drop emits
+        // the full metric tuple "regardless of handler outcome" — the
+        // discipline the invariant pins.
         match msg {
             // ── IntentRequest ────────────────────────────────────────────
             IpcMessage::IntentRequest(req) => {
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_PLANNER,
+                    crate::observability::IPC_MSG_KIND_INTENT_REQUEST,
+                );
                 planner_dispatch_log::intent_request(&req);
                 // Capture context BEFORE moving `req` into the handler.
                 let task_id_for_log = req.task_id.as_str().to_owned();
@@ -438,6 +455,11 @@ where
             // by variant. The WitnessAck response is a separate IpcMessage
             // variant so the verifier subprocess gets a typed acknowledgment.
             IpcMessage::WitnessSubmission(sub) => {
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_VERIFIER,
+                    crate::observability::IPC_MSG_KIND_WITNESS_SUBMISSION,
+                );
                 planner_dispatch_log::witness_request(&sub);
                 let task_id_for_log = sub.task_id.as_str().to_owned();
                 let started         = std::time::Instant::now();
@@ -504,6 +526,11 @@ where
             // including malformed ones — so the connection stays open and
             // the planner gets a typed reply it can match on.
             IpcMessage::EscalationRequest(req) => {
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_PLANNER,
+                    crate::observability::IPC_MSG_KIND_ESCALATION_REQUEST,
+                );
                 planner_dispatch_log::escalation_request(&req);
                 let task_id_for_log = req.task_id.as_str().to_owned();
                 let started         = std::time::Instant::now();
@@ -522,6 +549,11 @@ where
             // `provider-failure-handling.md §2.1` for the architecture
             // and `handlers/planner_fetch.rs` for the admission rules.
             IpcMessage::PlannerFetchRequest(req) => {
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_PLANNER,
+                    crate::observability::IPC_MSG_KIND_PLANNER_FETCH_REQUEST,
+                );
                 let request_id = req.request_id;
                 let started    = std::time::Instant::now();
                 let resp = handlers::planner_fetch::handle(req, &ctx).await;
@@ -538,6 +570,11 @@ where
             }
 
             other => {
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_UNKNOWN,
+                    crate::observability::IPC_MSG_KIND_UNEXPECTED,
+                );
                 planner_dispatch_log::planner_unexpected_message(&other);
                 // Unknown variant: log and drop frame but keep connection open.
             }

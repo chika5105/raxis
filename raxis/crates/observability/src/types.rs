@@ -465,6 +465,40 @@ pub enum MetricName {
     /// `accepted: bool`. One increment per dispatched operator IPC
     /// frame.
     OperatorIpcTotal,
+
+    // ── iter44: kernel↔substrate vsock IPC metrics (slice 4b) ────────
+    //
+    // Counterparts of the planner-socket dispatcher in
+    // `kernel/src/ipc/server.rs::drive_planner_stream` (the convergence
+    // point for both production vsock streams and the in-process Unix-
+    // socket test stream — see the rustdoc on that fn). Each
+    // substrate-originated IPC frame the kernel consumes emits
+    // exactly one duration sample + one counter increment, and the
+    // module-global `KernelSubstrateIpcInflight` gauge tracks the
+    // number of frames the kernel is currently mid-handler on. Spec:
+    // `v3/otel-observability.md §8` rows added under iter44 +
+    // invariant `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`.
+    /// `raxis.kernel.substrate.ipc.roundtrip.duration` — Histogram (ms).
+    /// Labels: `role` (closed allow-list = `{ "planner",
+    /// "verifier", "gateway", "unknown" }`), `message_kind` (closed
+    /// allow-list = `{ "intent_request", "witness_submission",
+    /// "escalation_request", "planner_fetch_request",
+    /// "unexpected" }`). Wall-clock from frame received → response
+    /// frame written. iter44 IPC-bucket override
+    /// `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]` ms.
+    KernelSubstrateIpcRoundtripDuration,
+    /// `raxis.kernel.substrate.ipc.messages.total` — Counter. Same
+    /// `role` / `message_kind` labels. One increment per frame the
+    /// dispatcher routes (the "unexpected" arm increments too,
+    /// proving the closed lexicon stays total).
+    KernelSubstrateIpcMessagesTotal,
+    /// `raxis.kernel.substrate.ipc.inflight` — Gauge. Labels:
+    /// `role`. Module-global counter that increments before the
+    /// per-variant handler runs and decrements after the response
+    /// frame is written, regardless of handler outcome. Sampled
+    /// (re-emitted) on every increment / decrement so the gauge
+    /// tracks actual concurrency.
+    KernelSubstrateIpcInflight,
 }
 
 impl MetricName {
@@ -557,6 +591,9 @@ impl MetricName {
 
             Self::OperatorIpcDuration                  => "raxis.operator.ipc.duration",
             Self::OperatorIpcTotal                     => "raxis.operator.ipc.total",
+            Self::KernelSubstrateIpcRoundtripDuration  => "raxis.kernel.substrate.ipc.roundtrip.duration",
+            Self::KernelSubstrateIpcMessagesTotal      => "raxis.kernel.substrate.ipc.messages.total",
+            Self::KernelSubstrateIpcInflight           => "raxis.kernel.substrate.ipc.inflight",
         }
     }
 
@@ -589,7 +626,8 @@ impl MetricName {
             | Self::GitWorktreeProvisionDuration
             | Self::GitMergeDuration
             | Self::KernelRespawnDuration
-            | Self::OperatorIpcDuration => MetricType::Histogram,
+            | Self::OperatorIpcDuration
+            | Self::KernelSubstrateIpcRoundtripDuration => MetricType::Histogram,
 
             Self::CircuitBreakerState
             | Self::SessionsActive
@@ -599,7 +637,8 @@ impl MetricName {
             | Self::InitiativeTaskInFlight
             | Self::AuditChainLag
             | Self::DashboardSseConnectionActive
-            | Self::KernelUptimeSeconds => MetricType::Gauge,
+            | Self::KernelUptimeSeconds
+            | Self::KernelSubstrateIpcInflight => MetricType::Gauge,
 
             Self::IntentAdmissionTotal
             | Self::GatewayFetchTotal
@@ -636,7 +675,8 @@ impl MetricName {
             | Self::GitCommitTotal
             | Self::KernelRespawnTotal
             | Self::SupervisorRefusedRestartTotal
-            | Self::OperatorIpcTotal => MetricType::Counter,
+            | Self::OperatorIpcTotal
+            | Self::KernelSubstrateIpcMessagesTotal => MetricType::Counter,
         }
     }
 
@@ -668,7 +708,8 @@ impl MetricName {
             | Self::GitWorktreeProvisionDuration
             | Self::GitMergeDuration
             | Self::KernelRespawnDuration
-            | Self::OperatorIpcDuration => Unit::Milliseconds,
+            | Self::OperatorIpcDuration
+            | Self::KernelSubstrateIpcRoundtripDuration => Unit::Milliseconds,
 
             Self::TokensConsumed
             | Self::PlannerInferenceTokensTotal => Unit::Tokens,

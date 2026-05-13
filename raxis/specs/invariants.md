@@ -87,9 +87,9 @@
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
-| Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01, INV-OBS-OPERATOR-IPC-COVERAGE-01 | 3 |
+| Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01, INV-OBS-OPERATOR-IPC-COVERAGE-01, INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 | 4 |
 | KSB capabilities envelope — V2.6 | INV-KSB-CAPABILITIES-PARITY-01, INV-KSB-CAPABILITIES-ROLE-SCOPED-01, INV-KSB-CAPABILITIES-TURN-COHERENT-01 | 3 |
-| **Total** | | **111** |
+| **Total** | | **112** |
 
 ---
 
@@ -6283,6 +6283,160 @@ closed-lexicon update to be a single PR.
 **Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
 rows for `OperatorIpcTotal` and `OperatorIpcDuration`). Referenced
 from `v3/observability-prometheus.md §3.12` (Prometheus inventory).
+
+### INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 — Every kernel↔substrate IPC frame has a paired counter + histogram + inflight emission
+
+**Statement.** Every `IpcMessage` frame the kernel dispatcher
+`kernel/src/ipc/server.rs::drive_planner_stream` consumes MUST
+produce:
+
+  1. Exactly one `KernelSubstrateIpcMessagesTotal` counter
+     increment, labelled with the same closed-lexicon `(role,
+     message_kind)` pair as item 2.
+  2. Exactly one `KernelSubstrateIpcRoundtripDuration` histogram
+     observation, with the iter44 IPC-bucket override `[1, 5, 10,
+     25, 50, 100, 250, 500, 1000, 2500, 5000]` ms, recording the
+     wall-clock from frame-received to response-frame-written (or,
+     for the `unexpected` arm, frame-received to drop).
+  3. One `KernelSubstrateIpcInflight` gauge sample with the
+     post-increment count emitted BEFORE the handler runs, and
+     one gauge sample with the post-decrement count emitted AFTER
+     the response frame is written (or after the unexpected drop).
+     The per-`role` inflight counter MUST return to its pre-frame
+     baseline value once the handler completes — i.e. the
+     increments and decrements pair up exactly, regardless of
+     handler outcome (`Ok` return, early `?` propagation from
+     `write_frame`, panic unwind).
+
+Coverage is one-to-one across counter / histogram per
+`(role, message_kind)` series: `rate(KernelSubstrateIpcMessagesTotal[5m])
+== rate(KernelSubstrateIpcRoundtripDuration[5m])`. The inflight
+gauge labelled by `role` is a defense-in-depth surface: at
+steady state when no streams are mid-handler, every `role`
+series MUST read zero.
+
+The label vocabularies are CLOSED:
+* `role` — `{ "planner", "verifier", "gateway", "unknown" }`. The
+  closed set is pinned by
+  `kernel/src/observability.rs::KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET`
+  and by the static-str constants the dispatcher passes to
+  `KernelSubstrateIpcRoundtrip::start`. `gateway` is reserved for
+  a future gateway-side dispatcher migration (slice 4c+); it is
+  pinned in the closed set today so the dashboard PromQL stays
+  stable when the gateway dispatcher starts emitting.
+* `message_kind` — `{ "intent_request", "witness_submission",
+  "escalation_request", "planner_fetch_request", "unexpected" }`.
+  The lexeme is the snake_case projection of the dispatched
+  `IpcMessage` request variant; every non-dispatched variant
+  collapses to `unexpected` so the dashboard's "Messages by
+  kind" panel can pivot on a stable set even as new wire variants
+  are added. Pinned by
+  `kernel/src/observability.rs::KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET`
+  and by the exhaustive match arm in
+  `kernel_substrate_ipc_route` whose totality is enforced by the
+  compiler over every `IpcMessage` variant.
+
+**Justification.** The kernel↔substrate IPC dispatcher is the
+single entry point for every planner / verifier subprocess
+frame the kernel admits: intent submissions, witness submissions,
+escalation requests, and the kernel-mediated gateway egress
+fetches that LLM tool-calls travel over. Pre-iter44 the only
+operator-visible IPC signals were the per-arm structured stderr
+log lines emitted by `planner_dispatch_log::*` — durable, but not
+pivot-able into a Grafana panel and impossible to alert on at the
+rate / latency level.
+
+The three metrics are the structural complement of slice 4a's
+`OperatorIpcDuration` / `OperatorIpcTotal` on the operator-socket
+side: together they cover every kernel UDS dispatcher the iter44
+"is the kernel healthy and what is it doing right now?" view
+depends on. The new `15-ipc.json` dashboard surfaces:
+
+  * p50 / p95 / p99 round-trip latency overall and per
+    `message_kind` (a tail-latency spike on `intent_request`
+    indicates a kernel admission slow path; on
+    `planner_fetch_request` it tracks LLM provider RTT).
+  * Messages-per-second by `(role, message_kind)` — the
+    dispatcher's traffic mix at a glance.
+  * Inflight by `role` — a monotonically growing line is the
+    leading indicator of a stuck handler (or a session leak); the
+    inflight=0 baseline pinned by item 3 is the "kernel is
+    quiescent" signal.
+  * Unexpected-variant rate — non-zero steady-state indicates a
+    wire-protocol mismatch between a substrate client and the
+    kernel (e.g. a planner build that smuggles an
+    `OperatorRequest` onto planner.sock).
+
+The "regardless of handler outcome" guarantee on item 3 is
+load-bearing: the RAII guard
+`KernelSubstrateIpcRoundtrip` in `kernel/src/observability.rs`
+emits the full metric tuple inside its `Drop` impl, so any
+exit path — normal return, early `?` propagation from
+`write_frame`, panic unwind — flushes the counter + histogram +
+post-decrement gauge exactly once. A handler that hangs
+mid-`.await` keeps the inflight counter elevated, which is
+exactly the operator-visible signal the invariant promises.
+
+**Scenario.** A planner subprocess deadlocks while awaiting a
+`PlannerFetchResponse` from a misbehaving upstream LLM provider.
+The provider response never arrives; the kernel's
+`handlers::planner_fetch::handle` future never completes. With
+this invariant:
+
+  1. The dispatcher's `KernelSubstrateIpcRoundtrip` guard for
+     this frame is still held — `Drop` has not run.
+  2. `KernelSubstrateIpcInflight{role="planner"}` reads `1`
+     (one frame mid-handler).
+  3. The dashboard's "Inflight by role" panel shows the
+     `planner` series stuck at 1 (or higher, if other planners
+     also fan in).
+  4. The operator pivots from the inflight gauge to the
+     structured `planner_fetch_response` log (which carries
+     `request_id`, `latency_ms`, `error`) to identify the
+     wedged tool-call and either operator-abort the task or
+     restart the gateway upstream.
+
+Without the metric, the operator's only signal is the audit
+log (which records the FetchRequest but not the timing of the
+missing response) — durable but not real-time-pivot-able.
+
+**Witness.** Four unit tests in
+`kernel/src/observability.rs::substrate_ipc_tests`:
+
+* `every_variant_maps_to_closed_lexicons` — drives one fixture
+  instance per dispatched `IpcMessage` variant plus a
+  representative `unexpected` variant through
+  `kernel_substrate_ipc_route` and asserts each `(role,
+  message_kind)` pair lies in the closed sets. The exhaustive
+  match arm in `kernel_substrate_ipc_route` provides the
+  compile-time totality witness over the full enum.
+* `dispatched_variants_have_canonical_route` — pins the canonical
+  `(role, message_kind)` pair for each of the four dispatched
+  variants and the `(unknown, unexpected)` collapse for every
+  other variant.
+* `record_roundtrip_emits_paired_metrics` — iterates the full
+  Cartesian product of the two closed sets, asserts each
+  `record_kernel_substrate_ipc_roundtrip` call emits BOTH the
+  counter and the histogram observation with matching labels
+  and the iter44 IPC-bucket override (not the hub's global
+  default).
+* `raii_guard_round_trips_inflight_to_zero` — drives N (=5)
+  `KernelSubstrateIpcRoundtrip::start` + `Drop` pairs and
+  asserts (a) the per-role inflight counter returns to zero,
+  (b) the metric tape carries exactly 2N gauge samples + N
+  counters + N histograms, and (c) the final gauge sample is
+  zero — pinning the RAII Drop contract end-to-end.
+
+The `kernel_substrate_ipc_route` match arm is itself a structural
+witness — adding a new `IpcMessage` variant produces a compile
+error here until the variant is mapped, which forces the
+closed-lexicon update to be a single PR.
+
+**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+rows for `KernelSubstrateIpcRoundtripDuration`,
+`KernelSubstrateIpcMessagesTotal`, `KernelSubstrateIpcInflight`).
+Referenced from `v3/observability-prometheus.md §3.13`
+(Prometheus inventory).
 
 ---
 
