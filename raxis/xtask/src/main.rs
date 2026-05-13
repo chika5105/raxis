@@ -10,6 +10,7 @@ mod dev_codesign;
 mod dev_kernel;
 mod dev_keys;
 mod dev_prereqs;
+mod dev_reset;
 mod images;
 mod license_check;
 mod linux_microvm;
@@ -118,12 +119,26 @@ fn main() -> anyhow::Result<()> {
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             macos_firewall::run_status(&tail).context("macos-firewall-status")
         }
+        Some("dev-reset") => {
+            // `cargo xtask dev-reset notifications [--data-dir <P>] [--dry-run]`
+            // — Phase 2 of dashboard-hardening §2 / INV-NOTIF-SCOPE-01.
+            // Wipes the operator-notifications projection
+            // (`<data_dir>/kernel.db::notifications` table +
+            // `<data_dir>/notifications/inbox.jsonl`) so the next
+            // kernel boot starts the inbox empty AFTER the
+            // `notification_priority` filter took effect. The
+            // audit chain at `<data_dir>/audit/` is NEVER touched
+            // — that's the whole point of the audit-vs-
+            // notification separation.
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            dev_reset::run(&tail).context("dev-reset")
+        }
         Some(other) => anyhow::bail!(
             "unknown xtask target: {other:?}\n\
              available: spec-graph [--strict], license-check [--strict], \
-             dev-keys, dev-codesign, dev-prereqs, images, linux-microvm, \
-             linux-prereqs, macos-firewall-prereq, macos-firewall-status, \
-             perf, observability"
+             dev-keys, dev-codesign, dev-prereqs, dev-reset, images, \
+             linux-microvm, linux-prereqs, macos-firewall-prereq, \
+             macos-firewall-status, perf, observability"
         ),
         None => anyhow::bail!(
             "usage: cargo xtask <target> [flags]\n\
@@ -133,6 +148,7 @@ fn main() -> anyhow::Result<()> {
              dev-keys init  [--dir <PATH>] [--force]   — emit local-build signing keypair\n                                                 (release-and-distribution.md §8)\n  \
              dev-codesign   [--profile <P>]            — ad-hoc codesign target/<P>/raxis-kernel\n                 [--entitlements <PATH>]    against release/raxis.entitlements\n                 [--binary <NAME>]          (macOS only; no-op on Linux)\n                                                 (system-requirements.md §5.2)\n  \
              dev-prereqs    [--install]                 — verify / install AVF demo prerequisites\n                 [--scope user|workspace]   (Homebrew, musl-cross, openssl@3,\n                 [--arch aarch64|x86_64]    rustup musl target, codesign, cargo);\n                 [--skip-cargo-config]     idempotently patches\n                                                 ~/.cargo/config.toml linker pin.\n                                                 (demo-e2e-sample/AVF_DEMO.md §0)\n  \
+             dev-reset notifications                    — wipe the operator-notifications inbox\n                 [--data-dir <PATH>]                       projection (kernel.db::notifications\n                 [--dry-run]                               table + notifications/inbox.jsonl)\n                                                           so the next kernel boot starts empty\n                                                           AFTER the notification_priority\n                                                           filter took effect. The audit chain\n                                                           at <data_dir>/audit/ is NEVER touched\n                                                           (INV-NOTIF-SCOPE-01).\n  \
              images dev-kernel                          — stage Linux guest-kernel binary at\n                 (--from-file <PATH> | --url <URL> --sha256 <HEX>) \n                 [--install-dir <PATH>] [--arch <ARCH>] [--force]\n                                                 <install_dir>/kernel/vmlinux\n                                                 (system-requirements.md §11)\n  \
              images dev-stage --role <ROLE>             — cross-compile raxis-planner-<role>\n                 [--target <TRIPLE>]                       and stage it into images/<role>/rootfs/init\n                                                 (planner-harness.md §14.4)\n  \
              images build-all                           — pack staged rootfs into signed cpio.gz\n                 [--role <ROLE>] [--install-dir <P>]       initramfs and lay out under\n                 [--signing-key <PATH>]                    <install_dir>/images/raxis-<role>-<kver>.{{img,manifest.toml}}\n                                                 (planner-harness.md §14.4 + e2e-live-test-gap.md)\n  \

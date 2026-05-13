@@ -48,4 +48,10 @@ chrono        = { version = "0.4", default-features = false, features = ["clock"
 raxis-isolation         = { path = "../crates/isolation" }
 raxis-test-support      = { path = "../crates/test-support" }
 raxis-observability     = { path = "../crates/observability" }
+# `cargo xtask dev-reset notifications` opens kernel.db read-write to
+# truncate the `notifications` table without touching any other row.
+# The audit chain is in `<data_dir>/audit/` (a separate JSONL store)
+# so wiping the SQLite table never touches it. Workspace-pinned to
+# the same rusqlite version raxis-store uses.
+rusqlite     = { workspace = true }
 tempfile     = "3"
