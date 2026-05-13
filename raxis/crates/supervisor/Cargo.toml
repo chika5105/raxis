@@ -1,0 +1,97 @@
+[package]
+name              = "raxis-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `self-healing-supervisor.md §4.1`
+#
+# This crate ships a small (target ≤ 500 LOC of supervisor logic
+# excluding tests) external binary that wraps `raxis-kernel` so a
+# deadlock / panic / OOM-kill / crash becomes a sub-second auto-
+# restart instead of a permanently wedged kernel. The crate is
+# deliberately single-responsibility: spawn child / classify exit
+# / decide restart-or-not. It owns its own circuit breaker
+# (`<data_dir>/supervisor_state.json`) and sentinel
+# (`<data_dir>/kernel_lifecycle_status.json`) but does NOT touch
+# the audit chain — the kernel's existing audit pipeline is the
+# single source of truth for restart events
+# (`INV-SUPERVISOR-RESTART-AUDIT-01`); the supervisor's structured
+# stderr log + sentinel file are operator-facing observability
+# only.
+
+[lib]
+name = "raxis_supervisor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "raxis-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+# Wallclock + structured-log dependencies. We intentionally do NOT
+# pull in the full `raxis-types` / `raxis-audit-tools` workspace
+# crates; the supervisor must stay buildable even if the kernel's
+# audit-chain layout changes. The sentinel file is a private
+# JSON contract between supervisor and (a) the kernel's
+# `restart_lifecycle::read_sentinel_for_restart`, (b) the
+# dashboard's `kernel-lifecycle` handler.
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+chrono      = { workspace = true }
+anyhow      = { workspace = true }
+
+# Direct UNIX signal API for the operator-signal contract per
+# `self-healing-supervisor.md §4.5`. `nix` ships SIGTERM /
+# SIGINT / SIGKILL / SIGHUP as typed constants and `kill(pid,
+# signal)` as a checked syscall. Pinned to the long-stable 0.27
+# line which keeps a small feature surface (only `signal` +
+# `process` here).
+[target.'cfg(unix)'.dependencies]
+nix         = { version = "0.27", default-features = false, features = ["signal", "process"] }
+libc        = { workspace = true }
+
+[dev-dependencies]
+tempfile    = "3"
+# Used by the integration tests to spawn the fake-child binary
+# the supervisor supervises. The fake-child binary is built from
+# the `tests/bin/` sources via cargo's `[[test]]` + per-test
+# `[[bin]]` machinery (see this crate's `[[bin]]` metadata
+# below).
+tokio       = { workspace = true }
+
+# Fake child binaries used by the integration tests. Each binary
+# exits with a deterministic code / signal so the supervisor's
+# classifier can be exercised without depending on the real
+# `raxis-kernel` boot sequence.
+[[bin]]
+name = "supervisor-fake-child-exit70"
+path = "tests/bin/exit70.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "supervisor-fake-child-exit0"
+path = "tests/bin/exit0.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "supervisor-fake-child-panic"
+path = "tests/bin/panic.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "supervisor-fake-child-sleep-forever"
+path = "tests/bin/sleep_forever.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "supervisor-fake-child-slow-sigterm"
+path = "tests/bin/slow_sigterm.rs"
+test = false
+doc  = false

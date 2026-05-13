@@ -68,6 +68,12 @@ members = [
     "live-e2e",
     "pusher",
     "xtask",
+    # `self-healing-supervisor.md §4.1` — opt-in external
+    # supervisor binary that wraps `raxis-kernel`. Default-off
+    # behind the `RAXIS_SUPERVISOR_AUTO_RESTART=1` env var; live-
+    # e2e MUST NOT set this so iter41+ behaviour stays bit-
+    # identical to today.
+    "crates/supervisor",
 ]
 
 [workspace.package]
