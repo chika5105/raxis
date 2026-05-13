@@ -46,6 +46,19 @@ raxis-types     = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 thiserror       = { workspace = true }
+# `tokio` for the host-side credential-proxy vsock-loopback bridge
+# (`vsock_loopback_bridge.rs`). The bridge owns a per-session
+# reverse-direction UDS listener (`<uds_path>_<vsock_port>`) and
+# splices accepted streams to `127.0.0.1:<host_loopback_port>` via
+# `tokio::io::copy_bidirectional`. Using tokio (vs. `std::thread`
+# like the AVF substrate) avoids paying for one OS thread per
+# concurrent credential-proxy connection on Linux hosts that may
+# run hundreds of concurrent sessions. The substrate caller is
+# always inside the kernel's tokio runtime
+# (`raxis-session-spawn::spawn_session` is `async fn`); the bridge
+# surfaces `LoopbackBridgeError::NoTokioRuntime` if invoked outside
+# one.
+tokio           = { workspace = true }
 
 [dev-dependencies]
 # `tempfile` is workspace-wide test-only. We re-import directly here so

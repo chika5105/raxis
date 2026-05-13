@@ -44,6 +44,8 @@
 pub mod api;
 pub mod vmm;
 pub mod vsock;
+#[cfg(unix)]
+pub mod vsock_loopback_bridge;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -351,6 +353,8 @@ impl FirecrackerBackend {
             vsock_cid:     spec.vsock_cid.unwrap_or(0),
             api_sock_path: api_sock,
             vsock_uds:     vsock_uds,
+            #[cfg(unix)]
+            loopback_bridges: Vec::new(),
         })
     }
 }
@@ -569,6 +573,19 @@ pub struct FirecrackerSession {
     api_sock_path: PathBuf,
     /// VSock UDS path; cleaned up on Drop.
     vsock_uds:     PathBuf,
+    /// Per-`(vsock_port)` reverse-direction loopback bridges. One
+    /// entry per `register_loopback_listener` call. Drained on
+    /// `terminate` / `shutdown` BEFORE the VMM child is reaped so
+    /// each bridge's UDS path (`<vsock_uds>_<vsock_port>`) is
+    /// unlinked while the runtime dir is still writable. Empty by
+    /// default — sessions that did NOT declare credentials never
+    /// register listeners and the kernel-side composer
+    /// (`raxis-session-spawn`) only iterates a non-empty
+    /// `LoopbackPlan`. See [`vsock_loopback_bridge`] module docs
+    /// for the per-session isolation argument and
+    /// `INV-CRED-PROXY-VM-REACHABILITY-01`.
+    #[cfg(unix)]
+    loopback_bridges: Vec<vsock_loopback_bridge::LoopbackListenerHandle>,
 }
 
 impl FirecrackerSession {
@@ -624,12 +641,87 @@ impl Session for FirecrackerSession {
         if let Some(ch) = self.channel.take() {
             ch.close();
         }
+        // Drain every reverse-direction loopback bridge BEFORE we
+        // reap the VMM child. Each handle's Drop aborts its
+        // accept task and unlinks
+        // `<vsock_uds>_<vsock_port>`; doing it while the runtime
+        // dir is still writable keeps cleanup local to the
+        // substrate (vs. surfacing as stale-socket clutter for
+        // `raxis doctor` to flag later). See
+        // `vsock_loopback_bridge::LoopbackListenerHandle` Drop docs.
+        #[cfg(unix)]
+        self.loopback_bridges.clear();
         if let Some(mut vmm) = self.vmm.take() {
             vmm.terminate().map_err(|e| {
                 IsolationError::BackendInternal(format!("{BACKEND_ID}: terminate: {e}"))
             })?;
         }
         let _ = std::fs::remove_file(&self.vsock_uds);
+        Ok(())
+    }
+
+    /// Register a credential-proxy vsock-loopback listener on this
+    /// session's Firecracker UDS multiplexer.
+    ///
+    /// The host pre-binds `<vsock_uds>_<vsock_port>` so that when
+    /// the in-guest forwarder dials
+    /// `(VMADDR_CID_HOST, vsock_port)`, Firecracker delivers the
+    /// connection to the bridge's accept loop, which splices the
+    /// bytes to `127.0.0.1:<host_loopback_port>` (where the
+    /// credential proxy is bound). Per-VM device boundary IS the
+    /// per-session isolation boundary — no shared host vsock CID.
+    /// See [`crate::vsock_loopback_bridge`] for the per-session
+    /// isolation argument and `INV-CRED-PROXY-VM-REACHABILITY-01`.
+    ///
+    /// **Fail-closed.** Any bind / configure / spawn failure
+    /// surfaces as `IsolationError` without registering a partial
+    /// listener. `Drop` drains successfully-registered listeners,
+    /// so a mid-fan-out failure in `session-spawn` leaves no
+    /// leaked UDS paths.
+    #[cfg(unix)]
+    fn register_loopback_listener(
+        &mut self,
+        vsock_port:         u32,
+        host_loopback_port: u16,
+    ) -> Result<(), IsolationError> {
+        if self.terminated {
+            return Err(IsolationError::TransportFault(format!(
+                "{BACKEND_ID}: register_loopback_listener: session terminated",
+            )));
+        }
+        let handle = vsock_loopback_bridge::register_listener(
+            &self.vsock_uds,
+            vsock_port,
+            host_loopback_port,
+        )
+        .map_err(|e| match e {
+            // `EADDRINUSE` / `EACCES` / `ENOENT` from `bind(2)` are
+            // transport-class faults: the substrate could not stand
+            // up the host half of the bridge, so the session cannot
+            // serve credential-proxy traffic. The session-spawn
+            // composer turns this into a teardown of the partially
+            // built session.
+            vsock_loopback_bridge::LoopbackBridgeError::Bind { .. } => {
+                IsolationError::TransportFault(format!(
+                    "{BACKEND_ID}: register_loopback_listener: {e}",
+                ))
+            }
+            // `NoTokioRuntime` is a substrate-trait misuse
+            // (`register_loopback_listener` called from a non-async
+            // caller) and `TokioHandover` is a host-side reactor /
+            // fd state divergence; neither is a peer transport
+            // fault, so we surface them as `BackendInternal` (the
+            // same class the AVF substrate uses for its
+            // dispatch-queue failure mode in
+            // `register_loopback_listener`).
+            vsock_loopback_bridge::LoopbackBridgeError::NoTokioRuntime
+            | vsock_loopback_bridge::LoopbackBridgeError::TokioHandover(_) => {
+                IsolationError::BackendInternal(format!(
+                    "{BACKEND_ID}: register_loopback_listener: {e}",
+                ))
+            }
+        })?;
+        self.loopback_bridges.push(handle);
         Ok(())
     }
 
@@ -653,6 +745,10 @@ impl Session for FirecrackerSession {
         if let Some(ch) = self.channel.take() {
             ch.close();
         }
+        // Drain reverse-direction loopback bridges before the VMM
+        // reap (same ordering as `terminate`).
+        #[cfg(unix)]
+        self.loopback_bridges.clear();
 
         let status = if let Some(mut vmm) = self.vmm.take() {
             vmm.wait_or_kill(grace).map_err(|e| {
