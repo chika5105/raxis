@@ -14,6 +14,7 @@ mod license_check;
 mod linux_microvm;
 mod linux_prereqs;
 mod macos_firewall;
+mod observability;
 mod perf;
 mod spec_graph;
 
@@ -80,6 +81,16 @@ fn main() -> anyhow::Result<()> {
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             perf::run(&tail).context("perf")
         }
+        Some("observability") => {
+            // `cargo xtask observability {up,down,status,urls}` —
+            // standalone wrapper around the OTel + Prometheus +
+            // Grafana subset of the live-e2e compose stack so an
+            // operator can review the dashboards without running
+            // the full live-e2e harness. See
+            // `xtask/src/observability.rs` header.
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            observability::run(&tail).context("observability")
+        }
         Some("linux-prereqs") => {
             // `cargo xtask linux-prereqs [--json]` — Linux Firecracker
             // substrate host preflight. See
@@ -110,7 +121,8 @@ fn main() -> anyhow::Result<()> {
             "unknown xtask target: {other:?}\n\
              available: spec-graph [--strict], license-check [--strict], \
              dev-keys, dev-codesign, dev-prereqs, images, linux-microvm, \
-             linux-prereqs, macos-firewall-prereq, macos-firewall-status"
+             linux-prereqs, macos-firewall-prereq, macos-firewall-status, \
+             perf, observability"
         ),
         None => anyhow::bail!(
             "usage: cargo xtask <target> [flags]\n\
@@ -126,7 +138,9 @@ fn main() -> anyhow::Result<()> {
              linux-microvm bundle                       — one-shot Firecracker bundle:\n                 [--install-dir <PATH>] [--arch <ARCH>]      stage reference vmlinux + every\n                 [--kernel-from-file <PATH>]                 canonical role's signed initramfs\n                 [--kernel-url <URL>] [--kernel-sha256 <HEX>]   under <install_dir>/\n                 [--target <TRIPLE>] [--signing-key <PATH>]    (isolation-linux-microvm.md §9)\n                 [--role <ROLE>] [--skip-kernel] [--skip-stage] [--force]\n  \
              linux-prereqs                              — Linux substrate host preflight:\n                 [--json]                                  /dev/kvm, vhost_vsock, kvm group,\n                                                           kernel ≥ 5.10, cgroup v2, firecracker(1),\n                                                           virtiofsd(1) (V3 prereq, Warn-only)\n                                                           (isolation-linux-microvm.md §9)\n  \
              macos-firewall-prereq                      — one-time `socketfilterfw --add` /\n                 [--dry-run]                                `--unblockapp` of every raxis host\n                 [--release-only | --debug-only]            binary so the macOS firewall popup\n                                                           does not re-appear on every\n                                                           `cargo build`. Auto-runs as part of\n                                                           `dev-prereqs` on macOS.\n  \
-             macos-firewall-status                      — read-only listing of the firewall\n                                                           allowlist state for every raxis host\n                                                           binary."
+             macos-firewall-status                      — read-only listing of the firewall\n                                                           allowlist state for every raxis host\n                                                           binary.\n  \
+             perf {{vm-cold-boot,audit-throughput,all}}  — drive the perf harness against the\n                 [--iterations N] [--backend ...]            live-e2e Prometheus + Grafana stack\n                                                         (specs/v3/observability-prometheus.md;\n                                                          guides/recipes/ops/16-measure-perf.md)\n  \
+             observability {{up,down,status,urls}}       — bring up / tear down / probe the\n                 [--no-open] [--full] [--volumes]            OTel-collector + Prometheus + Grafana\n                 [--dashboard <UID>]                         subset of the live-e2e compose\n                                                         stack as a STANDALONE surface. Pinned\n                                                         to the `raxis-live-e2e-test` compose\n                                                         project namespace. The `up` flow\n                                                         prints Grafana / Prometheus URLs +\n                                                         per-dashboard deep-links, and on\n                                                         macOS / Linux opens the Grafana home\n                                                         in the default browser. Use this\n                                                         when you want to inspect the\n                                                         dashboards WITHOUT running a full\n                                                         live-e2e or `cargo xtask perf` run."
         ),
     }
 }
