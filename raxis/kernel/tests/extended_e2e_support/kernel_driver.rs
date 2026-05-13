@@ -126,20 +126,23 @@ pub fn require_gateway_binary() -> PathBuf {
 // `raxis_types::HostPreflightError::DiskPressure` and:
 //   1. Prints one stable-prefixed line to stderr —
 //      `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
-//      — so the dashboard banner (subscribed to the same
-//      `attention_kind` filter the kernel uses for runtime
-//      `OperatorAttentionRequired` events) can pick up the
-//      preflight failure without a kernel boot.
+//      — for harness / terminal / CI-log consumers. This is the
+//      only surface for the host-hygiene signal; it is a
+//      developer-/CI-host concern and is deliberately not routed
+//      to the operator dashboard or the kernel's audit chain
+//      (see `INV-HOST-HYGIENE-01` scope clause and
+//      `dashboard-hardening.md §5.7`).
 //   2. Panics with the structured `Display` rendering, which
 //      surfaces the offending volume + remediation command in the
-//      `cargo test` failure summary.
+//      `cargo test` failure summary so a developer who never
+//      reads stderr still sees the right next step.
 // ---------------------------------------------------------------------------
 
-/// Stable stderr prefix the dashboard / Tier-3 reporter scrapes
-/// for preflight-emitted operator-attention events. Kept distinct
-/// from the audit-event JSON the kernel itself emits so a log
-/// parser can tell pre-kernel preflights apart from runtime
-/// kernel emissions.
+/// Stable stderr prefix consumed by the live-e2e harness, the
+/// developer's terminal, and CI log scrapers when the preflight
+/// detects host disk pressure. The kernel itself does not emit a
+/// `HostHygieneDiskPressure` audit event — this envelope is the
+/// single surface for the dev-host signal.
 pub const HOST_PREFLIGHT_LOG_PREFIX: &str = "OPERATOR_ATTENTION_REQUIRED";
 
 /// Host disk-pressure preflight — see module docs above. Panics on
@@ -208,16 +211,18 @@ fn probe_disk_pressure(_threshold_pct: u32) -> Vec<raxis_types::DiskVolumeReport
 
 /// Emit the structured payload to stderr with the
 /// `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
-/// envelope the dashboard banner is wired to consume. The kernel
-/// is not yet running at preflight time so we cannot use the
-/// in-process `audit.emit` path; the stderr envelope is the
-/// pre-kernel substitute and stays compatible with the kernel-side
-/// emission shape (same `attention_kind`, same JSON body).
+/// envelope. This is the only surface for the dev-host
+/// hygiene signal — see `INV-HOST-HYGIENE-01` scope clause and
+/// `dashboard-hardening.md §5.7`. The envelope is consumed by
+/// the harness, the developer's terminal, and CI log scrapers;
+/// it is deliberately not routed to the kernel audit chain or
+/// the operator dashboard (those are reserved for kernel
+/// runtime invariants).
 pub fn emit_operator_attention_to_stderr(err: &raxis_types::HostPreflightError) {
     eprintln!(
         "{HOST_PREFLIGHT_LOG_PREFIX} {} {}",
         raxis_types::HostPreflightError::ATTENTION_KIND,
-        err.to_audit_details_json(),
+        err.to_envelope_json(),
     );
 }
 
@@ -270,10 +275,11 @@ mod hygiene_preflight_tests {
     use raxis_types::HostPreflightError;
 
     /// Synthetic-fixture probe: assert the structured JSON the
-    /// preflight prints to stderr is byte-identical to what the
-    /// dashboard banner expects. Pinning the JSON shape here
-    /// catches a serde-rename or field-rename break before the
-    /// FE finds out via a silent banner.
+    /// preflight prints to stderr is byte-identical to the
+    /// stderr-envelope wire shape harness / CI-log consumers
+    /// scrape. Pinning the JSON shape here catches a serde-rename
+    /// or field-rename break before downstream consumers find
+    /// out via a silent envelope.
     #[test]
     fn synthesised_disk_pressure_round_trips_to_attention_envelope() {
         let err = HostPreflightError::disk_pressure(
@@ -284,27 +290,29 @@ mod hygiene_preflight_tests {
                 free_human: "64.0GiB".into(),
             }],
         );
-        let json = err.to_audit_details_json();
+        let json = err.to_envelope_json();
         assert!(
             json.contains("\"pressure_kind\":\"DiskPressure\""),
-            "dashboard filter would miss the event without the tag: {json}"
+            "envelope consumers would miss the event without the tag: {json}"
         );
         assert!(
             json.contains("/System/Volumes/Data"),
             "offending volume missing from JSON: {json}"
         );
-        // `Display` impl pins the operator-facing one-liner the
-        // panic message AND the dashboard tooltip render.
+        // `Display` impl pins the developer-facing one-liner that
+        // lands in the panic message AND the `cargo test`
+        // failure summary.
         let rendered = format!("{err}");
         assert!(rendered.contains("Run `cargo xtask hygiene` to remediate"));
         assert!(rendered.contains("/System/Volumes/Data at 92%"));
     }
 
-    /// `attention_kind` is the dashboard's filter string. Pin it
-    /// here so a future `HostPreflightError` rename cannot
-    /// silently disconnect the banner from the preflight emit.
+    /// `ATTENTION_KIND` is the stderr-envelope filter string the
+    /// harness / CI log scraper match on. Pin it here so a future
+    /// `HostPreflightError` rename cannot silently disconnect the
+    /// envelope from the consumers without flagging this test.
     #[test]
-    fn attention_kind_matches_dashboard_filter_contract() {
+    fn attention_kind_is_stable_for_envelope_consumers() {
         assert_eq!(HostPreflightError::ATTENTION_KIND, "HostHygieneDiskPressure");
     }
 

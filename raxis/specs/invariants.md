@@ -3664,13 +3664,33 @@ cannot satisfy the V2 disk-watchdog contract
 
 ### INV-HOST-HYGIENE-01 — Worktree pool MUST be swept; live-e2e MUST refuse over-pressure
 
-**Statement.** Every host running Raxis worker agents MUST
-have a worktree-hygiene mechanism that prunes git worktrees
-whose branches have landed to the host repo's resolved
-default-branch ref AND whose files are not actively held
-open. The live-e2e harness MUST refuse to run when host
-disk usage exceeds 90% on the repo volume, `/private/tmp`,
-or `/var/folders/*`.
+**Statement.** Every developer host running parent-side Raxis
+worker agents MUST have a worktree-hygiene mechanism that
+prunes git worktrees whose branches have landed to the host
+repo's resolved default-branch ref AND whose files are not
+actively held open. The live-e2e harness MUST refuse to run
+when host disk usage exceeds 90% on the repo volume,
+`/private/tmp`, or `/var/folders/*`.
+
+**Scope: dev/CI host, not production operator.** This
+invariant governs the developer-host concern of keeping the
+parent-side `git worktree` pool from filling the data volume
+under concurrent worker activity. A `brew install raxis`
+production operator has no cargo workspace and no
+aegis-worktrees to sweep — the invariant simply does not
+apply to that deployment. Accordingly, the enforcement chain
+is workspace-/CI-scoped: `cargo xtask hygiene` + `cargo xtask
+hygiene-check` (developer tools), the live-e2e harness
+preflight (CI / developer pre-test gate), the structured
+stderr envelope `OPERATOR_ATTENTION_REQUIRED
+HostHygieneDiskPressure {json}` (harness / terminal / CI-log
+consumer), and the operator recipe at
+`guides/operator/18-host-hygiene.md`. The operator dashboard
+is **deliberately not** part of the surface: the kernel does
+not emit a `HostHygieneDiskPressure` audit event, and the
+audit chain stays kernel-scoped for runtime invariants only
+per `INV-DASHBOARD-FAILURE-VISIBILITY-01`'s kernel-emitted-only
+scope (see `dashboard-hardening.md §5.7`).
 
 The reference implementation is `cargo xtask hygiene` (sweep)
 + `cargo xtask hygiene-check --threshold-pct N` (read-only
@@ -3721,16 +3741,18 @@ The classifier rule is mechanical:
   `BranchAhead` / `InUse` / `TooNew`) so the dry-run output
   is auditable.
 
-The live-e2e preflight emits a structured
-`AuditEventKind::OperatorAttentionRequired` with
-`attention_kind = "HostHygieneDiskPressure"` and a JSON
-`details` payload conforming to
-`raxis_types::host_preflight::HostPreflightError::DiskPressure`
-*before* bailing the test. The dashboard banner
-(`HostHygieneBanner`, `INV-DASHBOARD-FAILURE-VISIBILITY-01`)
-subscribes to this event and renders a dismissible amber
-strip carrying the offending volume, used percentage, free
-space, and the `cargo xtask hygiene` remediation command.
+The live-e2e preflight emits a structured stderr envelope
+`OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+where `{json}` is a `raxis_types::host_preflight::HostPreflightError::DiskPressure`
+payload (`pressure_kind`, `threshold_pct`, `observed_volumes`,
+`remediation_cmd`, `docs_url`) *before* bailing the test.
+The envelope is consumed by the harness itself, the
+developer's terminal, and CI log scrapers — NOT by the
+operator dashboard (see Scope above and
+`dashboard-hardening.md §5.7`). The preflight ALSO panics
+with the structured `Display` rendering so the offending
+volume and the `cargo xtask hygiene` remediation command land
+in the `cargo test` failure summary without parsing stderr.
 
 **Justification.** A single saturating run of seven
 concurrent parent-side workers (each carrying a multi-GiB
@@ -3750,21 +3772,35 @@ branches over a 24-hour window; each leaves behind a
 `/private/tmp/raxis-<task>-<pid>/` worktree carrying a
 ~3 GiB `target/`. The seventh worker spawns, the host disk
 crosses 90%, the live-e2e preflight observes the
-`/System/Volumes/Data` capacity, emits
-`OperatorAttentionRequired{HostHygieneDiskPressure}`, and
-fails the test before any kernel boot. The operator clicks
-the dashboard banner, runs `cargo xtask hygiene`, watches
-the six landed worktrees disappear, and re-runs the test —
-clean.
+`/System/Volumes/Data` capacity, prints the
+`OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+envelope to stderr, panics with the structured remediation
+pointer, and fails the test before any kernel boot. The
+developer reads the panic message (or the `cargo test`
+failure summary), runs `cargo xtask hygiene`, watches the
+six landed worktrees disappear, and re-runs the test — clean.
 
 **Canonical home.** `xtask/src/hygiene.rs` header (sweep
 mechanism + `resolve_main_ref` / `parse_symbolic_ref_output`
 default-branch resolver), `guides/operator/18-host-hygiene.md`
 "Default-branch resolution" section (operator recipe + the
 `--main-ref` override example). The structured-error payload
-is pinned in `crates/types/src/host_preflight.rs`; the
-dashboard banner contract is pinned in
-`dashboard-hardening.md §6`.
+is pinned in `crates/types/src/host_preflight.rs`. The
+out-of-scope rationale for the operator dashboard is pinned
+in `dashboard-hardening.md §5.7`.
+
+**Witness / verification.**
+  * Sweep + classifier: `xtask/src/hygiene.rs::tests` (unit
+    tests for `resolve_main_ref` / `parse_symbolic_ref_output`
+    + classifier rules).
+  * Preflight + envelope shape:
+    `kernel/tests/extended_e2e_support/kernel_driver.rs::hygiene_preflight_tests`
+    (synthetic disk-pressure round-trip through the stderr
+    envelope JSON + `Display`, `ATTENTION_KIND` constant pin,
+    clear-host happy path).
+  * Wire-shape: `crates/types/src/host_preflight.rs::tests`
+    (JSON round-trip, `pressure_kind` discriminator,
+    `Display` rendering, `ATTENTION_KIND` constant).
 
 ---
 

@@ -137,14 +137,19 @@ preflight gates **before** any `seed_*` helper runs:
        `raxis_types::HostPreflightError::DiskPressure { threshold_pct,
        observed_volumes, remediation_cmd, docs_url }`.
      * Emits one stable-prefixed stderr line —
-       `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}` —
-       which the dashboard banner
-       (`dashboard-fe/src/components/banners/HostHygieneBanner.tsx`,
-       `INV-DASHBOARD-FAILURE-VISIBILITY-01 §5.7`) consumes
-       without waiting for a kernel boot.
+       `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+       — for harness / terminal / CI-log consumers. This is the
+       only surface for the host-hygiene signal: it is a
+       developer-/CI-host concern (see `INV-HOST-HYGIENE-01`'s
+       scope clause in `specs/invariants.md §11.11`) and is
+       deliberately not routed to the operator dashboard
+       (`dashboard-hardening.md §5.7`). The audit chain stays
+       kernel-scoped for runtime invariants only.
      * Panics with the structured `Display` rendering, putting
        the offending volume + `cargo xtask hygiene` remediation
-       command into the `cargo test` failure summary.
+       command into the `cargo test` failure summary so a
+       developer who never reads stderr still sees the right
+       next step.
    Converts what was a 31-min mid-flight `DiskFullHaltEntered`
    (iter 16 of the motivating incident, every activation
    rejected with `FailDiskFull`) into a sub-second skip with

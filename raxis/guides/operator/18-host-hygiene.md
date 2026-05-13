@@ -1,6 +1,15 @@
 # Host worktree hygiene — preventing parent-side disk fill
 
-> **Topic:** Operations | **Time to read:** ~5 min | **Complexity:** ⭐⭐ Intermediate
+> **Topic:** Developer operations (workspace-only) | **Time to read:** ~5 min | **Complexity:** ⭐⭐ Intermediate
+
+> **Scope.** This recipe is a **developer / CI** concern, not a
+> production-operator concern. A `brew install raxis` operator
+> has no cargo workspace and no parent-side aegis-worktrees to
+> sweep; this page does not apply to that deployment. The
+> tooling described here (`cargo xtask hygiene` family) is
+> workspace-only. The signal does **not** surface in the
+> operator dashboard — see [`dashboard-hardening.md §5.7`]
+> for the out-of-scope rationale.
 
 Each parent-side parallel agent that runs against this repo
 creates its own `git worktree add` checkout (typically under
@@ -11,7 +20,7 @@ fill the data volume in hours and trip the kernel's
 in-flight activation with `FAIL_DISK_FULL` ([INV-CAPACITY-02],
 [`host-capacity.md §7.1`]).
 
-The `cargo xtask hygiene` family is the operator-side mechanism
+The `cargo xtask hygiene` family is the developer-side mechanism
 that prevents that recurrence. It is the canonical implementation
 of [`INV-HOST-HYGIENE-01`].
 
@@ -196,23 +205,28 @@ cargo xtask hygiene-install-timer --uninstall
 ## Opt-out
 
 If you're happy doing the sweep by hand, just don't install the
-timer. The live-e2e preflight ([INV-HOST-HYGIENE-01]) still fires
-when the volume goes above 90% — you'll see the
-`OperatorAttentionRequired { attention_kind:
-"HostHygieneDiskPressure" }` event in the dashboard banner, and
-the test will fail-fast with the remediation command embedded in
-the structured payload.
+timer. The live-e2e preflight ([INV-HOST-HYGIENE-01]) still
+fires when the volume goes above 90% — the harness prints
+`OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}` to
+stderr and panics with the same structured payload, putting the
+offending volume + the `cargo xtask hygiene` remediation command
+into the `cargo test` failure summary. The signal does not
+surface in the operator dashboard — it is a developer-/CI-host
+concern, not a production-operator concern (see
+[`dashboard-hardening.md §5.7`] for the out-of-scope rationale).
 
 ---
 
 ## Related
 
-- [INV-HOST-HYGIENE-01] — `raxis/specs/invariants.md §11.10`
+- [INV-HOST-HYGIENE-01] — `raxis/specs/invariants.md §11.11`
 - [INV-CAPACITY-02] — disk-full halt-admit, the watchdog this sweep is preventing from tripping
 - [`host-capacity.md`] — the kernel's own disk-pressure watchdog (data-dir scope, distinct from the host-wide hygiene scope here)
+- [`dashboard-hardening.md §5.7`] — out-of-scope rationale for the operator dashboard
 
 [INV-HOST-HYGIENE-01]: ../../specs/invariants.md
 [INV-CAPACITY-02]: ../../specs/v2/host-capacity.md
 [`host-capacity.md`]: ../../specs/v2/host-capacity.md
 [`host-capacity.md §7.1`]: ../../specs/v2/host-capacity.md
 [`INV-HOST-HYGIENE-01`]: ../../specs/invariants.md
+[`dashboard-hardening.md §5.7`]: ../../specs/v2/dashboard-hardening.md

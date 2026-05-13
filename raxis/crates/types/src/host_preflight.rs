@@ -3,27 +3,34 @@
 //
 // Wire shape
 // ----------
-// Carried inside `AuditEventKind::OperatorAttentionRequired` as
-// `attention_kind = "HostHygieneDiskPressure"` plus a JSON
-// `details` field whose body matches `HostPreflightError`.
-// Pinning the JSON shape here keeps three call sites in sync:
+// Carried inside the structured stderr envelope
+// `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+// emitted by the live-e2e harness preflight before the test
+// bails. The JSON body matches `HostPreflightError`. Pinning
+// the shape here keeps two call sites in sync:
 //
 //   * `kernel/tests/extended_e2e_realistic_scenario.rs`'s
-//     preflight emits the event before bailing the test.
+//     preflight prints the envelope before panicking.
 //   * `xtask/src/hygiene.rs`'s `hygiene-check` subcommand uses
 //     the same struct for its diagnostic output.
-//   * `dashboard-fe/src/components/banners/HostHygieneBanner.tsx`
-//     parses the `details` JSON and renders the amber strip
-//     (INV-DASHBOARD-FAILURE-VISIBILITY-01).
 //
-// The serde tag is `pressure_kind` so the same audit-event detail
-// envelope can grow new variants (e.g. `InodePressure`,
-// `MainRepoOverQuota`) without breaking the dashboard parser.
+// Scope note: this is a developer-/CI-host signal. It is
+// deliberately NOT carried by the kernel's audit chain or the
+// operator dashboard — `INV-HOST-HYGIENE-01` is workspace-only
+// (a `brew install raxis` operator has no cargo workspace and
+// no parent-side aegis-worktrees to sweep) and the audit chain
+// stays kernel-scoped for runtime invariants only. See
+// `specs/invariants.md §11.11` and `dashboard-hardening.md §5.7`
+// for the out-of-scope rationale.
+//
+// The serde tag is `pressure_kind` so the same stderr envelope
+// can grow new variants (e.g. `InodePressure`,
+// `MainRepoOverQuota`) without breaking existing parsers.
 //
 // Crate invariant (lib.rs / INV-CRATE-01): no I/O, no spawning,
 // no async — pure data + serde. The `Display` impl renders the
-// human-readable form the live-e2e harness panic message uses
-// AND the operator-facing dashboard tooltip text.
+// human-readable form the live-e2e harness panic message AND
+// the `cargo test` failure-summary line consume.
 
 use std::fmt;
 
@@ -31,8 +38,9 @@ use serde::{Deserialize, Serialize};
 
 /// Per-volume disk-usage report. Mirrors the shape `df -P` returns
 /// AND what `xtask::hygiene::VolumeReport` produces, with `free`
-/// pre-rendered to a human string ("64.0GiB") so the dashboard
-/// banner does not need to re-derive units client-side.
+/// pre-rendered to a human string ("64.0GiB") so the harness
+/// panic message and CI log consumer do not need to re-derive
+/// units.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskVolumeReport {
     /// `df` "Mounted on" column — e.g. `/System/Volumes/Data`,
@@ -56,16 +64,17 @@ pub enum HostPreflightError {
         /// The threshold the preflight enforced.
         threshold_pct: u32,
         /// Every volume the probe inspected, including ones that
-        /// were below the threshold — the dashboard renders the
-        /// over-threshold ones in amber and the under-threshold
-        /// ones as muted context, mirroring `cargo xtask
-        /// hygiene-check`'s stderr output.
+        /// were below the threshold — mirrors `cargo xtask
+        /// hygiene-check`'s stderr output. The `Display` impl
+        /// surfaces only the over-threshold rows in the
+        /// human-readable one-liner; under-threshold entries are
+        /// retained in the structured payload for CI / log
+        /// consumers that want full context.
         observed_volumes: Vec<DiskVolumeReport>,
-        /// Operator-runnable command. Always
+        /// Developer-runnable command. Always
         /// `"cargo xtask hygiene"` for the V2.5 implementation.
         remediation_cmd: String,
-        /// Optional pointer to the operator recipe. The dashboard
-        /// banner renders this as a "Read more" link when present.
+        /// Optional pointer to the developer recipe.
         docs_url: Option<String>,
     },
 }
@@ -88,17 +97,18 @@ impl HostPreflightError {
         }
     }
 
-    /// `attention_kind` value used inside
-    /// `AuditEventKind::OperatorAttentionRequired`. Pinned to
-    /// `"HostHygieneDiskPressure"` so the dashboard banner has a
-    /// stable filter string.
+    /// Identifier carried in the `OPERATOR_ATTENTION_REQUIRED
+    /// <kind> {json}` stderr envelope the live-e2e harness
+    /// preflight prints. Pinned to `"HostHygieneDiskPressure"`
+    /// so harness / log consumers have a stable filter string;
+    /// renaming it is a wire break for those consumers.
     pub const ATTENTION_KIND: &'static str = "HostHygieneDiskPressure";
 
-    /// Render to the JSON form that lands in the audit event's
-    /// `details` field. Pure-data crate convention: no panicking;
+    /// Render to the JSON form embedded in the stderr envelope.
+    /// Pure-data crate convention: no panicking;
     /// `serde_json::to_string` cannot fail for this enum because
     /// every variant is finite and `String`-typed.
-    pub fn to_audit_details_json(&self) -> String {
+    pub fn to_envelope_json(&self) -> String {
         serde_json::to_string(self).expect("HostPreflightError serializes")
     }
 }
@@ -171,18 +181,19 @@ mod tests {
     #[test]
     fn json_round_trip_is_byte_identical() {
         let err = fixture();
-        let json = err.to_audit_details_json();
+        let json = err.to_envelope_json();
         let back: HostPreflightError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, back);
     }
 
     #[test]
-    fn json_carries_pressure_kind_tag_for_dashboard_filter() {
+    fn json_carries_pressure_kind_tag_for_envelope_consumers() {
         let err = fixture();
-        let json = err.to_audit_details_json();
+        let json = err.to_envelope_json();
         assert!(
             json.contains("\"pressure_kind\":\"DiskPressure\""),
-            "JSON tag missing; dashboard filter would not match: {json}"
+            "JSON tag missing; envelope consumers (harness / CI log scraper) \
+             would not match: {json}"
         );
         assert!(json.contains("\"threshold_pct\":90"));
         assert!(json.contains("\"remediation_cmd\":\"cargo xtask hygiene\""));
@@ -213,8 +224,9 @@ mod tests {
         assert_eq!(
             HostPreflightError::ATTENTION_KIND,
             "HostHygieneDiskPressure",
-            "ATTENTION_KIND is the dashboard filter string; \
-             changing it without updating the FE is a wire break."
+            "ATTENTION_KIND is the stderr-envelope filter string; \
+             changing it is a wire break for the live-e2e harness, \
+             terminal users, and CI log scrapers."
         );
     }
 }

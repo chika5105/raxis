@@ -167,10 +167,14 @@ fn realistic_session_lifecycle() {
     // Host disk-pressure preflight (INV-HOST-HYGIENE-01) FIRST —
     // every other preflight (and the docker bring-up below) does
     // work on disk; failing fast here turns a 31-min mid-flight
-    // `DiskFullHaltEntered` into a sub-second skip with a
-    // structured `OperatorAttentionRequired{HostHygieneDiskPressure}`
-    // payload the dashboard banner consumes. Mirrors `cargo xtask
-    // hygiene-check --threshold-pct 90`.
+    // `DiskFullHaltEntered` into a sub-second skip. On detected
+    // pressure the harness prints the structured stderr envelope
+    // `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+    // for harness / terminal / CI-log consumers and panics with
+    // the structured `Display` rendering — the developer-/CI-host
+    // signal does NOT route through the kernel audit chain or the
+    // operator dashboard (see `dashboard-hardening.md §5.7`).
+    // Mirrors `cargo xtask hygiene-check --threshold-pct 90`.
     require_disk_hygiene();
     //
     // Bring up the docker-compose backing stack BEFORE any other
