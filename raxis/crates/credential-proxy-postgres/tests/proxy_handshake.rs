@@ -494,21 +494,69 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
 
     let events = audit.events.lock().unwrap();
     // Expected sequence (forwarded SELECT then blocked INSERT):
-    //   1. DatabaseQueryExecuted   (SELECT, blocked=false)
-    //   2. CredentialProxyUpstreamConnected
-    //   3. DatabaseQueryCompleted   (rows_returned=1)
-    //   4. DatabaseQueryExecuted    (INSERT, blocked=true)
+    //   1. CredentialProxySubstituted (per `INV-SECRET-05` /
+    //      `secrets-model.md §2.5`: emitted once per agent
+    //      connection right after the proxy resolves real
+    //      credential material via `CredentialBackend::resolve`,
+    //      BEFORE the simple-query loop runs)
+    //   2. DatabaseQueryExecuted   (SELECT, blocked=false)
+    //   3. CredentialProxyUpstreamConnected
+    //   4. DatabaseQueryCompleted   (rows_returned=1)
+    //   5. DatabaseQueryExecuted    (INSERT, blocked=true)
     // The blocked statement does NOT trigger an upstream connect or
     // a Completed event.
     assert!(
-        events.len() >= 4,
-        "expected at least 4 audit events; got {}: {:#?}",
+        events.len() >= 5,
+        "expected at least 5 audit events; got {}: {:#?}",
         events.len(),
         events,
     );
 
-    // First event: DatabaseQueryExecuted for SELECT.
+    // First event: CredentialProxySubstituted, fired once per
+    // connection at the moment the proxy commits to forwarding the
+    // backend-resolved credential. Pins `INV-SECRET-05` on the chain
+    // structurally; downstream tests
+    // (`credential_substitution_evidence.rs`) filter on this event.
+    // Audit-safety: `substitution_shape` is a fixed short string
+    // describing the SHAPE of the substitution and MUST NOT carry
+    // credential bytes; we assert the canonical postgres-proxy
+    // wording and assert it does NOT contain the credential URL's
+    // user/password material that the fake backend serves.
     match &events[0] {
+        AuditEvent::CredentialProxySubstituted {
+            consumer,
+            credential,
+            substitution_shape,
+            ..
+        } => {
+            assert_eq!(credential.as_str(), "demo");
+            assert_eq!(consumer.kind, "credential_proxy");
+            assert_eq!(consumer.id, "test:postgres:audit");
+            assert_eq!(
+                substitution_shape,
+                "postgres-url: agent-supplied user/password discarded; \
+                 backend-resolved url applied to upstream",
+            );
+            // INV-SECRET-05 audit-safety: substitution_shape is a
+            // fixed descriptor and must never leak the upstream
+            // credential bytes (user, password, host, port, dbname).
+            for forbidden in [
+                "demo:demo",
+                &pg_addr.ip().to_string(),
+                &pg_addr.port().to_string(),
+            ] {
+                assert!(
+                    !substitution_shape.contains(forbidden),
+                    "substitution_shape must not contain credential material `{forbidden}`; \
+                     got {substitution_shape:?}",
+                );
+            }
+        }
+        other => panic!("event[0] must be CredentialProxySubstituted, got {other:?}"),
+    }
+
+    // Second event: DatabaseQueryExecuted for SELECT.
+    match &events[1] {
         AuditEvent::DatabaseQueryExecuted {
             operation,
             blocked,
@@ -521,11 +569,11 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
             assert_eq!(credential.as_str(), "demo");
             assert_eq!(sql_sha256.len(), 64);
         }
-        other => panic!("event[0] must be DatabaseQueryExecuted, got {other:?}"),
+        other => panic!("event[1] must be DatabaseQueryExecuted, got {other:?}"),
     }
 
-    // Second event: CredentialProxyUpstreamConnected.
-    match &events[1] {
+    // Third event: CredentialProxyUpstreamConnected.
+    match &events[2] {
         AuditEvent::CredentialProxyUpstreamConnected {
             upstream_host,
             upstream_port,
@@ -536,11 +584,11 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
             assert_eq!(*upstream_port, pg_addr.port());
             assert!(!tls, "fake-pg fixture is plaintext");
         }
-        other => panic!("event[1] must be CredentialProxyUpstreamConnected, got {other:?}"),
+        other => panic!("event[2] must be CredentialProxyUpstreamConnected, got {other:?}"),
     }
 
-    // Third event: DatabaseQueryCompleted for SELECT.
-    match &events[2] {
+    // Fourth event: DatabaseQueryCompleted for SELECT.
+    match &events[3] {
         AuditEvent::DatabaseQueryCompleted {
             rows_returned,
             bytes_returned,
@@ -551,17 +599,17 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
             assert!(*bytes_returned > 0);
             assert!(upstream_error.is_none());
         }
-        other => panic!("event[2] must be DatabaseQueryCompleted, got {other:?}"),
+        other => panic!("event[3] must be DatabaseQueryCompleted, got {other:?}"),
     }
 
-    // Fourth event: DatabaseQueryExecuted for blocked INSERT.
-    match &events[3] {
+    // Fifth event: DatabaseQueryExecuted for blocked INSERT.
+    match &events[4] {
         AuditEvent::DatabaseQueryExecuted {
             operation, blocked, ..
         } => {
             assert_eq!(operation, "INSERT");
             assert!(*blocked, "select-only restriction must block INSERT");
         }
-        other => panic!("event[3] must be DatabaseQueryExecuted (blocked), got {other:?}"),
+        other => panic!("event[4] must be DatabaseQueryExecuted (blocked), got {other:?}"),
     }
 }
