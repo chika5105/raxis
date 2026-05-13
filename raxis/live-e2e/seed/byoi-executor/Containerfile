@@ -1,0 +1,154 @@
+# RAXIS BYO (Bring-Your-Own-Image) Executor — sample Containerfile.
+#
+# **Status: SAMPLE / TEST FIXTURE.** This Containerfile is NOT the
+# canonical RAXIS Executor image. The canonical image
+# (`raxis/images/executor-starter/Containerfile`) ships Python 3.11
+# + Node 20 + Rust + Go + GitHub CLI + ripgrep/fd; it is built by
+# the `cargo xtask images bake-rootfs --role executor-starter`
+# pipeline and signed by the kernel release.
+#
+# This file demonstrates the OPERATOR-FACING workflow for declaring
+# a custom Executor image via `policy.toml [[vm_images]]`:
+#
+#   1. Operator builds an OCI image deriving from a stable base
+#      (here `debian:bookworm-slim`) with the toolchain their
+#      tasks need (here Python 3.12 + Node 22 — different from the
+#      canonical 3.11 / 20 so the test can prove the kernel actually
+#      booted the BYO image, not the starter).
+#   2. Operator computes the rootfs SHA-256.
+#   3. Operator stages the image bytes under
+#      `<data_dir>/oci-cache/images/sha256/<aa>/<full>/rootfs.img`
+#      (per `image-cache.md §4`).
+#   4. Operator declares the image in `policy.toml`:
+#
+#        [[vm_images]]
+#        name                     = "byo-executor-py312-node22"
+#        oci_digest               = "sha256:<the-hash>"
+#        role_restriction         = ["Executor"]
+#        linux_kernel_version_min = "5.14"
+#        description              = "BYO Executor: Python 3.12 + Node 22"
+#
+#        [default_executor_image]
+#        alias = "byo-executor-py312-node22"
+#
+#   5. Operator re-signs `policy.toml` and bumps the policy epoch.
+#   6. Plans whose Executor tasks omit `vm_image` (or set it to
+#      `"byo-executor-py312-node22"`) now boot from this image.
+#
+# The trust contract: at every Executor session-spawn the kernel
+# stream-hashes the on-disk rootfs and refuses to boot if the SHA
+# does not match the policy-declared digest. A tampered rootfs (one
+# byte off) fails closed with `SecurityViolationDetected
+# { violation_kind: "OperatorImageDigestMismatch" }` per
+# `INV-OPERATOR-CUSTOM-IMAGE-01`. This is the same trust shape the
+# canonical Reviewer / Orchestrator images use; the BYO path
+# uniformly reuses that plumbing per `INV-OPERATOR-CUSTOM-IMAGE-02`.
+#
+# ----------------------------------------------------------------------
+# Pinned versions
+# ----------------------------------------------------------------------
+#
+# Pin both languages to specific patch versions so the live-e2e
+# witness's stdout regex (`Python 3\.12\.\d+` / `v22\.\d+\.\d+`)
+# remains deterministic across re-bakes. Bumping a patch version
+# here MUST be paired with a matching update to the witness regex
+# in `tests/extended_e2e_byo_executor_image.rs` (the harness
+# helper `extended_e2e_support::byo_image::PINNED_*` constants).
+#
+#   * Python 3.12.7  — sourced from the Docker-Hub-published
+#                      `python:3.12.7-slim-bookworm` upstream.
+#                      Debian bookworm-slim itself ships Python 3.11
+#                      in its default repo, hence the upstream image.
+#   * Node 22.10.0   — sourced from the NodeSource `setup_22.x`
+#                      installer; the per-bake `apt-cache madison
+#                      nodejs` entry pins the patch version below.
+#                      Bookworm has no native Node 22 package; the
+#                      NodeSource Debian repo is the operator-
+#                      friendly path used by the canonical
+#                      executor-starter image as well (Node 20 LTS
+#                      there; Node 22 LTS here).
+#
+# Build pipeline (driven by
+# `extended_e2e_support::byo_image::bake_byo_executor_image`):
+#
+#   1. docker build -f raxis/live-e2e/seed/byoi-executor/Containerfile
+#        --platform linux/<host-arch>
+#        --tag raxis-byo-executor-py312-node22:dev
+#        raxis/live-e2e/seed/byoi-executor/
+#   2. docker create raxis-byo-executor-py312-node22:dev
+#   3. docker export <container-id> | tar -xf -
+#        → bytes of the rootfs filesystem; helper packs into
+#          `<staging>/rootfs.img` (single tar payload, sha256-hashed
+#          on-the-fly).
+#   4. Helper places `rootfs.img` + synthesised `manifest.json` +
+#      `config.json` under
+#      `<data_dir>/oci-cache/images/sha256/<aa>/<full>/`.
+#   5. Helper amends `policy.toml` with `[[vm_images]]` + the
+#      `[default_executor_image]` alias.
+#
+# ----------------------------------------------------------------------
+
+FROM python:3.12.7-slim-bookworm AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+# Minimal OS surface the BYO Executor needs to satisfy `BashTool` /
+# `EditFileTool` / `GrepSearchTool` calls plus invocation of the
+# pinned Node toolchain. Deliberately narrower than the canonical
+# starter image — operators sizing a BYO image for a single language
+# per task pay less in pull / boot time, which is one of the BYO
+# value props.
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        bash \
+        ca-certificates \
+        coreutils \
+        curl \
+        findutils \
+        git \
+        gnupg \
+        grep \
+        jq \
+        less \
+        sed \
+        tar \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python 3.12 is already PID-1's default `python3` because we
+# derived from `python:3.12.7-slim-bookworm`. Expose `python3.12`
+# as an explicit alias so the live-e2e witness can test the *exact*
+# version-string the BYO image promises (a future Debian update
+# moving `python3` to a different minor would otherwise silently
+# alias). Symlinking is sufficient — the upstream
+# `python:3.12-slim-bookworm` image already populates
+# `/usr/local/bin/python3.12`, but we re-state the symlink to be
+# defensive against base-image drift.
+RUN ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3 \
+    && python3.12 --version
+
+# Node 22 LTS via NodeSource — the per-arch installer handles
+# amd64 / arm64 / armhf transparently. We do NOT pin to a specific
+# Node patch in the apt source because NodeSource overwrites their
+# 22.x repo on every patch release; the `npm install --version`
+# emit in the witness regex matches `v22\.\d+\.\d+` so a transparent
+# patch bump does not break the test, but a major-version drift
+# would fail loudly.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install --no-install-recommends -y nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version
+
+# Note: `raxis-planner-executor` (the Executor PID-1 entry point)
+# is **NOT** baked into this Containerfile in the live-e2e fixture
+# path. The harness helper
+# `extended_e2e_support::byo_image::bake_byo_executor_image` overlays
+# the planner binary (cross-compiled to the guest target triple)
+# onto the exported filesystem AFTER `docker export`, mirroring the
+# canonical-image dev-stage pipeline. In production an operator
+# would COPY the planner binary in directly — see
+# `raxis/guides/recipes/ops/17-bring-your-own-executor-image.md`
+# for the operator-facing recipe. Keeping the planner overlay out
+# of THIS file lets the Containerfile bake cache across many
+# planner-binary rebuilds (same trade-off as the canonical
+# executor-starter image).
