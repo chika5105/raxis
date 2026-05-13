@@ -51,13 +51,13 @@ use raxis_audit_tools::reader::ChainReader;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
-    AuditEntryView, ChainStatusView, DagEdge, DashboardData, EscalationView, HealthCheck,
-    HealthSnapshot, InitiativeListEntry, InitiativePlanView, InitiativeView, NotificationView,
-    OperatorAuthResolution, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
-    ReviewerVerdictView, SessionView, StructuredOutputView, SubsystemDetailRow,
-    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
-    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
-    SUBSYSTEM_CATALOG,
+    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge,
+    DashboardData, EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry,
+    InitiativePlanView, InitiativeView, NotificationView, OperatorAuthResolution,
+    PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView,
+    SessionView, StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard,
+    SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile,
+    WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -249,7 +249,36 @@ pub struct KernelDashboardData {
     /// fixtures); attempts to emit return a hard error so the
     /// invariant is not silently violated.
     audit_sink: Option<Arc<dyn raxis_audit_tools::AuditSink>>,
+    /// Per-operator rate-limit state for the credential reveal
+    /// endpoints. `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`
+    /// caps each operator at 5 reveals per 60-second sliding
+    /// window so a script-against-the-endpoint attack can't
+    /// silently page through the credential set.
+    reveal_rate_limit: parking_lot::Mutex<RevealRateLimitState>,
 }
+
+/// Sliding-window rate-limit state for the credential reveal
+/// endpoints. One vec per operator fingerprint; we GC entries
+/// older than `WINDOW` on every check so the map never grows
+/// unboundedly even under churn.
+#[derive(Debug, Default)]
+struct RevealRateLimitState {
+    /// Per-operator timestamp ring.
+    by_operator: std::collections::HashMap<String, Vec<std::time::Instant>>,
+}
+
+/// Maximum reveals per operator per `REVEAL_RATE_LIMIT_WINDOW`.
+/// `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`.
+const REVEAL_RATE_LIMIT_MAX: u32 = 5;
+/// Sliding-window length for the credential reveal rate limiter.
+const REVEAL_RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// Auto-hide deadline added to every per-initiative reveal
+/// response. `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`.
+const REVEAL_AUTOHIDE_INITIATIVE_SECS: u64 = 30;
+/// Auto-hide deadline for system-credential reveals (Anthropic).
+/// Shorter than the per-initiative default — the spec calls out
+/// 15 seconds explicitly.
+const REVEAL_AUTOHIDE_SYSTEM_SECS: u64 = 15;
 
 impl KernelDashboardData {
     /// Build a new kernel-wired data layer.
@@ -284,6 +313,7 @@ impl KernelDashboardData {
             policy_advancer: None,
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
+            reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
         })
     }
 
@@ -310,6 +340,7 @@ impl KernelDashboardData {
             policy_advancer: None,
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
+            reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
         }
     }
 
@@ -1690,6 +1721,137 @@ impl DashboardData for KernelDashboardData {
         }
     }
 
+    fn list_initiative_credentials(
+        &self,
+        initiative_id: &str,
+    ) -> Result<Vec<CredentialMetadata>, ApiError> {
+        let conn = self.open_ro()?;
+        // Step 1: confirm the initiative exists. We use the
+        // initiatives view rather than relying on a 404 from the
+        // credential-table walk so the wire shape mirrors every
+        // other per-initiative endpoint.
+        let _row = raxis_store::views::initiatives::by_id(&conn, initiative_id)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("initiatives::by_id: {e}"),
+            })?
+            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+        // Step 2: enumerate task ids for the initiative.
+        let task_rows =
+            raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
+                .map_err(|e| ApiError::Internal {
+                    log_only: format!("tasks::list_by_initiative: {e}"),
+                })?;
+        // Step 3: union credential decls across every task,
+        // dedup by name (the same credential may be bound by
+        // multiple tasks; the dashboard listing surface shows
+        // each unique credential once).
+        let mut seen: std::collections::BTreeMap<String, raxis_plan_credentials::TaskCredentialDecl> =
+            std::collections::BTreeMap::new();
+        for t in &task_rows {
+            let decls = read_task_credential_proxies_via_dashboard_glue(&conn, &t.task_id)?;
+            for d in decls {
+                seen.entry(d.name.as_str().to_owned()).or_insert(d);
+            }
+        }
+        // Step 4: project to wire shape.
+        let mut out: Vec<CredentialMetadata> = seen
+            .into_values()
+            .map(|d| project_credential_metadata(d, &self.data_dir))
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    fn reveal_initiative_credential(
+        &self,
+        initiative_id: &str,
+        credential_name: &str,
+    ) -> Result<CredentialReveal, ApiError> {
+        let conn = self.open_ro()?;
+        // Same existence check: a 404 response surfaces "I don't
+        // know this initiative" before we touch the credential
+        // backend.
+        let _row = raxis_store::views::initiatives::by_id(&conn, initiative_id)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("initiatives::by_id: {e}"),
+            })?
+            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+        let task_rows =
+            raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
+                .map_err(|e| ApiError::Internal {
+                    log_only: format!("tasks::list_by_initiative: {e}"),
+                })?;
+        // Walk every task once; first match wins. We do not need
+        // to dedup here because a found-decl is enough.
+        let mut found: Option<raxis_plan_credentials::TaskCredentialDecl> = None;
+        for t in &task_rows {
+            let decls = read_task_credential_proxies_via_dashboard_glue(&conn, &t.task_id)?;
+            if let Some(d) = decls.into_iter().find(|d| d.name.as_str() == credential_name) {
+                found = Some(d);
+                break;
+            }
+        }
+        let decl = found.ok_or(ApiError::NotFound { kind: "credential".into() })?;
+        // Drop the conn before the (potentially blocking) read.
+        drop(conn);
+        let reveal = read_credential_bytes(
+            &self.data_dir,
+            decl.name.as_str(),
+            REVEAL_AUTOHIDE_INITIATIVE_SECS,
+        )?;
+        Ok(reveal)
+    }
+
+    fn list_system_credentials(&self) -> Result<Vec<CredentialMetadata>, ApiError> {
+        list_system_credential_metadata(&self.data_dir)
+    }
+
+    fn reveal_system_credential(
+        &self,
+        credential_name: &str,
+    ) -> Result<CredentialReveal, ApiError> {
+        // Defence-in-depth: the route layer requires admin role +
+        // rate-limits; this layer additionally rejects any name
+        // that doesn't carry the `providers.` scope prefix. The
+        // current system-credential set is provider-only; future
+        // system credentials will bring their own prefix.
+        if !credential_name.starts_with("providers.") {
+            return Err(ApiError::NotFound { kind: "system-credential".into() });
+        }
+        read_credential_bytes(
+            &self.data_dir,
+            credential_name,
+            REVEAL_AUTOHIDE_SYSTEM_SECS,
+        )
+    }
+
+    fn enforce_reveal_rate_limit(
+        &self,
+        operator_fingerprint: &str,
+    ) -> Result<(), ApiError> {
+        let mut g = self.reveal_rate_limit.lock();
+        let now = std::time::Instant::now();
+        let window = REVEAL_RATE_LIMIT_WINDOW;
+        let entry = g
+            .by_operator
+            .entry(operator_fingerprint.to_owned())
+            .or_default();
+        // GC entries that have aged out of the window.
+        entry.retain(|ts| now.duration_since(*ts) < window);
+        if (entry.len() as u32) >= REVEAL_RATE_LIMIT_MAX {
+            let oldest = entry.first().copied().unwrap_or(now);
+            let elapsed = now.duration_since(oldest);
+            let retry_after = window.saturating_sub(elapsed);
+            return Err(ApiError::TooManyRequests {
+                max: REVEAL_RATE_LIMIT_MAX,
+                window_secs: window.as_secs() as u32,
+                retry_after_secs: retry_after.as_secs().max(1) as u32,
+            });
+        }
+        entry.push(now);
+        Ok(())
+    }
+
     fn emit_operator_audit(
         &self,
         event: raxis_audit_tools::AuditEventKind,
@@ -1754,15 +1916,378 @@ fn correlation_fields_for_operator_event(
             let _ = worktree_id;
             (None, None, None)
         }
+        // Per-initiative credential viewer events carry the
+        // initiative id directly; promote it to the audit row's
+        // `initiative_id` correlation column so the chain walker
+        // can group by initiative for forensic review
+        // (`INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`).
+        K::OperatorListedCredentials { initiative_id, .. }
+        | K::OperatorRevealedCredential { initiative_id, .. } => {
+            (None, None, Some(initiative_id.clone()))
+        }
+        // Likewise for any operator-action gap-closer event that
+        // carries an initiative / task / session id. We promote
+        // a single best-fit field; multi-id events stay on the
+        // payload only.
+        K::OperatorViewedInitiative { initiative_id, .. }
+        | K::OperatorViewedInitiativeDag { initiative_id, .. }
+        | K::OperatorViewedInitiativeTasks { initiative_id, .. }
+        | K::OperatorViewedPlanToml { initiative_id, .. } => {
+            (None, None, Some(initiative_id.clone()))
+        }
+        K::OperatorViewedTask { task_id, .. }
+        | K::OperatorViewedTaskOutputs { task_id, .. } => {
+            (None, Some(task_id.clone()), None)
+        }
+        K::OperatorViewedSession { session_id, .. }
+        | K::OperatorOpenedSessionStream { session_id, .. } => {
+            (Some(session_id.clone()), None, None)
+        }
+        K::OperatorViewedAuditChain { initiative_id_filter, .. }
+        | K::OperatorViewedSessionList { initiative_id_filter, .. } => {
+            (None, None, initiative_id_filter.clone())
+        }
         K::OperatorDiffViewed { .. }
         | K::OperatorFileContentFetched { .. }
         | K::OperatorNotificationMarkedRead { .. }
         | K::OperatorNotificationsMarkedAllRead { .. }
         | K::OperatorAuditChainReverified { .. }
         | K::OperatorNotificationViewed { .. }
-        | K::OperatorHealthQueried { .. } => (None, None, None),
+        | K::OperatorHealthQueried { .. }
+        | K::OperatorListedSystemCredentials { .. }
+        | K::OperatorRevealedSystemCredential { .. }
+        | K::OperatorViewedInitiativeList { .. }
+        | K::OperatorViewedEscalation { .. }
+        | K::OperatorViewedEscalationList { .. }
+        | K::OperatorViewedInbox { .. }
+        | K::OperatorViewedNotifications { .. }
+        | K::OperatorViewedPolicySnapshot { .. }
+        | K::OperatorViewedPolicyToml { .. }
+        | K::OperatorViewedWorktreeList { .. }
+        | K::OperatorViewedWorktreeLog { .. } => (None, None, None),
         _ => (None, None, None),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Credential viewer helpers (INV-DASHBOARD-CREDENTIAL-*)
+// ---------------------------------------------------------------------------
+
+/// SQL table name for the per-task credential proxy registry.
+/// Mirrors `raxis_kernel::initiatives::lifecycle::TASK_CREDENTIAL_PROXIES`
+/// — duplicated here because the dashboard-kernel crate cannot
+/// depend on `raxis-kernel` without a circular dep. The schema is
+/// pinned by `raxis-store` migration 10.
+const TASK_CREDENTIAL_PROXIES_TABLE: &str = "task_credential_proxies";
+
+/// Re-implementation of
+/// `raxis_kernel::initiatives::lifecycle::read_task_credential_proxies_in_tx`
+/// scoped to the dashboard-kernel crate. The kernel's version
+/// runs inside the approve-plan transaction; ours runs against
+/// the dashboard's read-only `RoConn::raw()`.
+///
+/// Why we duplicate rather than depending on `raxis-kernel`:
+/// the dashboard-kernel → raxis-kernel direction would close a
+/// dependency cycle (the kernel depends on dashboard-kernel for
+/// the dashboard surface). Pinning the schema in `migration_sql_dumps`
+/// + this helper gives us the same wire shape with a tiny code
+/// duplication budget. Drift is caught by
+/// `tests::credential_proxies_table_round_trips_through_dashboard_view`
+/// in the kernel-side e2e suite.
+fn read_task_credential_proxies_via_dashboard_glue(
+    conn: &raxis_store::ro::RoConn,
+    task_id: &str,
+) -> Result<Vec<raxis_plan_credentials::TaskCredentialDecl>, ApiError> {
+    use raxis_credentials::CredentialName;
+    // `&RoConn` Derefs to `&rusqlite::Connection`; we call
+    // `prepare` through that. The crate carries a direct
+    // `rusqlite` dep solely to spell the closure's `Row::get::<T>(idx)`
+    // type witnesses below.
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT credential_name, mount_as, proxy_json
+               FROM {table}
+              WHERE task_id = ?1
+           ORDER BY created_at_unix_secs ASC, credential_name ASC",
+            table = TASK_CREDENTIAL_PROXIES_TABLE,
+        ))
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("prepare task_credential_proxies: {e}"),
+        })?;
+
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([task_id], |row| {
+            let credential_name = row.get::<_, String>(0)?;
+            let mount_as = row.get::<_, String>(1)?;
+            let proxy_json = row.get::<_, String>(2)?;
+            Ok((credential_name, mount_as, proxy_json))
+        })
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("query task_credential_proxies: {e}"),
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("rusqlite row decode: {e}"),
+        })?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (credential_name, mount_as, proxy_json) in rows {
+        let proxy: raxis_plan_credentials::ProxyDecl =
+            serde_json::from_str(&proxy_json).map_err(|e| ApiError::Internal {
+                log_only: format!(
+                    "task `{task_id}` credential `{credential_name}`: \
+                     ProxyDecl re-deserialise failed (schema drift?): {e}",
+                ),
+            })?;
+        out.push(raxis_plan_credentials::TaskCredentialDecl {
+            name: CredentialName::new(credential_name),
+            mount_as,
+            proxy,
+        });
+    }
+    Ok(out)
+}
+
+/// Project a parsed [`raxis_plan_credentials::TaskCredentialDecl`]
+/// onto the wire-shape [`CredentialMetadata`]. The on-disk file
+/// is `stat`d so the response carries `byte_size + sha256_prefix`
+/// for the FE; missing files surface as `byte_size = 0` and
+/// `sha256_prefix = None` (the FE renders this in red).
+fn project_credential_metadata(
+    decl: raxis_plan_credentials::TaskCredentialDecl,
+    data_dir: &std::path::Path,
+) -> CredentialMetadata {
+    use raxis_plan_credentials::ProxyDecl;
+    let name = decl.name.as_str().to_owned();
+    let proxy_type = match &decl.proxy {
+        ProxyDecl::Postgres { .. } => "postgres",
+        ProxyDecl::Http { .. } => "http",
+        ProxyDecl::K8s { .. } => "k8s",
+        ProxyDecl::Smtp { .. } => "smtp",
+        ProxyDecl::Redis { .. } => "redis",
+        ProxyDecl::Aws { .. } => "aws",
+        ProxyDecl::Gcp { .. } => "gcp",
+        ProxyDecl::Azure { .. } => "azure",
+        ProxyDecl::Mysql { .. } => "mysql",
+        ProxyDecl::Mssql { .. } => "mssql",
+        ProxyDecl::Mongodb { .. } => "mongodb",
+        ProxyDecl::Unknown => "unknown",
+    };
+    let format_hint = match &decl.proxy {
+        ProxyDecl::Postgres { .. } => {
+            "libpq URL (postgresql://user:pass@host:port/db)".to_owned()
+        }
+        ProxyDecl::Mysql { .. } => "MySQL URL (mysql://user:pass@host:port/db)".to_owned(),
+        ProxyDecl::Mssql { .. } => "MSSQL URL (mssql://user:pass@host:port/db)".to_owned(),
+        ProxyDecl::Mongodb { .. } => {
+            "MongoDB URI (mongodb://user:pass@host:port/db)".to_owned()
+        }
+        ProxyDecl::Redis { .. } => "Redis password (single-line plaintext)".to_owned(),
+        ProxyDecl::Smtp { .. } => "SMTP relay password (raw bytes)".to_owned(),
+        ProxyDecl::Http { .. } => {
+            "HTTP credential (Bearer token / Basic password)".to_owned()
+        }
+        ProxyDecl::K8s { .. } => "Kubeconfig YAML".to_owned(),
+        ProxyDecl::Aws { .. } => "AWS access-key TOML (access_key_id + secret_access_key)".to_owned(),
+        ProxyDecl::Gcp { .. } => "GCP service-account JSON".to_owned(),
+        ProxyDecl::Azure { .. } => {
+            "Azure service-principal TOML (client_id + client_secret)".to_owned()
+        }
+        ProxyDecl::Unknown => "(unknown proxy type — see plan TOML)".to_owned(),
+    };
+    let upstream_host_port = upstream_host_port_for_decl(&decl.proxy);
+    let path = raxis_credentials_file::credential_file_path(
+        data_dir,
+        &decl.name,
+    );
+    let (byte_size, sha256_prefix) = stat_credential_bytes(&path);
+    CredentialMetadata {
+        name,
+        proxy_type: proxy_type.to_owned(),
+        mount_as: Some(decl.mount_as),
+        format_hint,
+        upstream_host_port,
+        byte_size,
+        sha256_prefix,
+        loaded_from_path: Some(path.to_string_lossy().into_owned()),
+        is_revealable: true,
+        reveal_required_role: "admin".into(),
+    }
+}
+
+/// Extract the upstream `host:port` (when applicable) from a
+/// proxy variant. Variants with no upstream concept (k8s, aws,
+/// gcp, azure, mysql, mssql, mongodb) return `None` — the FE
+/// hides the row in those cases.
+fn upstream_host_port_for_decl(
+    proxy: &raxis_plan_credentials::ProxyDecl,
+) -> Option<String> {
+    use raxis_plan_credentials::ProxyDecl;
+    match proxy {
+        ProxyDecl::Smtp { upstream_host_port, .. }
+        | ProxyDecl::Redis { upstream_host_port, .. } => Some(upstream_host_port.clone()),
+        ProxyDecl::Http { upstream_url, .. } => {
+            // `upstream_url` is a full URL; we surface `host:port`
+            // when the URL parses cleanly. Otherwise we surface
+            // the raw URL so the FE can still render it.
+            Some(upstream_url.clone())
+        }
+        _ => None,
+    }
+}
+
+/// `stat(2)` the credential file and compute the SHA-256 prefix.
+/// Returns `(0, None)` for a missing or unreadable file so the
+/// FE can render a clear "missing on disk" affordance. Reads the
+/// full bytes once — credential files are bounded at < 1 MiB
+/// each by the kernel admission pipeline.
+fn stat_credential_bytes(path: &std::path::Path) -> (u64, Option<String>) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return (0, None),
+    };
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(&bytes);
+    let digest = h.finalize();
+    let mut hex_prefix = String::with_capacity(8);
+    for b in &digest[..4] {
+        use std::fmt::Write;
+        let _ = write!(&mut hex_prefix, "{b:02x}");
+    }
+    (bytes.len() as u64, Some(hex_prefix))
+}
+
+/// Read the credential bytes and project them onto the wire
+/// shape [`CredentialReveal`]. `auto_hide_secs` is added to the
+/// current unix-seconds clock to compute `expires_at_unix`. The
+/// caller (route layer) is responsible for the role gate, the
+/// rate limit, and emitting the audit row BEFORE this is
+/// invoked — `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`.
+fn read_credential_bytes(
+    data_dir: &std::path::Path,
+    credential_name: &str,
+    auto_hide_secs: u64,
+) -> Result<CredentialReveal, ApiError> {
+    use raxis_credentials::{CredentialBackend, CredentialError, ConsumerIdentity, CredentialName};
+    let cn = CredentialName::new(credential_name.to_owned());
+    // Run the same backend the kernel uses to resolve credentials
+    // for proxy injection. This routes through the shared
+    // path-shape + chmod-0600 + uid validator, so a tampered
+    // file fails the reveal closed without us re-implementing
+    // the security check on the dashboard side.
+    let backend = raxis_credentials_file::FileCredentialBackend::open(data_dir);
+    let consumer = ConsumerIdentity::new("dashboard", "operator-reveal");
+    let value = match backend.resolve(&cn, consumer) {
+        Ok(v) => v,
+        Err(CredentialError::NotFound(_)) => {
+            return Err(ApiError::NotFound { kind: "credential".into() });
+        }
+        Err(e) => {
+            return Err(ApiError::Internal {
+                log_only: format!("resolve credential {credential_name}: {e}"),
+            });
+        }
+    };
+    // Project the bytes onto the wire shape inside the
+    // `with_bytes` closure so the secret never escapes the
+    // SecretBox unnecessarily. UTF-8 credentials surface as
+    // `encoding=utf8`; binary blobs surface as base64 (the FE
+    // labels them so the operator knows to decode).
+    let (encoding, plaintext, byte_size, sha_prefix) = value.with_bytes(|bytes| {
+        let (encoding, plaintext) = match std::str::from_utf8(bytes) {
+            Ok(s) => ("utf8".to_owned(), s.to_owned()),
+            Err(_) => {
+                use base64::Engine as _;
+                let s = base64::engine::general_purpose::STANDARD.encode(bytes);
+                ("base64".to_owned(), s)
+            }
+        };
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(bytes);
+        let digest = h.finalize();
+        let mut sha_prefix = String::with_capacity(8);
+        for b in &digest[..4] {
+            use std::fmt::Write;
+            let _ = write!(&mut sha_prefix, "{b:02x}");
+        }
+        (encoding, plaintext, bytes.len() as u64, sha_prefix)
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(CredentialReveal {
+        name: credential_name.to_owned(),
+        plaintext,
+        encoding,
+        byte_size,
+        expires_at_unix: now.saturating_add(auto_hide_secs),
+        sha256_prefix: sha_prefix,
+    })
+}
+
+/// Enumerate `<data_dir>/providers/*.toml` and surface metadata
+/// only. Provider credentials are gateway-bound; the listing
+/// surface here is the operator-visible counterpart so an admin
+/// can see WHICH providers the kernel is configured against
+/// without revealing any plaintext.
+fn list_system_credential_metadata(
+    data_dir: &std::path::Path,
+) -> Result<Vec<CredentialMetadata>, ApiError> {
+    let providers_dir = data_dir.join("providers");
+    let entries = match std::fs::read_dir(&providers_dir) {
+        Ok(e) => e,
+        // No providers/ dir ⇒ kernel has no system credentials.
+        // Empty list, NOT an error (the dashboard surface should
+        // still render so the operator can see the absence).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(e) => {
+            return Err(ApiError::Internal {
+                log_only: format!("read_dir providers: {e}"),
+            });
+        }
+    };
+    let mut out: Vec<CredentialMetadata> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let name = format!("providers.{stem}");
+        let (byte_size, sha256_prefix) = stat_credential_bytes(&path);
+        // The Anthropic credential is the canonical example; we
+        // hint at the wire format so operators can sanity-check
+        // before they reveal.
+        let format_hint = if stem.contains("anthropic") {
+            "Anthropic provider TOML (api_key = \"sk-ant-…\")".to_owned()
+        } else if stem.contains("openai") {
+            "OpenAI provider TOML (api_key = \"sk-…\")".to_owned()
+        } else {
+            "Provider TOML (api_key + auth_header + auth_prefix)".to_owned()
+        };
+        out.push(CredentialMetadata {
+            name,
+            proxy_type: "provider".to_owned(),
+            mount_as: None,
+            format_hint,
+            upstream_host_port: None,
+            byte_size,
+            sha256_prefix,
+            loaded_from_path: Some(path.to_string_lossy().into_owned()),
+            is_revealable: true,
+            reveal_required_role: "admin".into(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

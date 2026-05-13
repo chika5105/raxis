@@ -148,7 +148,8 @@ pub fn notification_priority_for_kind_str(
         | "ReconciliationGap"
         | "OperatorQuarantineSwept"
         | "InitiativeQuarantined"
-        | "LineageQuarantined" => Some(Critical),
+        | "LineageQuarantined"
+        | "OperatorRevealedSystemCredential" => Some(Critical),
 
         // High
         "EscalationSubmitted"
@@ -174,7 +175,8 @@ pub fn notification_priority_for_kind_str(
         | "NotificationDeliveryFailed"
         | "CircuitBreakerStateChanged"
         | "PlanRejected"
-        | "InitiativeAborted" => Some(High),
+        | "InitiativeAborted"
+        | "OperatorRevealedCredential" => Some(High),
 
         // Medium
         "KernelStarted"
@@ -262,6 +264,12 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::OperatorQuarantineSwept { .. } => Some(Critical),
         K::InitiativeQuarantined { .. } => Some(Critical),
         K::LineageQuarantined { .. } => Some(Critical),
+        // INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01: every
+        // system-credential reveal (Anthropic provider key in
+        // particular) MUST surface in the inbox so a second
+        // operator sees the event without being parked in front
+        // of the dashboard.
+        K::OperatorRevealedSystemCredential { .. } => Some(Critical),
 
         // ── High: operator attention required, but not yet a P0 ──
         //
@@ -295,6 +303,10 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::CircuitBreakerStateChanged { .. } => Some(High),
         K::PlanRejected { .. } => Some(High),
         K::InitiativeAborted { .. } => Some(High),
+        // INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01: per-initiative
+        // credential reveals are High — visible to other operators
+        // but a tier below the system-credential class above.
+        K::OperatorRevealedCredential { .. } => Some(High),
 
         // ── Medium: lifecycle milestones operators want to see ──
         //
@@ -366,7 +378,33 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         | K::OperatorDiffViewed { .. }
         | K::OperatorFileContentFetched { .. }
         | K::OperatorAuditChainReverified { .. }
-        | K::OperatorHealthQueried { .. } => None,
+        | K::OperatorHealthQueried { .. }
+        // INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01 gap-closers.
+        // Every dashboard read/list endpoint emits an `Operator*`
+        // event for forensic accountability; none of them notify
+        // because the operator just performed the action and
+        // surfacing it back is noise.
+        | K::OperatorListedCredentials { .. }
+        | K::OperatorListedSystemCredentials { .. }
+        | K::OperatorViewedInitiativeList { .. }
+        | K::OperatorViewedInitiative { .. }
+        | K::OperatorViewedInitiativeDag { .. }
+        | K::OperatorViewedInitiativeTasks { .. }
+        | K::OperatorViewedTask { .. }
+        | K::OperatorViewedTaskOutputs { .. }
+        | K::OperatorViewedSessionList { .. }
+        | K::OperatorViewedSession { .. }
+        | K::OperatorOpenedSessionStream { .. }
+        | K::OperatorViewedEscalationList { .. }
+        | K::OperatorViewedEscalation { .. }
+        | K::OperatorViewedAuditChain { .. }
+        | K::OperatorViewedInbox { .. }
+        | K::OperatorViewedNotifications { .. }
+        | K::OperatorViewedPolicySnapshot { .. }
+        | K::OperatorViewedPolicyToml { .. }
+        | K::OperatorViewedWorktreeList { .. }
+        | K::OperatorViewedWorktreeLog { .. }
+        | K::OperatorViewedPlanToml { .. } => None,
 
         // 2. Routine session lifecycle. The audit chain records
         //    every spawn / exit / respawn for forensic
@@ -650,6 +688,37 @@ mod tests {
                 operator_fingerprint: "fp".into(),
                 outcome: "Accepted".into(),
             },
+            // Listing endpoints under the credential viewer never
+            // notify (the operator just looked at a list); the
+            // reveal events below DO notify.
+            AuditEventKind::OperatorListedCredentials {
+                operator_fingerprint: "fp".into(),
+                initiative_id: "init-1".into(),
+                count: 3,
+                outcome: "Accepted".into(),
+            },
+            AuditEventKind::OperatorListedSystemCredentials {
+                operator_fingerprint: "fp".into(),
+                count: 1,
+                outcome: "Accepted".into(),
+            },
+            // Operator-action gap-closer view events are forensic-
+            // only; surfacing them in the inbox would re-create the
+            // pre-`INV-NOTIF-SCOPE-01` situation where the operator
+            // sees their own clicks echoed back at them.
+            AuditEventKind::OperatorViewedInitiativeList {
+                operator_fingerprint: "fp".into(),
+                count: 2,
+                state_filter: None,
+                outcome: "Accepted".into(),
+            },
+            AuditEventKind::OperatorViewedAuditChain {
+                operator_fingerprint: "fp".into(),
+                cursor_seq: None,
+                count: 50,
+                initiative_id_filter: None,
+                outcome: "Accepted".into(),
+            },
         ];
         for ev in cases {
             assert_eq!(
@@ -660,6 +729,45 @@ mod tests {
                 ev.as_str(),
             );
         }
+    }
+
+    /// `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01` +
+    /// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`: per-
+    /// initiative reveals notify at High; system-credential
+    /// reveals notify at Critical so other operators see them.
+    #[test]
+    fn credential_reveals_notify_with_correct_priority() {
+        let per_init = AuditEventKind::OperatorRevealedCredential {
+            operator_fingerprint: "fp".into(),
+            initiative_id: "init-1".into(),
+            credential_name: "test-pg-dev".into(),
+            severity: "high".into(),
+            outcome: "Accepted".into(),
+        };
+        let system = AuditEventKind::OperatorRevealedSystemCredential {
+            operator_fingerprint: "fp".into(),
+            credential_name: "providers.anthropic-prod".into(),
+            severity: "critical".into(),
+            outcome: "Accepted".into(),
+        };
+        assert_eq!(
+            notification_priority(&per_init),
+            Some(NotificationPriority::High),
+            "Per-initiative credential reveal must notify at High",
+        );
+        assert_eq!(
+            notification_priority(&system),
+            Some(NotificationPriority::Critical),
+            "System credential reveal must notify at Critical",
+        );
+        assert_eq!(
+            notification_priority_for_kind_str(per_init.as_str()),
+            Some(NotificationPriority::High),
+        );
+        assert_eq!(
+            notification_priority_for_kind_str(system.as_str()),
+            Some(NotificationPriority::Critical),
+        );
     }
 
     /// Routine high-volume events MUST NOT notify. A 50-task

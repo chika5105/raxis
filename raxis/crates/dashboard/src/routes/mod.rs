@@ -16,6 +16,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod credentials;
 pub mod escalations;
 pub mod git;
 pub mod health;

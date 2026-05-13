@@ -2999,6 +2999,346 @@ pub enum AuditEventKind {
         /// Stable-wire outcome string.
         outcome:              String,
     },
+
+    // ── Dashboard credential viewer (INV-DASHBOARD-CREDENTIAL-*) ────
+    //
+    // The dashboard surfaces every credential bound to an initiative's
+    // plan (`task_credential_proxies` joined with metadata about
+    // proxy_type / mount_as / file path / size) plus the system-wide
+    // provider credentials (e.g. Anthropic). Plaintext is NEVER in the
+    // listing endpoint and is gated behind an explicit operator
+    // "Reveal" click that requires the `admin` role; both the listing
+    // AND the reveal emit their own `Operator*` audit events so the
+    // chain records "who looked at WHICH cred and when". See
+    // `dashboard-operator-action-audit-coverage.md` for the gap-
+    // analysis table that pinned each variant below.
+
+    /// Operator listed the credentials bound to one initiative via
+    /// `GET /api/initiatives/:id/credentials`. The response carries
+    /// only metadata (name, proxy type, mount target, file path,
+    /// byte size, sha256 prefix) — never plaintext. `count` records
+    /// how many credentials were surfaced so the audit chain can
+    /// answer "did the operator see something they shouldn't have"
+    /// without re-querying the kernel state.
+    OperatorListedCredentials {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Initiative whose credential set was listed.
+        initiative_id:        String,
+        /// Number of credential metadata rows returned (zero on a
+        /// fresh initiative with no credentials, or on a 404 after
+        /// the initiative was already validated).
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator revealed one credential's plaintext bytes via
+    /// `POST /api/initiatives/:id/credentials/:name/reveal`. This
+    /// is the highest-severity `Operator*` audit on the dashboard
+    /// chain — every reveal MUST emit one of these BEFORE the
+    /// plaintext leaves the kernel address space. `severity = "high"`
+    /// pins the notification-router behaviour at a single seam.
+    /// `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`.
+    OperatorRevealedCredential {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Initiative the credential was bound to.
+        initiative_id:        String,
+        /// Credential name (matches `task_credential_proxies.credential_name`).
+        credential_name:      String,
+        /// Stable-wire severity classifier — pinned to `"high"` for
+        /// per-initiative credentials. The notification router
+        /// matches on this so a future operator-routed alert can
+        /// promote it to a Critical without rewriting every
+        /// emission site.
+        severity:             String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator listed system-wide credentials (provider keys, etc.)
+    /// via `GET /api/system/credentials`. Admin-only; a `read`-role
+    /// caller never reaches this audit because the route returns 403
+    /// before the data layer is invoked. `count` mirrors
+    /// `OperatorListedCredentials.count`.
+    OperatorListedSystemCredentials {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of system credentials surfaced.
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator revealed a system-wide credential via
+    /// `POST /api/system/credentials/:name/reveal`. The Anthropic
+    /// provider key is the canonical motivating example: every
+    /// reveal here is severity `"critical"` and surfaces in the
+    /// Notifications panel so a second operator sees that the
+    /// reveal happened even when they're not in front of the
+    /// dashboard. `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`.
+    OperatorRevealedSystemCredential {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Credential name (e.g. `"providers.anthropic-prod"`).
+        credential_name:      String,
+        /// Stable-wire severity classifier — pinned to `"critical"`
+        /// for system credentials.
+        severity:             String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    // ── Operator-action audit-coverage gap-closers ──────────────────
+    //
+    // Every dashboard endpoint that exposes operator-private data
+    // OR mutates kernel state MUST emit an `Operator*` audit event
+    // BEFORE the response per `INV-AUDIT-OPERATOR-ACTION-01` and
+    // `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`. The
+    // variants below close the gaps identified in
+    // `dashboard-operator-action-audit-coverage.md §gap-analysis`.
+
+    /// Operator listed initiatives via `GET /api/initiatives`. Polled
+    /// every few seconds by the dashboard; the data layer therefore
+    /// debounces emissions to one per operator+endpoint per 5-minute
+    /// window (`INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`
+    /// "polling-style queries" carve-out).
+    OperatorViewedInitiativeList {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of rows surfaced.
+        count:                u32,
+        /// Optional state filter applied (`"Active"`, `"Closed"`, …).
+        state_filter:         Option<String>,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened the initiative-detail surface via
+    /// `GET /api/initiatives/:id`. Per-resource read; not debounced.
+    OperatorViewedInitiative {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Initiative id requested.
+        initiative_id:        String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened the initiative DAG view via
+    /// `GET /api/initiatives/:id/dag`.
+    OperatorViewedInitiativeDag {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Initiative id whose DAG was requested.
+        initiative_id:        String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened the per-initiative task list via
+    /// `GET /api/initiatives/:id/tasks`.
+    OperatorViewedInitiativeTasks {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Initiative id whose task list was requested.
+        initiative_id:        String,
+        /// Number of tasks surfaced.
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened a task detail surface via `GET /api/tasks/:id`.
+    OperatorViewedTask {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Task id requested.
+        task_id:              String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened the task structured-outputs surface via
+    /// `GET /api/tasks/:id/outputs`. Audited because structured
+    /// outputs may carry session-private artefacts.
+    OperatorViewedTaskOutputs {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Task id requested.
+        task_id:              String,
+        /// Number of structured-output rows surfaced.
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator listed sessions via `GET /api/sessions`. Like the
+    /// initiative-list endpoint, this is polled; the data layer
+    /// debounces emissions to one per 5-minute window per
+    /// operator+filter combination.
+    OperatorViewedSessionList {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of rows surfaced.
+        count:                u32,
+        /// Optional initiative-id filter.
+        initiative_id_filter: Option<String>,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened a session detail surface via
+    /// `GET /api/sessions/:id`.
+    OperatorViewedSession {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Session id requested.
+        session_id:           String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened a session SSE stream via
+    /// `GET /api/sessions/:id/stream`. Every SSE attach audits once;
+    /// the keepalive frames the server emits every 15s do NOT audit
+    /// (see `dashboard-operator-action-audit-coverage.md §exclusions`).
+    OperatorOpenedSessionStream {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Session id whose stream was attached to.
+        session_id:           String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator listed escalations via `GET /api/escalations`.
+    OperatorViewedEscalationList {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of rows surfaced.
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened an escalation detail surface via
+    /// `GET /api/escalations/:id`.
+    OperatorViewedEscalation {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Escalation id requested.
+        escalation_id:        String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator paginated the audit chain via `GET /api/audit`. The
+    /// audit chain is the most operator-private surface on the
+    /// dashboard; paging through it is itself audited so a forensic
+    /// review can reconstruct who walked which range and when.
+    OperatorViewedAuditChain {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Cursor seq passed in (`None` ⇒ tail).
+        cursor_seq:           Option<u64>,
+        /// Page size returned.
+        count:                u32,
+        /// Optional initiative-id filter.
+        initiative_id_filter: Option<String>,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened the operator inbox via `GET /api/inbox`.
+    OperatorViewedInbox {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of rows surfaced.
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator listed notifications via `GET /api/notifications`
+    /// (or `GET /api/notifications/unread-count`). Polled; debounced
+    /// per `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`.
+    OperatorViewedNotifications {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of rows surfaced (0 for the unread-count endpoint).
+        count:                u32,
+        /// `true` iff the operator passed `unread_only=true`.
+        unread_only:          bool,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator viewed the policy snapshot via `GET /api/policy`.
+    OperatorViewedPolicySnapshot {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Active policy epoch surfaced.
+        policy_epoch:         u64,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator viewed the raw `policy.toml` via
+    /// `GET /api/policy/toml`. Audited at high granularity because
+    /// the raw TOML carries the full operator roster + permitted-op
+    /// allowlist.
+    OperatorViewedPolicyToml {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Active policy epoch at the time of read.
+        policy_epoch:         u64,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator listed git worktrees via `GET /api/git/worktrees`.
+    OperatorViewedWorktreeList {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of worktrees surfaced.
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator viewed a worktree's `git log` via
+    /// `GET /api/git/worktrees/:name/log`. Distinct from
+    /// `OperatorWorktreeAccessed` (which fires on the metadata read)
+    /// and `OperatorDiffViewed` so a forensic walk can distinguish
+    /// "looked at history" from "looked at diff".
+    OperatorViewedWorktreeLog {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Worktree slug.
+        worktree_id:          String,
+        /// Number of log entries surfaced.
+        count:                u32,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator viewed the plan TOML for one initiative via
+    /// `GET /api/initiatives/:id/plan` (the in-flight
+    /// `worker/dashboard-plan-view` will wire the route; the variant
+    /// is reserved here so both workers agree on the wire shape).
+    OperatorViewedPlanToml {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Initiative id whose plan was viewed.
+        initiative_id:        String,
+        /// Plan SHA-256 fingerprint surfaced (matches
+        /// `initiatives.plan_sha256`).
+        plan_sha256:          Option<String>,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
 }
 
 impl AuditEventKind {
@@ -3132,6 +3472,37 @@ impl AuditEventKind {
             Self::OperatorAuditChainReverified { .. } => "OperatorAuditChainReverified",
             Self::OperatorNotificationViewed { .. } => "OperatorNotificationViewed",
             Self::OperatorHealthQueried { .. } => "OperatorHealthQueried",
+            // INV-DASHBOARD-CREDENTIAL-* — reveal & list events, the
+            // canonical motivating example for the operator-action
+            // audit-coverage sweep.
+            Self::OperatorListedCredentials { .. } => "OperatorListedCredentials",
+            Self::OperatorRevealedCredential { .. } => "OperatorRevealedCredential",
+            Self::OperatorListedSystemCredentials { .. } => {
+                "OperatorListedSystemCredentials"
+            }
+            Self::OperatorRevealedSystemCredential { .. } => {
+                "OperatorRevealedSystemCredential"
+            }
+            // INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01 gap-closers.
+            Self::OperatorViewedInitiativeList { .. } => "OperatorViewedInitiativeList",
+            Self::OperatorViewedInitiative { .. } => "OperatorViewedInitiative",
+            Self::OperatorViewedInitiativeDag { .. } => "OperatorViewedInitiativeDag",
+            Self::OperatorViewedInitiativeTasks { .. } => "OperatorViewedInitiativeTasks",
+            Self::OperatorViewedTask { .. } => "OperatorViewedTask",
+            Self::OperatorViewedTaskOutputs { .. } => "OperatorViewedTaskOutputs",
+            Self::OperatorViewedSessionList { .. } => "OperatorViewedSessionList",
+            Self::OperatorViewedSession { .. } => "OperatorViewedSession",
+            Self::OperatorOpenedSessionStream { .. } => "OperatorOpenedSessionStream",
+            Self::OperatorViewedEscalationList { .. } => "OperatorViewedEscalationList",
+            Self::OperatorViewedEscalation { .. } => "OperatorViewedEscalation",
+            Self::OperatorViewedAuditChain { .. } => "OperatorViewedAuditChain",
+            Self::OperatorViewedInbox { .. } => "OperatorViewedInbox",
+            Self::OperatorViewedNotifications { .. } => "OperatorViewedNotifications",
+            Self::OperatorViewedPolicySnapshot { .. } => "OperatorViewedPolicySnapshot",
+            Self::OperatorViewedPolicyToml { .. } => "OperatorViewedPolicyToml",
+            Self::OperatorViewedWorktreeList { .. } => "OperatorViewedWorktreeList",
+            Self::OperatorViewedWorktreeLog { .. } => "OperatorViewedWorktreeLog",
+            Self::OperatorViewedPlanToml { .. } => "OperatorViewedPlanToml",
         }
     }
 }

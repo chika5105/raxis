@@ -93,6 +93,23 @@ pub enum ApiError {
         /// Short validator-message (already operator-safe).
         detail: String,
     },
+    /// Caller exceeded the per-operator rate limit on a privileged
+    /// endpoint. Carries the configured limit + window so the
+    /// browser can render an actionable retry banner. Used by the
+    /// credential-reveal endpoints (`POST /api/initiatives/:id/
+    /// credentials/:name/reveal`, `POST /api/system/credentials/
+    /// :name/reveal`) per
+    /// `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01` to defeat
+    /// trivial scripting attacks against the reveal surface.
+    #[error("too many requests: max {max} per {window_secs}s — retry in {retry_after_secs}s")]
+    TooManyRequests {
+        /// Max requests permitted in the window.
+        max: u32,
+        /// Window length in seconds.
+        window_secs: u32,
+        /// Seconds the caller should wait before retrying.
+        retry_after_secs: u32,
+    },
     /// An infrastructure error (DB, audit, IO) occurred. The
     /// inner detail is logged via `tracing::error!` and replaced
     /// with a generic `internal error` on the wire so internal
@@ -119,6 +136,10 @@ impl ApiError {
             Self::Gone { .. } => (StatusCode::GONE, "FAIL_DASHBOARD_GONE"),
             Self::BadRequest { .. } => (StatusCode::BAD_REQUEST, "FAIL_DASHBOARD_BAD_REQUEST"),
             Self::PolicyInvalid { .. } => (StatusCode::BAD_REQUEST, "FAIL_DASHBOARD_POLICY_INVALID"),
+            Self::TooManyRequests { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "FAIL_DASHBOARD_RATE_LIMITED",
+            ),
             Self::Internal { log_only } => {
                 tracing::error!(error = %log_only, "raxis-dashboard internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "FAIL_DASHBOARD_INTERNAL")

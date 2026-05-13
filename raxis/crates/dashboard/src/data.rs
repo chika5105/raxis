@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -858,6 +859,141 @@ pub struct SubsystemHealthResponse {
     pub generated_at_ms: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Credential viewer surfaces — INV-DASHBOARD-CREDENTIAL-* family
+// ---------------------------------------------------------------------------
+
+/// Metadata for a single credential surfaced on the dashboard. The
+/// shape is identical for per-initiative and system credentials —
+/// the routing layer carries the scope context separately. NEVER
+/// carries plaintext bytes; the `reveal` endpoint is the only
+/// surface that returns `bytes` and it does so on a separate JSON
+/// shape ([`CredentialReveal`]).
+///
+/// `INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01`: a listing endpoint
+/// that ever returned plaintext would silently violate this
+/// invariant. The struct deliberately has no `bytes` / `value` /
+/// `plaintext` field so a future refactor cannot accidentally add
+/// one.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CredentialMetadata {
+    /// Stable credential name as declared in the plan
+    /// (`<name>` for per-initiative credentials,
+    /// `providers.<id>` for system credentials). Matches
+    /// `task_credential_proxies.credential_name`.
+    pub name: String,
+    /// Stable proxy-type discriminant (`postgres` / `http` /
+    /// `k8s` / `redis` / `aws` / `gcp` / `azure` / `mysql` /
+    /// `mssql` / `mongodb` / `smtp` / `provider`). For
+    /// system credentials this is always `"provider"`; for
+    /// per-initiative credentials this mirrors the proxy
+    /// declaration.
+    pub proxy_type: String,
+    /// Env-var name the credential is mounted as inside the agent
+    /// VM (e.g. `DATABASE_URL`). `None` for system credentials
+    /// (gateway-bound, never reaches an agent VM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_as: Option<String>,
+    /// Operator-safe hint about the on-disk wire format
+    /// (e.g. `"libpq URL (postgresql://user:pass@host:port/db)"`,
+    /// `"Anthropic provider TOML (api_key = \"…\")"`). Used by the
+    /// FE to render a "what to expect" line above the reveal
+    /// modal so the operator can confirm they're about to look
+    /// at the right shape.
+    pub format_hint: String,
+    /// Optional upstream `host:port` derived from the proxy
+    /// declaration (e.g. `127.0.0.1:5432` for a Postgres proxy).
+    /// `None` when the proxy variant has no upstream concept
+    /// (k8s, aws, gcp, azure, system credentials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_host_port: Option<String>,
+    /// Size of the credential file in bytes. `0` when the file
+    /// does not yet exist on disk (the kernel surfaced a
+    /// declaration without a backing file). The FE renders the
+    /// missing-file case in red so the operator can see the gap.
+    pub byte_size: u64,
+    /// First 8 lowercase hex chars of the SHA-256 of the
+    /// credential bytes. `None` when the file does not yet
+    /// exist. The full digest is NEVER surfaced — 8 hex chars
+    /// is enough fingerprint to recognise a rotation; more
+    /// would let a low-privilege observer correlate against
+    /// known plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256_prefix: Option<String>,
+    /// Absolute on-disk path the credential was loaded from
+    /// (e.g. `/var/raxis/credentials/test-pg-dev.env`). `None`
+    /// for backends that don't have a file path concept (Vault,
+    /// AWS-SM, Azure KV, HSM). Operators use this to verify
+    /// they're looking at the right file before they reveal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_from_path: Option<String>,
+    /// `true` iff the dashboard has a reveal endpoint for this
+    /// credential. Always `true` today (every backend supports
+    /// reveal); reserved for future backends (HSM-only) that
+    /// expose the credential to the kernel but not to the
+    /// dashboard.
+    pub is_revealable: bool,
+    /// Wire-stable role string the caller MUST hold to reveal
+    /// (`"admin"` per `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`).
+    /// The FE consumes this verbatim to disable the reveal
+    /// button for `read`-role operators with the right tooltip.
+    pub reveal_required_role: String,
+}
+
+/// Wire shape returned by the per-initiative listing endpoint
+/// `GET /api/initiatives/:id/credentials`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CredentialListResponse {
+    /// Credentials bound to this initiative's plan (or, for the
+    /// system endpoint, every system credential the kernel
+    /// knows about). Ordered by `name` for deterministic
+    /// rendering.
+    pub credentials: Vec<CredentialMetadata>,
+}
+
+/// Wire shape returned by a successful reveal call. Carries the
+/// plaintext (UTF-8 string), the byte size, and the unix-seconds
+/// timestamp the FE should auto-hide at (`expires_at_unix`).
+///
+/// `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`: the response includes
+/// the auto-hide deadline so the FE doesn't have to track which
+/// kind of credential it just revealed (per-initiative auto-hides
+/// at 30s; system at 15s).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CredentialReveal {
+    /// Credential name (echoed for FE state validation).
+    pub name: String,
+    /// Plaintext bytes as a UTF-8 string. Binary credentials are
+    /// surfaced as `encoding = "base64"` and the `plaintext` field
+    /// holds the standard-base64 encoding (no padding stripped).
+    pub plaintext: String,
+    /// `"utf8"` (the credential parsed as UTF-8) or `"base64"`
+    /// (binary, base64-encoded). The FE renders binary as a hex
+    /// dump.
+    pub encoding: String,
+    /// Size of the underlying credential bytes (NOT the encoded
+    /// representation).
+    pub byte_size: u64,
+    /// Unix-seconds timestamp the FE should auto-hide the
+    /// plaintext at. The FE MUST honour this even if the user
+    /// has the page open — every reveal is on a deadline.
+    pub expires_at_unix: u64,
+    /// First 8 lowercase hex chars of the SHA-256 of the
+    /// credential bytes. The FE shows this in the reveal banner
+    /// so the operator can sanity-check what they're looking at
+    /// without saving the plaintext.
+    pub sha256_prefix: String,
+}
+
+/// Stable wire-string label for the dashboard's credential rate
+/// limiter. The route layer captures the limit + window from
+/// [`crate::config::DashboardConfig::reveal_rate_limit_per_window`]
+/// and `reveal_rate_limit_window_secs`; the data layer enforces
+/// it via `enforce_reveal_rate_limit` so a future test fixture or
+/// a future second backend (Vault) can re-use the same throttle
+/// surface.
+pub const REVEAL_RATE_LIMIT_LABEL: &str = "credential_reveal";
+
 /// Notification row surfaced by `GET /api/notifications`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NotificationView {
@@ -1170,6 +1306,80 @@ pub trait DashboardData: Send + Sync + 'static {
         signature_bytes: &[u8],
     ) -> Result<PolicyAdvancement, ApiError>;
 
+    /// List the credentials bound to one initiative's plan. The
+    /// data layer joins `task_credential_proxies` with the
+    /// kernel's credential backend to surface metadata only —
+    /// NEVER plaintext. Credentials are de-duplicated by name
+    /// (one initiative may have multiple tasks binding the same
+    /// credential) and ordered alphabetically.
+    ///
+    /// Returns `Err(NotFound)` for unknown initiative ids.
+    /// Returns an empty list for initiatives whose plan declares
+    /// no credentials. `INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01`:
+    /// the wire shape carries no `bytes` / `plaintext` field by
+    /// construction.
+    fn list_initiative_credentials(
+        &self,
+        initiative_id: &str,
+    ) -> Result<Vec<CredentialMetadata>, ApiError>;
+
+    /// Reveal the plaintext bytes of one initiative-bound
+    /// credential. Returns the bytes wrapped in [`CredentialReveal`]
+    /// with the auto-hide deadline pre-computed (default 30s).
+    ///
+    /// Returns `Err(NotFound)` when the credential name is not
+    /// declared by any task on this initiative. The route layer
+    /// is responsible for the role gate (`admin` only) and the
+    /// rate limit; the data layer assumes both have been honoured
+    /// before the call.
+    ///
+    /// `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01` is enforced
+    /// at the route layer — the data layer MUST NOT emit the
+    /// audit row from inside this call (the route layer needs
+    /// to emit BEFORE the response and the operator-fingerprint
+    /// is only available in the `AuthorizedOperator` extractor).
+    fn reveal_initiative_credential(
+        &self,
+        initiative_id: &str,
+        credential_name: &str,
+    ) -> Result<CredentialReveal, ApiError>;
+
+    /// List system-wide credentials (provider keys, etc.). The
+    /// data layer enumerates `<data_dir>/providers/*.toml` plus
+    /// any other credential the kernel exposes via the system
+    /// scope.
+    ///
+    /// Admin-only at the route layer; the data layer does not
+    /// re-check the role.
+    fn list_system_credentials(&self) -> Result<Vec<CredentialMetadata>, ApiError>;
+
+    /// Reveal the plaintext bytes of one system-wide credential.
+    /// Auto-hide deadline is 15s (vs 30s for per-initiative
+    /// credentials) per
+    /// `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`.
+    fn reveal_system_credential(
+        &self,
+        credential_name: &str,
+    ) -> Result<CredentialReveal, ApiError>;
+
+    /// Enforce the per-operator rate limit on the credential
+    /// reveal endpoints. Returns `Err(TooManyRequests)` when the
+    /// caller has exceeded the configured limit; returns `Ok(())`
+    /// after registering the call. The window is sliding (we use
+    /// a tail-of-N timestamps per operator); the route layer
+    /// passes the operator fingerprint AFTER the role check
+    /// passed.
+    ///
+    /// Default impl returns `Ok(())` so test fixtures can opt
+    /// out without standing up a clock; production
+    /// `KernelDashboardData` overrides with the real throttle.
+    fn enforce_reveal_rate_limit(
+        &self,
+        _operator_fingerprint: &str,
+    ) -> Result<(), ApiError> {
+        Ok(())
+    }
+
     /// Emit a single `Operator*` audit event for an operator-
     /// initiated dashboard action (mutating OR privileged-read).
     /// Implements `INV-AUDIT-OPERATOR-ACTION-01`.
@@ -1245,6 +1455,45 @@ struct InMemoryInner {
     /// assert `INV-AUDIT-OPERATOR-ACTION-01` is honoured by
     /// every operator-initiated route — read or mutate.
     recorded_operator_audits: Vec<raxis_audit_tools::AuditEventKind>,
+    /// Per-initiative credential listings for the credential
+    /// viewer surface. Keyed by initiative id; values are the
+    /// metadata + plaintext bytes (the latter is reserved for
+    /// the test reveal path — production reads come through
+    /// `KernelDashboardData::reveal_initiative_credential`). When
+    /// an initiative id is not present the listing endpoint
+    /// returns `NotFound`.
+    initiative_credentials: HashMap<String, Vec<CredentialFixture>>,
+    /// System-wide credential listings.
+    system_credentials: Vec<CredentialFixture>,
+    /// Per-operator timestamp ring used by the in-memory rate
+    /// limiter (`enforce_reveal_rate_limit`). Operators that hit
+    /// the limit get a synthetic `TooManyRequests` so route-layer
+    /// integration tests can exercise the throttle without
+    /// standing up a real clock.
+    reveal_rate_limit_state: HashMap<String, Vec<std::time::Instant>>,
+    /// In-memory rate-limit ceiling. `0` ⇒ disabled (default for
+    /// most tests). Tests that exercise the throttle bump this
+    /// via [`InMemoryDashboardData::with_reveal_rate_limit`].
+    reveal_rate_limit_max: u32,
+    /// In-memory rate-limit window. Defaults to 60 seconds when
+    /// the limit is enabled.
+    reveal_rate_limit_window: Duration,
+}
+
+/// In-memory credential fixture used by tests to seed the
+/// credential viewer surface. Carries the metadata the listing
+/// endpoint surfaces plus the plaintext bytes the reveal endpoint
+/// returns. NEVER appears in the wire shape — this is purely an
+/// in-process test affordance.
+#[derive(Debug, Clone)]
+pub struct CredentialFixture {
+    /// Metadata returned from the listing endpoint.
+    pub metadata: CredentialMetadata,
+    /// Plaintext bytes returned from the reveal endpoint. Stored
+    /// as a `String` because tests only ever exercise UTF-8
+    /// credentials; binary credentials are out of scope for the
+    /// in-memory fixture.
+    pub plaintext: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1408,6 +1657,48 @@ impl InMemoryDashboardData {
     ) -> &Arc<Self> {
         let mut g = self.inner.write();
         g.streams.entry(session_id.into()).or_default().tail.push(evt);
+        self
+    }
+
+    /// Seed an initiative-scoped credential into the in-memory
+    /// fixture. The listing endpoint surfaces every credential
+    /// pushed for the given initiative id; the reveal endpoint
+    /// returns the plaintext.
+    pub fn push_initiative_credential(
+        self: &Arc<Self>,
+        initiative_id: impl Into<String>,
+        fix: CredentialFixture,
+    ) -> &Arc<Self> {
+        let mut g = self.inner.write();
+        g.initiative_credentials
+            .entry(initiative_id.into())
+            .or_default()
+            .push(fix);
+        self
+    }
+
+    /// Seed a system-wide credential fixture (provider key, etc.).
+    pub fn push_system_credential(
+        self: &Arc<Self>,
+        fix: CredentialFixture,
+    ) -> &Arc<Self> {
+        self.inner.write().system_credentials.push(fix);
+        self
+    }
+
+    /// Configure the in-memory rate limiter for the credential
+    /// reveal endpoints. `max = 0` disables the throttle (the
+    /// default). Tests that exercise the throttle pass
+    /// `(5, Duration::from_secs(60))` to mirror the production
+    /// default.
+    pub fn with_reveal_rate_limit(
+        self: &Arc<Self>,
+        max: u32,
+        window: Duration,
+    ) -> &Arc<Self> {
+        let mut g = self.inner.write();
+        g.reveal_rate_limit_max = max;
+        g.reveal_rate_limit_window = window;
         self
     }
 }
@@ -1871,6 +2162,150 @@ impl DashboardData for InMemoryDashboardData {
         g.recorded_operator_audits.push(event);
         Ok(())
     }
+
+    fn list_initiative_credentials(
+        &self,
+        initiative_id: &str,
+    ) -> Result<Vec<CredentialMetadata>, ApiError> {
+        let g = self.inner.read();
+        // The listing endpoint distinguishes "initiative does not
+        // exist" (NotFound) from "initiative exists but has no
+        // credentials" (empty list). We use the seeded initiative
+        // table as the source of truth: an entry with an empty
+        // vec ⇒ initiative-with-no-creds; a missing key ⇒ NotFound.
+        if g.initiatives
+            .iter()
+            .any(|i| i.summary.initiative_id == initiative_id)
+            || g.initiative_credentials.contains_key(initiative_id)
+        {
+            Ok(g.initiative_credentials
+                .get(initiative_id)
+                .map(|v| v.iter().map(|f| f.metadata.clone()).collect())
+                .unwrap_or_default())
+        } else {
+            Err(ApiError::NotFound { kind: "initiative".into() })
+        }
+    }
+
+    fn reveal_initiative_credential(
+        &self,
+        initiative_id: &str,
+        credential_name: &str,
+    ) -> Result<CredentialReveal, ApiError> {
+        let g = self.inner.read();
+        let creds = g
+            .initiative_credentials
+            .get(initiative_id)
+            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+        let fix = creds
+            .iter()
+            .find(|f| f.metadata.name == credential_name)
+            .ok_or(ApiError::NotFound { kind: "credential".into() })?;
+        let bytes = fix.plaintext.as_bytes();
+        Ok(CredentialReveal {
+            name: fix.metadata.name.clone(),
+            plaintext: fix.plaintext.clone(),
+            encoding: "utf8".into(),
+            byte_size: bytes.len() as u64,
+            // 30s default for per-initiative reveals.
+            expires_at_unix: now_secs_for_reveal().saturating_add(30),
+            sha256_prefix: hex_sha256_prefix(bytes),
+        })
+    }
+
+    fn list_system_credentials(&self) -> Result<Vec<CredentialMetadata>, ApiError> {
+        Ok(self
+            .inner
+            .read()
+            .system_credentials
+            .iter()
+            .map(|f| f.metadata.clone())
+            .collect())
+    }
+
+    fn reveal_system_credential(
+        &self,
+        credential_name: &str,
+    ) -> Result<CredentialReveal, ApiError> {
+        let g = self.inner.read();
+        let fix = g
+            .system_credentials
+            .iter()
+            .find(|f| f.metadata.name == credential_name)
+            .ok_or(ApiError::NotFound { kind: "system-credential".into() })?;
+        let bytes = fix.plaintext.as_bytes();
+        Ok(CredentialReveal {
+            name: fix.metadata.name.clone(),
+            plaintext: fix.plaintext.clone(),
+            encoding: "utf8".into(),
+            byte_size: bytes.len() as u64,
+            // 15s default for system reveals (shorter — Anthropic
+            // is the canonical motivating case).
+            expires_at_unix: now_secs_for_reveal().saturating_add(15),
+            sha256_prefix: hex_sha256_prefix(bytes),
+        })
+    }
+
+    fn enforce_reveal_rate_limit(
+        &self,
+        operator_fingerprint: &str,
+    ) -> Result<(), ApiError> {
+        let mut g = self.inner.write();
+        let max = g.reveal_rate_limit_max;
+        if max == 0 {
+            return Ok(());
+        }
+        let window = g.reveal_rate_limit_window;
+        let now = std::time::Instant::now();
+        let entry = g
+            .reveal_rate_limit_state
+            .entry(operator_fingerprint.to_owned())
+            .or_default();
+        // Drop timestamps that have aged out of the window.
+        entry.retain(|ts| now.duration_since(*ts) < window);
+        if (entry.len() as u32) >= max {
+            // Caller is over the limit; the oldest entry tells
+            // us how long until the window slides forward enough
+            // to free a slot.
+            let oldest = entry.first().copied().unwrap_or(now);
+            let elapsed = now.duration_since(oldest);
+            let retry_after = window.saturating_sub(elapsed);
+            return Err(ApiError::TooManyRequests {
+                max,
+                window_secs: window.as_secs() as u32,
+                retry_after_secs: retry_after.as_secs().max(1) as u32,
+            });
+        }
+        entry.push(now);
+        Ok(())
+    }
+}
+
+/// Wall-clock unix-seconds helper for the in-memory reveal path.
+/// `KernelDashboardData` re-implements with the same semantics —
+/// keeping a tiny helper here lets the in-memory tests assert
+/// `expires_at_unix > 0` without standing up a clock fixture.
+fn now_secs_for_reveal() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Lowercase-hex first 8 chars of SHA-256(`bytes`). Used by the
+/// in-memory reveal path so wire-shape tests can assert the
+/// digest prefix without parsing the full 64-char hex.
+fn hex_sha256_prefix(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(bytes);
+    let digest = h.finalize();
+    let mut s = String::with_capacity(8);
+    for b in &digest[..4] {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
 }
 
 /// Stable-wire `outcome` discriminants for `Operator*` audit
@@ -1908,6 +2343,14 @@ pub mod operator_outcome {
             Gone { .. } => REJECTED_VALIDATION,
             BadRequest { .. } => REJECTED_VALIDATION,
             PolicyInvalid { .. } => REJECTED_VALIDATION,
+            // A rate-limit refusal is not a permission failure
+            // (the operator does have the role) — it's a
+            // mechanical-validation refusal expressed as 429 on the
+            // wire. Surfacing it as `RejectedValidation` lets
+            // forensic dashboards distinguish "operator doesn't
+            // have role" (`RejectedPermission`) from "operator
+            // hammered the reveal endpoint".
+            TooManyRequests { .. } => REJECTED_VALIDATION,
             Internal { .. } => INTERNAL_ERROR,
         }
     }

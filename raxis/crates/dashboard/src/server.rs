@@ -323,6 +323,35 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // handler emits a 60s `Cache-Control: private` header
         // for approved plans and `no-store` for pending ones.
         .route("/api/initiatives/:id/plan",        get(initiatives::plan::<D>))
+        // Per-initiative credential viewer (INV-DASHBOARD-CREDENTIAL-*).
+        // Listing is read-role; reveal is admin-only with a per-
+        // operator rate limit + paired audit emission. Body limits
+        // inherit `BODY_LIMIT_DEFAULT` (the reveal endpoint takes
+        // an empty POST body — the path carries the credential
+        // selector; we cap at 4 KiB defence-in-depth).
+        .route(
+            "/api/initiatives/:id/credentials",
+            get(credentials::list_initiative::<D>),
+        )
+        .route(
+            "/api/initiatives/:id/credentials/:name/reveal",
+            post(credentials::reveal_initiative::<D>)
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+        )
+        // System-wide credential viewer (admin-only — even the
+        // listing requires the admin role so a `read` operator
+        // cannot enumerate which providers the kernel uses).
+        .route(
+            "/api/system/credentials",
+            get(credentials::list_system::<D>),
+        )
+        .route(
+            "/api/system/credentials/:name/reveal",
+            post(credentials::reveal_system::<D>)
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+        )
         // Tasks.
         .route("/api/tasks/:id",                   get(tasks::detail::<D>))
         .route("/api/tasks/:id/outputs",           get(tasks::outputs::<D>))

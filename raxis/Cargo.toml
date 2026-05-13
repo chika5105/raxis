@@ -224,6 +224,7 @@ raxis-crypto = { path = "crates/crypto" }
 raxis-audit-tools       = { path = "crates/audit" }
 raxis-credentials       = { path = "crates/raxis-credentials" }
 raxis-credentials-file  = { path = "crates/raxis-credentials-file" }
+raxis-plan-credentials  = { path = "crates/plan-credentials" }
 raxis-credential-proxy-cloud-shared = { path = "crates/credential-proxy-cloud-shared" }
 raxis-tproxy-protocol   = { path = "crates/tproxy-protocol" }
 raxis-vsock-loopback    = { path = "crates/vsock-loopback" }
