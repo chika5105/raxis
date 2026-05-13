@@ -2697,6 +2697,51 @@ substitution_round_trip` witness in the realism extended e2e.
 `credential-proxy.md`,
 `kernel/tests/extended_e2e_support/credential_substitution_evidence.rs`.
 
+### INV-CRED-PROXY-VM-REACHABILITY-01 — Substrate transparently bridges in-VM `127.0.0.1:N` to host loopback
+
+Executor agents inside isolation VMs MUST be able to reach
+host-side credential proxies via stock loopback URLs
+(`127.0.0.1:<port>`); the kernel substrate (AVF bridge / vsock
+forwarder / port-forward) MUST provide this transparently.
+Credential material itself MUST NEVER traverse the VM boundary;
+only the proxied protocol traffic.
+
+**Mechanical enforcement.** `raxis-session-spawn::spawn_session`
+allocates one vsock port per credential proxy, stamps a
+`RAXIS_VSOCK_LOOPBACK_PLAN` env var the in-guest forwarder
+(`raxis-tproxy::loopback_forwarder`) reads at boot, and registers
+a host-side `VZVirtioSocketListener` on the VM's
+`VZVirtioSocketDevice` whose delegate splices each accepted vsock
+connection to host `127.0.0.1:<host_loopback_port>`. The vsock
+port lives on the VM's own vsock device (per-VM isolation
+boundary), the forwarder is transport-agnostic (no credential
+material ever crosses the boundary), and the agent's stock
+libpq / pymongo / redis-py / aws-sdk clients dial
+`127.0.0.1:<port>` exactly as on a non-virtualised host. Substrates
+that cannot satisfy this invariant MUST refuse
+`Session::register_loopback_listener` fail-closed
+(`IsolationError::BackendInternal`) so the kernel can tear down
+the VM rather than ship a session whose agent silently cannot
+reach its credentials.
+
+**Justification.** Without this invariant the credential-proxy
+contract breaks the moment the agent runs inside an AVF /
+Firecracker VM: the kernel binds proxies on host
+`127.0.0.1:NNN`, but `127.0.0.1` inside the VM resolves to the
+**guest's** loopback — nothing listens there, every database /
+storage / cloud-API task fails with `ECONNREFUSED`, and the
+operator-visible failure mode is "the bash tool is completely
+non-functional" rather than a clear isolation diagnostic. The
+substrate-level fan-out preserves both the credential boundary
+(`INV-SECRET-02`, `INV-VM-CAP-04`) and the stock-URL contract
+the executor scripts depend on.
+
+**Canonical home.** `v2/credential-proxy.md §12a`,
+`raxis/crates/vsock-loopback/src/lib.rs` (wire format),
+`raxis/crates/isolation-apple-vz/src/vsock_loopback_bridge.rs`
+(host half), `raxis/tproxy/src/loopback_forwarder.rs`
+(in-guest half).
+
 ---
 
 ## §11.9 — Dashboard surface (INV-DASHBOARD-* / INV-AUDIT-DASHBOARD-* / INV-AUDIT-OPERATOR-* / INV-NOTIF-SCOPE-*)
@@ -3025,7 +3070,7 @@ Most security properties at the system level are emergent from
 | **Audit chain is verifiable without the kernel running** | INV-AUDIT-PAIRED-01 (every state change has a pending) + INV-AUDIT-PAIRED-02/03 (pairing integrity) + INV-AUDIT-PAIRED-04 (`last_committing_event_seq` disambiguates orphans) + INV-AUDIT-PAIRED-05 (offline verifier algorithm) + INV-AUDIT-PAIRED-06 (recovery is advisory) + INV-04 (chain hash linkage) — together these turn R-7 from a probabilistic "if recovery runs" guarantee into a structural "verifiable from frozen state alone" guarantee |
 | **Kernel cannot announce one mutation and commit another** | INV-AUDIT-PAIRED-02 (digest equality between pending's `intended_post_state_digest` and confirmed's `actual_post_state_digest`) + INV-04 (chain hash linkage prevents post-hoc edit) + INV-CERT-* (event signing prevents forgery) — a buggy or compromised kernel that diverges intent from effect is flagged as `Finding::DigestMismatch` by the offline verifier, with no kernel cooperation required |
 | **V3 cloud-credential exchange is structurally bounded** | INV-CLOUD-FWD-01 (construction-enforced egress allowlist) + INV-CLOUD-FWD-02 (audit redaction) + INV-CLOUD-FWD-05 (operator credentials never enter VM) + INV-VM-CAP-04 (no credential mounts in VM) — together these guarantee the V3 forwarding path can dial only the four known cloud control planes, cannot leak the operator's issuance material through audit / cache / response, and confines the long-lived secret to the kernel-host proxy process | |
-| **Secrets model is structurally sound against an adversarial LLM** | INV-SECRET-01 (operators never place raw secrets in worktrees) + INV-SECRET-02 (resolution host-side) + INV-SECRET-03 (proxy is the only egress path) + INV-SECRET-04 (no LLM-compliance dependence) + INV-SECRET-05 (proxy substitutes placeholders before upstream) + INV-VM-CAP-04 (no credential mounts in VM) — together these guarantee a jailbroken / prompt-injected / hallucinating LLM that exfiltrates everything it can observe leaks only the operator-staged placeholders. The real credential material never enters the LLM's context; the substitution discipline at the proxy boundary is the load-bearing mechanical guarantee, with the witness in `credential_substitution_evidence` pinning all five sub-properties on every realism e2e run |
+| **Secrets model is structurally sound against an adversarial LLM** | INV-SECRET-01 (operators never place raw secrets in worktrees) + INV-SECRET-02 (resolution host-side) + INV-SECRET-03 (proxy is the only egress path) + INV-SECRET-04 (no LLM-compliance dependence) + INV-SECRET-05 (proxy substitutes placeholders before upstream) + INV-VM-CAP-04 (no credential mounts in VM) + INV-CRED-PROXY-VM-REACHABILITY-01 (substrate-level vsock fan-out preserves stock-URL transparency without crossing the credential boundary) — together these guarantee a jailbroken / prompt-injected / hallucinating LLM that exfiltrates everything it can observe leaks only the operator-staged placeholders. The real credential material never enters the LLM's context; the substitution discipline at the proxy boundary is the load-bearing mechanical guarantee, with the witness in `credential_substitution_evidence` pinning all five sub-properties on every realism e2e run |
 
 When auditing a code path, look for which combination of invariants
 governs it; a single invariant in isolation rarely tells the full

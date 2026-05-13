@@ -197,6 +197,17 @@ a separate, fully-tested implementation.
 
 The Kernel starts a per-session **credential proxy** for each credential declared in the plan. The proxy runs on the Kernel host (outside the VM) and is reachable from inside the VM via a VirtioFS-mounted Unix socket or a loopback-mapped port.
 
+> **Substrate-level reachability** (`INV-CRED-PROXY-VM-REACHABILITY-01`).
+> Credential proxies bind on the **host's** `127.0.0.1:<host_loopback_port>` so credential material never crosses the VM boundary
+> (`INV-SECRET-02`, `INV-VM-CAP-04`). Inside an isolation VM (Apple-VZ today, Firecracker tomorrow) the literal `127.0.0.1` resolves to the
+> **guest's** loopback interface — there is no listener on that side. The kernel's substrate fixes this transparently via a per-session
+> AF_VSOCK fan-out: it allocates one vsock port per credential proxy on the VM's `VZVirtioSocketDevice`, registers a host-side accepter that
+> splices each accepted vsock connection to the credential proxy's `127.0.0.1:<host_loopback_port>`, and stamps a `RAXIS_VSOCK_LOOPBACK_PLAN`
+> env var the in-guest forwarder (`raxis-tproxy::loopback_forwarder`) reads at boot. The forwarder binds `127.0.0.1:<guest_loopback_port>`
+> for every plan entry and dials `(VMADDR_CID_HOST, vsock_port)` for each accepted TCP connection. Stock executor scripts inside the VM see
+> a stock loopback URL — no awareness of the substrate plumbing, no library changes — and credential material itself stays on the host.
+> See `raxis/crates/vsock-loopback/` for the wire format and `raxis/crates/isolation-apple-vz/src/vsock_loopback_bridge.rs` for the AVF half.
+
 ```
 VM (agent process)                    |  Host (Kernel)
                                       |
@@ -229,13 +240,15 @@ The proxy listeners + the egress-admission listener + the VM itself are bound an
 
 1. `CredentialProxyManager::start_for_session(session_id, task_id, &decls)` binds one listener per `[[tasks.credentials]]` declaration on `127.0.0.1:0`.
 2. A per-session egress-admission `tokio::net::TcpListener::bind("127.0.0.1:0")` is bound for the in-guest `raxis-tproxy` to phone home to.
-3. The composer stamps three classes of values into `VmSpec.env` (per `extensibility-traits.md §3.5`):
+3. The composer stamps four classes of values into `VmSpec.env` (per `extensibility-traits.md §3.5`):
    * One entry per credential proxy keyed by the operator-declared `mount_as` field, value = the proxy's loopback URL (`postgresql://raxis@127.0.0.1:NNN/` for postgres, `http://127.0.0.1:NNN` for HTTP/k8s).
    * `RAXIS_SESSION_ID`.
    * `RAXIS_TPROXY_KERNEL_TCP` = the per-session admission listener address.
+   * `RAXIS_VSOCK_LOOPBACK_PLAN` = comma-separated `<vsock_port>:<guest_loopback_port>` pairs, one per credential proxy (per `raxis-vsock-loopback`'s wire format). Stamped only when the session declared at least one credential.
 4. `IsolationBackend::spawn(image, mounts, vm_spec)` → live `Box<dyn Session>`. Substrates honour the env block via their respective channels (Subprocess substrate forwards to `Command::env`; Firecracker / Apple-VZ stamp through metadata service or boot-args).
-5. The admission-loop is spawned as a per-session `tokio::task` that accepts loopback connections from the in-guest tproxy and runs `raxis-egress-admission::run_admission_loop` per accepted connection.
-6. Audit emit: `SessionVmSpawned { session_id, task_id, initiative_id, backend_id, egress_tier, admission_loopback, credential_proxies }`.
+5. **Vsock-loopback fan-out registration** (`INV-CRED-PROXY-VM-REACHABILITY-01`): for every entry in the plan from step 3, the composer calls `Session::register_loopback_listener(vsock_port, host_loopback_port)`. The Apple-VZ substrate registers a `VZVirtioSocketListener` on the VM's `VZVirtioSocketDevice` whose delegate dups the accepted vsock fd and splices it to host `127.0.0.1:<host_loopback_port>`. Per-VM device boundary is the per-session isolation boundary — no shared host vsock CID. Failure here is fail-closed: VM, admission listener, and credential proxies are torn down before surfacing the error.
+6. The admission-loop is spawned as a per-session `tokio::task` that accepts loopback connections from the in-guest tproxy and runs `raxis-egress-admission::run_admission_loop` per accepted connection.
+7. Audit emit: `SessionVmSpawned { session_id, task_id, initiative_id, backend_id, egress_tier, admission_loopback, credential_proxies }`.
 
 **Atomic-on-failure guarantee.** Every failure path between step 1 and step 6 tears down the listeners that DID succeed before returning the typed error. There is no half-bound state that can escape the call. See `raxis/crates/session-spawn/tests/spawn_round_trip.rs` for the full real-substrate round-trip.
 
@@ -2445,6 +2458,83 @@ Credential rotation is operationally safe because RAXIS proxies are **per-sessio
 
 This is equivalent to the Kubernetes rolling update pattern: new instances get new
 config; existing instances are not disrupted until they naturally terminate.
+
+---
+
+## 12a. VM↔Host Loopback Plumbing for Credential Proxies
+
+**Normative reference for `INV-CRED-PROXY-VM-REACHABILITY-01`.**
+
+The credential proxy contract above stamps env URLs of the form `postgresql://raxis@127.0.0.1:54xxx/`, `http://127.0.0.1:54xxx`, etc., into the agent's environment. Inside an isolation VM (Apple-VZ today; Firecracker tomorrow) the literal `127.0.0.1` resolves to the **guest's** loopback interface — the kernel's host loopback (where the proxies are bound) is structurally unreachable from inside the VM. Without substrate-level help, every executor task that needs database / storage access fails with `ECONNREFUSED`.
+
+The substrate fix is a **per-session AF_VSOCK fan-out** that preserves both the credential isolation invariants (`INV-SECRET-02`, `INV-VM-CAP-04`) and the stock-loopback contract (`libpq` / `pymongo` / `redis-py` / `aws-sdk` need zero awareness of the VM boundary).
+
+### 12a.1 — The wire shape
+
+The kernel-side composer (`raxis-session-spawn`) allocates one `(vsock_port, guest_loopback_port)` pair per credential proxy. By substrate convention the kernel uses **the same number** for the host loopback port, the vsock port, and the guest loopback port; all three are aligned so an operator triaging the audit chain sees one port number per proxy across all three namespaces.
+
+The plan is encoded as a single env var the substrate forwards verbatim into the guest:
+
+```text
+RAXIS_VSOCK_LOOPBACK_PLAN=<vsock_port>:<guest_loopback_port>,<vsock_port>:<guest_loopback_port>,…
+```
+
+Wire format details (round-trip-stable, ASCII, whitespace-free, base64-envelope safe) live in `raxis/crates/vsock-loopback/src/lib.rs`. Empty plan ⇒ empty string ⇒ "no credentials declared, forwarder is a no-op".
+
+### 12a.2 — Three-tier topology
+
+```text
+                    VM (guest)                         |   Host (Kernel)
+                                                       |
+agent libpq → 127.0.0.1:5432  ─[TCP accept]─►          |
+                              │                         |
+                              ▼                         |
+                  raxis-tproxy::loopback_forwarder      |
+                              │                         |
+                              ▼                         |
+                  AF_VSOCK connect (CID=2, port=5432) ──┼──►  VZVirtioSocketDevice
+                                                       |        │  on this VM
+                                                       |        ▼
+                                                       |   VZVirtioSocketListener
+                                                       |   (raxis-isolation-apple-vz::
+                                                       |    vsock_loopback_bridge)
+                                                       |        │
+                                                       |        │ delegate dups fd,
+                                                       |        │ retains connection,
+                                                       |        │ spawns splice thread
+                                                       |        ▼
+                                                       |   TCP connect 127.0.0.1:5432
+                                                       |        │
+                                                       |        ▼
+                                                       |   raxis-credential-proxy-postgres
+                                                       |   (reads credentials from disk,
+                                                       |    forwards to real DB on agent's
+                                                       |    behalf)
+```
+
+* **Per-VM isolation argument.** Each isolation VM has its own `VZVirtioSocketDevice` (Apple-VZ) / `vhost-vsock` instance (Firecracker). The substrate registers the `VZVirtioSocketListener` on **that VM's device**, not on a shared host CID. So vsock port `N` on VM-A's device is a different listener from vsock port `N` on VM-B's device — the substrate's per-VM device boundary IS the per-session isolation boundary. Cross-session access is structurally impossible: an executor in VM-B that dials `(VMADDR_CID_HOST, N)` reaches VM-B's listener (which forwards to VM-B's host loopback proxies), never VM-A's.
+* **Credential boundary preservation.** The credential proxy on the host side is the only component that ever sees plaintext credentials. The vsock channel carries opaque bytes — the in-VM forwarder is transport-agnostic and the host-side accepter just splices a SOCK_STREAM fd to a TCP connection. No code path puts a credential value on the vsock transport.
+* **Composes with `vm-network-isolation.md §3`.** The in-guest tproxy iptables rules already ACCEPT traffic to `lo` (the rule is `! -d 127.0.0.1`), so the agent's TCP connect to `127.0.0.1:<guest_loopback_port>` is not redirected through the egress-admission machinery — it reaches the in-VM forwarder directly. The forwarder's AF_VSOCK egress is an in-VM kernel-managed channel, not observed by the iptables OUTPUT chain.
+
+### 12a.3 — Lifecycle
+
+1. **Spawn.** `SessionSpawnService::spawn_session` builds the plan from `cred_handles.started_summaries()` (one entry per credential proxy), stamps `RAXIS_VSOCK_LOOPBACK_PLAN`, calls `Backend::spawn(...)`, then iterates the plan and calls `Session::register_loopback_listener(vsock_port, host_loopback_port)` for each entry. The Apple-VZ implementation in `crates/isolation-apple-vz/src/vsock_loopback_bridge.rs` registers a `VZVirtioSocketListener` on the VM's vsock device using `define_class!`-defined Rust delegate that conforms to `VZVirtioSocketListenerDelegate`.
+2. **Guest boot.** The in-VM `raxis-tproxy` binary reads `RAXIS_VSOCK_LOOPBACK_PLAN`, binds `127.0.0.1:<guest_loopback_port>` for every entry, and parks waiting for accepts.
+3. **Per-connection.** Agent code (libpq, pymongo, …) dials `127.0.0.1:<guest_loopback_port>`. The forwarder accepts, opens AF_VSOCK to `(VMADDR_CID_HOST, vsock_port)`. The host substrate's listener delegate accepts, dups the fd, retains the connection, and spawns a thread that opens `127.0.0.1:<host_loopback_port>` (the credential proxy) and pumps bytes bidirectionally.
+4. **Teardown.** Session shutdown drops the `LoopbackListenerHandle` vector on the AVF runtime; each Drop dispatches `removeSocketListenerForPort:` on the VM's vsock device and releases every retained `VZVirtioSocketConnection`, which closes AVF's owned fds. In-flight splice threads finish their pumps and close their dup'd fds independently. Credential proxies are torn down by the existing `SessionProxyHandles::shutdown` step.
+
+### 12a.4 — Invariant
+
+> **`INV-CRED-PROXY-VM-REACHABILITY-01`.** Executor agents inside isolation VMs MUST be able to reach host-side credential proxies via stock loopback URLs (`127.0.0.1:<port>`); the kernel substrate (AVF bridge / vsock forwarder / port-forward) MUST provide this transparently. Credential material itself MUST NEVER traverse the VM boundary; only the proxied protocol traffic. Substrates that cannot satisfy this invariant MUST refuse `Session::register_loopback_listener` fail-closed (`IsolationError::BackendInternal`) so the kernel can tear down the VM rather than ship a session whose agent silently cannot reach its credentials.
+
+### 12a.5 — Why this design (and not the alternatives)
+
+The implementation worked through four candidate shapes; the rejected ones are noted here so future maintainers do not re-derive them:
+
+* **Bind credential proxies on the AVF bridge IP.** AVF NAT assigns each VM its own bridge IP, but cross-session leakage risk plus the loss of stock `127.0.0.1` URLs (every consumer would need to learn its bridge IP) ruled this out. Per-VM IP discovery would also require a substrate API change to expose the assigned IP back to the kernel.
+* **AVF host port-forward.** AVF's NAT attachment does not expose a guest→host port-forward primitive; the framework only models host→guest connect via `VZVirtioSocketDevice::connectToPort:`. Adding a userland forwarder on top of NAT would require a second VM-attached process — strictly more complex than vsock.
+* **Run credential proxies inside the VM.** Cleanest network-wise, but credential MATERIAL would have to enter the guest, violating `INV-SECRET-02` and `INV-VM-CAP-04`. Credential resolution stays host-side; only the proxied protocol traffic crosses the boundary. Out.
+* **Vsock-loopback forwarder (chosen).** Preserves the credential boundary (host-only material), preserves per-VM isolation (per-device listeners), preserves the stock-loopback contract (the agent's libpq dials `127.0.0.1:5432` exactly as on a non-virtualised host), and composes with the existing tproxy / egress allowlist machinery (loopback bypasses iptables REDIRECT by design). The implementation cost is one new crate (`raxis-vsock-loopback`, 250 LOC of pure-data wire format) plus one new module per substrate (`vsock_loopback_bridge.rs` for AVF; future Firecracker addition uses Linux AF_VSOCK directly).
 
 ---
 
