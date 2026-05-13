@@ -3186,6 +3186,38 @@ mod tests {
         .unwrap();
     }
 
+    /// Initialise a real source repository at
+    /// `<data_dir>/repositories/main` with one commit on the
+    /// requested branch. Mirrors the
+    /// `worktree_provisioning::tests::bootstrap_source` shape and uses
+    /// the version-agnostic `init` + `symbolic-ref HEAD` pair so the
+    /// fixture works on git binaries that predate the `init -b` flag
+    /// (git ≥ 2.28).
+    fn bootstrap_source_repo(data_dir: &std::path::Path, branch: &str) {
+        use std::process::Command;
+        let main_repo = data_dir.join("repositories").join("main");
+        std::fs::create_dir_all(&main_repo).expect("mkdir main repo");
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&main_repo)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr),
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")]);
+        run(&["config", "user.email", "test@raxis.local"]);
+        run(&["config", "user.name", "raxis-test"]);
+        std::fs::write(main_repo.join("README.md"), b"hello\n").unwrap();
+        run(&["add", "README.md"]);
+        run(&["commit", "-q", "-m", "initial"]);
+    }
+
     /// Insert an Orchestrator session row keyed to `(session_id,
     /// initiative_id)` with a freshly-minted CSPRNG `session_token`.
     ///
@@ -3302,7 +3334,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_orchestrator_spawn_full_round_trip_through_trait_surface() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         enable_test_harness();
 
         // ── Wire real SessionSpawnService over a real
@@ -3338,10 +3370,25 @@ mod tests {
         let kernel_version = "v2-test";
         write_canonical_image_fake(install.path(), kernel_version);
 
+        // ── Real data_dir with a bootstrapped source repository at
+        //    `<data_dir>/repositories/main`. Production
+        //    `spawn_orchestrator_for_initiative` requires `data_dir`
+        //    to be wired via `with_data_dir` so the Step 24b
+        //    worktree-provisioning gix clone has a real source repo
+        //    to attach to (see the `OrchestratorSpawnContext is
+        //    missing data_dir` guard around line 705). The
+        //    bootstrap mirrors the
+        //    `worktree_provisioning::tests::bootstrap_source` shape
+        //    and uses the version-agnostic `init` + `symbolic-ref`
+        //    pair so the fixture works on older git binaries too.
+        let data_dir = tempfile::tempdir().unwrap();
+        bootstrap_source_repo(data_dir.path(), "main");
+
         let spawn_ctx = OrchestratorSpawnContext::new(
             install.path().to_path_buf(),
             kernel_version.to_owned(),
-        );
+        )
+        .with_data_dir(data_dir.path().to_path_buf());
 
         let allowlist = EgressAllowlist {
             exact_hosts: vec!["api.anthropic.com".into()],
@@ -3421,7 +3468,15 @@ mod tests {
 
     #[tokio::test]
     async fn live_orchestrator_spawn_with_missing_canonical_image_surfaces_typed_error() {
-        let _g = ENV_LOCK.lock().unwrap();
+        // Poison tolerance: if a sibling test in this module panicked
+        // before releasing `ENV_LOCK` (e.g. an `expect()` blew up after
+        // grabbing the guard), the std mutex marks the lock poisoned
+        // and the next `.lock().unwrap()` would itself panic with
+        // `PoisonError`. The guard here only serialises an env-var
+        // flip — no shared state is left in an inconsistent state on
+        // panic — so recovering the inner guard with `into_inner` is
+        // safe and keeps this test independently runnable.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         enable_test_harness();
 
         let creds_dir = tempfile::tempdir().unwrap();
