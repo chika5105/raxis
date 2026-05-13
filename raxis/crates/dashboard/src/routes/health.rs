@@ -164,6 +164,49 @@ pub struct KernelLifecycleResponse {
     /// `!fresh` to render an additional "Sentinel data is stale"
     /// note next to the status banner.
     pub fresh: bool,
+    /// V2.5 `self-healing-supervisor.md §3.5` /
+    /// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` — summary
+    /// of the most recent supervisor-aware auto-resume sweep.
+    /// `None` when the kernel has never been booted under the
+    /// supervisor, when the sentinel-paired auto-resume file
+    /// (`<data_dir>/last_auto_resume.json`) is missing, when its
+    /// shape doesn't parse, or when the recorded episode is older
+    /// than 5 minutes (the dashboard surfaces auto-resume status
+    /// only as a transient post-restart pill — chronic display
+    /// would distract from steady-state operation). Present iff
+    /// there is a recent auto-resume episode worth surfacing on
+    /// the banner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_resume: Option<KernelAutoResumeSummary>,
+}
+
+/// Serde-stable summary of one supervisor-aware auto-resume
+/// sweep. Read from `<data_dir>/last_auto_resume.json`, written
+/// by the kernel boot's `recovery::reconcile_after_supervisor_restart`
+/// caller in `kernel/src/main.rs`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct KernelAutoResumeSummary {
+    /// Tasks the sweep transitioned BRP → Admitted.
+    pub resumed:                   u32,
+    /// Tasks skipped because the initiative is operator-quarantined.
+    pub skipped_quarantined:       u32,
+    /// Tasks skipped because they were already at `BlockedRecoveryPending`
+    /// before this boot's recovery sweep (preserve operator pre-existing
+    /// block).
+    pub skipped_pre_existing_block: u32,
+    /// Tasks the sweep tried to resume but the FSM transition or
+    /// audit-emit failed; they remain at `BlockedRecoveryPending`
+    /// and will need an operator `task resume`.
+    pub transition_failed:         u32,
+    /// Stable identifier shared by every
+    /// `TaskAutoResumedAfterSupervisorRestart` event from this
+    /// episode. Lets the dashboard link the banner pill to the
+    /// matching audit rows.
+    pub supervisor_restart_id:     String,
+    /// Wallclock unix-seconds the kernel wrote the file. The
+    /// dashboard handler suppresses the field if this is more
+    /// than 5 minutes ago.
+    pub recorded_at_unix_secs:     i64,
 }
 
 /// Sentinel view used by the handler. Deliberately a private
@@ -253,9 +296,11 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
             kernel_pid: 0,
             updated_at_unix_secs: now,
             fresh: true,
+            auto_resume: None,
         };
     };
     let sentinel_path = PathBuf::from(data_dir).join("kernel_lifecycle_status.json");
+    let auto_resume = read_recent_auto_resume_summary(data_dir, now);
     let bytes = match std::fs::read(&sentinel_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -272,6 +317,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
                 kernel_pid: 0,
                 updated_at_unix_secs: now,
                 fresh: true,
+                auto_resume: auto_resume.clone(),
             };
         }
         Err(_e) => {
@@ -291,6 +337,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
                 kernel_pid: 0,
                 updated_at_unix_secs: now,
                 fresh: false,
+                auto_resume: auto_resume.clone(),
             };
         }
     };
@@ -310,6 +357,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
                 kernel_pid: 0,
                 updated_at_unix_secs: now,
                 fresh: false,
+                auto_resume: auto_resume.clone(),
             };
         }
     };
@@ -352,7 +400,33 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
         kernel_pid: view.kernel_pid,
         updated_at_unix_secs: view.updated_at_unix_secs,
         fresh,
+        auto_resume,
     }
+}
+
+/// Filename of the auto-resume status file the kernel writes
+/// after `recovery::reconcile_after_supervisor_restart`. Public
+/// so the kernel boot path (`kernel/src/main.rs`) can write to
+/// the same path the dashboard reads.
+pub const AUTO_RESUME_STATUS_FILENAME: &str = "last_auto_resume.json";
+
+/// Window after which the dashboard suppresses the auto-resume
+/// pill (5 minutes). Beyond this the operator's attention should
+/// be on steady-state operation, not a stale post-restart event.
+pub const AUTO_RESUME_VISIBILITY_WINDOW_SECS: i64 = 300;
+
+fn read_recent_auto_resume_summary(
+    data_dir: &str,
+    now:      i64,
+) -> Option<KernelAutoResumeSummary> {
+    let path = PathBuf::from(data_dir).join(AUTO_RESUME_STATUS_FILENAME);
+    let bytes = std::fs::read(&path).ok()?;
+    let parsed: KernelAutoResumeSummary = serde_json::from_slice(&bytes).ok()?;
+    let age = now.saturating_sub(parsed.recorded_at_unix_secs);
+    if age > AUTO_RESUME_VISIBILITY_WINDOW_SECS {
+        return None;
+    }
+    Some(parsed)
 }
 
 fn unix_now_secs() -> i64 {
@@ -567,5 +641,86 @@ mod tests {
         ));
         assert_eq!(resp.status, "Healthy");
         assert!(resp.fresh);
+    }
+
+    /// Recent auto-resume status file present ⇒ summary rides on
+    /// the response so the banner can render the green/amber pill.
+    /// Recorded at `now`, which is well inside the 5-minute
+    /// visibility window.
+    #[test]
+    fn fresh_auto_resume_status_rides_on_response() {
+        let dir = tempdir().unwrap();
+        let now = unix_now_secs();
+        std::fs::write(
+            dir.path().join(AUTO_RESUME_STATUS_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "resumed":                    4_u32,
+                "skipped_quarantined":        1_u32,
+                "skipped_pre_existing_block": 1_u32,
+                "transition_failed":          0_u32,
+                "supervisor_restart_id":      "supervisor-restart-1700000000-1",
+                "recorded_at_unix_secs":      now,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let resp = read_kernel_lifecycle_response(Some(
+            dir.path().to_str().unwrap(),
+        ));
+        let summary = resp.auto_resume.expect("auto_resume must be populated");
+        assert_eq!(summary.resumed, 4);
+        assert_eq!(summary.skipped_quarantined, 1);
+        assert_eq!(summary.skipped_pre_existing_block, 1);
+        assert_eq!(summary.transition_failed, 0);
+        assert_eq!(summary.supervisor_restart_id, "supervisor-restart-1700000000-1");
+    }
+
+    /// An auto-resume episode older than the 5-minute visibility
+    /// window is suppressed — the banner returns to its
+    /// supervisor-only view.
+    #[test]
+    fn stale_auto_resume_status_is_suppressed() {
+        let dir = tempdir().unwrap();
+        let now = unix_now_secs();
+        let one_hour_ago = now - 3_600;
+        std::fs::write(
+            dir.path().join(AUTO_RESUME_STATUS_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "resumed":                    1_u32,
+                "skipped_quarantined":        0_u32,
+                "skipped_pre_existing_block": 0_u32,
+                "transition_failed":          0_u32,
+                "supervisor_restart_id":      "supervisor-restart-old-1",
+                "recorded_at_unix_secs":      one_hour_ago,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let resp = read_kernel_lifecycle_response(Some(
+            dir.path().to_str().unwrap(),
+        ));
+        assert!(resp.auto_resume.is_none(),
+            "an episode > AUTO_RESUME_VISIBILITY_WINDOW_SECS old must be suppressed");
+    }
+
+    /// Garbage in `last_auto_resume.json` MUST NOT panic the
+    /// handler — the field collapses to `None` and the rest of
+    /// the response renders normally.
+    #[test]
+    fn garbage_auto_resume_file_collapses_to_none() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(AUTO_RESUME_STATUS_FILENAME),
+            b"{not-json",
+        )
+        .unwrap();
+        let resp = read_kernel_lifecycle_response(Some(
+            dir.path().to_str().unwrap(),
+        ));
+        assert!(resp.auto_resume.is_none());
+        // The rest of the response must still be coherent — no
+        // panic, no Halted{SupervisorGone} fallout, just the
+        // absence of the auto_resume pill.
+        assert_eq!(resp.status, "Healthy");
     }
 }

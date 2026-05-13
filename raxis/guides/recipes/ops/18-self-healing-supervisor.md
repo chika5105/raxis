@@ -192,6 +192,71 @@ Cross-reference: `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`,
 
 ---
 
+## 5b. Task auto-resume after a supervisor restart
+
+When the supervisor restarts the kernel after an auto-restartable
+exit code (deadlock, panic, signal-crash — anything `restart_eligible`
+per `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`), the new kernel's
+boot sequence transparently re-admits every task this boot's
+recovery sweep just produced. **Auto-resume is unconditional when
+the supervisor is enabled.** There is no per-task, per-initiative,
+or per-restart opt-out — the supervisor's whole purpose is to recover
+transparently from kernel-internal pathology, and a supervisor that
+restarts the kernel but then leaves work paused is pointless. See
+`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` and
+`specs/v2/self-healing-supervisor.md §3.5` for the design contract.
+
+The kernel emits one `TaskAutoResumedAfterSupervisorRestart` audit
+event per task that was actually re-admitted, carrying the pre-sweep
+`prior_state` (so a forensic post-mortem can reconstruct what the
+task was doing when the kernel went down) and a stable
+`supervisor_restart_id` (so multiple events from the same restart
+episode group as a single dashboard row). The kernel does NOT emit
+the event for skipped tasks — the existing `InitiativeQuarantined`
+row or the prior-block audit history is the audit trail for the skip.
+
+The dashboard's `<KernelLifecycleBanner>` adds a green or amber
+status pill for the auto-resume sweep:
+
+- **green** — every freshly-swept task auto-resumed cleanly.
+- **amber** — at least one freshly-swept task was preserved at
+  `BlockedRecoveryPending` (operator quarantine, pre-existing
+  block, or an internal transition failure). The banner row links
+  to the matching `TaskAutoResumedAfterSupervisorRestart` audit
+  events so the operator can see which tasks continued and which
+  ones did not.
+
+There is no banner state for "auto-resume disabled" — if you want
+the V1 fail-safe to apply across supervisor restarts (every kernel
+exit halts work for human review, even auto-restartable ones), you
+disable the supervisor entirely. See §7.
+
+The two skip cases (operator quarantine + pre-existing
+`BlockedRecoveryPending`) are the only operator surface for
+selectively preserving the V1 fail-safe at sub-supervisor
+granularity:
+
+- **Skip via quarantine.** `raxis initiative quarantine <id>`
+  before a deadlock leaves every task in the initiative paused
+  across the restart. Useful for "I want this initiative to wait
+  for me to investigate, regardless of what the supervisor does."
+- **Skip via pre-existing operator block.** A task that was
+  already at `BlockedRecoveryPending` BEFORE the kernel went
+  down (because you previously hit a witness rejection, blocked
+  it manually, or the previous boot's recovery sweep moved it
+  there and you opted not to resume) stays paused — the
+  auto-resume sweep distinguishes this from "freshly swept this
+  boot" via the per-task `prior_state` captured by the recovery
+  pass, and never overrides operator intent.
+
+Cross-reference:
+`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`,
+`specs/v2/self-healing-supervisor.md §3.5`,
+`INV-INIT-05` (the V1 fail-safe rule that the auto-resume
+codepath narrows the exception window for).
+
+---
+
 ## 6. Forensic evidence after a halt
 
 Every supervisor decision lands in three places — collect all
@@ -211,10 +276,11 @@ sequence number.
 
 ---
 
-## 7. Disable the supervisor
+## 7. When to disable the supervisor entirely
 
 If you want to drop back to the pre-V2.5 behaviour (no
-supervisor, no auto-restart, no sentinel writes), simply
+supervisor, no auto-restart, no sentinel writes, no auto-resume
+of tasks after a kernel exit), simply
 `unset RAXIS_SUPERVISOR_AUTO_RESTART` and re-launch:
 
 ```bash
@@ -226,7 +292,71 @@ raxis-kernel             # equivalent
 
 The dashboard banner stays hidden in this mode (the kernel
 handler returns `Healthy { fresh: true, supervisor_pid: 0 }`,
-which the banner explicitly suppresses).
+which the banner explicitly suppresses), and no auto-resume sweep
+runs because there is no supervisor restart to surface — every
+kernel exit leaves freshly-swept tasks at `BlockedRecoveryPending`
+for operator-resume disposition per `INV-INIT-05`.
+
+### When this is the right call
+
+The supervisor opt-in is the **sole operator surface** for the
+auto-resume contract (`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`):
+enabling the supervisor enables auto-resume on every supervisor-
+triggered restart, with no per-restart, per-initiative, or per-task
+knob to opt out. Disable the supervisor entirely when you need any
+of the following:
+
+- **Forensic-mode operations.** You are actively investigating an
+  outage and want EVERY kernel exit (supervisor-triggered or not)
+  to halt every in-flight task for human review. Auto-resume
+  would replay potentially-stale work without giving you a chance
+  to inspect the audit chain, the deadlock dump, or the task's
+  pre-crash state. Run with the supervisor disabled until the
+  investigation is complete; re-enable when you are confident
+  the underlying pathology is fixed.
+
+- **Post-incident root-cause analysis.** You suspect a kernel-
+  internal pathology that the supervisor would mask (deadlock
+  that recurs with low frequency, panic that depends on kernel
+  state, etc.) and you want the operator-launched kernel boot to
+  be the only restart path so each crash produces a clean
+  re-investigation cycle. The supervisor's circuit breaker
+  (`INV-SUPERVISOR-CIRCUIT-BREAKER-01`) is your safety net for the
+  high-frequency case, but the breaker only trips after 3
+  failures in 60 s — disable the supervisor entirely if you want
+  EVERY exit to halt, not just the 4th.
+
+- **Live-e2e harness runs.** The harness uses the kernel's exit
+  code as the test verdict; an auto-restart would mask the
+  failure. The harness MUST NOT set
+  `RAXIS_SUPERVISOR_AUTO_RESTART=1` (cross-reference §"When to
+  use the supervisor").
+
+- **One-shot CLI ceremonies.** `raxis cert mint-emergency`,
+  `raxis log verify-chain`, etc. all benefit from passthrough
+  mode where the kernel exits exactly once.
+
+### Re-enabling later
+
+Re-enabling the supervisor is symmetric:
+
+```bash
+export RAXIS_SUPERVISOR_AUTO_RESTART=1
+raxis-supervisor start
+```
+
+The kernel boot picks up where it left off — any tasks left at
+`BlockedRecoveryPending` from prior unmonitored boots stay where
+they are (the auto-resume sweep distinguishes "freshly swept
+this boot" from "pre-existing operator block" via the per-task
+`prior_state` captured during the recovery pass — see
+`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` skip clause 2
+for the contract).
+
+Cross-reference:
+`INV-SUPERVISOR-OPT-IN-01`,
+`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`,
+`INV-INIT-05`.
 
 ---
 

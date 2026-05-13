@@ -2906,6 +2906,14 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // recovery
     "ReconciliationGap", "TaskBlockedForRecovery",
     "DelegationSignatureUnverifiable",
+    // V2.5 self-healing-supervisor.md §3.5 — auto-resume after
+    // supervisor-triggered restart (per
+    // `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`). One event
+    // per task that the boot-time recovery sweep moved to
+    // `BlockedRecoveryPending` and the auto-resume codepath then
+    // re-admitted (operator-quarantined and pre-existing-block
+    // tasks are excluded; see audit event doc-comment).
+    "TaskAutoResumedAfterSupervisorRestart",
     // gateway
     "GatewaySpawned", "GatewayCrashed", "GatewayQuarantined",
     "GatewaySignalFailed",
@@ -7465,6 +7473,14 @@ channels   = []
                 warnings_count: 0,
                 lane_id:        "x".into(),
                 task_count:     0,
+            }.as_str(),
+            // V2.5 self-healing-supervisor.md §3.5 (auto-resume).
+            AuditEventKind::TaskAutoResumedAfterSupervisorRestart {
+                task_id:                 "x".into(),
+                initiative_id:           "x".into(),
+                prior_state:             "Running".into(),
+                witness_count_preserved: 0,
+                supervisor_restart_id:   "x".into(),
             }.as_str(),
         ];
 

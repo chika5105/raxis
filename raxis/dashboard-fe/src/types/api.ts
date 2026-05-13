@@ -506,6 +506,49 @@ export interface KernelLifecycleResponse {
   kernel_pid: number;
   updated_at_unix_secs: number;
   fresh: boolean;
+  /// V2.5 `self-healing-supervisor.md §3.5` /
+  /// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` — summary
+  /// of the most recent supervisor-aware auto-resume sweep.
+  /// Absent when the kernel has never been booted under the
+  /// supervisor, when the per-restart summary file
+  /// (`<data_dir>/last_auto_resume.json`) is missing or
+  /// unparseable, or when the recorded episode is older than
+  /// 5 minutes (`AUTO_RESUME_VISIBILITY_WINDOW_SECS` on the
+  /// kernel side). The banner uses this to render a transient
+  /// post-restart pill — green for full auto-resume, amber when
+  /// at least one task stayed paused.
+  auto_resume?: KernelAutoResumeSummary | null;
+}
+
+/// Serde-stable summary of one supervisor-aware auto-resume
+/// sweep. Mirrors `raxis_dashboard::routes::health::
+/// KernelAutoResumeSummary`, which is read from
+/// `<data_dir>/last_auto_resume.json` (written by the kernel
+/// boot's `recovery::reconcile_after_supervisor_restart` caller
+/// in `kernel/src/main.rs`).
+export interface KernelAutoResumeSummary {
+  /// Tasks the sweep transitioned BlockedRecoveryPending → Admitted.
+  resumed: number;
+  /// Tasks skipped because the initiative is operator-quarantined
+  /// (`initiative_quarantines` row exists for the initiative).
+  skipped_quarantined: number;
+  /// Tasks skipped because they were ALREADY at
+  /// `BlockedRecoveryPending` BEFORE this boot's recovery sweep
+  /// (preserve operator pre-existing block).
+  skipped_pre_existing_block: number;
+  /// Tasks the sweep tried to resume but the FSM transition or
+  /// audit-emit failed; they remain at `BlockedRecoveryPending`
+  /// and need an operator `task resume`.
+  transition_failed: number;
+  /// Stable identifier shared by every
+  /// `TaskAutoResumedAfterSupervisorRestart` event from this
+  /// episode. Lets the dashboard link the banner pill to the
+  /// matching audit rows.
+  supervisor_restart_id: string;
+  /// Wallclock unix-seconds the kernel wrote the file. The
+  /// dashboard handler suppresses the field if this is more
+  /// than `AUTO_RESUME_VISIBILITY_WINDOW_SECS` (5 minutes) ago.
+  recorded_at_unix_secs: number;
 }
 
 export interface WorktreeListEntry {

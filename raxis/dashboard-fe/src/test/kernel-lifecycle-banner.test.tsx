@@ -250,3 +250,186 @@ describe("<KernelLifecycleBannerView>", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+/* Witness for `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`
+ * (`raxis/specs/v2/self-healing-supervisor.md §3.5`). The
+ * dashboard MUST surface the auto-resume sweep outcome as a
+ * transient pill so operators see "your work continued" or
+ * "1 task is still paused" without re-reading the audit log. */
+describe("auto-resume pill (INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01)", () => {
+  it("paints green/ok when every BRP swept by the restart was re-admitted", () => {
+    expect(
+      bannerTone(
+        snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          auto_resume: {
+            resumed: 4,
+            skipped_quarantined: 0,
+            skipped_pre_existing_block: 0,
+            transition_failed: 0,
+            supervisor_restart_id: "supervisor-restart-1700000000-1",
+            recorded_at_unix_secs: 1_700_000_000,
+          },
+        }),
+      ),
+    ).toBe("ok");
+  });
+
+  it("paints amber/warn when at least one task stayed paused (any partial branch)", () => {
+    for (const partial of [
+      { skipped_quarantined: 1 },
+      { skipped_pre_existing_block: 1 },
+      { transition_failed: 1 },
+    ]) {
+      expect(
+        bannerTone(
+          snap({
+            status: "Healthy",
+            supervisor_pid: 12345,
+            auto_resume: {
+              resumed: 4,
+              skipped_quarantined: 0,
+              skipped_pre_existing_block: 0,
+              transition_failed: 0,
+              supervisor_restart_id: "supervisor-restart-1700000000-1",
+              recorded_at_unix_secs: 1_700_000_000,
+              ...partial,
+            },
+          }),
+        ),
+      ).toBe("warn");
+    }
+  });
+
+  it("Restarting status overrides the auto-resume pill (operator's primary signal)", () => {
+    expect(
+      bannerTone(
+        snap({
+          status: "Restarting",
+          attempt_n: 1,
+          max_attempts: 3,
+          supervisor_pid: 12345,
+          auto_resume: {
+            resumed: 4,
+            skipped_quarantined: 0,
+            skipped_pre_existing_block: 0,
+            transition_failed: 0,
+            supervisor_restart_id: "supervisor-restart-1700000000-1",
+            recorded_at_unix_secs: 1_700_000_000,
+          },
+        }),
+      ),
+    ).toBe("warn");
+  });
+
+  it("Halted status overrides the auto-resume pill (rose wins)", () => {
+    expect(
+      bannerTone(
+        snap({
+          status: "Halted",
+          sub_state: "CircuitOpen",
+          supervisor_pid: 12345,
+          auto_resume: {
+            resumed: 4,
+            skipped_quarantined: 0,
+            skipped_pre_existing_block: 0,
+            transition_failed: 0,
+            supervisor_restart_id: "supervisor-restart-1700000000-1",
+            recorded_at_unix_secs: 1_700_000_000,
+          },
+        }),
+      ),
+    ).toBe("stop");
+  });
+
+  it("renders the green pill with the resumed count + headline", () => {
+    render(
+      <KernelLifecycleBannerView
+        snapshot={snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          auto_resume: {
+            resumed: 4,
+            skipped_quarantined: 0,
+            skipped_pre_existing_block: 0,
+            transition_failed: 0,
+            supervisor_restart_id: "supervisor-restart-1700000000-1",
+            recorded_at_unix_secs: 1_700_000_000,
+          },
+        })}
+      />,
+    );
+    const banner = screen.getByTestId("kernel-lifecycle-banner");
+    expect(banner).toHaveAttribute("data-kernel-tone", "ok");
+    expect(banner).toHaveTextContent("Kernel restored — work auto-resumed");
+    const detail = screen.getByTestId("kernel-lifecycle-auto-resume");
+    expect(detail).toHaveTextContent("auto-resumed 4 tasks");
+    // No skip/failure clauses on the green path.
+    expect(detail).not.toHaveTextContent("skipped");
+    expect(detail).not.toHaveTextContent("preserved");
+    expect(detail).not.toHaveTextContent("failed");
+  });
+
+  it("renders the amber pill with quarantine + pre-existing-block + failure breakdown", () => {
+    render(
+      <KernelLifecycleBannerView
+        snapshot={snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          auto_resume: {
+            resumed: 4,
+            skipped_quarantined: 1,
+            skipped_pre_existing_block: 1,
+            transition_failed: 1,
+            supervisor_restart_id: "supervisor-restart-1700000000-1",
+            recorded_at_unix_secs: 1_700_000_000,
+          },
+        })}
+      />,
+    );
+    const banner = screen.getByTestId("kernel-lifecycle-banner");
+    expect(banner).toHaveAttribute("data-kernel-tone", "warn");
+    expect(banner).toHaveTextContent("Kernel restored — partial auto-resume");
+    const detail = screen.getByTestId("kernel-lifecycle-auto-resume");
+    expect(detail).toHaveTextContent("auto-resumed 4 tasks");
+    expect(detail).toHaveTextContent("skipped 1 quarantined");
+    expect(detail).toHaveTextContent("preserved 1 pre-existing");
+    expect(detail).toHaveTextContent("failed 1");
+  });
+
+  it("singularises 'task' when exactly one task auto-resumed", () => {
+    render(
+      <KernelLifecycleBannerView
+        snapshot={snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          auto_resume: {
+            resumed: 1,
+            skipped_quarantined: 0,
+            skipped_pre_existing_block: 0,
+            transition_failed: 0,
+            supervisor_restart_id: "supervisor-restart-1700000000-1",
+            recorded_at_unix_secs: 1_700_000_000,
+          },
+        })}
+      />,
+    );
+    expect(
+      screen.getByTestId("kernel-lifecycle-auto-resume"),
+    ).toHaveTextContent("auto-resumed 1 task");
+  });
+
+  it("hides the pill entirely when the kernel handler suppressed auto_resume (stale > 5 min)", () => {
+    const { container } = render(
+      <KernelLifecycleBannerView
+        snapshot={snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          // No auto_resume field — kernel handler suppressed it.
+        })}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+});

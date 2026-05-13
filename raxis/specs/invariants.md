@@ -83,9 +83,9 @@
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
-| Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01 | 8 |
+| Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
-| **Total** | | **103** |
+| **Total** | | **104** |
 
 ---
 
@@ -402,23 +402,59 @@ still Executing."
 
 ---
 
-### INV-INIT-05 — `BlockedRecoveryPending` requires operator action
+### INV-INIT-05 — `BlockedRecoveryPending` requires operator action (generic crash recovery)
 
-**Statement.** A `BlockedRecoveryPending` task can only be resumed
+**Statement.** Outside the V2.5 supervisor-aware auto-resume codepath,
+a `BlockedRecoveryPending` task can only be resumed
 (`raxis-cli task resume`) or terminated by operator `task abort`.
 The planner cannot self-resume; the kernel cannot auto-resume.
 
-**Justification.** A task lands in `BlockedRecoveryPending` only
-after a kernel crash; the operator must inspect the situation and
-decide whether to resume (state was salvageable) or abort (state
-was lost). Auto-resume would replay potentially-stale work without
-human review of the crash cause.
+**Scope.** This invariant governs the **generic crash-recovery
+fork** of `recovery::reconcile` — the operator-launched kernel boot
+that follows an unmonitored crash, an operator-initiated SIGTERM,
+or a non-supervised exit. In the generic fork, the boot-time
+reconciliation sweep moves every non-terminal task to
+`BlockedRecoveryPending` and the only legal exit edges from that
+state are operator-initiated (`task resume → Admitted`,
+`task abort → Aborted`).
 
-**Scenario.** Kernel crashes mid-task. On restart, `reconcile_tasks`
-sweeps the task to `BlockedRecoveryPending`. Operator runs `raxis
-log` to inspect crash cause, decides the task is safe to resume,
-runs `raxis task resume <id>`. Only then does the task transition
-back to `Running`.
+**Supervisor-aware exception.** When the supervisor restarts the
+kernel after an auto-restartable exit code (per
+`INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`), the `recovery::
+reconcile_after_supervisor_restart` codepath transparently re-admits
+the rows that THIS boot's recovery sweep just produced. The
+auto-resume is unconditional when the supervisor is enabled and
+explicitly skips (a) operator-quarantined initiatives and (b) tasks
+that were ALREADY `BlockedRecoveryPending` BEFORE the restart
+(preserve operator pre-existing block). See
+`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` for the full
+contract. Operators who want strict V1 fail-safe behaviour (every
+kernel exit halts work for human review, including supervisor-
+triggered restarts) disable the supervisor entirely
+(`RAXIS_SUPERVISOR_AUTO_RESTART=0`); the supervisor opt-in is the
+sole operator surface for that choice.
+
+**Justification.** A task lands in `BlockedRecoveryPending` after a
+kernel exit; in the unmonitored case the operator must inspect the
+situation and decide whether to resume (state was salvageable) or
+abort (state was lost). Auto-resume in the generic fork would
+replay potentially-stale work without human review of the crash
+cause. The supervisor-aware fork is exempt because the previous
+exit was already classified by an immortal external observer (the
+supervisor binary) as a kernel-internal pathology — the agent work
+itself is fine, only the kernel got stuck — and the audit chain
+already records the restart context paired with each auto-resume.
+
+**Scenario.** Operator-launched kernel crashes mid-task (no
+supervisor in the picture). On restart, `reconcile_tasks` sweeps
+the task to `BlockedRecoveryPending`. Operator runs `raxis log` to
+inspect crash cause, decides the task is safe to resume, runs
+`raxis task resume <id>`. Only then does the task transition back
+to `Admitted` (and onward through normal scheduling). The contrast
+with the supervisor-aware fork — where the same FSM edge fires
+automatically with `actor = "kernel"` and a paired
+`TaskAutoResumedAfterSupervisorRestart` audit event — is what the
+9th supervisor invariant pins.
 
 ---
 
@@ -5124,6 +5160,117 @@ restarts).
 
 ---
 
+### INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 — Tasks auto-resume after a supervisor-triggered restart
+
+**Statement.** When the supervisor restarts the kernel after an
+auto-restartable exit code (per
+`INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`), the kernel MUST
+auto-resume every `BlockedRecoveryPending` task created by THAT
+supervisor's recovery sweep, EXCEPT tasks under operator
+quarantine (`initiative_quarantines` row exists for the
+initiative) OR tasks that were already `BlockedRecoveryPending`
+before the restart (preserve pre-existing operator block —
+distinguishable via the per-task `prior_state` captured by the
+boot-time `reconcile_tasks` SELECT-then-UPDATE pass).
+
+Each auto-resume MUST emit
+`TaskAutoResumedAfterSupervisorRestart` with `task_id`,
+`initiative_id`, `prior_state`, `witness_count_preserved`, and a
+`supervisor_restart_id` shared by every event from the same
+restart episode. Skipped tasks (quarantined or pre-existing
+block) MUST NOT emit the event — the existing
+`InitiativeQuarantined` row + the prior `TaskBlockedForRecovery`
+audit record (or the pre-restart operator-resume FSM history) is
+the audit trail for the skip.
+
+There is no operator opt-out at the per-restart, per-initiative,
+or per-task granularity. Operators who want strict V1 fail-safe
+behaviour (every kernel exit halts work for human review,
+including supervisor-triggered restarts) MUST disable the
+supervisor entirely (`RAXIS_SUPERVISOR_AUTO_RESTART=0`); the
+supervisor opt-in is the SOLE operator surface for that choice.
+
+**FSM contract.** The auto-resume codepath walks the same
+`task_transitions::transition_task` API the operator
+`task resume` IPC handler uses (`BlockedRecoveryPending →
+Admitted`). The pre-sweep state is recorded on the audit event
+for forensics, but the FSM transition itself always lands at
+`Admitted`; the kernel re-derives the post-Admitted state via
+normal scheduling. The auto-resume actor is `kernel`, not
+`operator`, so audit-chain readers can mechanically distinguish
+operator-initiated resumes from supervisor-initiated resumes by
+the `actor` column on the `TaskStateChanged` row + the paired
+`TaskAutoResumedAfterSupervisorRestart` event.
+
+**Order rationale.** The auto-resume sweep MUST run AFTER
+`restart_lifecycle::rehydrate_restart_context` has emitted the
+paired `KernelRestart{Initiated,Completed}` events (so the chain
+reads left-to-right
+`KernelDeadlockDetected? → KernelStarted → KernelRestartInitiated →
+KernelRestartCompleted → TaskAutoResumedAfterSupervisorRestart{N}`)
+and BEFORE IPC accept (so the orchestrator never observes a
+transient `BlockedRecoveryPending` window — by the time the first
+IPC frame arrives, every auto-resumable task is already back in
+`Admitted` and the scheduler picks up exactly where it left off).
+
+**Justification.** The supervisor's whole purpose is to recover
+transparently from kernel-internal pathology — deadlock, panic,
+signal-crash. The agent work itself is fine; only the kernel got
+stuck. Forcing operators to manually resume every task after
+every supervisor restart converts self-healing into self-
+pretending: the kernel did the right thing (restart promptly +
+cleanly) and the operator experiences it as the system having
+**failed**. There is no realistic operator decision to add at
+the per-task granularity — the kernel already knows everything
+an operator would know about whether to resume (the previous
+exit was an auto-restartable code; the work itself is durable in
+SQLite + the audit chain). The two skip clauses preserve
+explicit operator intent (quarantine = "freeze this initiative",
+pre-existing BRP = "I had this paused for a reason"); both are
+recorded with their own audit row before the restart, so the
+operator's intent is mechanically preserved across the restart
+boundary.
+
+**Why a single operator-resume event isn't enough.** Without an
+auto-resume sweep, a supervisor-triggered restart leaves every
+task in `BlockedRecoveryPending` and the operator has to walk
+the inbox / dashboard and manually resume each one — even though
+the kernel already knows the previous exit was auto-restartable
+(the supervisor said so via the sentinel + the just-emitted
+`KernelRestartCompleted`). The auto-resume sweep elides that
+manual ceremony for the common case (steady-state work
+in-flight at the moment of the deadlock) while preserving
+operator intent for the explicit-block cases.
+
+**Witness.** Three layered tests:
+
+* `kernel/src/recovery.rs::supervisor_auto_resume_witness::auto_resume_partitions_six_task_fixture_per_invariant`
+  — FSM-level witness on a 6-task fixture across 3 initiatives
+  (3 Running + 1 GatesPending + 1 pre-existing BRP +
+  1 Running-on-quarantined-init). Asserts the canonical 4-2
+  partition (4 resumed → `Admitted`; 1 pre-existing block stays
+  at BRP; 1 quarantined task stays at BRP), asserts each
+  emitted event carries the correct `prior_state` +
+  `task_id` + `initiative_id`, asserts skipped tasks emit
+  ZERO `TaskAutoResumed*` events, asserts the
+  `supervisor_restart_id` is shared across the 4 emitted events.
+* `kernel/src/recovery.rs::supervisor_auto_resume_witness::auto_resume_is_a_noop_when_recovery_sweep_was_empty`
+  — short-circuit: when reconcile sweeps nothing, the auto-resume
+  sweep emits nothing and reports zero in every counter.
+* `kernel/tests/supervisor_auto_resume.rs` — cross-crate
+  contract: pins the `TaskAutoResumedAfterSupervisorRestart`
+  serde envelope shape, asserts `notification_priority` and
+  `notification_priority_for_kind_str` agree on `Medium`, and
+  asserts the discriminant string is in
+  `raxis-policy::KNOWN_AUDIT_EVENT_KINDS` (so operator
+  `[notifications.routes]` referring to it parse cleanly per
+  `cli-readonly.md §5.6.2`).
+
+**Canonical home.** `v2/self-healing-supervisor.md` §3.5
+(Operator session continuity — task auto-resume).
+
+---
+
 ### INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 — Dashboard JWT secret is persisted with rotation
 
 **Statement.** The dashboard's HS256 signing secret MUST be
@@ -5214,7 +5361,7 @@ Most security properties at the system level are emergent from
 | **Signed plan bytes cannot be replayed by an attacker** | INV-PLAN-BUNDLE-FRESH (per-bundle nonce + freshness window) + INV-INIT-06 (post-admission immutability) + INV-04 (audit-chain integrity records every admission) + INV-CERT-* (operator key custody) — the nonce closes same-window replay; the freshness window closes long-tail replay; key revocation closes detected-key-compromise; the three layers compose so an attacker who exfiltrates a signed bundle gets at most one admission attempt inside a bounded window |
 | **Provider-credential compromise has bounded post-revocation exposure** | INV-PROVIDER-10 (synchronous re-check at dispatch + UDS half-close on in-flight) + INV-KEY-08 (immediate session termination on compromise) + INV-PROVIDER-08 (per-attempt audit immediacy) + INV-VM-CAP-04 (no credential value in VM) — the re-check eliminates the alias-resolution → dispatch TOCTOU; the half-close drops in-flight HTTPS within a worker-side EOF latency; session termination removes the parent context; per-attempt audit makes every aborted call forensically visible |
 | **Path scope is enforced at every step** | INV-TASK-PATH-01 (admission) + INV-TASK-PATH-02 (completion) + INV-07 (claim derivation) |
-| **Recovery is deterministic from durable state** | INV-05 (reproducibility) + INV-INIT-08 (gate progress recoverable) + INV-INIT-05 (BlockedRecoveryPending requires operator) + INV-STORE-01/02 (atomic transactions) |
+| **Recovery is deterministic from durable state** | INV-05 (reproducibility) + INV-INIT-08 (gate progress recoverable) + INV-INIT-05 (BlockedRecoveryPending requires operator — generic crash-recovery fork) + INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 (supervisor-aware fork auto-resumes with two explicit skip clauses) + INV-STORE-01/02 (atomic transactions) |
 | **Budget enforcement cannot be bypassed** | INV-02A (kernel-priced inference) + INV-02B (no direct egress) + INV-INIT-09 (no auto-deadline; budget bounds runtime) |
 | **Provider egress is correct-by-default + auditable + stall-detected** | INV-EGRESS-DEFAULT-01 (kernel auto-grants provider FQDNs) + INV-EGRESS-DEFAULT-02 (`DefaultProviderEgressApplied` audit per grant) + INV-EGRESS-DEFAULT-03 (`deny_provider` typo rejected) + INV-EGRESS-STALL-01 (`SessionEgressStallDetected` after 3-in-30s denials) — `DEFAULT-01` eliminates the dominant config-time stall; `DEFAULT-02` keeps the implicit grant auditable; `DEFAULT-03` closes the silent-opt-out failure mode; `STALL-01` catches every runtime stall regardless of root cause |
 | **Approval is real, scoped, single-use** | INV-06 (approval gate) + INV-ESC-01..05 (FSM, epoch, session, nonce, scope) |

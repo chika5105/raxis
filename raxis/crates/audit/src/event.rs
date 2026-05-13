@@ -285,6 +285,73 @@ pub enum AuditEventKind {
         last_failure_reason: String,
     },
 
+    /// V2.5 `self-healing-supervisor.md §3.5` /
+    /// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` — the kernel
+    /// transparently re-admitted a task that the boot-time recovery
+    /// sweep had moved to `BlockedRecoveryPending`, after detecting
+    /// that the previous kernel exit was a supervisor-classified
+    /// auto-restartable code (deadlock, panic, signal-crash) rather
+    /// than an operator-initiated shutdown.
+    ///
+    /// Auto-resume is **unconditional** when the supervisor is
+    /// enabled (`RAXIS_SUPERVISOR_AUTO_RESTART=1`); operators who
+    /// want strict V1 fail-safe behaviour disable the supervisor
+    /// entirely. There is no per-restart opt-out at task or
+    /// initiative granularity.
+    ///
+    /// **Skip semantics.** The auto-resume sweep does NOT touch:
+    ///
+    ///   * Tasks whose initiative has a row in
+    ///     `initiative_quarantines` (operator-frozen — preserve).
+    ///   * Tasks that were ALREADY `BlockedRecoveryPending` BEFORE
+    ///     this kernel boot (preserve pre-existing operator block;
+    ///     the pre-restart `prior_state` is `BlockedRecoveryPending`
+    ///     itself).
+    ///
+    /// One event is emitted per task that was actually re-admitted.
+    /// Skipped tasks emit nothing — their `BlockedRecoveryPending`
+    /// row + the prior `TaskBlockedForRecovery` (or the operator
+    /// quarantine row) is the audit trail for the skip.
+    ///
+    /// Routes at `Medium` notification priority — steady-state
+    /// observability for the operator-continuity surface.
+    TaskAutoResumedAfterSupervisorRestart {
+        /// V1 task id whose state was re-admitted.
+        task_id:                  String,
+        /// Initiative the task belongs to. Useful for dashboard
+        /// grouping ("3 tasks across initiative X auto-resumed").
+        initiative_id:            String,
+        /// FSM state the task held BEFORE the boot-time recovery
+        /// sweep moved it to `BlockedRecoveryPending`. Recorded for
+        /// forensic completeness so an operator post-mortem can
+        /// reconstruct what the task was doing when the kernel
+        /// went down — even though the FSM transition the
+        /// auto-resume actually applies is `BlockedRecoveryPending →
+        /// Admitted` (the only legal exit from
+        /// `BlockedRecoveryPending`, mirroring the operator
+        /// `task resume` path; the kernel re-derives the
+        /// post-Admitted state via normal scheduling).
+        prior_state:              String,
+        /// Number of `witness_records` rows that survived the
+        /// restart for this task. Always equal to whatever was
+        /// already on disk (the auto-resume path does not touch
+        /// the witness table; `INV-INIT-08` `witness_records`
+        /// rows are append-only and survive any FSM transition).
+        /// Recorded so the operator dashboard can surface "your
+        /// witnesses were preserved" reassurance without re-running
+        /// a count query.
+        witness_count_preserved:  u32,
+        /// Stable identifier for the supervisor-restart episode
+        /// that triggered this auto-resume. Synthesised on the
+        /// kernel side from the supervisor sentinel's
+        /// `last_restart_unix_ts` + `attempt_n` fields:
+        /// `format!("supervisor-restart-{ts}-{attempt}")`. Multiple
+        /// `TaskAutoResumedAfterSupervisorRestart` events from the
+        /// SAME boot share the SAME `supervisor_restart_id` so the
+        /// dashboard can group them as a single restart episode.
+        supervisor_restart_id:    String,
+    },
+
     /// V2 agent-runtime substrate selection record.
     ///
     /// Emitted exactly once per kernel boot, immediately after
@@ -3573,6 +3640,9 @@ impl AuditEventKind {
             Self::KernelRestartInitiated { .. } => "KernelRestartInitiated",
             Self::KernelRestartCompleted { .. } => "KernelRestartCompleted",
             Self::KernelRestartHaltedCircuitOpen { .. } => "KernelRestartHaltedCircuitOpen",
+            Self::TaskAutoResumedAfterSupervisorRestart { .. } => {
+                "TaskAutoResumedAfterSupervisorRestart"
+            }
             Self::IsolationSubstrateSelected { .. } => "IsolationSubstrateSelected",
             Self::IsolationFallbackBypass { .. } => "IsolationFallbackBypass",
             Self::IsolationSubstrateRefused { .. } => "IsolationSubstrateRefused",

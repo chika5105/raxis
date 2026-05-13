@@ -7,17 +7,28 @@ import type { KernelLifecycleResponse } from "@/types/api";
 
 // Surfaces the supervisor's view of the kernel lifecycle.
 //
-// Spec: `raxis/specs/v2/self-healing-supervisor.md §5.4` /
-//       `INV-DASHBOARD-KERNEL-LIFECYCLE-01`.
+// Spec: `raxis/specs/v2/self-healing-supervisor.md §5.4` +
+//       `§3.5` (auto-resume) /
+//       `INV-DASHBOARD-KERNEL-LIFECYCLE-01` +
+//       `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`.
 //
 // Visibility contract:
-//   * `Healthy` + sentinel absent OR `supervisor_pid === 0` ⇒
-//     render NOTHING. Operators who never opted into the
+//   * `Healthy` + sentinel absent OR `supervisor_pid === 0` AND
+//     no recent `auto_resume` summary ⇒ render NOTHING.
+//     Operators who never opted into the
 //     `RAXIS_SUPERVISOR_AUTO_RESTART=1` workflow should not
 //     see banner chrome on every dashboard pane.
 //   * `Restarting`     ⇒ amber banner with attempt N/M + reason.
 //   * `Halted` + sub_state ⇒ rose banner (supervisor stopped
 //     attempting; operator action required).
+//   * `Healthy` + recent `auto_resume` summary present ⇒
+//     green pill (full auto-resume — every BRP swept by the
+//     restart was re-admitted) or amber pill (partial — at
+//     least one task stayed paused because of operator
+//     quarantine, pre-existing block, or transition failure).
+//     The pill is transient — the kernel handler suppresses
+//     the field after the 5-minute visibility window
+//     (`AUTO_RESUME_VISIBILITY_WINDOW_SECS`).
 //   * `fresh === false` ⇒ append a "stale data" note to whichever
 //     banner is rendered so the operator knows the supervisor's
 //     last writeup is suspect.
@@ -67,7 +78,13 @@ export function KernelLifecycleBannerView({
   if (tone === "hidden") return null;
   const { status, sub_state } = snapshot;
   const glyph =
-    tone === "warn" ? "↻" : tone === "stop" ? "■" : "?";
+    tone === "warn"
+      ? "↻"
+      : tone === "stop"
+        ? "■"
+        : tone === "ok"
+          ? "✓"
+          : "?";
   return (
     <div
       role="status"
@@ -76,6 +93,7 @@ export function KernelLifecycleBannerView({
       data-kernel-status={status}
       data-kernel-substate={sub_state ?? ""}
       data-kernel-fresh={snapshot.fresh ? "true" : "false"}
+      data-kernel-tone={tone}
       className={clsx(
         "rounded-md border px-3 py-2 text-xs flex flex-wrap items-center gap-3 justify-between",
         // Light + dark mode tone pairs follow ChainStatusBanner.
@@ -83,6 +101,8 @@ export function KernelLifecycleBannerView({
           "border-amber-700/40 bg-amber-700/10 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200",
         tone === "stop" &&
           "border-rose-700/50 bg-rose-700/10 text-rose-800 dark:border-rose-500/50 dark:bg-rose-500/10 dark:text-rose-200",
+        tone === "ok" &&
+          "border-emerald-700/40 bg-emerald-700/10 text-emerald-900 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-200",
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
@@ -92,7 +112,9 @@ export function KernelLifecycleBannerView({
             "inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold leading-none",
             tone === "warn"
               ? "text-amber-700 dark:text-amber-400"
-              : "text-rose-700 dark:text-rose-400",
+              : tone === "stop"
+                ? "text-rose-700 dark:text-rose-400"
+                : "text-emerald-700 dark:text-emerald-400",
           )}
         >
           {glyph}
@@ -120,6 +142,9 @@ export function KernelLifecycleBannerView({
               {snapshot.window_secs}s window
             </span>
           )}
+        {snapshot.auto_resume && (
+          <AutoResumeDetail summary={snapshot.auto_resume} />
+        )}
       </div>
       <div className="flex items-center gap-3">
         {!snapshot.fresh && (
@@ -140,11 +165,96 @@ export function KernelLifecycleBannerView({
   );
 }
 
-type BannerTone = "hidden" | "warn" | "stop";
+/// Per-restart auto-resume breakdown that rides inside the main
+/// banner row. Spec: `self-healing-supervisor.md §3.5` /
+/// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`.
+function AutoResumeDetail({
+  summary,
+}: {
+  summary: NonNullable<KernelLifecycleResponse["auto_resume"]>;
+}) {
+  // Full auto-resume ⇒ a single, dense pill. The amber-cases
+  // (skipped + transition_failed counts) are conditionally
+  // appended only when non-zero so the green-path stays as a
+  // one-glance reassurance line.
+  const hasSkipsOrFailures =
+    summary.skipped_quarantined > 0 ||
+    summary.skipped_pre_existing_block > 0 ||
+    summary.transition_failed > 0;
+  return (
+    <span
+      data-testid="kernel-lifecycle-auto-resume"
+      className="text-ink-muted truncate max-w-[80ch]"
+    >
+      · auto-resumed{" "}
+      <span className="font-mono">{summary.resumed}</span> task
+      {summary.resumed === 1 ? "" : "s"}
+      {hasSkipsOrFailures && (
+        <>
+          {summary.skipped_quarantined > 0 && (
+            <>
+              {" "}
+              · skipped{" "}
+              <span className="font-mono">
+                {summary.skipped_quarantined}
+              </span>{" "}
+              quarantined
+            </>
+          )}
+          {summary.skipped_pre_existing_block > 0 && (
+            <>
+              {" "}
+              · preserved{" "}
+              <span className="font-mono">
+                {summary.skipped_pre_existing_block}
+              </span>{" "}
+              pre-existing
+            </>
+          )}
+          {summary.transition_failed > 0 && (
+            <>
+              {" "}
+              · failed{" "}
+              <span className="font-mono">
+                {summary.transition_failed}
+              </span>
+            </>
+          )}
+        </>
+      )}
+    </span>
+  );
+}
+
+type BannerTone = "hidden" | "ok" | "warn" | "stop";
 
 /// Computes the banner tone from the snapshot. Pure function so
 /// tests can drive every branch without a React tree.
 export function bannerTone(s: KernelLifecycleResponse): BannerTone {
+  // Restart in flight or halt always wins over the auto-resume
+  // pill — those are the operator's primary signals.
+  if (s.status === "Restarting") return "warn";
+  if (s.status === "Halted") return "stop";
+  // V2.5 §3.5 auto-resume: when the kernel handler surfaced a
+  // recent auto-resume episode, paint a transient pill in
+  // place of the otherwise-hidden Healthy banner.
+  //
+  //   * Full auto-resume (no skips, no failures) → green pill.
+  //   * Partial (any skipped or transition-failed) → amber.
+  //
+  // There is no "auto-resume disabled" state because the
+  // supervisor opt-out (`RAXIS_SUPERVISOR_AUTO_RESTART=0`) is
+  // also the auto-resume opt-out — see
+  // `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`. With the
+  // supervisor disabled there IS no auto-resume episode to
+  // surface, so no pill renders.
+  if (s.auto_resume) {
+    const partial =
+      s.auto_resume.skipped_quarantined > 0 ||
+      s.auto_resume.skipped_pre_existing_block > 0 ||
+      s.auto_resume.transition_failed > 0;
+    return partial ? "warn" : "ok";
+  }
   // No supervisor in play (default-off opt-in) ⇒ never paint.
   // The kernel handler returns `Healthy { fresh: true,
   // supervisor_pid: 0 }` in this case; we want zero chrome.
@@ -153,8 +263,6 @@ export function bannerTone(s: KernelLifecycleResponse): BannerTone {
   // operator opted in but everything is fine; chrome would be
   // noise.
   if (s.status === "Healthy") return "hidden";
-  if (s.status === "Restarting") return "warn";
-  if (s.status === "Halted") return "stop";
   // Unknown / future status ⇒ render as warn so we don't
   // silently swallow a state the FE doesn't know about yet.
   return "warn";
@@ -178,6 +286,15 @@ export function headlineFor(s: KernelLifecycleResponse): string {
       default:
         return "Kernel halted";
     }
+  }
+  if (s.status === "Healthy" && s.auto_resume) {
+    const partial =
+      s.auto_resume.skipped_quarantined > 0 ||
+      s.auto_resume.skipped_pre_existing_block > 0 ||
+      s.auto_resume.transition_failed > 0;
+    return partial
+      ? "Kernel restored — partial auto-resume"
+      : "Kernel restored — work auto-resumed";
   }
   // Unknown status — surface verbatim so the operator at least
   // sees what the supervisor reported.

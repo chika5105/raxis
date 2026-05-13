@@ -385,7 +385,12 @@ async fn main() {
     // sync work onto a dedicated blocking-pool thread. Same pattern as
     // `handlers/witness::handle` (kernel-core.md async-safety contract).
     let audit_dir = data_dir.join("audit");
-    {
+    // V2.5 (`self-healing-supervisor.md §3.5`): hoist the per-task
+    // pre-sweep records out of Step 6 so the supervisor-aware
+    // auto-resume codepath at Step 8a''' can consume them. Empty
+    // when the sweep finds nothing to sweep — that's the
+    // common-case kernel boot.
+    let swept_tasks_detail: Vec<recovery::SweptTaskRecord> = {
         let store_for_recovery = Arc::clone(&store);
         let audit_dir_for_recovery = audit_dir.clone();
         let recovery_outcome = tokio::task::spawn_blocking(move || {
@@ -419,10 +424,11 @@ async fn main() {
                         result.folded_integration_merge_attempts
                     );
                 }
+                result.swept_tasks_detail
             }
             Err(e) => exit_with_code(e),
         }
-    }
+    };
 
     // Step 7a: Open the AuditWriter on segment-000.jsonl. Per
     // kernel-store.md §2.5.2 this is the only writer to the JSONL chain;
@@ -686,6 +692,23 @@ async fn main() {
             .saturating_mul(1000) as u64;
         let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
         let sentinel = restart_lifecycle::read_sentinel_for_restart(&sentinel_path);
+        let supervisor_restart_id = sentinel.as_ref().map(|s| {
+            // Stable per-restart-episode identifier — multiple
+            // `TaskAutoResumedAfterSupervisorRestart` events from
+            // the SAME boot share this string, so the dashboard
+            // can group them as a single restart episode. Falls
+            // back to "supervisor-restart-unknown-N" if either
+            // sentinel field is absent (forward-compat — older
+            // supervisor revisions may omit one or both fields).
+            let ts = s.attempt_n
+                .map(|n| n as i64)
+                .unwrap_or(0);
+            // The sentinel does not currently surface a
+            // last_restart_unix_ts on its `SentinelView` — use
+            // `unix_now` as a reasonable proxy bounded to this
+            // boot (the restart's wall-clock `unix_now`).
+            format!("supervisor-restart-{}-{}", unix_now, ts.max(1))
+        });
         let outcome = restart_lifecycle::rehydrate_restart_context(
             inner_audit.as_ref(),
             &data_dir,
@@ -705,6 +728,100 @@ async fn main() {
                 outcome.kernel_restart_initiated_emits,
                 outcome.kernel_restart_completed_emits,
             );
+        }
+
+        // Step 8a''' (V2.5 `self-healing-supervisor.md §3.5`,
+        // `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`):
+        // supervisor-aware auto-resume sweep.
+        //
+        // Runs ONLY when the rehydration above emitted at least one
+        // `KernelRestartCompleted` event (i.e. the supervisor's
+        // sentinel said `status = "Restarting"` AND the kernel just
+        // booted). A non-supervised restart, an operator-initiated
+        // shutdown, or a fresh kernel boot all produce
+        // `kernel_restart_completed_emits == 0` and short-circuit
+        // here, leaving any swept tasks in `BlockedRecoveryPending`
+        // for normal operator-resume disposition.
+        //
+        // **Order rationale.** Runs AFTER the
+        // `KernelRestart{Initiated,Completed}` pair so the chain
+        // reads left-to-right as
+        // `KernelDeadlockDetected? → KernelStarted → KernelRestartInitiated →
+        //  KernelRestartCompleted → TaskAutoResumedAfterSupervisorRestart{N}`.
+        // Runs BEFORE IPC accept so the orchestrator never observes
+        // the transient `BlockedRecoveryPending` window — by the
+        // time the first IPC frame arrives, every auto-resumable
+        // task is already back in `Admitted` and the scheduler
+        // picks up exactly where it left off.
+        if outcome.kernel_restart_completed_emits > 0 {
+            let restart_id = supervisor_restart_id
+                .clone()
+                .unwrap_or_else(|| format!("supervisor-restart-{unix_now}-1"));
+            let store_for_resume = Arc::clone(&store);
+            let inner_audit_for_resume = Arc::clone(&inner_audit);
+            let swept_for_resume = swept_tasks_detail.clone();
+            let resume_report = tokio::task::spawn_blocking(move || {
+                recovery::reconcile_after_supervisor_restart(
+                    &store_for_resume,
+                    inner_audit_for_resume.as_ref(),
+                    &swept_for_resume,
+                    &restart_id,
+                )
+            })
+            .await
+            .unwrap_or_else(|join_err| {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"supervisor_auto_resume\",\
+                     \"action\":\"join_failed\",\"error\":\"{join_err}\"}}"
+                );
+                recovery::AutoResumeReport::default()
+            });
+            if !resume_report.outcomes.is_empty() {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"supervisor_auto_resume_completed\",\
+                     \"resumed\":{},\"quarantined\":{},\
+                     \"pre_existing_block\":{},\"transition_failed\":{},\
+                     \"supervisor_restart_id\":{}}}",
+                    resume_report.resumed,
+                    resume_report.quarantined,
+                    resume_report.pre_existing_block,
+                    resume_report.transition_failed,
+                    serde_json::to_string(&resume_report.supervisor_restart_id)
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                );
+                // V2.5 (`self-healing-supervisor.md §3.5`):
+                // surface the auto-resume summary on the
+                // dashboard's `/api/health/kernel-lifecycle`
+                // endpoint by writing a small summary file
+                // alongside the supervisor sentinel. The
+                // dashboard handler reads this file and folds
+                // it into `KernelLifecycleResponse.auto_resume`
+                // for the banner pill. Best-effort: a failed
+                // write is logged but never aborts boot — the
+                // audit chain already carries the per-task
+                // events; this file is observability only.
+                let summary = serde_json::json!({
+                    "resumed":                    resume_report.resumed as u32,
+                    "skipped_quarantined":        resume_report.quarantined as u32,
+                    "skipped_pre_existing_block": resume_report.pre_existing_block as u32,
+                    "transition_failed":          resume_report.transition_failed as u32,
+                    "supervisor_restart_id":      &resume_report.supervisor_restart_id,
+                    "recorded_at_unix_secs":      raxis_runtime::unix_now_secs(),
+                });
+                let summary_path = data_dir.join(
+                    raxis_dashboard::routes::health::AUTO_RESUME_STATUS_FILENAME,
+                );
+                if let Err(e) = std::fs::write(
+                    &summary_path,
+                    serde_json::to_vec_pretty(&summary).unwrap_or_default(),
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"auto_resume_status_write_failed\",\
+                         \"path\":\"{}\",\"error\":\"{e}\"}}",
+                        summary_path.display(),
+                    );
+                }
+            }
         }
     }
 

@@ -3,17 +3,44 @@
 // Normative reference: kernel-core.md §2.2 `src/recovery.rs`.
 //
 // Purpose: Runs at startup step 6. Verifies audit chain integrity, identifies
-// tasks that were in-flight at crash time, and marks them BlockedRecoveryPending
-// for operator disposition. Does NOT auto-resume — automatic resumption is v2.
+// tasks that were in-flight at crash time, and marks them
+// BlockedRecoveryPending for operator disposition.
 //
-// Entry point: `pub fn reconcile(store, audit_dir) -> ReconciliationResult`
-// Called once from main.rs step 6; sub-functions are private.
+// **V2.5 supervisor-aware auto-resume** (`self-healing-supervisor.md §3.5`,
+// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`).  When the kernel was
+// re-spawned by the `raxis-supervisor` binary after an auto-restartable
+// exit code (deadlock / panic / signal-crash), the boot sequence calls
+// `reconcile_after_supervisor_restart` AFTER the audit writer is open
+// AFTER `restart_lifecycle::rehydrate_restart_context` has emitted the
+// paired `KernelRestart{Initiated,Completed}` events.  That codepath
+// transparently re-admits every task this boot's recovery sweep just
+// moved to `BlockedRecoveryPending` (BRP → Admitted, mirroring the
+// operator `task resume` FSM edge), with two explicit exclusions:
+//
+//   * tasks under operator quarantine (`initiative_quarantines` row),
+//   * tasks that were ALREADY `BlockedRecoveryPending` BEFORE this
+//     boot's sweep (preserve pre-existing operator block).
+//
+// The exclusion set is the entire operator opt-out surface; there is
+// no per-task or per-restart auto-resume disable.  Operators who want
+// strict V1 fail-safe behaviour (every kernel exit halts work for
+// human review) disable the supervisor entirely (`RAXIS_SUPERVISOR_AUTO_RESTART=0`).
+// See `INV-INIT-05` (tightened V2.5) for the FSM-level statement.
+//
+// Entry points:
+//   * `pub fn reconcile(store, audit_dir) -> ReconciliationResult`
+//     — Called once from main.rs step 6 BEFORE the audit writer is open.
+//   * `pub fn reconcile_after_supervisor_restart(...)` — Called from
+//     main.rs step 8a''' AFTER the writer is open + the supervisor's
+//     restart-lifecycle events have landed.  No-op when the previous
+//     exit was operator-initiated.
 //
 // Fatal sub-step: verify_audit_chain — failure returns KernelError::AuditChainBroken
 // which main.rs maps to BOOT_ERR_AUDIT_CHAIN (exit code 13).
 
 use std::path::Path;
 
+use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
 use raxis_types::{
     unix_now_secs, IntegrationMergeAttemptDiscardReason,
@@ -23,6 +50,7 @@ use raxis_types::{
 use raxis_types::InitiativeState;
 
 use crate::errors::KernelError;
+use crate::initiatives::task_transitions::{transition_task, TransitionActor};
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers and FSM state
 // strings flow through typed constants/enums; no raw SQL identifiers in
@@ -31,10 +59,31 @@ const TASKS:                       &str = Table::Tasks.as_str();
 const VERIFIER_RUN_TOKENS:         &str = Table::VerifierRunTokens.as_str();
 const INITIATIVES:                 &str = Table::Initiatives.as_str();
 const INTEGRATION_MERGE_ATTEMPTS:  &str = Table::IntegrationMergeAttempts.as_str();
+const WITNESS_RECORDS:             &str = Table::WitnessRecords.as_str();
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// One task moved to `BlockedRecoveryPending` (or already at it) by
+/// the boot-time recovery sweep. Captured per-task so the V2.5
+/// supervisor-aware auto-resume codepath
+/// (`reconcile_after_supervisor_restart`) can decide which rows to
+/// re-admit and which to leave alone.
+///
+/// `prior_state` is the FSM state the task held BEFORE the bulk
+/// `UPDATE … SET state = 'BlockedRecoveryPending'`. A row that was
+/// ALREADY `BlockedRecoveryPending` shows `prior_state =
+/// "BlockedRecoveryPending"` — the auto-resume path treats that as
+/// "operator already blocked this; do not auto-resume".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweptTaskRecord {
+    pub task_id:       String,
+    pub initiative_id: String,
+    /// Stable SQL string of the prior state (one of `Admitted`,
+    /// `Running`, `GatesPending`, `BlockedRecoveryPending`).
+    pub prior_state:   String,
+}
 
 /// Summary of what reconcile() did.
 #[derive(Debug)]
@@ -53,6 +102,12 @@ pub struct ReconciliationResult {
     pub folded_integration_merge_attempts: usize,
     /// Whether the audit chain verified cleanly.
     pub chain_ok: bool,
+    /// V2.5 (`self-healing-supervisor.md §3.5`) per-task swept
+    /// records — one per row the bulk UPDATE touched, including
+    /// rows that were already `BlockedRecoveryPending`. Consumed
+    /// by `reconcile_after_supervisor_restart` to decide which
+    /// rows to auto-resume; the rest of the kernel ignores it.
+    pub swept_tasks_detail: Vec<SweptTaskRecord>,
 }
 
 /// A lightweight report from reconcile_tasks.
@@ -60,6 +115,10 @@ pub struct ReconciliationResult {
 pub struct ReconciliationReport {
     pub swept_tasks: usize,
     pub expired_tokens: usize,
+    /// Per-task pre-sweep state captures (V2.5 supervisor auto-resume
+    /// fuel). One entry per row touched by the bulk UPDATE, including
+    /// rows that were already `BlockedRecoveryPending`.
+    pub swept_tasks_detail: Vec<SweptTaskRecord>,
 }
 
 /// A lightweight report from reconcile_integration_merge_attempts.
@@ -120,6 +179,7 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
         expired_tokens:                    task_report.expired_tokens,
         folded_integration_merge_attempts: imerge_report.folded_attempts,
         chain_ok,
+        swept_tasks_detail:                task_report.swept_tasks_detail,
     })
 }
 
@@ -271,6 +331,64 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
         }
     };
 
+    // V2.5 (`self-healing-supervisor.md §3.5`) — capture per-task
+    // pre-sweep state INSIDE the same transaction as the bulk UPDATE
+    // so the supervisor-aware auto-resume codepath has a snapshot of
+    // what each task was doing before the deadlock-triggered
+    // restart. The SELECT runs FIRST; the UPDATE then writes
+    // `BlockedRecoveryPending` over those same rows. Both statements
+    // share the transaction so a re-crash mid-recovery either
+    // commits both or rolls back to a state where the next reconcile
+    // re-runs them (idempotent — INV-STORE-02).
+    //
+    // The SELECT bound condition mirrors the UPDATE bound condition
+    // exactly (same `WHERE state NOT IN (terminal)` predicate), so
+    // the captured `swept_tasks_detail` is in 1:1 correspondence
+    // with the rows the UPDATE will touch.
+    let swept_detail: Vec<SweptTaskRecord> = {
+        let mut stmt = match tx.prepare(&format!(
+            "SELECT task_id, initiative_id, state FROM {TASKS}
+             WHERE state NOT IN ({terminal})
+             ORDER BY task_id"
+        )) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"prepare_pre_sweep_select_failed\",\"error\":\"{e}\"}}",
+                );
+                return report;
+            }
+        };
+        let rows = match stmt.query_map([], |r| {
+            Ok(SweptTaskRecord {
+                task_id:       r.get(0)?,
+                initiative_id: r.get(1)?,
+                prior_state:   r.get(2)?,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"pre_sweep_select_failed\",\"error\":\"{e}\"}}",
+                );
+                return report;
+            }
+        };
+        let mut out = Vec::new();
+        for row in rows {
+            match row {
+                Ok(rec) => out.push(rec),
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"pre_sweep_row_decode_failed\",\"error\":\"{e}\"}}",
+                    );
+                    return report;
+                }
+            }
+        }
+        out
+    };
+
     // Sweep every non-terminal task in a single statement. This avoids the
     // N-statement TOCTOU window where a query-then-loop-then-update pattern
     // could race a parallel actor.
@@ -320,8 +438,9 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
         return report;
     }
 
-    report.swept_tasks    = swept;
-    report.expired_tokens = expired;
+    report.swept_tasks         = swept;
+    report.expired_tokens      = expired;
+    report.swept_tasks_detail  = swept_detail;
 
     if swept > 0 || expired > 0 {
         eprintln!(
@@ -329,6 +448,299 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
              \"swept_tasks\":{swept},\"expired_tokens\":{expired}}}",
         );
     }
+
+    report
+}
+
+// ---------------------------------------------------------------------------
+// V2.5 supervisor-aware auto-resume — `self-healing-supervisor.md §3.5`,
+// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`.
+// ---------------------------------------------------------------------------
+
+/// Per-task outcome of the V2.5 supervisor-aware auto-resume sweep.
+/// Surfaced through [`AutoResumeReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoResumeOutcome {
+    /// Task was re-admitted (`BlockedRecoveryPending → Admitted`)
+    /// and a `TaskAutoResumedAfterSupervisorRestart` event was
+    /// emitted.
+    Resumed {
+        task_id:                 String,
+        initiative_id:           String,
+        prior_state:             String,
+        witness_count_preserved: u32,
+    },
+    /// Skipped because the initiative is operator-quarantined
+    /// (`initiative_quarantines` row exists). NO event emitted —
+    /// the existing quarantine row is the audit trail for the
+    /// skip.
+    SkippedQuarantined {
+        task_id:       String,
+        initiative_id: String,
+    },
+    /// Skipped because the task was ALREADY `BlockedRecoveryPending`
+    /// before this boot's recovery sweep (operator pre-existing
+    /// block — preserve operator intent). NO event emitted.
+    SkippedPreExistingBlock {
+        task_id:       String,
+        initiative_id: String,
+    },
+    /// Skipped because the FSM transition or audit emit failed —
+    /// the task stays in `BlockedRecoveryPending` and an operator
+    /// will need to resume manually. The reason is logged on
+    /// stderr; this variant exists so the report distinguishes
+    /// "deliberately skipped" from "tried to resume and failed".
+    SkippedTransitionFailed {
+        task_id:       String,
+        initiative_id: String,
+        reason:        String,
+    },
+}
+
+/// Aggregate report of one supervisor-aware auto-resume sweep.
+///
+/// `resumed`, `quarantined`, `pre_existing_block`, and
+/// `transition_failed` are the four mutually-exclusive outcome
+/// counters; the per-task `outcomes` vector preserves order so the
+/// caller can render a deterministic dashboard view.
+#[derive(Debug, Clone, Default)]
+pub struct AutoResumeReport {
+    pub resumed:               usize,
+    pub quarantined:           usize,
+    pub pre_existing_block:    usize,
+    pub transition_failed:     usize,
+    pub outcomes:              Vec<AutoResumeOutcome>,
+    /// Stable identifier echoed onto every emitted
+    /// `TaskAutoResumedAfterSupervisorRestart` event — exposed on
+    /// the report so the kernel can also surface it on the
+    /// supervisor-banner backend (see `dashboard/src/routes/health.rs`).
+    pub supervisor_restart_id: String,
+}
+
+/// V2.5 supervisor-aware auto-resume sweep —
+/// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`.
+///
+/// Walks every `SweptTaskRecord` captured by the boot-time
+/// `reconcile_tasks` pass and decides per-task whether to:
+///
+///   * **resume** — `BlockedRecoveryPending → Admitted` via the
+///     same `transition_task` API the operator `task resume` IPC
+///     handler calls (so `witness_records` rows survive untouched
+///     per `INV-INIT-08`, and the activation-row sub-FSM stays
+///     consistent with `task_transitions::transition_task_in_tx`),
+///     then emit `TaskAutoResumedAfterSupervisorRestart` with the
+///     pre-sweep `prior_state` for forensic reconstruction;
+///
+///   * **skip — quarantine** — the initiative has a row in
+///     `initiative_quarantines` (operator already froze it). The
+///     existing `InitiativeQuarantined` audit event + the row
+///     itself are the audit trail; this sweep is silent on
+///     skipped tasks;
+///
+///   * **skip — pre-existing block** — the task's pre-sweep state
+///     was ALREADY `BlockedRecoveryPending` (operator had blocked
+///     it before the kernel went down). Preserving operator
+///     intent across a supervisor restart is the entire point of
+///     this rule (`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`
+///     skip clause 2). This sweep is silent on skipped tasks.
+///
+/// **Auto-resume is unconditional** when the supervisor is enabled.
+/// There is no per-restart, per-task, or per-initiative opt-out.
+/// Operators who want strict V1 fail-safe behaviour disable the
+/// supervisor entirely (`RAXIS_SUPERVISOR_AUTO_RESTART=0`).
+///
+/// **Per-task error handling.** A `transition_task` failure for one
+/// row never aborts the sweep for siblings — the failed row stays
+/// in `BlockedRecoveryPending`, an operator will need to resume it
+/// manually, and the report's `transition_failed` counter +
+/// `SkippedTransitionFailed` outcome carry the reason for the
+/// dashboard.
+///
+/// **Audit-emit error handling.** If the FSM transition succeeds
+/// but the `TaskAutoResumedAfterSupervisorRestart` emit fails,
+/// the sweep logs a structured stderr line and continues — the
+/// task IS in `Admitted` and the kernel WILL pick it up; the
+/// missing audit line is forensic loss only. Counted under
+/// `transition_failed` so dashboards can reflect the partial
+/// outcome.
+pub fn reconcile_after_supervisor_restart(
+    store:                 &Store,
+    audit:                 &dyn AuditSink,
+    swept_tasks_detail:    &[SweptTaskRecord],
+    supervisor_restart_id: &str,
+) -> AutoResumeReport {
+    let mut report = AutoResumeReport {
+        supervisor_restart_id: supervisor_restart_id.to_owned(),
+        ..AutoResumeReport::default()
+    };
+
+    if swept_tasks_detail.is_empty() {
+        return report;
+    }
+
+    eprintln!(
+        "{{\"level\":\"info\",\"step\":\"supervisor_auto_resume\",\
+         \"action\":\"scan\",\"swept_count\":{},\
+         \"supervisor_restart_id\":{}}}",
+        swept_tasks_detail.len(),
+        serde_json::to_string(supervisor_restart_id)
+            .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+    );
+
+    for record in swept_tasks_detail {
+        // Skip pre-existing operator blocks (INV-SUPERVISOR-AUTO-RESUME-
+        // ON-CLEAN-RESTART-01 skip clause 2).
+        if record.prior_state == TaskState::BlockedRecoveryPending.as_sql_str() {
+            report.pre_existing_block += 1;
+            report.outcomes.push(AutoResumeOutcome::SkippedPreExistingBlock {
+                task_id:       record.task_id.clone(),
+                initiative_id: record.initiative_id.clone(),
+            });
+            continue;
+        }
+
+        // Skip operator-quarantined initiatives (skip clause 1).
+        let quarantined = {
+            let conn = store.lock_sync();
+            match raxis_store::views::initiative_quarantines::is_quarantined_rw(
+                &conn,
+                &record.initiative_id,
+            ) {
+                Ok(b)  => b,
+                // Fail-safe deny: a transient sqlite error MUST NOT
+                // silently re-resume a frozen initiative. Treat the
+                // error as "quarantined" for this sweep — operator
+                // can re-issue the resume manually if the underlying
+                // sqlite issue clears.
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"step\":\"supervisor_auto_resume\",\
+                         \"action\":\"quarantine_check_failed_treating_as_quarantined\",\
+                         \"initiative_id\":{},\"error\":\"{e}\"}}",
+                        serde_json::to_string(&record.initiative_id)
+                            .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                    );
+                    true
+                }
+            }
+        };
+        if quarantined {
+            report.quarantined += 1;
+            report.outcomes.push(AutoResumeOutcome::SkippedQuarantined {
+                task_id:       record.task_id.clone(),
+                initiative_id: record.initiative_id.clone(),
+            });
+            continue;
+        }
+
+        // Resume via the same FSM edge the operator `task resume`
+        // path uses (`BlockedRecoveryPending → Admitted`). The
+        // FSM does NOT support BRP → Running / GatesPending; the
+        // pre-sweep state is recorded on the audit event for
+        // forensics, and the kernel re-derives the post-Admitted
+        // path through normal scheduling.
+        let transition_outcome = transition_task(
+            &record.task_id,
+            TaskState::Admitted,
+            None,
+            TransitionActor::Kernel,
+            store,
+        );
+
+        if let Err(e) = transition_outcome {
+            let reason = e.to_string();
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"supervisor_auto_resume\",\
+                 \"action\":\"transition_failed\",\"task_id\":{},\
+                 \"prior_state\":\"{}\",\"reason\":{}}}",
+                serde_json::to_string(&record.task_id)
+                    .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                record.prior_state,
+                serde_json::to_string(&reason)
+                    .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+            );
+            report.transition_failed += 1;
+            report.outcomes.push(AutoResumeOutcome::SkippedTransitionFailed {
+                task_id:       record.task_id.clone(),
+                initiative_id: record.initiative_id.clone(),
+                reason,
+            });
+            continue;
+        }
+
+        // Count witness_records rows that survived the restart.
+        // `INV-INIT-08`: the table is append-only and is never
+        // touched by `transition_task`; this count is a forensic
+        // observation, not a preservation step.
+        let witness_count_preserved = {
+            let conn = store.lock_sync();
+            match conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"
+                ),
+                rusqlite::params![&record.task_id],
+                |r| r.get::<_, i64>(0),
+            ) {
+                Ok(n)  => u32::try_from(n.max(0)).unwrap_or(u32::MAX),
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"step\":\"supervisor_auto_resume\",\
+                         \"action\":\"witness_count_failed\",\"task_id\":{},\"error\":\"{e}\"}}",
+                        serde_json::to_string(&record.task_id)
+                            .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                    );
+                    0
+                }
+            }
+        };
+
+        if let Err(e) = audit.emit(
+            AuditEventKind::TaskAutoResumedAfterSupervisorRestart {
+                task_id:                 record.task_id.clone(),
+                initiative_id:           record.initiative_id.clone(),
+                prior_state:             record.prior_state.clone(),
+                witness_count_preserved,
+                supervisor_restart_id:   supervisor_restart_id.to_owned(),
+            },
+            None,
+            Some(&record.task_id),
+            Some(&record.initiative_id),
+        ) {
+            // FSM advanced; audit emit lost. Log + count under
+            // `transition_failed` so the dashboard reflects the
+            // partial outcome.
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"supervisor_auto_resume\",\
+                 \"event\":\"TaskAutoResumedAfterSupervisorRestart\",\
+                 \"audit_emit_failed\":\"{e}\",\"task_id\":{}}}",
+                serde_json::to_string(&record.task_id)
+                    .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+            );
+            report.transition_failed += 1;
+            report.outcomes.push(AutoResumeOutcome::SkippedTransitionFailed {
+                task_id:       record.task_id.clone(),
+                initiative_id: record.initiative_id.clone(),
+                reason:        format!("audit_emit_failed: {e}"),
+            });
+            continue;
+        }
+
+        report.resumed += 1;
+        report.outcomes.push(AutoResumeOutcome::Resumed {
+            task_id:                 record.task_id.clone(),
+            initiative_id:           record.initiative_id.clone(),
+            prior_state:             record.prior_state.clone(),
+            witness_count_preserved,
+        });
+    }
+
+    eprintln!(
+        "{{\"level\":\"info\",\"step\":\"supervisor_auto_resume\",\
+         \"action\":\"complete\",\"resumed\":{},\"quarantined\":{},\
+         \"pre_existing_block\":{},\"transition_failed\":{}}}",
+        report.resumed, report.quarantined,
+        report.pre_existing_block, report.transition_failed,
+    );
 
     report
 }
@@ -2428,5 +2840,265 @@ mod git_apply_recovery_integration {
         assert_eq!(r2.repaired,     0);
         assert_eq!(r2.inconsistent, 0);
         assert!(sink2.captured().is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Witness — `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`.
+//
+// The user-prompt-named witness file is `kernel/tests/supervisor_auto_resume.rs`,
+// which is unreachable from `kernel/tests/*` because the kernel is a
+// binary-only crate (no `lib.rs` exposes `recovery::*`). The integration
+// test at `tests/supervisor_auto_resume.rs` covers the cross-crate
+// contract surface (audit-event variant shape, notification routing,
+// policy `KNOWN_AUDIT_EVENT_KINDS` lockstep). This module covers the
+// FSM-level invariant — the auto-resume sweep partitions a 6-task
+// fixture into the four canonical outcomes per the invariant
+// statement.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod supervisor_auto_resume_witness {
+    use super::*;
+    use raxis_audit_tools::AuditEventKind;
+    use raxis_store::Store;
+    use raxis_test_support::FakeAuditSink;
+
+    const INITIATIVE_QUARANTINES: &str = Table::InitiativeQuarantines.as_str();
+
+    /// Insert a single initiative row in `Executing` state so the
+    /// per-task FK references resolve.
+    fn seed_initiative(store: &Store, initiative_id: &str) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![initiative_id, InitiativeState::Executing.as_sql_str(), now],
+        ).unwrap();
+    }
+
+    fn seed_task(
+        store:         &Store,
+        task_id:       &str,
+        initiative_id: &str,
+        state:         TaskState,
+    ) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, ?2, 'default', ?3, 'kernel', 1, ?4, ?4, 0)"
+            ),
+            rusqlite::params![task_id, initiative_id, state.as_sql_str(), now],
+        ).unwrap();
+    }
+
+    /// Insert one `initiative_quarantines` row so the auto-resume
+    /// sweep treats the initiative as operator-frozen. Column shape
+    /// per `crates/store/src/views/initiative_quarantines.rs`
+    /// `SELECT_ALL_COLS`.
+    fn quarantine_initiative(store: &Store, initiative_id: &str) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs() as i64;
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVE_QUARANTINES}
+                    (initiative_id, quarantined_at, quarantined_by, reason, sweep_target)
+                 VALUES (?1, ?2, 'op-fp', 'forensic hold', NULL)"
+            ),
+            rusqlite::params![initiative_id, now],
+        ).unwrap();
+    }
+
+    fn task_state(store: &Store, task_id: &str) -> String {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    /// Witness — `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`.
+    ///
+    /// Fixture (6 tasks across 3 initiatives — one of each
+    /// auto-resume disposition):
+    ///
+    ///   init-resume    (NOT quarantined)
+    ///     · t-running-1   Running         → expect Resumed (prior_state="Running")
+    ///     · t-running-2   Running         → expect Resumed (prior_state="Running")
+    ///     · t-running-3   Running         → expect Resumed (prior_state="Running")
+    ///     · t-already-brp BlockedRecoveryPending → expect SkippedPreExistingBlock
+    ///   init-gates     (NOT quarantined)
+    ///     · t-gates       GatesPending    → expect Resumed (prior_state="GatesPending")
+    ///   init-quarantine (operator-quarantined BEFORE the sweep)
+    ///     · t-quarantined Running         → expect SkippedQuarantined
+    ///
+    /// Asserted post-conditions:
+    ///   1. `reconcile_tasks` sweeps 5 of 6 rows to BRP (pre-existing
+    ///      BRP row is unchanged in state but re-`transitioned_at`-stamped;
+    ///      it appears in `swept_tasks_detail` with prior_state =
+    ///      "BlockedRecoveryPending").
+    ///   2. `reconcile_after_supervisor_restart` returns
+    ///      `resumed = 4`, `pre_existing_block = 1`,
+    ///      `quarantined = 1`, `transition_failed = 0`.
+    ///   3. Every Resumed task is now `Admitted`.
+    ///   4. Every Skipped task is still `BlockedRecoveryPending`.
+    ///   5. The `FakeAuditSink` holds EXACTLY 4 `TaskAutoResumed*`
+    ///      events — skipped tasks emit nothing.
+    ///   6. Each emitted event carries the correct `prior_state`,
+    ///      `task_id`, `initiative_id`, and a SHARED
+    ///      `supervisor_restart_id` (one episode → one id).
+    #[test]
+    fn auto_resume_partitions_six_task_fixture_per_invariant() {
+        let store = Store::open_in_memory().unwrap();
+
+        seed_initiative(&store, "init-resume");
+        seed_initiative(&store, "init-gates");
+        seed_initiative(&store, "init-quarantine");
+
+        seed_task(&store, "t-running-1",   "init-resume",     TaskState::Running);
+        seed_task(&store, "t-running-2",   "init-resume",     TaskState::Running);
+        seed_task(&store, "t-running-3",   "init-resume",     TaskState::Running);
+        seed_task(&store, "t-already-brp", "init-resume",     TaskState::BlockedRecoveryPending);
+        seed_task(&store, "t-gates",       "init-gates",      TaskState::GatesPending);
+        seed_task(&store, "t-quarantined", "init-quarantine", TaskState::Running);
+
+        quarantine_initiative(&store, "init-quarantine");
+
+        let report = reconcile_tasks(&store);
+        // INV check 1: SELECT-then-UPDATE inside one transaction. All 6
+        // non-terminal rows (including the pre-existing BRP) appear in
+        // `swept_tasks_detail` with their pre-sweep state.
+        assert_eq!(report.swept_tasks_detail.len(), 6,
+            "all 6 non-terminal tasks must be captured");
+        // The bulk UPDATE only counts rows whose state CHANGED — the
+        // pre-existing BRP row's state didn't change (it was already
+        // BRP). SQLite `UPDATE` counts every row matched by the WHERE
+        // clause regardless, so we expect 6 here too.
+        assert_eq!(report.swept_tasks, 6,
+            "bulk UPDATE touches all 6 non-terminal rows");
+
+        let prior_state_for = |task_id: &str| -> Option<String> {
+            report.swept_tasks_detail.iter()
+                .find(|r| r.task_id == task_id)
+                .map(|r| r.prior_state.clone())
+        };
+        assert_eq!(prior_state_for("t-running-1"),   Some("Running".into()));
+        assert_eq!(prior_state_for("t-running-2"),   Some("Running".into()));
+        assert_eq!(prior_state_for("t-running-3"),   Some("Running".into()));
+        assert_eq!(prior_state_for("t-already-brp"), Some("BlockedRecoveryPending".into()));
+        assert_eq!(prior_state_for("t-gates"),       Some("GatesPending".into()));
+        assert_eq!(prior_state_for("t-quarantined"), Some("Running".into()));
+
+        // After the sweep, every captured row is at BRP in the table.
+        for tid in [
+            "t-running-1", "t-running-2", "t-running-3",
+            "t-already-brp", "t-gates", "t-quarantined",
+        ] {
+            assert_eq!(task_state(&store, tid), "BlockedRecoveryPending",
+                "{tid} must be at BRP after reconcile sweep");
+        }
+
+        let sink = FakeAuditSink::new();
+        let restart_id = "supervisor-restart-1700000000-1";
+        let resume_report = reconcile_after_supervisor_restart(
+            &store,
+            &sink,
+            &report.swept_tasks_detail,
+            restart_id,
+        );
+
+        // INV check 2: outcome counters match the invariant partition.
+        assert_eq!(resume_report.resumed,            4,
+            "3 Running + 1 GatesPending must auto-resume");
+        assert_eq!(resume_report.pre_existing_block, 1,
+            "the pre-existing BRP task must be preserved");
+        assert_eq!(resume_report.quarantined,        1,
+            "the quarantined-initiative task must be preserved");
+        assert_eq!(resume_report.transition_failed,  0,
+            "no transition failures expected on a clean fixture");
+        assert_eq!(resume_report.outcomes.len(),     6,
+            "every input record must produce one outcome");
+        assert_eq!(resume_report.supervisor_restart_id, restart_id);
+
+        // INV check 3: Resumed tasks are now Admitted.
+        for tid in ["t-running-1", "t-running-2", "t-running-3", "t-gates"] {
+            assert_eq!(task_state(&store, tid), "Admitted",
+                "{tid} must be re-admitted after supervisor auto-resume");
+        }
+        // INV check 4: Skipped tasks remain at BRP.
+        for tid in ["t-already-brp", "t-quarantined"] {
+            assert_eq!(task_state(&store, tid), "BlockedRecoveryPending",
+                "{tid} must remain at BRP (skipped by auto-resume)");
+        }
+
+        // INV check 5: emitted audit events — one per Resumed,
+        // ZERO for Skipped (operator-quarantined + pre-existing-BRP
+        // skip silently per the invariant statement).
+        let events = sink.events();
+        assert_eq!(events.len(), 4,
+            "skipped tasks must NOT emit TaskAutoResumed*; resumed tasks emit exactly one each");
+
+        // INV check 6: every event carries a faithful prior_state +
+        // a SHARED supervisor_restart_id.
+        let mut by_task: std::collections::HashMap<String, (String, String, u32)>
+            = std::collections::HashMap::new();
+        for ev in &events {
+            match &ev.kind {
+                AuditEventKind::TaskAutoResumedAfterSupervisorRestart {
+                    task_id, initiative_id, prior_state,
+                    witness_count_preserved, supervisor_restart_id,
+                } => {
+                    assert_eq!(supervisor_restart_id, restart_id,
+                        "all events from one restart must share supervisor_restart_id");
+                    by_task.insert(
+                        task_id.clone(),
+                        (initiative_id.clone(), prior_state.clone(), *witness_count_preserved),
+                    );
+                }
+                other => panic!("unexpected event in auto-resume sweep: {other:?}"),
+            }
+        }
+        let (init, prior, w) = by_task.get("t-running-1").expect("t-running-1 event missing");
+        assert_eq!(init,  "init-resume");
+        assert_eq!(prior, "Running");
+        assert_eq!(*w,    0, "no witnesses seeded → preserved count = 0");
+        let (init, prior, _) = by_task.get("t-gates").expect("t-gates event missing");
+        assert_eq!(init,  "init-gates");
+        assert_eq!(prior, "GatesPending",
+            "the GatesPending → Admitted auto-resume MUST surface the original GatesPending state on the audit event");
+
+        // No event for the skipped tasks.
+        assert!(!by_task.contains_key("t-already-brp"),
+            "pre-existing BRP must NOT emit TaskAutoResumed*");
+        assert!(!by_task.contains_key("t-quarantined"),
+            "quarantined-initiative task must NOT emit TaskAutoResumed*");
+    }
+
+    /// Empty input → no-op (the supervisor restarted but the recovery
+    /// sweep found nothing in flight). Witness for the `is_empty()`
+    /// short-circuit in `reconcile_after_supervisor_restart`.
+    #[test]
+    fn auto_resume_is_a_noop_when_recovery_sweep_was_empty() {
+        let store = Store::open_in_memory().unwrap();
+        let sink = FakeAuditSink::new();
+        let report = reconcile_after_supervisor_restart(
+            &store, &sink, &[], "supervisor-restart-empty-1",
+        );
+        assert_eq!(report.resumed,            0);
+        assert_eq!(report.quarantined,        0);
+        assert_eq!(report.pre_existing_block, 0);
+        assert_eq!(report.transition_failed,  0);
+        assert!(report.outcomes.is_empty());
+        assert!(sink.events().is_empty());
     }
 }

@@ -194,6 +194,7 @@ pub fn notification_priority_for_kind_str(
         | "IntegrationMergeCompleted"
         | "PushCompleted"
         | "KernelRestartCompleted"
+        | "TaskAutoResumedAfterSupervisorRestart"
         | "EscalationApproved"
         | "EscalationDenied"
         | "EscalationConsumed"
@@ -355,6 +356,15 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // page. Pairs 1:1 with the earlier `KernelRestartInitiated`
         // (High) per `INV-SUPERVISOR-RESTART-AUDIT-01`.
         K::KernelRestartCompleted { .. } => Some(Medium),
+        // V2.5 self-healing-supervisor.md §3.5 /
+        // `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` — every
+        // task auto-resumed after a supervisor restart routes here.
+        // Medium because the supervisor-restart pair (`KernelRestart*`)
+        // already raised the operator's attention; the per-task
+        // events are observability for the auto-resume sweep itself
+        // (so dashboards can render "N tasks continued automatically"
+        // without re-walking the whole tasks table).
+        K::TaskAutoResumedAfterSupervisorRestart { .. } => Some(Medium),
         K::EscalationApproved { .. } => Some(Medium),
         K::EscalationDenied { .. } => Some(Medium),
         K::EscalationConsumed { .. } => Some(Medium),

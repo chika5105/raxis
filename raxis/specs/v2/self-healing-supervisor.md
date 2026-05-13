@@ -202,6 +202,151 @@ All four are routed through `notification_priority` in `crates/dashboard-kernel/
 | `KernelRestartInitiated` | `High` | Operator should know the kernel is about to be replaced. |
 | `KernelRestartCompleted` | `Medium` | Steady-state observability; not a page. |
 | `KernelRestartHaltedCircuitOpen` | `Critical` | Manual intervention required; this IS a 2 a.m. page. |
+| `TaskAutoResumedAfterSupervisorRestart` | `Medium` | Per-task observability for the §3.5 auto-resume sweep; the operator already saw the §3.4 `KernelRestart*` pair. |
+
+---
+
+## §3.5 Operator session continuity — task auto-resume (`INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`)
+
+### §3.5.1 Design contract
+
+**Auto-resume is unconditional when the supervisor is enabled.**
+There is no per-task, per-initiative, or per-restart opt-out. The
+supervisor opt-in (`RAXIS_SUPERVISOR_AUTO_RESTART=1`, the §4.9
+env var) is the SOLE operator surface for the auto-resume
+behaviour: enabling the supervisor enables auto-resume on every
+supervisor-triggered restart; disabling the supervisor preserves
+the V1 fail-safe (every kernel exit halts work for human review,
+including operator-initiated SIGTERMs and unmonitored crashes).
+Operators who want strict V1 fail-safe behaviour for forensic-mode
+workflows MUST disable the supervisor entirely — see
+`guides/recipes/ops/18-self-healing-supervisor.md` "When to disable
+the supervisor entirely".
+
+**Why this rule.** The supervisor's whole purpose is to recover
+transparently from kernel-internal pathology — deadlock, panic,
+signal-crash. The agent work itself is fine; only the kernel got
+stuck. A supervisor that restarts the kernel but then leaves work
+paused is pointless: forcing operators to manually resume every
+task after every supervisor restart converts self-healing into
+self-pretending. There is no realistic operator decision to add at
+the per-task granularity — the kernel already knows everything an
+operator would know about whether to resume (the previous exit was
+classified by an immortal external observer as auto-restartable,
+the work itself is durable in SQLite + the audit chain). The
+explicit-block cases (operator quarantine, pre-existing BRP) are
+preserved by the two skip clauses in §3.5.2; both record their
+intent in the audit chain BEFORE the restart, so the operator's
+intent is mechanically preserved across the restart boundary.
+
+### §3.5.2 Auto-resume sweep semantics
+
+The kernel's `recovery::reconcile_after_supervisor_restart` runs
+at boot Step 8a''' (after `restart_lifecycle::rehydrate_restart_context`
+emits the paired `KernelRestart{Initiated,Completed}` events,
+before IPC accept). It consumes the per-task pre-sweep records
+captured by Step 6 `recovery::reconcile_tasks` (a SELECT-then-UPDATE
+inside one transaction now retains every row's `prior_state`
+alongside the bulk move to `BlockedRecoveryPending`), and walks
+each row deciding:
+
+* **Resume** — `BlockedRecoveryPending → Admitted` via the SAME
+  `task_transitions::transition_task` API the operator
+  `task resume` IPC handler uses (so `witness_records` survive
+  untouched per `INV-INIT-08`, the `subtask_activations` sub-FSM
+  stays consistent, and the canonical FSM edge is exercised
+  exactly once for both code paths). The auto-resume `actor` is
+  `kernel`, not `operator`, so audit-chain readers can mechanically
+  distinguish operator-initiated resumes from supervisor-initiated
+  resumes.
+
+* **Skip — quarantine** — the initiative has a row in
+  `initiative_quarantines` (operator already froze it). The
+  pre-restart `InitiativeQuarantined` audit record + the row
+  itself are the forensic trail; the auto-resume sweep emits
+  NOTHING for the skipped task. A transient sqlite error on the
+  quarantine check fails safely (treats the task as quarantined
+  rather than silently re-resuming a frozen initiative).
+
+* **Skip — pre-existing block** — the task's pre-sweep state was
+  ALREADY `BlockedRecoveryPending` (operator had blocked it
+  before the kernel went down). The pre-restart operator-resume
+  FSM history is the forensic trail; the auto-resume sweep emits
+  NOTHING for the skipped task. Distinguishable from the
+  "swept-this-boot" rows by the per-task `prior_state` captured
+  inside the same transaction as the bulk UPDATE — the SELECT
+  records `BlockedRecoveryPending` for these rows, while
+  freshly-swept rows record `Running`/`Admitted`/`GatesPending`.
+
+Each Resumed task emits exactly one
+`TaskAutoResumedAfterSupervisorRestart` event with
+`task_id`, `initiative_id`, the pre-sweep `prior_state`,
+`witness_count_preserved` (a forensic count of `witness_records`
+rows — `INV-INIT-08` rows are append-only and survive any FSM
+transition), and a `supervisor_restart_id` shared by every event
+from the same restart episode (synthesised from the supervisor
+sentinel's wall-clock + attempt counter).
+
+### §3.5.3 Order rationale
+
+The auto-resume sweep MUST run AFTER the
+`KernelRestart{Initiated,Completed}` pair so the audit chain
+reads left-to-right:
+
+```
+KernelDeadlockDetected? → KernelStarted → KernelRestartInitiated →
+KernelRestartCompleted → TaskAutoResumedAfterSupervisorRestart{N}
+```
+
+It MUST run BEFORE IPC accept so the orchestrator never observes
+the transient `BlockedRecoveryPending` window — by the time the
+first IPC frame arrives, every auto-resumable task is already back
+in `Admitted` and the scheduler picks up exactly where it left off.
+
+### §3.5.4 FSM transition contract
+
+The kernel FSM only allows `BlockedRecoveryPending → Admitted` and
+`BlockedRecoveryPending → Aborted`; the auto-resume codepath uses
+the same `Admitted` edge the operator `task resume` IPC handler
+uses. The pre-sweep `prior_state` (Running / GatesPending /
+Admitted) is recorded on the `TaskAutoResumedAfterSupervisorRestart`
+audit event for forensics, but the FSM transition itself always
+lands at `Admitted`; the kernel re-derives the post-Admitted state
+via normal scheduling (orchestrator decides whether to re-fire the
+session, the gate cycle re-fires if witnesses are pending, etc).
+
+### §3.5.5 Per-task error handling
+
+A `transition_task` failure for one row never aborts the sweep for
+siblings — the failed row stays in `BlockedRecoveryPending`, an
+operator will need to resume it manually, and the
+`AutoResumeReport.transition_failed` counter +
+`SkippedTransitionFailed` outcome carry the reason for the
+dashboard. An audit emit failure after a successful FSM transition
+logs a structured stderr line and continues — the task IS in
+`Admitted` and the kernel WILL pick it up; the missing audit line
+is forensic loss only.
+
+### §3.5.6 Witness coverage (mechanically enforced)
+
+* `kernel/src/recovery.rs::supervisor_auto_resume_witness::auto_resume_partitions_six_task_fixture_per_invariant`
+  — FSM-level witness on a 6-task fixture across 3 initiatives
+  (3 Running + 1 GatesPending + 1 pre-existing BRP +
+  1 Running-on-quarantined-init). Asserts the canonical 4-2
+  partition (4 resumed → `Admitted`; 1 pre-existing block stays
+  at BRP; 1 quarantined task stays at BRP), asserts each emitted
+  event carries the correct `prior_state` + `task_id` +
+  `initiative_id`, asserts skipped tasks emit ZERO
+  `TaskAutoResumed*` events, asserts the
+  `supervisor_restart_id` is shared across the 4 emitted events.
+* `kernel/src/recovery.rs::supervisor_auto_resume_witness::auto_resume_is_a_noop_when_recovery_sweep_was_empty`
+  — short-circuit witness for the common "nothing in flight at
+  the moment of the deadlock" case.
+* `kernel/tests/supervisor_auto_resume.rs` — cross-crate contract
+  witness pinning the `TaskAutoResumedAfterSupervisorRestart`
+  serde envelope shape, the `Medium` notification priority on
+  both routing surfaces, and the policy
+  `KNOWN_AUDIT_EVENT_KINDS` lockstep entry.
 
 ---
 
