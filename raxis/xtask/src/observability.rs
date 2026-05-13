@@ -79,6 +79,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
+use crate::browser::{open_in_best_browser, preference_from_env, BrowserPreference, OpenOutcome};
+
 /// Canonical compose project name pinned at commit `9a2fbb3`.
 ///
 /// Hard-coding it here keeps the xtask in lock-step with the
@@ -213,6 +215,14 @@ fn run_up(tail: &[String]) -> Result<()> {
 }
 
 fn should_auto_open() -> bool {
+    // `RAXIS_E2E_BROWSER=none` is the canonical suppression knob;
+    // the legacy `RAXIS_E2E_NO_OPEN=1` is honoured for backcompat
+    // with the README's pre-Cursor surface. `CI` / `SSH_CONNECTION`
+    // are conservative guards so a scripted CI runner or a
+    // headless SSH session doesn't try to spawn a window.
+    if matches!(preference_from_env(), BrowserPreference::None) {
+        return false;
+    }
     if std::env::var("RAXIS_E2E_NO_OPEN").as_deref() == Ok("1") {
         return false;
     }
@@ -499,26 +509,12 @@ fn open_browser_best_effort() {
 }
 
 fn open_url_best_effort(url: &str) {
-    let argv: &[&str] = if cfg!(target_os = "macos") {
-        &["open"]
-    } else if cfg!(target_os = "linux") {
-        &["xdg-open"]
-    } else {
-        // Best-effort on other platforms: most BSDs ship `xdg-open`,
-        // some don't ship anything. We try `xdg-open` and bail out
-        // cleanly if it's missing.
-        &["xdg-open"]
-    };
-    let res = Command::new(argv[0])
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    match res {
-        Ok(_) => eprintln!("    opened: {url}"),
-        Err(e) => eprintln!("    open `{}` for {url} failed: {e}", argv[0]),
-    }
+    // `crate::browser::open_in_best_browser` handles the full
+    // Cursor-vs-system dispatch + per-OS fallback + URL-printing
+    // fallback. It never panics; its `OpenOutcome` is informational
+    // (the eprintln side effects already cover the operator-facing
+    // "opened in <X>" line).
+    let _outcome: OpenOutcome = open_in_best_browser(url);
 }
 
 // ── Probe helpers ───────────────────────────────────────────────────

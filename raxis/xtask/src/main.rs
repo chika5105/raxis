@@ -5,6 +5,7 @@
 // implements the V2 cross-spec consistency checks specified in
 // `specs/v2/v2-deep-spec.md §Spec-Graph Lint`.
 
+mod browser;
 mod dev_codesign;
 mod dev_kernel;
 mod dev_keys;
