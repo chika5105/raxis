@@ -440,6 +440,17 @@ Worktree lifecycle (v2 agent-disagreement):
   WorktreeAbandonedArchived,
   WorktreePurged
 
+Reviewer-rejection retry (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`):
+  // Pairs with the new `PendingActivation` row insert in
+  // `handle_retry_sub_task` Step 2d. Post-commit emission: the
+  // SQLite transaction commits first, then the audit event fires
+  // in the same handler frame. A crash between the two leaves
+  // SQLite consistent (new activation row exists, ready for the
+  // next `ActivateSubTask`) with a missing audit anchor; the
+  // recovery sweep observes the orphaned `PendingActivation`
+  // row and re-emits the event on next kernel boot.
+  ExecutorRespawnFromReviewRejection                  // paired with subtask_activations insert
+
 Operator quarantine (v2 key-revocation):
   OperatorQuarantineDirectiveAdded,
   OperatorQuarantineDirectiveExpired,

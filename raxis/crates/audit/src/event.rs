@@ -1074,6 +1074,79 @@ pub enum AuditEventKind {
         verdict: String,
     },
 
+    /// V2 §Step 12 + `agent-disagreement.md §3.6` —
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` audit anchor.
+    ///
+    /// Emitted by [`handle_retry_sub_task`] exactly when the prior
+    /// activation's `activation_state = 'Completed'` AND
+    /// `review_reject_count > 0` (the Option-A precondition
+    /// relaxation per agent-disagreement.md §3.6). This is the
+    /// canonical chain-side signal that the kernel admitted a
+    /// retry of an Executor that the Reviewer aggregator
+    /// terminal-rejected — distinct from the crash-retry path
+    /// (`prior_state = 'Failed'`) which carries no such anchor.
+    ///
+    /// **Why a distinct event (vs. reusing `SessionVmSpawned` +
+    /// activation-table join).** The `SessionVmSpawned` event
+    /// fires on every PendingActivation → Active transition,
+    /// including the round-1 spawn that the Orchestrator's first
+    /// `ActivateSubTask` drives. Witnesses that need to assert
+    /// "the kernel respawned the Executor *because of a Reviewer
+    /// rejection*" cannot disambiguate first-spawn from
+    /// retry-spawn from the `SessionVmSpawned` payload alone; the
+    /// only safe disambiguator is a join into
+    /// `subtask_activations` to count prior rows for the same
+    /// `task_id`. That coupling violates `INV-AUDIT-04` (audit
+    /// chain MUST be self-describing; forensic reconstruction
+    /// MUST NOT depend on live SQLite state). The new variant
+    /// makes the "respawn-after-review-rejection" intent
+    /// explicit in the chain, removing the join.
+    ///
+    /// **Why the counter rides the event.** A forensic replay
+    /// against a chain-only archive (audit segment file + no
+    /// SQLite) MUST be able to reconstruct the
+    /// `max_review_rejections` ceiling exactly. The
+    /// `review_reject_count` payload field is the value
+    /// AT THE TIME THE RETRY WAS ADMITTED (i.e. carried forward
+    /// from the prior activation row's column, NOT a fresh
+    /// read against a possibly-mutated row).
+    ///
+    /// **Paired with what.** Per `audit-paired-writes.md §4`, this
+    /// event is the chain-side half of the SQLite-side state
+    /// mutation in [`handle_retry_sub_task`] Step 2d (the
+    /// new `PendingActivation` row insert). The pairing is
+    /// post-commit: the SQLite transaction commits first, then
+    /// the audit event is emitted in the same handler frame.
+    /// A crash between the two leaves a consistent SQLite state
+    /// (new activation row exists, ready for `ActivateSubTask`)
+    /// with a missing audit anchor; the recovery sweep observes
+    /// the orphaned `PendingActivation` row and re-emits the
+    /// event on the next kernel boot.
+    ExecutorRespawnFromReviewRejection {
+        /// Executor sub-task being respawned (matches the
+        /// `executor_task_id` of the preceding
+        /// `ReviewAggregationCompleted { verdict =
+        /// "AtLeastOneRejected" }` for the round that triggered
+        /// the retry).
+        task_id: String,
+        /// Activation row that was Reviewer-rejected. Its
+        /// `activation_state` remains `'Completed'` after this
+        /// event fires — per `agent-disagreement.md §3.6` the
+        /// FSM is forward-only.
+        prior_activation_id: String,
+        /// Freshly-inserted `PendingActivation` row. The
+        /// Orchestrator's subsequent `ActivateSubTask` against
+        /// `task_id` drives this row to `Active` and produces
+        /// the round-2 `SessionVmSpawned`.
+        new_activation_id: String,
+        /// `subtask_activations.review_reject_count` value
+        /// carried forward from the prior row to the new row
+        /// (`handle_retry_sub_task` does NOT bump on admission;
+        /// the bump happened earlier in the post-`SubmitReview`
+        /// aggregator at terminal-`AtLeastOneRejected`).
+        review_reject_count: u32,
+    },
+
     // --- Escalation ---
     EscalationSubmitted {
         escalation_id: String,
@@ -2968,6 +3041,7 @@ impl AuditEventKind {
             Self::WitnessRejected { .. } => "WitnessRejected",
             Self::VerifierProcessFailed { .. } => "VerifierProcessFailed",
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
+            Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
             Self::EscalationSubmitted { .. } => "EscalationSubmitted",
             Self::EscalationApproved { .. } => "EscalationApproved",
             Self::EscalationDenied { .. } => "EscalationDenied",

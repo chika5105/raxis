@@ -26,11 +26,24 @@
 //!
 //! Combined chain-side + SQLite-side predicate:
 //!
-//! 1. **Chain-side (same shape as the directive witness).** The
-//!    audit chain contains, in order:
+//! 1. **Chain-side (Option-A wire surface — see
+//!    `agent-disagreement.md §3.6`).** The audit chain contains,
+//!    in order:
 //!    a. `IntentAccepted{SubmitReview, task=reviewer_a_task_id}`.
-//!    b. `SessionVmSpawned{task=executor_task_id}` AFTER (a) —
-//!       the round-2 re-spawn.
+//!    b. `ExecutorRespawnFromReviewRejection{task_id=
+//!       executor_task_id}` AFTER (a) — the
+//!       `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` chain
+//!       anchor emitted by `handle_retry_sub_task` when the
+//!       Orchestrator's `RetrySubTask` is admitted off a
+//!       Completed activation whose `review_reject_count > 0`.
+//!       This event is strictly stronger than the prior
+//!       `SessionVmSpawned` predicate it replaced: a round-1
+//!       spawn fires `SessionVmSpawned` too, so the older
+//!       witness had to join `subtask_activations` to count
+//!       prior rows; `ExecutorRespawnFromReviewRejection`
+//!       carries `(prior_activation_id, new_activation_id,
+//!       review_reject_count)` inline, removing the SQLite
+//!       coupling (and satisfying `INV-AUDIT-04`).
 //!    c. `IntentAccepted{SubmitReview, task=reviewer_b_task_id}`
 //!       AFTER (a).
 //!    d. `ReviewAggregationCompleted{executor_task_id, verdict=AllPassed}`.
@@ -174,10 +187,24 @@ impl ReviewerSubstantiveDisagreementWitness {
                         report.saw_reviewer_b = true;
                     }
                 }
-                Some(AuditEventKind::SessionVmSpawned { task_id, .. })
-                    if task_id.as_deref()
-                        == Some(self.executor_task_id.as_str())
-                        && report.saw_reviewer_a =>
+                // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
+                // chain anchor. The event is emitted by
+                // `handle_retry_sub_task` precisely when the
+                // Orchestrator's `RetrySubTask` is admitted off a
+                // Completed activation with `review_reject_count
+                // > 0` — i.e. exactly the
+                // "respawn-after-review-rejection" condition this
+                // witness wants to assert. Round-1 spawn fires
+                // `SessionVmSpawned` but NOT this event, so the
+                // first-spawn / retry-spawn ambiguity that
+                // forced the prior witness to count activation
+                // rows is gone. The `saw_reviewer_a` guard
+                // remains for ordering — `RetrySubTask` MUST
+                // follow at least one Reviewer rejection.
+                Some(AuditEventKind::ExecutorRespawnFromReviewRejection {
+                    task_id, ..
+                }) if task_id == self.executor_task_id
+                    && report.saw_reviewer_a =>
                 {
                     report.saw_executor_respawn = true;
                 }
@@ -250,6 +277,9 @@ mod tests {
         let event_kind = match &kind {
             AuditEventKind::IntentAccepted { .. } => "IntentAccepted",
             AuditEventKind::SessionVmSpawned { .. } => "SessionVmSpawned",
+            AuditEventKind::ExecutorRespawnFromReviewRejection { .. } => {
+                "ExecutorRespawnFromReviewRejection"
+            }
             AuditEventKind::ReviewAggregationCompleted { .. } => {
                 "ReviewAggregationCompleted"
             }
@@ -290,6 +320,21 @@ mod tests {
             egress_tier:        "Tier1Tproxy".to_owned(),
             admission_loopback: "127.0.0.1:0".to_owned(),
             credential_proxies: 0,
+        }, Some(task_id))
+    }
+
+    /// Fixture builder for the `ExecutorRespawnFromReviewRejection`
+    /// audit event the witness now matches on per
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. Synthesises
+    /// stable activation-id strings derived from `task_id` and the
+    /// chain seq so the witness's "second match" path (round-3 retry
+    /// on a still-disagreed task) sees distinct ids.
+    fn respawn_review(seq: u64, task_id: &str, review_reject_count: u32) -> AuditEvent {
+        ev(seq, AuditEventKind::ExecutorRespawnFromReviewRejection {
+            task_id:             task_id.to_owned(),
+            prior_activation_id: format!("prior-{task_id}-{seq}"),
+            new_activation_id:   format!("new-{task_id}-{seq}"),
+            review_reject_count,
         }, Some(task_id))
     }
 
@@ -337,7 +382,7 @@ mod tests {
     fn clean_chain() -> Vec<AuditEvent> {
         vec![
             submit_review_intent(0, TASK_REVIEW_LINT_A),
-            vm_spawn(1, "lint-defect"),
+            respawn_review(1, "lint-defect", 1),
             submit_review_intent(2, TASK_REVIEW_LINT_B),
             aggregation_pass(3, "lint-defect"),
         ]
@@ -384,15 +429,55 @@ mod tests {
         let w = witness(&db);
         let chain = vec![
             submit_review_intent(0, TASK_REVIEW_LINT_A),
-            // No vm_spawn — reviewer-B fires immediately.
-            submit_review_intent(1, TASK_REVIEW_LINT_B),
-            aggregation_pass(2, "lint-defect"),
+            // No `ExecutorRespawnFromReviewRejection` — reviewer-B
+            // fires immediately. A round-1 `SessionVmSpawned`
+            // (if present) does NOT satisfy the witness anymore;
+            // only the `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
+            // anchor counts.
+            vm_spawn(1, "lint-defect"),
+            submit_review_intent(2, TASK_REVIEW_LINT_B),
+            aggregation_pass(3, "lint-defect"),
         ];
         let report = w.evaluate(&chain);
         assert!(!report.is_pass());
         assert!(report.saw_reviewer_a);
-        assert!(!report.saw_executor_respawn);
+        assert!(!report.saw_executor_respawn,
+            "round-1 SessionVmSpawned alone must NOT satisfy \
+             saw_executor_respawn — only \
+             ExecutorRespawnFromReviewRejection does (INV-AUDIT-04 + \
+             INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01)");
         assert!(report.matched_basenames.contains(&"greet.ts"));
+    }
+
+    /// Regression guard: a round-1 `SessionVmSpawned` AND the
+    /// round-2 `ExecutorRespawnFromReviewRejection` must coexist
+    /// cleanly. The witness must lock onto the latter and ignore
+    /// the former.
+    #[test]
+    fn round_1_session_vm_spawn_does_not_mask_round_2_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = seed_tasks_db(tmp.path(), "lint-defect",
+            Some("rejected: greet.py adds an unused import"));
+        let w = witness(&db);
+        let chain = vec![
+            // Round-1: initial executor spawn fires SessionVmSpawned
+            // (does NOT satisfy the witness on its own).
+            vm_spawn(0, "lint-defect"),
+            // Round-1 review cycle.
+            submit_review_intent(1, TASK_REVIEW_LINT_A),
+            // Round-2 retry: the canonical chain anchor.
+            respawn_review(2, "lint-defect", 1),
+            // Round-2 review cycle.
+            submit_review_intent(3, TASK_REVIEW_LINT_B),
+            aggregation_pass(4, "lint-defect"),
+        ];
+        let report = w.evaluate(&chain);
+        assert!(report.is_pass(),
+            "round-1 spawn + round-2 retry-anchor chain must pass: {report:#?}");
+        assert!(report.saw_executor_respawn,
+            "ExecutorRespawnFromReviewRejection at seq=2 must drive \
+             saw_executor_respawn regardless of the earlier round-1 \
+             SessionVmSpawned at seq=0");
     }
 
     #[test]

@@ -193,6 +193,7 @@ pub fn notification_priority_for_kind_str(
         | "EscalationConsumed"
         | "WitnessAccepted"
         | "ReviewAggregationCompleted"
+        | "ExecutorRespawnFromReviewRejection"
         | "GitConsistencyRepaired"
         | "DryRunAdmitted"
         | "PathScopeOverrideApplied" => Some(Medium),
@@ -324,6 +325,16 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::EscalationConsumed { .. } => Some(Medium),
         K::WitnessAccepted { .. } => Some(Medium),
         K::ReviewAggregationCompleted { .. } => Some(Medium),
+        // `ExecutorRespawnFromReviewRejection` rides at Medium next to
+        // `ReviewAggregationCompleted` — the two events are paired
+        // chain anchors for a single Reviewer-rejection round
+        // (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`). Operators
+        // who watch the inbox for review-loop progression want both
+        // ends of the pair (the rejection verdict + the kernel-
+        // admitted retry); High would over-page on a normal
+        // multi-round disagreement, Low would hide a loop that's
+        // burning rounds against `max_review_rejections`.
+        K::ExecutorRespawnFromReviewRejection { .. } => Some(Medium),
         K::GitConsistencyRepaired { .. } => Some(Medium),
         K::DryRunAdmitted { .. } => Some(Medium),
         K::PathScopeOverrideApplied { .. } => Some(Medium),

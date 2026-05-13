@@ -2629,6 +2629,68 @@ The snapshot insert is part of the same store transaction as the `tasks.status =
 > and `kernel/src/initiatives/task_transitions.rs::transition_task_in_tx`
 > (the cross-call-site contract that keeps activation FSM in
 > lock-step with task FSM on every terminal edge).
+>
+> **Executor task-FSM independence from reviewer verdicts
+> (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).** The cascade
+> above stamps `activation_state = 'Completed'` + `terminated_at =
+> now` BEFORE any reviewer ever votes — the kernel does not gate
+> task completion on downstream review outcome (per
+> `paradigm.md §3.6` "the executor's task-FSM is independent of
+> downstream review verdicts"). Reviewer rejection is therefore
+> captured on a separate axis: the `subtask_activations.review_
+> reject_count INTEGER NOT NULL DEFAULT 0` column (shipped in
+> migration 0005). It is the canonical witness for the
+> reviewer-rejection retry path, with three load-bearing
+> properties:
+>
+>   1. **Bump site.** `increment_executor_review_reject_count`
+>      (`kernel/src/handlers/intent.rs`) bumps the column at the
+>      post-`SubmitReview` aggregator's
+>      terminal-`AtLeastOneRejected` branch — paired in the same
+>      SQLite transaction with the `ReviewAggregationCompleted`
+>      audit emission per `audit-paired-writes.md §4`. The
+>      target row is the LATEST `subtask_activations` row by
+>      `created_at` for the executor's `task_id`, regardless of
+>      `terminated_at` (the Completed cascade closed the row
+>      before the aggregator ran). Pre-fix, the helper filtered
+>      `WHERE terminated_at IS NULL` and the UPDATE matched zero
+>      rows, leaving the counter structurally dead — iter41
+>      reproduced this exact silent no-op.
+>
+>   2. **Retry precondition.** `handle_retry_sub_task` admits a
+>      `RetrySubTask` against a `Completed` prior activation IFF
+>      `review_reject_count > 0` (per
+>      `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` / Option A in
+>      `agent-disagreement.md §3.6`). A clean `Completed`
+>      activation with `review_reject_count = 0` is REJECTED with
+>      `FAIL_INVALID_REQUEST` — admitting it would let the
+>      orchestrator force a re-run of a successful task
+>      (paradigm-`R-6` Fail-Closed Default). The retry inserts a
+>      NEW `PendingActivation` row carrying the counter forward
+>      verbatim; the prior `Completed` row is NOT mutated (the FSM
+>      is forward-only — `Completed → Failed` backward
+>      transitions are forbidden, this is the load-bearing
+>      distinction from the rejected Option B in
+>      `agent-disagreement.md §3.6`).
+>
+>   3. **Audit anchor.** The retry path emits
+>      `AuditEventKind::ExecutorRespawnFromReviewRejection {
+>      task_id, prior_activation_id, new_activation_id,
+>      review_reject_count }` immediately after the new row is
+>      committed (paired post-commit per
+>      `audit-paired-writes.md §4`). The `review_reject_count`
+>      payload field is the value AT THE TIME THE RETRY WAS
+>      ADMITTED (carried forward from the prior row's column,
+>      NOT a fresh read against a possibly-mutated row), so a
+>      forensic replay against a chain-only archive (audit
+>      segment file + no SQLite) can reconstruct the
+>      `max_review_rejections` ceiling exactly.
+>
+> The `crash_retry_count INTEGER NOT NULL DEFAULT 0` column on
+> the same row is the analogous counter for the crash-retry path
+> (Step 12 of `v2-deep-spec.md`). The two counters do NOT share
+> a budget — `max_crash_retries` and `max_review_rejections`
+> are independent plan-level ceilings tunable per-task.
 
 ---
 

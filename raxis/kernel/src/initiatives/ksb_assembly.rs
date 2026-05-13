@@ -38,7 +38,7 @@ use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
 use raxis_ksb::{
-    CredentialPort, DagRow, KsbSnapshot, PendingEscalation,
+    CredentialPort, DagRow, KsbSnapshot, PendingEscalation, ReviewerVerdict,
     KSB_SCHEMA_VERSION,
 };
 use raxis_store::Table;
@@ -188,6 +188,31 @@ pub fn assemble_ksb_snapshot(
     // ── Pending escalations scoped to this initiative ────────────
     let pending_escalations = read_pending_escalations(conn, inputs.initiative_id)?;
 
+    // ── Reviewer verdicts scoped to this initiative ──────────────
+    //
+    // Closes `INV-PLANNER-ORCH-RETRY-ON-REJECT-01`
+    // (`specs/invariants.md §10`): the orchestrator NNSP directs
+    // the model to call `retry_subtask` whenever any
+    // `reviewer_verdicts=` row reads `approved=false`. That rule
+    // is dead-letter unless this projection actually populates
+    // the rows from the live store. The reviewer's own
+    // `tasks.review_verdict` (written by
+    // `review_aggregation::increment_executor_review_reject_count`
+    // post-`SubmitReview`) carries the per-Reviewer verdict; the
+    // executor's `tasks.last_critique` carries the concatenated
+    // formatted critiques (one per Reviewer per round). Executor
+    // sessions get an empty list — the executor's KSB has no DAG
+    // visibility per `KsbRole::Executor` matching above, and
+    // surfacing siblings' verdicts to a peer Executor would
+    // expose review state across DAG nodes the executor was not
+    // permitted to read.
+    let reviewer_verdicts = match inputs.role {
+        KsbRole::Executor => Vec::new(),
+        KsbRole::Reviewer | KsbRole::Orchestrator => {
+            read_reviewer_verdicts_for_initiative(conn, inputs.initiative_id)?
+        }
+    };
+
     // ── Initiative anchor `base_sha` ─────────────────────────────
     //
     // V2.5: every per-initiative session (orchestrator, executor,
@@ -219,11 +244,7 @@ pub fn assemble_ksb_snapshot(
         task_description,
         target_ref,
         base_sha,
-        // V3 placeholder. Wiring up the reviewer-verdict feed
-        // requires plumbing the witness-aggregation crate
-        // (`review_aggregation`) into this projection; left for the
-        // KSB v2 → v3 follow-up.
-        reviewer_verdicts:             Vec::new(),
+        reviewer_verdicts,
         pending_escalations,
         credential_ports:              inputs.credential_ports.clone(),
     })
@@ -319,6 +340,14 @@ fn read_dag_rows_for_initiative(
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Per-executor reviewer count comes from `task_dag_edges` joined
+    // against `plan_registry` for the successor's session_agent_type
+    // (a successor MAY be a downstream executor rather than a
+    // reviewer — we only count the latter, matching how the
+    // orchestrator-NNSP rule pivots on `reviewer_verdicts=`).
+    let reviewer_counts =
+        read_reviewer_counts_per_executor(conn, initiative_id, registry)?;
+
     Ok(rows.into_iter().map(|(task_id, state, evaluation_sha)| {
         let title = registry
             .get(&TaskKey::new(initiative_id.to_owned(), task_id.clone()))
@@ -326,18 +355,162 @@ fn read_dag_rows_for_initiative(
                 t.description.lines().next().unwrap_or("").to_owned()
             })
             .unwrap_or_default();
+        let reviewers: u32 = reviewer_counts
+            .get(task_id.as_str())
+            .copied()
+            .unwrap_or(0);
         DagRow {
             task_id,
             state: state.to_lowercase(),
             title,
-            // Reviewer count is V3 work — would require a join
-            // against `subtask_activations` filtered to reviewer
-            // sessions. Reported as `0` for now; the renderer
-            // tolerates this verbatim.
-            reviewers: 0,
+            reviewers,
             evaluation_sha: evaluation_sha.unwrap_or_default(),
         }
     }).collect())
+}
+
+/// Count the number of `Reviewer`-typed successors per executor task
+/// in the initiative. Used to populate `DagRow::reviewers` so the
+/// orchestrator can ground the `reviewer_verdicts=` block scan
+/// against the per-executor reviewer multiplicity.
+///
+/// The reviewer-vs-other classification is sourced from the plan
+/// registry (`session_agent_type` per `[[tasks]]`) — `task_dag_edges`
+/// alone does not encode role since executors can also depend on
+/// other executors.
+fn read_reviewer_counts_per_executor(
+    conn:          &Connection,
+    initiative_id: &str,
+    registry:      &PlanRegistry,
+) -> Result<std::collections::BTreeMap<String, u32>, rusqlite::Error> {
+    use raxis_types::SessionAgentType;
+    let sql = format!(
+        "SELECT predecessor_task_id, successor_task_id \
+           FROM {edges} \
+          WHERE initiative_id = ?1",
+        edges = Table::TaskDagEdges.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let edges = stmt
+        .query_map(rusqlite::params![initiative_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut counts: std::collections::BTreeMap<String, u32> =
+        std::collections::BTreeMap::new();
+    for (pred, succ) in edges {
+        let succ_role = registry
+            .get(&TaskKey::new(initiative_id.to_owned(), succ.clone()))
+            .map(|t| t.session_agent_type);
+        if matches!(succ_role, Some(SessionAgentType::Reviewer)) {
+            *counts.entry(pred).or_insert(0) += 1;
+        }
+    }
+    Ok(counts)
+}
+
+/// Project the per-Reviewer verdict feed for the initiative.
+///
+/// Closes `INV-PLANNER-ORCH-RETRY-ON-REJECT-01` (the orchestrator
+/// NNSP scans `reviewer_verdicts=` for `approved=false`; that scan
+/// is meaningful only when the kernel populates the block from
+/// live `tasks.review_verdict` data).
+///
+/// **Source of truth.** `handle_submit_review`'s post-commit
+/// branch writes to two columns:
+///
+///   * `tasks.review_verdict` on the **reviewer**'s row — the
+///     per-Reviewer verdict (`Approved` / `Rejected`); written by
+///     the `SubmitReview` handler. NULL until the reviewer votes.
+///   * `tasks.last_critique` on the **executor predecessor**'s
+///     row — the concatenated formatted critiques
+///     (`[Reviewer <id>]: <text>\n\n` per submission, per Step 22
+///     of the v2-deep-spec). Empty until at least one rejection.
+///
+/// The renderer joins these via `task_dag_edges` (reviewer →
+/// executor predecessor) so each rendered `reviewer_verdicts=`
+/// row carries the executor's `evaluation_sha` (the SHA the
+/// reviewer voted against). Reviewer rows whose `review_verdict`
+/// is still NULL are omitted (no signal yet) so the orchestrator
+/// does not over-trigger retry on stale state.
+///
+/// Critique extraction parses the executor's
+/// `last_critique` looking for the `[Reviewer <reviewer_task_id>]: `
+/// prefix — fail-soft (empty critique on parse miss) so a malformed
+/// critique payload never breaks the projection. The KSB renderer
+/// (`crates/ksb/src/lib.rs`) tolerates an empty critique field by
+/// rendering `""` verbatim.
+fn read_reviewer_verdicts_for_initiative(
+    conn:          &Connection,
+    initiative_id: &str,
+) -> Result<Vec<ReviewerVerdict>, rusqlite::Error> {
+    // Single SQL query: every Reviewer task with a non-NULL
+    // `review_verdict` joined against its executor predecessor's
+    // evaluation_sha + last_critique. We rely on `task_dag_edges`
+    // to map reviewer → executor; a reviewer with multiple
+    // executor predecessors is exotic enough (the realistic plan
+    // is the 1:1 case) that we include one row per (reviewer,
+    // predecessor) pair — the renderer handles duplicates
+    // verbatim and the orchestrator's `approved=false` scan is
+    // monotone.
+    let sql = format!(
+        "SELECT
+             rev.task_id           AS reviewer_task_id,
+             rev.review_verdict    AS verdict,
+             COALESCE(exe.evaluation_sha, '')  AS exec_sha,
+             COALESCE(exe.last_critique, '')   AS exec_last_critique
+           FROM {tasks} rev
+           JOIN {edges} edge ON edge.successor_task_id = rev.task_id
+                            AND edge.initiative_id   = rev.initiative_id
+           JOIN {tasks} exe  ON exe.task_id        = edge.predecessor_task_id
+                            AND exe.initiative_id  = rev.initiative_id
+          WHERE rev.initiative_id  = ?1
+            AND rev.review_verdict IS NOT NULL
+          ORDER BY rev.task_id ASC, exe.task_id ASC",
+        tasks = Table::Tasks.as_str(),
+        edges = Table::TaskDagEdges.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params![initiative_id], |r| {
+            let reviewer_task_id: String = r.get(0)?;
+            let verdict:          String = r.get(1)?;
+            let evaluation_sha:   String = r.get(2)?;
+            let last_critique:    String = r.get(3)?;
+            Ok(ReviewerVerdict {
+                approved: verdict.eq_ignore_ascii_case("Approved"),
+                critique: extract_critique_for_reviewer(
+                    &last_critique,
+                    &reviewer_task_id,
+                ),
+                reviewer_task_id,
+                evaluation_sha,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Extract one Reviewer's critique from the executor's
+/// concatenated `last_critique` field. The format is per
+/// `handle_submit_review` Step 22 — each submission appends
+/// `"[Reviewer <reviewer_task_id>]: <critique>\n\n"`. Returns the
+/// most recent matching critique (i.e. the last segment with the
+/// matching prefix), or empty string when no segment matches —
+/// fail-soft so a parse miss does not break the KSB projection.
+fn extract_critique_for_reviewer(
+    last_critique:     &str,
+    reviewer_task_id:  &str,
+) -> String {
+    let prefix = format!("[Reviewer {reviewer_task_id}]: ");
+    let mut latest: Option<&str> = None;
+    for segment in last_critique.split("\n\n") {
+        if let Some(rest) = segment.strip_prefix(&prefix) {
+            latest = Some(rest);
+        }
+    }
+    latest.unwrap_or("").to_owned()
 }
 
 fn read_pending_escalations(
@@ -567,6 +740,133 @@ mod tests {
         assert!(snap.task_description.len() <= TASK_DESCRIPTION_MAX_BYTES,
             "oversized description MUST be truncated to TASK_DESCRIPTION_MAX_BYTES, \
              got len={}", snap.task_description.len());
+    }
+
+    /// Closes `INV-PLANNER-ORCH-RETRY-ON-REJECT-01`: the orchestrator
+    /// KSB MUST surface per-Reviewer verdicts so the orchestrator NNSP
+    /// can scan `reviewer_verdicts=` for `approved=false` and trigger
+    /// `retry_subtask`. Iter42 reproduced the kernel-side gap (the
+    /// projection was hard-coded to `Vec::new()`) directly: the
+    /// orchestrator never saw the rejection signal because the kernel
+    /// never populated the block, even though the data was present
+    /// on `tasks.review_verdict`.
+    #[test]
+    fn assemble_orchestrator_snapshot_populates_reviewer_verdicts_from_store() {
+        use raxis_types::SessionAgentType;
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-realistic";
+        let exec = "lint-defect";
+        let rev_a = "review-lint-defect-A";
+        let rev_b = "review-lint-defect-B";
+
+        registry.insert_orchestrator(init.to_owned(), OrchestratorPlanFields {
+            cross_cutting_artifacts: vec![],
+            description:             "drive lint-defect to merge".to_owned(),
+            target_ref:              "refs/heads/main".to_owned(),
+            elastic:                 None,
+        });
+        registry.insert(TaskKey::new(init.to_owned(), exec.to_owned()),
+            TaskPlanFields {
+                description:        "introduce one lint defect".to_owned(),
+                session_agent_type: SessionAgentType::Executor,
+                ..Default::default()
+            });
+        registry.insert(TaskKey::new(init.to_owned(), rev_a.to_owned()),
+            TaskPlanFields {
+                description:        "Reviewer A".to_owned(),
+                session_agent_type: SessionAgentType::Reviewer,
+                ..Default::default()
+            });
+        registry.insert(TaskKey::new(init.to_owned(), rev_b.to_owned()),
+            TaskPlanFields {
+                description:        "Reviewer B".to_owned(),
+                session_agent_type: SessionAgentType::Reviewer,
+                ..Default::default()
+            });
+
+        // Seed the store directly with the rows the verdict-feed
+        // projection joins against. We bypass the full intent
+        // pipeline (lifecycle / submit_review handlers) — the
+        // assertion is on the projection's read path, not the
+        // upstream writers.
+        let conn = store.lock_sync();
+        let exec_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        for (tid, role, verdict) in &[
+            (exec,  "Executor", None::<&str>),
+            (rev_a, "Reviewer", Some("Approved")),
+            (rev_b, "Reviewer", Some("Rejected")),
+        ] {
+            conn.execute(
+                "INSERT INTO tasks (
+                     task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     evaluation_sha, last_critique, review_verdict
+                 ) VALUES (?1, ?2, 'default', 'Completed', 'op',
+                           0, 0, 0, ?3, ?4, ?5)",
+                rusqlite::params![
+                    tid, init,
+                    if *role == "Executor" { Some(exec_sha) } else { None },
+                    if *role == "Executor" {
+                        Some("[Reviewer review-lint-defect-A]: ok\n\n[Reviewer review-lint-defect-B]: REJECTION: greeting.rs introduces clippy::useless_conversion\n\n")
+                    } else { None },
+                    *verdict,
+                ],
+            ).expect("insert task");
+        }
+        for rev in &[rev_a, rev_b] {
+            conn.execute(
+                "INSERT INTO task_dag_edges (
+                    initiative_id, predecessor_task_id, successor_task_id,
+                    predecessor_satisfied
+                 ) VALUES (?1, ?2, ?3, 1)",
+                rusqlite::params![init, exec, rev],
+            ).expect("insert dag edge");
+        }
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &*conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id:       None,
+                role:          KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+            },
+        ).expect("assemble orchestrator snapshot");
+        drop(conn);
+
+        // Reviewer-verdict projection MUST surface both Reviewers'
+        // verdicts against the executor's evaluation_sha.
+        assert_eq!(snap.reviewer_verdicts.len(), 2,
+            "orchestrator KSB MUST carry one row per voted Reviewer; got: {:?}",
+            snap.reviewer_verdicts);
+        let rev_a_row = snap.reviewer_verdicts.iter()
+            .find(|v| v.reviewer_task_id == rev_a)
+            .expect("reviewer A row present");
+        let rev_b_row = snap.reviewer_verdicts.iter()
+            .find(|v| v.reviewer_task_id == rev_b)
+            .expect("reviewer B row present");
+        assert!(rev_a_row.approved, "Reviewer A must read approved=true");
+        assert!(!rev_b_row.approved, "Reviewer B must read approved=false");
+        assert_eq!(rev_a_row.evaluation_sha, exec_sha,
+            "reviewer evaluation_sha MUST mirror the executor predecessor's");
+        assert_eq!(rev_b_row.evaluation_sha, exec_sha);
+        assert!(rev_b_row.critique.contains("greeting.rs"),
+            "Reviewer B's critique MUST be parsed from the executor's last_critique");
+
+        // dag_rows MUST report 2 reviewers attached to lint-defect
+        // (neither sibling executor nor non-reviewer downstream
+        // would otherwise inflate the count).
+        let lint_row = snap.dag_rows.iter()
+            .find(|r| r.task_id == exec)
+            .expect("lint-defect dag row present");
+        assert_eq!(lint_row.reviewers, 2,
+            "lint-defect MUST surface its reviewer multiplicity in dag_rows");
     }
 
     #[test]

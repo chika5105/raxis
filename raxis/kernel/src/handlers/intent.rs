@@ -2427,48 +2427,76 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 // is responsible for not double-submitting the same verdict.
 // ---------------------------------------------------------------------------
 
-/// V2 §Step 25 — bump the Executor's *current* (terminated_at IS NULL)
-/// `subtask_activations.review_reject_count` by one.
+/// V2 §Step 25 + `agent-disagreement.md §3.6` — bump the Executor's
+/// MOST-RECENT `subtask_activations.review_reject_count` by one.
 ///
 /// Called from the [`handle_submit_review`] post-commit aggregation
 /// loop exactly once per terminal-rejected round (the aggregator
 /// emits `AtLeastOneRejected` once when the last sibling Reviewer
 /// votes; per-Reviewer increments would multiply the count and make
 /// `max_review_rejections` ceilings effectively N× too tight). The
-/// returned `Result` is fail-soft at the call site — the counter
-/// is internal accounting, not on the audit path.
+/// returned affected-row count is the inspection point for the
+/// call site — `Ok(1)` is the expected happy path, `Ok(0)` means
+/// the Executor activation row vanished mid-flight (a recovery
+/// sweep that's about to re-emit the aggregator, or an aborted
+/// initiative) and the bump is a forensic no-op.
 ///
-/// **Why scope to `terminated_at IS NULL`.** A given Executor task
-/// can have several historical activation rows (one per retry
-/// round — `handle_retry_sub_task` inserts a NEW
-/// `PendingActivation` row per V2 §Step 12 rather than mutating the
-/// prior one). The counter we want to bump is the *active* one —
-/// the row whose session is still bound — which by construction is
-/// the only row with a NULL `terminated_at`. Bumping a terminated
-/// row would double-count history and skew the ceiling check.
+/// **Why MOST-RECENT, not `terminated_at IS NULL` (iter41 bug
+/// fix).** The original `terminated_at IS NULL` filter was inert
+/// for the Reviewer-rejection path: per
+/// `kernel/src/initiatives/task_transitions.rs`, the Executor's
+/// `CompleteTask` cascades the activation row's `terminated_at`
+/// to `now` and `activation_state` to `'Completed'` BEFORE any
+/// Reviewer ever runs. By the time the aggregator's
+/// terminal-`AtLeastOneRejected` branch fires (post-`SubmitReview`),
+/// every activation row for the Executor has a non-NULL
+/// `terminated_at`, so the UPDATE matched zero rows and the
+/// counter never advanced — `max_review_rejections` was
+/// structurally dead and `handle_retry_sub_task`'s ceiling check
+/// silently passed through every retry. iter41 reproduced this
+/// exactly: `subtask_activations.review_reject_count = 0` on
+/// `lint-defect` after both reviewers rejected.
 ///
-/// **Atomicity.** Single `UPDATE ... SET review_reject_count =
-/// review_reject_count + 1` in its own transaction. Concurrent
-/// reviewers cannot race here because the aggregator's
-/// terminal-rejected branch fires once per round (when the last
-/// Pending vote becomes non-Pending), and `handle_submit_review`
-/// itself is serialised by the per-session sequence-number gate
-/// (INV-01).
+/// The corrected SQL selects the row with the latest `created_at`
+/// — the only row that represents the round just rejected. After
+/// a [`handle_retry_sub_task`] insert the next-round
+/// `PendingActivation` row becomes the most-recent, so a
+/// subsequent rejection in that round bumps the new row's
+/// counter, NOT the prior round's. Both rows coexist (per
+/// Option A in `agent-disagreement.md §3.6`); the `review_reject_
+/// count` is denormalised: each row's column is the per-round
+/// count, but `handle_retry_sub_task` carries the value forward
+/// at admission so the ceiling check observes the cumulative.
+///
+/// **Atomicity.** Single `UPDATE` targeting the row whose
+/// `activation_id` matches a `(SELECT activation_id ... ORDER BY
+/// created_at DESC LIMIT 1)` subquery, executed in the supplied
+/// transaction so the bump is paired with the post-commit audit
+/// emission in [`handle_submit_review`] per
+/// `audit-paired-writes.md §4`. Concurrent reviewers cannot race
+/// because the aggregator's terminal-rejected branch fires once
+/// per round (when the last Pending vote becomes non-Pending),
+/// and `handle_submit_review` itself is serialised by the
+/// per-session sequence-number gate (INV-01).
 fn increment_executor_review_reject_count(
     executor_task_id: &str,
     store:            &Store,
-) -> Result<(), rusqlite::Error> {
+) -> Result<usize, rusqlite::Error> {
     let conn = store.lock_sync();
-    conn.execute(
+    let affected = conn.execute(
         &format!(
             "UPDATE {SUBTASK_ACTIVATIONS}
                 SET review_reject_count = review_reject_count + 1
-              WHERE task_id        = ?1
-                AND terminated_at IS NULL"
+              WHERE activation_id = (
+                  SELECT activation_id FROM {SUBTASK_ACTIVATIONS}
+                   WHERE task_id = ?1
+                   ORDER BY created_at DESC
+                   LIMIT 1
+              )"
         ),
         rusqlite::params![executor_task_id],
     )?;
-    Ok(())
+    Ok(affected)
 }
 
 /// V2 §Step 12 — bump the executor's *current* (`terminated_at IS NULL`)
@@ -2996,16 +3024,34 @@ fn handle_submit_review(
             outcome.verdict,
             crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected,
         ) {
-            if let Err(e) = increment_executor_review_reject_count(
+            match increment_executor_review_reject_count(
                 predecessor.as_str(), store,
             ) {
-                eprintln!(
-                    "{{\"level\":\"warn\",\
-                     \"event\":\"ReviewRejectCounterIncrementFailed\",\
-                     \"executor_task_id\":\"{predecessor}\",\
-                     \"reviewer_task_id\":\"{reviewer_task_id}\",\
-                     \"error\":\"{e}\"}}",
-                );
+                Ok(0) => {
+                    // The Executor's activation row vanished between
+                    // the aggregator's read and this bump — a recovery
+                    // sweep that's about to re-emit, an aborted
+                    // initiative, or a malformed plan whose
+                    // `task_dag_edges` advertised a non-existent
+                    // predecessor. Forensic-only log; the audit row
+                    // below still carries the verdict for replay.
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"ReviewRejectCounterBumpMissedRow\",\
+                         \"executor_task_id\":\"{predecessor}\",\
+                         \"reviewer_task_id\":\"{reviewer_task_id}\"}}",
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"ReviewRejectCounterIncrementFailed\",\
+                         \"executor_task_id\":\"{predecessor}\",\
+                         \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                         \"error\":\"{e}\"}}",
+                    );
+                }
             }
         }
 
@@ -4794,6 +4840,13 @@ async fn handle_retry_sub_task(
         new_activation_id:      String,
         crash_retry_count:      i64,
         review_reject_count:    i64,
+        /// `true` iff the retry was admitted via the
+        /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
+        /// `Completed + review_reject_count > 0` branch (vs. the
+        /// classic `prior_state = 'Failed'` crash-retry path).
+        /// Drives the post-commit
+        /// `ExecutorRespawnFromReviewRejection` audit emission.
+        from_review_rejection:  bool,
     }
 
     let decision: RetryDecision = {
@@ -4830,12 +4883,59 @@ async fn handle_retry_sub_task(
                 None    => return Err((PlannerErrorCode::FailUnknownTask,
                                        TaskState::Admitted)),
             };
-            if prior_state != "Failed" {
+            // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` —
+            // `agent-disagreement.md §3.6` Option A.
+            //
+            // Two retry-eligibility classes are admitted:
+            //
+            //   * `prior_state == "Failed"` — the classic crash /
+            //     `ReportFailure` path. The Executor's activation
+            //     row was closed to `Failed` by the
+            //     `transition_task_in_tx` cascade and the orchestrator
+            //     is asking for a fresh round per V2 §Step 12.
+            //
+            //   * `prior_state == "Completed"` AND
+            //     `review_reject_count > 0` — the Reviewer-rejection
+            //     path. The Executor's task-FSM stayed `Completed`
+            //     by design (`kernel-store.md §2.5.1`: the executor
+            //     task-FSM is independent of downstream review
+            //     verdicts). The counter, bumped in
+            //     `increment_executor_review_reject_count` at the
+            //     terminal-`AtLeastOneRejected` aggregator branch,
+            //     is the canonical retry-eligibility witness — it
+            //     proves a Reviewer rejected this round AND
+            //     proves the prior `Completed` is NOT a clean
+            //     completion the orchestrator is illegally trying
+            //     to "redo".
+            //
+            // The Option-B alternative (transition activation
+            // `Completed → Failed` on rejection) was rejected:
+            // it (1) violates the forward-only FSM contract in
+            // `agent-disagreement.md §3.6`'s decision rationale,
+            // (2) overloads the `Failed` semantic ("executor
+            // reported failure" vs "reviewers rejected"), and
+            // (3) makes dashboard counts flap because the
+            // executor activation transitions backward on every
+            // rejection round. See `specs/invariants.md
+            // INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` for
+            // the full alternatives analysis.
+            //
+            // The negative-case regression is pinned by
+            // `handle_retry_sub_task` unit test
+            // `retry_from_completed_without_review_rejection_is_rejected`
+            // below — a `Completed` activation with
+            // `review_reject_count = 0` MUST be rejected with
+            // `FAIL_INVALID_REQUEST` so accidental "retry a
+            // successful task" intents stay closed off.
+            let allow_from_completed_review_rejection =
+                prior_state == "Completed" && review_reject_count > 0;
+            if prior_state != "Failed" && !allow_from_completed_review_rejection {
                 eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"RetrySubTaskRejectedNotFailed\",\
+                    "{{\"level\":\"warn\",\"event\":\"RetrySubTaskRejectedNotRetryable\",\
                      \"task_id\":\"{task_id_clone}\",\
                      \"prior_activation_id\":\"{prior_activation_id}\",\
-                     \"prior_state\":\"{prior_state}\"}}",
+                     \"prior_state\":\"{prior_state}\",\
+                     \"review_reject_count\":{review_reject_count}}}",
                 );
                 return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
             }
@@ -4965,6 +5065,7 @@ async fn handle_retry_sub_task(
                 new_activation_id,
                 crash_retry_count,
                 review_reject_count,
+                from_review_rejection: allow_from_completed_review_rejection,
             })
         })
         .await
@@ -5094,6 +5195,53 @@ async fn handle_retry_sub_task(
                  \"task_id\":\"{}\",\"prior_session_id\":\"{}\",\
                  \"error\":\"{e}\"}}",
                 task_id_owned, prior_sid,
+            );
+        }
+    }
+
+    // ── Step 5b: chain-side anchor for the Option-A retry path. ───────
+    //
+    // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` /
+    // `agent-disagreement.md §3.6` — when the retry was admitted via
+    // the Reviewer-rejection branch (prior_state == "Completed" AND
+    // review_reject_count > 0), emit the `ExecutorRespawnFromReview-
+    // Rejection` event so a chain-only forensic replay can
+    // disambiguate retry-after-review from retry-after-crash without
+    // joining `subtask_activations`. The crash-retry path
+    // (`prior_state = 'Failed'`) does NOT fire this event; the
+    // preceding `TaskStateChanged { state: Failed }` is its anchor.
+    //
+    // The `review_reject_count` payload is the value carried into
+    // the new activation row (Step 2d insert; the value was
+    // forwarded verbatim from the prior row's column). It is the
+    // round number of the rejection that drove this retry, NOT a
+    // post-bump value — the bump happened earlier in the
+    // aggregator at `handle_submit_review`'s
+    // terminal-`AtLeastOneRejected` branch.
+    if decision.from_review_rejection {
+        let review_reject_count_u32 =
+            u32::try_from(decision.review_reject_count).unwrap_or(u32::MAX);
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection {
+                task_id:             task_id_owned.clone(),
+                prior_activation_id: decision.prior_activation_id.clone(),
+                new_activation_id:   decision.new_activation_id.clone(),
+                review_reject_count: review_reject_count_u32,
+            },
+            Some(session_id.as_str()),
+            Some(task_id_owned.as_str()),
+            Some(initiative_id.as_str()),
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"ExecutorRespawnFromReviewRejectionAuditEmitFailed\",\
+                 \"task_id\":\"{}\",\"prior_activation_id\":\"{}\",\
+                 \"new_activation_id\":\"{}\",\"review_reject_count\":{},\
+                 \"error\":\"{e}\"}}",
+                task_id_owned,
+                decision.prior_activation_id,
+                decision.new_activation_id,
+                decision.review_reject_count,
             );
         }
     }
@@ -8553,6 +8701,104 @@ mod tests {
         prior_activation_id
     }
 
+    /// Companion to [`seed_failed_executor_for_retry`] for the
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` (Option A)
+    /// path: seed an Executor whose activation is `Completed`
+    /// (not `Failed`) with the supplied counters. The task FSM
+    /// stays `Completed` (per `kernel-store.md §2.5.1` — the
+    /// executor task-FSM is independent of downstream review
+    /// verdicts), the activation row is closed with
+    /// `terminated_at = now - 60s` (mirroring the cascade in
+    /// `transition_task_in_tx`), and no session row is seeded
+    /// because the prior session has already been revoked by the
+    /// `CompleteTask` cascade in the production flow.
+    ///
+    /// `review_count = 0` is the regression-guard case: a clean
+    /// `Completed` activation without any reviewer rejections —
+    /// the retry handler MUST reject this with `INVALID_REQUEST`
+    /// so an accidental "retry a successful task" intent stays
+    /// closed off.
+    fn seed_completed_review_rejected_executor_for_retry(
+        store:           &Store,
+        registry:        &crate::initiatives::PlanRegistry,
+        task_id:         &str,
+        review_count:    u32,
+        max_review:      Option<u32>,
+    ) -> String {
+        let initiative_id = "init-retry";
+        let conn = store.lock_sync();
+        let now_real    = unix_now_secs();
+        let prior_now   = now_real.saturating_sub(60);
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![
+                initiative_id,
+                InitiativeState::Executing.as_sql_str(),
+                prior_now,
+            ],
+        ).unwrap();
+        // Task row in `Completed` — the executor task-FSM stays
+        // Completed regardless of review verdict (Option-A semantic
+        // anchor). The retry handler resets it back to `Admitted`
+        // so the next `ActivateSubTask` is dispatch-legal.
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     actual_cost)
+                 VALUES (?1, ?2, 'default', ?3, 'kernel', 1, ?4, ?4, 0)"
+            ),
+            rusqlite::params![
+                task_id,
+                initiative_id,
+                TaskState::Completed.as_sql_str(),
+                prior_now,
+            ],
+        ).unwrap();
+        let prior_activation_id = uuid::Uuid::new_v4().to_string();
+        // `Completed` activation row — both timestamps populated;
+        // `session_id` NULL because the cascade revokes the prior
+        // session at terminal-task-transition time, so by the time
+        // the Reviewer aggregator runs no live session is bound.
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS}
+                    (activation_id, task_id, initiative_id,
+                     activation_state, session_id, evaluation_sha,
+                     crash_retry_count, review_reject_count,
+                     created_at, activated_at, terminated_at)
+                 VALUES (?1, ?2, ?3, 'Completed', NULL, NULL,
+                         0, ?4, ?5, ?5, ?5)"
+            ),
+            rusqlite::params![
+                prior_activation_id,
+                task_id,
+                initiative_id,
+                review_count as i64,
+                prior_now,
+            ],
+        ).unwrap();
+        drop(conn);
+        registry.insert(
+            crate::initiatives::plan_registry::TaskKey::new(
+                initiative_id, task_id,
+            ),
+            crate::initiatives::plan_registry::TaskPlanFields {
+                description:           "completed-review-rejected fixture".to_owned(),
+                max_crash_retries:     None,
+                max_review_rejections: max_review,
+                ..Default::default()
+            },
+        );
+        prior_activation_id
+    }
+
     /// Build a minimal `IntentRequest` for `RetrySubTask`. All
     /// non-relevant fields receive deterministic placeholders that
     /// the handler ignores.
@@ -9025,6 +9271,311 @@ mod tests {
             "the registry-miss arm surfaces as FAIL_UNKNOWN_TASK \
              (the operator-facing handle for 'this task is not \
              tracked' — defense-in-depth against fail-open)");
+    }
+
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` — Option A
+    /// happy path. The Executor's activation is `Completed`
+    /// (cascaded from `CompleteTask`), `review_reject_count > 0`
+    /// (the post-`SubmitReview` aggregator bumped it on
+    /// terminal-`AtLeastOneRejected`), and the orchestrator is
+    /// now asking for a fresh round. The handler MUST:
+    ///
+    ///   * admit the retry (no `prior_state != "Failed"` rejection);
+    ///   * insert a new `PendingActivation` row carrying the prior
+    ///     `review_reject_count` forward verbatim (the FSM is
+    ///     forward-only; both rows coexist per Option A);
+    ///   * reset `tasks.state` to `Admitted` so the subsequent
+    ///     `ActivateSubTask` is dispatch-legal;
+    ///   * emit `ExecutorRespawnFromReviewRejection` to the audit
+    ///     chain as the canonical anchor (witnesses match on this
+    ///     event, NOT on the more-generic `SessionVmSpawned`).
+    ///
+    /// The negative-case regression is pinned by
+    /// [`retry_from_completed_without_review_rejection_is_rejected`].
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_from_completed_with_review_rejection_admits_and_emits_audit() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        let prior_activation_id = tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            seed_completed_review_rejected_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-completed-rejected",
+                /*review_count*/ 1,
+                /*max_review*/  Some(3),
+            )
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-completed-rejected", 1);
+        let resp = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect(
+            "Completed activation + review_reject_count > 0 \
+             must admit the retry per Option A",
+        );
+        assert_eq!(resp.task_state, TaskState::Admitted);
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+
+        let activations = read_activations(
+            store.clone(), "exe-completed-rejected",
+        ).await;
+        assert_eq!(activations.len(), 2,
+            "retry-from-Completed MUST insert a new row, leaving \
+             the prior Completed row immutable (FSM forward-only)");
+        assert_eq!(activations[0].0, prior_activation_id);
+        assert_eq!(activations[0].1, "Completed",
+            "prior row state MUST remain Completed — Option A \
+             explicitly forbids the backward Completed → Failed \
+             transition that Option B would have required");
+        assert_eq!(activations[1].1, "PendingActivation",
+            "new row state MUST be PendingActivation (the spawn \
+             handoff lands on `ActivateSubTask`)");
+        assert!(activations[1].2.is_none(),
+            "new PendingActivation row MUST have NULL session_id");
+        assert_eq!(activations[1].4, 1,
+            "new row MUST carry review_reject_count = 1 forward \
+             from the prior row (the counter is denormalised; \
+             handle_retry_sub_task itself does NOT bump)");
+
+        // Audit anchor — the new event variant the witness matches
+        // on. Distinct from `SessionVmSpawned` (which fires on EVERY
+        // PendingActivation → Active transition, including round-1
+        // spawn — so a witness using `SessionVmSpawned` alone could
+        // not distinguish first-spawn from retry-spawn without a
+        // SQLite join, violating INV-AUDIT-04). Pin both the
+        // variant tag AND the payload shape so a future refactor
+        // that renames the event silently breaks here.
+        let events = sink.events();
+        let respawn = events.iter().find(|e| matches!(
+            &e.kind,
+            raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection { .. },
+        )).expect(
+            "Option-A retry path MUST emit \
+             ExecutorRespawnFromReviewRejection — without this anchor \
+             the realistic-scenario witness cannot disambiguate \
+             retry-after-review from retry-after-crash",
+        );
+        match &respawn.kind {
+            raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection {
+                task_id, prior_activation_id: ev_prior, new_activation_id: ev_new,
+                review_reject_count,
+            } => {
+                assert_eq!(task_id, "exe-completed-rejected");
+                assert_eq!(ev_prior, &prior_activation_id,
+                    "audit payload MUST quote the actual prior activation id, \
+                     not a fresh uuid — forensic replay relies on it");
+                assert_eq!(ev_new, &activations[1].0,
+                    "audit payload MUST quote the activation_id of the new \
+                     PendingActivation row");
+                assert_eq!(*review_reject_count, 1,
+                    "audit payload MUST carry the round-of-rejection counter \
+                     (the value at admission time, not post-bump)");
+            }
+            _ => unreachable!(),
+        }
+
+        // The crash-retry-only `SessionRevoked` audit event must NOT
+        // fire on the Option-A path because no prior session was
+        // bound (the cascade revoked it at `CompleteTask` time, so
+        // `prior_session_id` is `None` in the activation row).
+        // Defensive pin: a future refactor that conflates the two
+        // paths and tries to revoke a phantom session would silently
+        // emit a `SessionRevoked` event for `NULL`-session and
+        // surface as audit-chain noise; this assertion catches it.
+        assert!(
+            !events.iter().any(|e| matches!(
+                &e.kind,
+                raxis_audit_tools::AuditEventKind::SessionRevoked { .. },
+            )),
+            "Option-A path with no prior session MUST NOT emit \
+             SessionRevoked",
+        );
+    }
+
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` — negative
+    /// regression guard. A `Completed` activation with
+    /// `review_reject_count = 0` represents a clean completion
+    /// (no reviewer ever rejected); admitting a retry here would
+    /// let the orchestrator force a re-run of a successful task
+    /// against the operator's intent — a paradigm-R-6
+    /// (Fail-Closed Default) violation. The handler MUST reject
+    /// with `INVALID_REQUEST` — the same wire surface as the
+    /// other non-Failed prior states.
+    ///
+    /// Without this guard a future regression that drops the
+    /// `review_reject_count > 0` half of the precondition would
+    /// silently widen the retry budget by an unbounded factor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_from_completed_without_review_rejection_is_rejected() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            seed_completed_review_rejected_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-completed-clean",
+                /*review_count*/ 0,
+                /*max_review*/  Some(3),
+            );
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-completed-clean", 1);
+        let err = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect_err(
+            "retry from clean Completed (review_reject_count = 0) \
+             MUST be rejected — Option A only relaxes the precondition \
+             when a Reviewer has actually rejected the round",
+        );
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+            "wire surface: FAIL_INVALID_REQUEST (the same code as \
+             a retry against an Active or PendingActivation prior row \
+             — Option A is strictly additive, never widens the \
+             coarse code set)");
+
+        assert_eq!(
+            read_activations(store.clone(), "exe-completed-clean").await.len(),
+            1,
+            "rejected retry MUST NOT insert a new activation row",
+        );
+    }
+
+    /// Counter-no-op regression guard (the iter41 silent-bug fix).
+    /// `increment_executor_review_reject_count` MUST target the
+    /// MOST-RECENT activation row regardless of `terminated_at`
+    /// — the pre-fix `WHERE terminated_at IS NULL` filter matched
+    /// zero rows once the `CompleteTask` cascade closed the row,
+    /// so the counter never advanced and `max_review_rejections`
+    /// was structurally dead. This test seeds exactly the iter41
+    /// shape (a single `Completed` activation with
+    /// `terminated_at` populated) and asserts the bump succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn increment_review_reject_count_bumps_most_recent_terminated_row() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (_ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_completed_review_rejected_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-bump", /*review*/ 0, /*max_review*/ Some(3),
+            );
+        }).await.unwrap();
+
+        let store_for_bump = store.clone();
+        let affected = tokio::task::spawn_blocking(move || {
+            increment_executor_review_reject_count(
+                "exe-bump", store_for_bump.as_ref(),
+            )
+        }).await.unwrap().expect("bump SQL must succeed");
+        assert_eq!(affected, 1,
+            "the MOST-RECENT activation row (Completed with non-NULL \
+             terminated_at) MUST be the bump target — the pre-fix \
+             `terminated_at IS NULL` filter would have returned 0");
+
+        let activations = read_activations(store.clone(), "exe-bump").await;
+        assert_eq!(activations.len(), 1);
+        assert_eq!(activations[0].1, "Completed",
+            "the bump MUST NOT mutate activation_state — only the \
+             counter column moves (Option A: forward-only FSM)");
+        assert_eq!(activations[0].4, 1,
+            "review_reject_count MUST be 1 after the bump");
+
+        // Idempotency-of-shape check: a second bump (representing
+        // a second round of rejection on the same activation —
+        // unusual but allowed by the SQL) must advance the counter
+        // by exactly 1 more.
+        let store_for_bump2 = store.clone();
+        let affected2 = tokio::task::spawn_blocking(move || {
+            increment_executor_review_reject_count(
+                "exe-bump", store_for_bump2.as_ref(),
+            )
+        }).await.unwrap().expect("second bump SQL must succeed");
+        assert_eq!(affected2, 1);
+        assert_eq!(
+            read_activations(store.clone(), "exe-bump").await[0].4,
+            2,
+        );
+    }
+
+    /// Counter-no-op regression guard — multi-activation variant.
+    /// When two activation rows exist for the same `task_id` (a
+    /// prior Completed round-1 + a new PendingActivation round-2
+    /// from `handle_retry_sub_task`), the bump MUST target the
+    /// round-2 row (latest `created_at`), NOT the historical
+    /// round-1 row. This pins the "per-round counter" semantic
+    /// documented on `increment_executor_review_reject_count`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn increment_review_reject_count_targets_latest_when_multiple_rows() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (_ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        let (round1_id, round2_id) = tokio::task::spawn_blocking(move || {
+            let r1 = seed_completed_review_rejected_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-two-rounds",
+                /*review_count*/ 1, // round-1 already rejected
+                /*max_review*/  Some(5),
+            );
+            // Manually insert a round-2 PendingActivation row with
+            // a strictly-later `created_at` so the SELECT-by-
+            // most-recent finds it. In production this is the
+            // insert in `handle_retry_sub_task` Step 2d.
+            let conn = store_for_seed.lock_sync();
+            let r2 = uuid::Uuid::new_v4().to_string();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SUBTASK_ACTIVATIONS}
+                        (activation_id, task_id, initiative_id,
+                         activation_state, session_id, evaluation_sha,
+                         crash_retry_count, review_reject_count,
+                         created_at, activated_at, terminated_at)
+                     VALUES (?1, 'exe-two-rounds', 'init-retry',
+                             'PendingActivation', NULL, NULL,
+                             0, 1, ?2, NULL, NULL)"
+                ),
+                rusqlite::params![&r2, now],
+            ).unwrap();
+            drop(conn);
+            (r1, r2)
+        }).await.unwrap();
+
+        let store_for_bump = store.clone();
+        tokio::task::spawn_blocking(move || {
+            increment_executor_review_reject_count(
+                "exe-two-rounds", store_for_bump.as_ref(),
+            )
+        }).await.unwrap().expect("bump SQL must succeed");
+
+        let activations = read_activations(store.clone(), "exe-two-rounds").await;
+        let by_id: std::collections::HashMap<_, _> = activations.into_iter()
+            .map(|(id, state, _sess, _crash, rev)| (id, (state, rev)))
+            .collect();
+        assert_eq!(by_id.get(&round1_id).unwrap().1, 1,
+            "round-1 Completed row's counter MUST stay 1 (historical \
+             round; never re-bumped by a subsequent round's rejection)");
+        assert_eq!(by_id.get(&round2_id).unwrap().1, 2,
+            "round-2 PendingActivation row's counter MUST be bumped \
+             from 1 (carried forward at admission) to 2 (this round's \
+             rejection) — the per-round counter semantic");
     }
 
     /// Explicit `Some(0)` ceiling: operator says "no retries

@@ -165,11 +165,62 @@ A natural alternative is "kernel auto-issues `RetrySubTask` on `AtLeastOneReject
 - **paradigm.md `R-12` — Out-of-Band Escalation.** Disagreement is a coordination failure to be resolved by an authorized principal. The Orchestrator IS that principal in the V2 hierarchical model; routing the decision through the agent layer is on-paradigm.
 - **`integration-merge.md §8` — IntegrationMerge predicate.** The merge predicate (kernel-side) does NOT include "no outstanding rejections" because the executor task is `Completed` regardless of verdict; adding the predicate would couple the merge handler to the cross-Reviewer aggregator and break the existing dispatch matrix. The cleaner factoring is to keep the merge handler simple and let the Orchestrator gate via the prompt.
 
+#### Kernel-side projection contract (the verdict feed)
+
+The NNSP rule above is dead-letter unless the kernel's KSB projection actually populates `reviewer_verdicts=` from the live store. Two sources back the projection:
+
+1. **Per-Reviewer verdict.** `tasks.review_verdict` (`Approved` / `Rejected`) is stamped on the Reviewer's own task row by the cross-Reviewer aggregator in `kernel/src/initiatives/review_aggregation.rs::write_aggregate_review_verdict_in_tx`. NULL until the reviewer votes; non-NULL rows feed one `ReviewerVerdict` row each.
+2. **Per-Reviewer critique text.** Reviewer rejections concatenate `[Reviewer <reviewer_task_id>]: <critique>\n\n` onto the **executor predecessor's** `tasks.last_critique` per `handle_submit_review` Step 22. The KSB projection parses out the matching Reviewer's segment for the `critique` field; multi-round critiques are de-duplicated to the most recent matching segment.
+
+The projection lives at `kernel/src/initiatives/ksb_assembly.rs::read_reviewer_verdicts_for_initiative`. It joins `tasks` (filtered to the initiative + non-NULL `review_verdict`) against `task_dag_edges` (reviewer → executor predecessor) so each rendered row carries the executor's `evaluation_sha` (the SHA the reviewer voted against). Executor sessions get an empty list — the executor's KSB has no DAG visibility per `KsbRole::Executor`, and surfacing a peer Reviewer's critique to a sibling Executor would expose review state across DAG nodes the executor was not permitted to read.
+
+`DagRow::reviewers` (the per-executor reviewer multiplicity rendered as `reviewers=N` in the `dag=` block) is sourced symmetrically — `read_reviewer_counts_per_executor` joins `task_dag_edges` against the plan registry's `session_agent_type` so only `Reviewer`-typed successors are counted (a downstream executor that depends on this executor does NOT inflate the count).
+
 #### Witness coverage
 
-The realistic-scenario E2E test (`kernel/tests/extended_e2e_realistic_scenario.rs`) wires `ReviewerSubstantiveDisagreementWitness` (`kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs`) which fails the test if the Orchestrator does not respawn the `lint-defect` executor after the substantive `approved=false` verdict from `review-lint-defect-B`. A regression in the Orchestrator NNSP that drops this rule will surface as `saw_executor_respawn = false` + `saw_aggregation_pass = false` in the witness report — exactly the failure mode reproduced on iter41 (audit-chain rendered the aggregation row but the Orchestrator went straight to `integration_merge` because the prompt did not direct it to retry).
+The realistic-scenario E2E test (`kernel/tests/extended_e2e_realistic_scenario.rs`) wires `ReviewerSubstantiveDisagreementWitness` (`kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs`) which fails the test if the Orchestrator does not respawn the `lint-defect` executor after the substantive `approved=false` verdict from `review-lint-defect-B`. A regression in either the Orchestrator NNSP or the kernel-side `reviewer_verdicts=` projection surfaces as `saw_executor_respawn = false` + `saw_aggregation_pass = false` in the witness report — exactly the failure mode reproduced on iter41 (NNSP missing the rule) and iter42 (NNSP correct but kernel-side projection hard-coded to `Vec::new()`).
 
-The corresponding driver-side regression is pinned by `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule`.
+The corresponding regressions are pinned by:
+
+- `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule` (NNSP unit test).
+- `kernel/src/initiatives/ksb_assembly.rs::tests::assemble_orchestrator_snapshot_populates_reviewer_verdicts_from_store` (kernel-side projection unit test).
+
+#### Kernel-side retry admission contract (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`)
+
+The NNSP rule above is the orchestrator-side trigger; the kernel-side admission contract is the matching receiver. When the Orchestrator's `RetrySubTask` arrives at `kernel/src/handlers/intent.rs::handle_retry_sub_task`, the kernel observes that the executor's most-recent activation is in `Completed` (per `kernel-store.md §2.5.1` the task-FSM is independent of reviewer verdicts — the cascade in `transition_task_in_tx` stamped `activation_state = 'Completed'` + `terminated_at = now` when `CompleteTask` fired, BEFORE any reviewer ever voted).
+
+A naive `prior_state != "Failed"` rejection would loop forever here — the Orchestrator would issue `RetrySubTask`, the kernel would reject with `INVALID_REQUEST`, the Orchestrator would retry, etc. The kernel therefore implements Option A: admit the retry when the activation is `Completed` AND `review_reject_count > 0`. The two retry-eligibility classes (with their decision-rationale anchors) are:
+
+| Class | Prior activation state | `review_reject_count` | Anchor audit event |
+|---|---|---|---|
+| Crash-retry | `Failed` | (any) | preceding `TaskStateChanged { state: Failed }` |
+| Reviewer-rejection retry (Option A) | `Completed` | `> 0` | `ExecutorRespawnFromReviewRejection` |
+
+A `Completed + review_reject_count = 0` activation is REJECTED with `FAIL_INVALID_REQUEST` — that combination represents a clean completion the orchestrator MUST NOT be allowed to redo (paradigm-`R-6` Fail-Closed Default). The `review_reject_count` counter is the canonical witness — bumped in `increment_executor_review_reject_count` at the post-`SubmitReview` aggregator's terminal-`AtLeastOneRejected` branch (paired in the same SQLite transaction with the `ReviewAggregationCompleted` audit emission per `audit-paired-writes.md §4`), so any `Completed` activation with a positive counter is provably "rejected this round, not clean".
+
+The retry inserts a NEW `PendingActivation` row carrying both counters forward verbatim. The prior `Completed` row is NOT mutated — the FSM is forward-only, and both rows coexist for the same `task_id`. Subsequent counter bumps target the LATEST row by `created_at` (per-round counter semantics).
+
+**Why Option A (relax precondition) and not Option B (`Completed → Failed` backward transition):**
+
+| Criterion | Option A (chosen) | Option B (rejected) |
+|---|---|---|
+| FSM contract | Preserved — forward-only | Violated — backward `Completed → Failed` transition |
+| Spec alignment | `paradigm.md §3.6` — executor task-FSM independent of review verdicts | Conflicts with `paradigm.md §3.6` |
+| `Failed` semantic | Preserved — "executor reported failure" | Overloaded — "executor failed" OR "reviewers rejected" |
+| Dashboard counters | Monotonic | Flap on every rejection round |
+| Audit chain | Forward-only history (`Completed`, then `ExecutorRespawnFromReviewRejection`, then `Completed` again) | Audit chain reads as zig-zag |
+| Crash-recovery surface | Unchanged | New transient inconsistent window between cascade and reopen |
+| Information preserved | Activation A (`Completed`) + Activation B (round-2) coexist | Activation A's `Completed` history is overwritten |
+| Kernel diff size | ~5 LOC + counter column (column already shipped in migration 0005) | ~50 LOC + new audit variant + pairing logic + cascade-undo |
+
+The reviewer-rejection retry emits the new audit event `ExecutorRespawnFromReviewRejection { task_id, prior_activation_id, new_activation_id, review_reject_count }` (defined in `crates/audit/src/event.rs`). This event is the canonical chain-side anchor for the realistic-scenario `ReviewerSubstantiveDisagreementWitness` — it disambiguates retry-after-review from retry-after-crash (which has no such anchor) and from round-1 first-spawn (which fires only `SessionVmSpawned`). Without a dedicated event, witnesses would have to join `subtask_activations` to count prior rows for the same `task_id`, violating `INV-AUDIT-04` (audit chain MUST be self-describing — forensic reconstruction MUST NOT depend on live SQLite state).
+
+The corresponding regressions are pinned by:
+
+- `kernel/src/handlers/intent.rs::tests::retry_from_completed_with_review_rejection_admits_and_emits_audit` (positive admission + audit emit).
+- `kernel/src/handlers/intent.rs::tests::retry_from_completed_without_review_rejection_is_rejected` (negative regression guard against accidentally widening the retry surface).
+- `kernel/src/handlers/intent.rs::tests::increment_review_reject_count_bumps_most_recent_terminated_row` (counter-no-op fix — pre-fix `terminated_at IS NULL` filter would have matched zero rows).
+- `kernel/src/handlers/intent.rs::tests::increment_review_reject_count_targets_latest_when_multiple_rows` (per-round counter semantics).
 
 ---
 
