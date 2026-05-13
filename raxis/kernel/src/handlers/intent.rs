@@ -4774,6 +4774,22 @@ async fn handle_retry_sub_task(
 
     let task_id_owned = req.task_id.as_str().to_owned();
 
+    // iter44 perf-metrics — `IntentAdmitPredicateEvaluatedTotal`.
+    // Every meaningful return path in this handler (success or
+    // structured rejection) increments the counter labelled with
+    // `intent_kind="RetrySubTask"`, the boolean `admissible`, and
+    // a closed-set `reason` lexeme. The dashboard panel "LLM
+    // blind-ask rate (inadmissible/total)" in `40-planner.json`
+    // pivots on this counter.
+    let admit_emit = |admissible: bool, reason: &'static str| {
+        crate::observability::record_intent_admit_predicate(
+            ctx.observability.as_ref(),
+            "RetrySubTask",
+            admissible,
+            reason,
+        );
+    };
+
     // Pull the operator-declared ceilings from the plan registry
     // BEFORE the SQL transaction so we can fail fast on a missing
     // entry. The registry lookup is a single read-only RwLock so
@@ -4794,9 +4810,15 @@ async fn handle_retry_sub_task(
             ).map_err(|_| ())
         })
         .await
-        .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
+        .map_err(|_| {
+            admit_emit(false, crate::observability::ADMIT_REASON_OTHER);
+            (PlannerErrorCode::FailUnknownTask, TaskState::Admitted)
+        })?;
         let initiative_id = lookup
-            .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
+            .map_err(|_| {
+                admit_emit(false, crate::observability::ADMIT_REASON_UNKNOWN_LANE);
+                (PlannerErrorCode::FailUnknownTask, TaskState::Admitted)
+            })?;
 
         let key = crate::initiatives::plan_registry::TaskKey::new(
             &initiative_id, &task_id_owned,
@@ -4814,6 +4836,7 @@ async fn handle_retry_sub_task(
                      \"task_id\":\"{}\",\"initiative_id\":\"{}\"}}",
                     task_id_owned, initiative_id,
                 );
+                admit_emit(false, crate::observability::ADMIT_REASON_UNKNOWN_LANE);
                 return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted));
             }
         };
@@ -4853,10 +4876,26 @@ async fn handle_retry_sub_task(
         let store_arc = Arc::clone(&ctx.store);
         let task_id_clone = task_id_owned.clone();
         let initiative_id_clone = initiative_id.clone();
+        // iter44: clone the hub into the closure so each rejection
+        // branch inside the SQL transaction can emit a labelled
+        // `IntentAdmitPredicateEvaluatedTotal` increment alongside
+        // the eprintln/audit it already writes.
+        let admit_obs = Arc::clone(&ctx.observability);
+        let emit_admit = move |admissible: bool, reason: &'static str| {
+            crate::observability::record_intent_admit_predicate(
+                admit_obs.as_ref(),
+                "RetrySubTask",
+                admissible,
+                reason,
+            );
+        };
         tokio::task::spawn_blocking(move || -> Result<RetryDecision, (PlannerErrorCode, TaskState)> {
             let mut conn = store_arc.lock_sync();
             let tx = conn.transaction()
-                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+                .map_err(|_| {
+                    emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                    (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                })?;
 
             // 2a. Most-recent activation row — must exist + must be
             //      `Failed`. `PendingActivation` / `Active` /
@@ -4880,8 +4919,11 @@ async fn handle_retry_sub_task(
             let (prior_activation_id, prior_state, prior_session_id,
                  crash_retry_count, review_reject_count) = match prior {
                 Some(t) => t,
-                None    => return Err((PlannerErrorCode::FailUnknownTask,
-                                       TaskState::Admitted)),
+                None    => {
+                    emit_admit(false, crate::observability::ADMIT_REASON_UNKNOWN_LANE);
+                    return Err((PlannerErrorCode::FailUnknownTask,
+                                TaskState::Admitted));
+                }
             };
             // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` —
             // `agent-disagreement.md §3.6` Option A.
@@ -4937,6 +4979,7 @@ async fn handle_retry_sub_task(
                      \"prior_state\":\"{prior_state}\",\
                      \"review_reject_count\":{review_reject_count}}}",
                 );
+                emit_admit(false, crate::observability::ADMIT_REASON_RETRY_INADMISSIBLE);
                 return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
             }
 
@@ -4957,6 +5000,7 @@ async fn handle_retry_sub_task(
                      \"crash_retry_count\":{crash_retry_count},\
                      \"max_crash_retries\":{max_crash_retries}}}",
                 );
+                emit_admit(false, crate::observability::ADMIT_REASON_BUDGET_EXHAUSTED);
                 return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
             }
             if review_reject_count >= i64::from(max_review_rejections) {
@@ -4967,6 +5011,7 @@ async fn handle_retry_sub_task(
                      \"review_reject_count\":{review_reject_count},\
                      \"max_review_rejections\":{max_review_rejections}}}",
                 );
+                emit_admit(false, crate::observability::ADMIT_REASON_BUDGET_EXHAUSTED);
                 return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
             }
 
@@ -4987,8 +5032,10 @@ async fn handle_retry_sub_task(
                            WHERE session_id = ?2"
                     ),
                     rusqlite::params![now, prior_sid],
-                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation,
-                               TaskState::Admitted))?;
+                ).map_err(|_| {
+                    emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                    (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                })?;
             }
 
             // 2d. Insert a NEW activation row in `PendingActivation`.
@@ -5024,6 +5071,7 @@ async fn handle_retry_sub_task(
                      \"event\":\"RetrySubTaskActivationInsertFailed\",\
                      \"task_id\":\"{task_id_clone}\",\"reason\":\"{e}\"}}",
                 );
+                emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
                 (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
             })?;
 
@@ -5052,12 +5100,22 @@ async fn handle_retry_sub_task(
                     now,
                     &task_id_clone,
                 ],
-            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation,
-                           TaskState::Admitted))?;
+            ).map_err(|_| {
+                emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+            })?;
 
             tx.commit()
-                .map_err(|_| (PlannerErrorCode::FailPolicyViolation,
-                              TaskState::Admitted))?;
+                .map_err(|_| {
+                    emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                    (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                })?;
+
+            // Predicate accepted; the retry was admitted. Record the
+            // success label so the dashboard's
+            // `admissible="false" / total` ratio has a stable
+            // denominator.
+            emit_admit(true, crate::observability::ADMIT_REASON_OK);
 
             Ok(RetryDecision {
                 prior_activation_id,
@@ -5069,7 +5127,10 @@ async fn handle_retry_sub_task(
             })
         })
         .await
-        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))??
+        .map_err(|_| {
+            admit_emit(false, crate::observability::ADMIT_REASON_OTHER);
+            (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+        })??
     };
 
     // ── Step 4: best-effort substrate VM termination. ──────────────────

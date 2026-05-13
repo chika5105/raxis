@@ -176,6 +176,7 @@ key that is not on the list drops the entire metric and bumps
 | `raxis.planner.dispatch.turn.total`            | Counter        | `agent_type`, `outcome` |
 | `raxis.planner.tool_call.duration`             | Histogram (ms) | `tool_name`, `outcome` |
 | `raxis.planner.retry.total`                    | Counter        | `provider`, `attempt`, `final_outcome` |
+| `raxis.intent.admit_predicate.evaluated.total` | Counter        | `intent_kind`, `admissible`, `reason` |
 
 ### 3.5 Credential proxies
 

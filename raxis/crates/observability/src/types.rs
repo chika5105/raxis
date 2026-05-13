@@ -306,6 +306,12 @@ pub enum MetricName {
     IsolationSpawnTotal,
     /// `raxis.isolation.respawn_attempted.total` — Counter.
     IsolationRespawnAttemptedTotal,
+    /// `raxis.intent.admit_predicate.evaluated.total` — Counter.
+    /// iter44: leading indicator that the KSB-capabilities envelope
+    /// is reaching the planner. Labels: `intent_kind`, `admissible`,
+    /// `reason` ∈ {`ok`, `retry_inadmissible`, `budget_exhausted`,
+    /// `unknown_lane`, `other`}.
+    IntentAdmitPredicateEvaluatedTotal,
     /// `raxis.isolation.failed_final.total` — Counter.
     IsolationFailedFinalTotal,
     /// `raxis.isolation.scale.event.total` — Counter.
@@ -447,6 +453,7 @@ impl MetricName {
             Self::IsolationSpawnVsockHandshakeDuration => "raxis.isolation.spawn.vsock_handshake.duration",
             Self::IsolationSpawnTotal                  => "raxis.isolation.spawn.total",
             Self::IsolationRespawnAttemptedTotal       => "raxis.isolation.respawn_attempted.total",
+            Self::IntentAdmitPredicateEvaluatedTotal   => "raxis.intent.admit_predicate.evaluated.total",
             Self::IsolationFailedFinalTotal            => "raxis.isolation.failed_final.total",
             Self::IsolationScaleEventTotal             => "raxis.isolation.scale.event.total",
             Self::IsolationScaleDeferredTotal          => "raxis.isolation.scale.deferred.total",
@@ -551,6 +558,7 @@ impl MetricName {
             | Self::ObservabilityDroppedTotal
             | Self::IsolationSpawnTotal
             | Self::IsolationRespawnAttemptedTotal
+            | Self::IntentAdmitPredicateEvaluatedTotal
             | Self::IsolationFailedFinalTotal
             | Self::IsolationScaleEventTotal
             | Self::IsolationScaleDeferredTotal

@@ -953,3 +953,141 @@ mod respawn_kind_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// iter44 perf-metrics — `IntentAdmitPredicateEvaluatedTotal`.
+//
+// Every kernel-side admit-predicate evaluation (currently the
+// `RetrySubTask` retry-eligibility check; future commits broaden to
+// other intents that compute server-side admissibility) emits one
+// counter increment labelled with:
+//
+//   * `intent_kind`  — closed lexicon already pinned by `IntentKind::*`.
+//   * `admissible`   — Bool; true iff the predicate accepted the
+//                      intent.
+//   * `reason`       — closed lexicon below.
+//
+// The dashboard's "LLM blind-ask rate" panel
+// (`grafana/dashboards/40-planner.json`) divides
+// `admissible="false"` by total to show the trend toward zero as the
+// KSB-capabilities envelope (in flight on a sibling worker branch)
+// teaches the planner not to submit known-inadmissible intents in
+// the first place. A non-decreasing rate after that landing is a
+// regression signal.
+// ---------------------------------------------------------------------------
+
+/// Predicate evaluation succeeded; the intent was accepted.
+pub const ADMIT_REASON_OK:                 &str = "ok";
+/// The retry was rejected because the prior activation row was in
+/// a state for which retry is not legal (e.g. `Completed` without a
+/// review-rejection witness).
+pub const ADMIT_REASON_RETRY_INADMISSIBLE: &str = "retry_inadmissible";
+/// The retry was rejected because the per-task ceiling
+/// (`max_crash_retries` / `max_review_rejections`) is exhausted.
+pub const ADMIT_REASON_BUDGET_EXHAUSTED:   &str = "budget_exhausted";
+/// The intent referenced an unknown task / lane / activation —
+/// useful for the kernel-store gate when it cannot resolve the
+/// addressee row.
+pub const ADMIT_REASON_UNKNOWN_LANE:       &str = "unknown_lane";
+/// Anything else (DB error, FSM gate violation, transactional
+/// fault). Should be vanishingly rare on the dashboard.
+pub const ADMIT_REASON_OTHER:              &str = "other";
+
+/// Closed set of admit-predicate `reason` lexemes. The dashboard
+/// PromQL pivots on this set; an emit site that smuggled in a
+/// free-form value would show up as a stray series.
+pub const ADMIT_REASON_CLOSED_SET: &[&str] = &[
+    ADMIT_REASON_OK,
+    ADMIT_REASON_RETRY_INADMISSIBLE,
+    ADMIT_REASON_BUDGET_EXHAUSTED,
+    ADMIT_REASON_UNKNOWN_LANE,
+    ADMIT_REASON_OTHER,
+];
+
+/// `raxis.intent.admit_predicate.evaluated.total` — one counter
+/// increment per server-side admit-predicate evaluation. Emit
+/// alongside the audit/eprintln payload, so dashboard rate ==
+/// audit rate and the operator can pivot from one to the other.
+pub fn record_intent_admit_predicate(
+    hub:         &ObservabilityHub,
+    intent_kind: &str,
+    admissible:  bool,
+    reason:      &str,
+) {
+    if !hub.enabled() { return; }
+    let mut labels = redact::attrs([
+        ("intent_kind", intent_kind),
+        ("reason",      reason),
+    ]);
+    labels.insert(
+        "admissible".to_owned(),
+        raxis_observability::AttrValue::Bool(admissible),
+    );
+    hub.record_counter(
+        MetricName::IntentAdmitPredicateEvaluatedTotal,
+        labels,
+        1.0,
+    );
+}
+
+#[cfg(test)]
+mod admit_predicate_tests {
+    use super::*;
+    use raxis_observability::{
+        exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
+        ObservabilityExporter, ObservabilityHub,
+    };
+    use std::sync::Arc;
+
+    fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled:     true,
+            sample_rate: 1.0,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
+        (hub, exp)
+    }
+
+    /// Every closed-set `reason` value emits with the matching label.
+    /// Pins the v1 dashboard PromQL surface against accidental
+    /// free-form-string drift.
+    #[test]
+    fn every_reason_emits_with_known_label() {
+        for &reason in ADMIT_REASON_CLOSED_SET {
+            let admissible = reason == ADMIT_REASON_OK;
+            let (hub, exp) = enabled_hub();
+            record_intent_admit_predicate(
+                hub.as_ref(),
+                "RetrySubTask",
+                admissible,
+                reason,
+            );
+            hub.flush();
+            let metrics = exp.metrics();
+            assert_eq!(metrics.len(), 1);
+            let m = &metrics[0];
+            assert_eq!(m.name, MetricName::IntentAdmitPredicateEvaluatedTotal);
+            assert!(matches!(
+                m.datapoint,
+                DataPoint::Sum { value } if (value - 1.0).abs() < 1e-9,
+            ));
+            match m.labels.get("reason").unwrap() {
+                AttrValue::Str(s) => assert_eq!(s, reason),
+                other            => panic!("reason must be Str, got {other:?}"),
+            }
+            match m.labels.get("admissible").unwrap() {
+                AttrValue::Bool(b) => assert_eq!(*b, admissible),
+                other              => panic!("admissible must be Bool, got {other:?}"),
+            }
+            match m.labels.get("intent_kind").unwrap() {
+                AttrValue::Str(s) => assert_eq!(s, "RetrySubTask"),
+                other             => panic!("intent_kind must be Str, got {other:?}"),
+            }
+        }
+    }
+}

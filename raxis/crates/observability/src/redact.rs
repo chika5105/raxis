@@ -144,6 +144,11 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     // retries, orchestrator no-progress respawns, and reviewer
     // rejection respawns. Closed lexicon — no PII.
     ("respawn_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    // iter44: `IntentAdmitPredicateEvaluatedTotal` carries a boolean
+    // `admissible` (true → predicate accepted, false → kernel
+    // rejected the intent). The matching `reason` label is already
+    // covered by the generic `reason` schema above.
+    ("admissible",        AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
 ];
 
 /// Explicit denylist. Defense-in-depth: even if a key accidentally

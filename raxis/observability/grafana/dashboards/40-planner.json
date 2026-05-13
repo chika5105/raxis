@@ -48,6 +48,28 @@
         { "expr": "sum by (attempt, final_outcome) (rate(raxis_planner_retry_total[5m]))", "legendFormat": "attempt {{attempt}} {{final_outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "LLM blind-ask rate (inadmissible / total)",
+      "description": "Leading indicator that the KSB-capabilities envelope is reaching the planner. Should trend toward zero as the LLM stops blind-asking for inadmissible intents. iter44.",
+      "gridPos": { "x": 0, "y": 25, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(raxis_intent_admit_predicate_evaluated_total{admissible=\"false\"}[5m])) / clamp_min(sum(rate(raxis_intent_admit_predicate_evaluated_total[5m])), 1e-9)", "legendFormat": "blind-ask rate", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Inadmissible intents by reason",
+      "description": "Per-reason breakdown of the blind-ask rate; the closed lexicon is { ok, retry_inadmissible, budget_exhausted, unknown_lane, other }. iter44.",
+      "gridPos": { "x": 12, "y": 25, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (intent_kind, reason) (rate(raxis_intent_admit_predicate_evaluated_total{admissible=\"false\"}[5m]))", "legendFormat": "{{intent_kind}} {{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
     }
   ]
 }

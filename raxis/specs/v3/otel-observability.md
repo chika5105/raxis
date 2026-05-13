@@ -635,6 +635,7 @@ Span events are within-span timeline annotations. The closed list is in `EventNa
 | `BudgetExceededTotal` | Counter | None | `lane_id` | Cumulative budget-exceeded admission rejections. |
 | `ObservabilityDroppedTotal` | Counter | None | `reason` (`queue_full`/`disk_pressure`/`schema_mismatch`/`redaction_failure`) | Frames the kernel could not persist. **An operator dashboard MUST surface this metric — non-zero value means the dashboard is incomplete.** |
 | `IsolationRespawnAttemptedTotal` | Counter | None | `backend`, `image_kind`, `attempt`, `respawn_kind` (`vm_crash`/`orchestrator_no_progress`/`reviewer_rejection`/`unknown`) | Cumulative respawn attempts. `respawn_kind` (iter44 / `INV-OBS-RESPAWN-KIND-LABEL-01`) disambiguates healthy transient-retry churn from logical-deadlock and reviewer-disagreement respawns; the closed lexicon is the load-bearing dashboard contract. |
+| `IntentAdmitPredicateEvaluatedTotal` | Counter | None | `intent_kind`, `admissible` (`true`/`false`), `reason` (`ok`/`retry_inadmissible`/`budget_exhausted`/`unknown_lane`/`other`) | Cumulative intent-admit-predicate evaluations. iter44 leading-indicator metric: `admissible="false"` rate trends toward zero as the KSB-capabilities envelope teaches the planner not to submit known-inadmissible intents. The dashboard query `sum(rate(...{admissible="false"}[5m])) / sum(rate(...[5m]))` is the canonical "LLM blind-ask rate" panel. Currently emitted by the `RetrySubTask` handler on every server-side retry-eligibility decision. |
 
 ### §8.1 Histogram bucket policy
 
