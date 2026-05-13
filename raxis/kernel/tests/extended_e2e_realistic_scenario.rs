@@ -121,6 +121,10 @@ use extended_e2e_support::{
     },
 };
 
+use common::dashboard::{
+    configured_dashboard_port, mutate_dashboard_block_in_policy,
+    open_dashboard_with_autologin,
+};
 use common::tier3_artifacts::Tier3Reporter;
 
 const REALISTIC_GATE: &str = "RAXIS_LIVE_E2E_REALISTIC";
@@ -174,6 +178,16 @@ fn realistic_session_lifecycle() {
 
     let gateway_binary = require_gateway_binary();
     enable_gateway_in_policy(&data_dir, &gateway_binary);
+    // Re-bind the dashboard to a non-default test port (default
+    // 19820, override via RAXIS_E2E_DASHBOARD_PORT) and inject
+    // the React `dashboard-fe/dist` static_dir when built. Without
+    // this the kernel binds at the spec default 9820 which would
+    // collide with a developer daemon, AND it would serve only
+    // the JSON API (no UI) since no `static_dir` is set in the
+    // genesis policy. Idempotent against repeated test runs in
+    // the same process: the helper rewrites the policy.toml once
+    // before the kernel daemon spawns and reads it.
+    mutate_dashboard_block_in_policy(&data_dir);
     write_credentials(&data_dir);
     write_provider_credentials(&data_dir);
 
@@ -220,6 +234,21 @@ fn realistic_session_lifecycle() {
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[realism-e2e] kernel daemon up, accepting operator IPC");
+
+    // ── (visual-debug) — open the operator dashboard with an
+    //    autologin URL so the QA worker can attach a browser to
+    //    the live realistic-scenario run. Best-effort: a missing
+    //    FE bundle / port collision / missing `open(1)` is
+    //    logged and skipped, never fatal — the test must still
+    //    pass headless on CI / SSH. The URL is also threaded
+    //    into the Tier-3 reporter so the post-run artifact block
+    //    surfaces it for offline triage.
+    let dashboard_port = configured_dashboard_port();
+    if let Some(url) = open_dashboard_with_autologin(
+        &signing_key, dashboard_port, "realism-e2e",
+    ) {
+        tier3.set_dashboard_url(url);
+    }
 
     // ── Submit BOTH initiatives back-to-back ─────────────────
     let initiative_primary = uuid::Uuid::now_v7().to_string();
@@ -418,11 +447,6 @@ fn realistic_session_lifecycle() {
         ),
         &tp_workdir,
     );
-    // The realistic-scenario harness does not mount the dashboard
-    // (the kernel boot path here skips `open_dashboard_with_autologin`);
-    // we therefore omit the dashboard URL line cleanly rather than
-    // emit a broken placeholder.
-
     // ── Graceful shutdown ────────────────────────────────────
     let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
     assert!(
