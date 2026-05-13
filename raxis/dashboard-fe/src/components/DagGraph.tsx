@@ -1,7 +1,12 @@
 import { useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 
-import { stateTone, toneClasses, type StateBadgeTone } from "@/lib/state-color";
+import {
+  shortStateLabel,
+  stateTone,
+  toneClasses,
+  type StateBadgeTone,
+} from "@/lib/state-color";
 
 export interface DagGraphNode {
   task_id: string;
@@ -72,7 +77,25 @@ interface DagGraphProps {
 }
 
 const NODE_W = 200;
-const NODE_H = 56;
+const NODE_H = 64;
+// State chip occupies a fixed slot in the top-right of the
+// node. The chip width is sized to fit a 10-char uppercase
+// label at fontSize 9 bold — `shortStateLabel` (in
+// `lib/state-color.ts`) caps every kernel state name at that
+// length by splitting PascalCase tokens on uppercase
+// boundaries (so e.g. `BlockedRecoveryPending` reads as
+// `BLOCKED`). Title truncation is then derived from the
+// remaining horizontal budget so the two text columns can
+// never collide horizontally regardless of how long the
+// title is.
+const STATE_CHIP_W = 70;
+const STATE_CHIP_H = 16;
+// Title gets the horizontal budget the chip leaves behind:
+//   200 (node) - 10 (left pad) - 70 (chip) - 6 (chip right pad)
+//   - 8 (visual gap) ≈ 106 px. At fontSize 12 / Inter that's
+// ~16 chars before truncation; the helper appends a trailing
+// ellipsis when truncation actually fires.
+const TITLE_MAX_CHARS = 16;
 
 /// Static SVG DAG renderer using `dagre` for layered layout.
 /// Operator-tooling-grade — no zoom/pan, just a clean readable
@@ -275,19 +298,59 @@ export function DagGraph({
                 {"\n"}
                 state: {n.state}
               </title>
+              {/*
+               * State label rendered as a discrete chip in the
+               * top-right slot — NOT a free-floating right-aligned
+               * `<text>`. The previous treatment let the state
+               * string (e.g. `COMPLETED`, 9 chars at fontSize 9
+               * bold ≈ 55px) extend leftwards into the title's
+               * x-range; for any title > ~20 chars the truncated
+               * title would visually overlap the state label,
+               * making both unreadable. Operators reported this
+               * as "overlay of completed on the task description".
+               *
+               * The chip occupies a fixed `STATE_CHIP_W`-wide slot
+               * with its own panel-raised fill (i.e. the card
+               * surface, not the muted node body), giving the
+               * status text a high-contrast background regardless
+               * of the surrounding tone family. Title truncation
+               * below is sized so the title can never exceed the
+               * chip's left edge.
+               */}
+              <rect
+                x={n.w - STATE_CHIP_W - 6}
+                y={6}
+                width={STATE_CHIP_W}
+                height={STATE_CHIP_H}
+                rx={3}
+                fill="rgb(var(--c-panel-raised))"
+                stroke={stroke}
+                strokeWidth={1}
+              />
+              <text
+                x={n.w - 6 - STATE_CHIP_W / 2}
+                y={6 + STATE_CHIP_H - 4}
+                textAnchor="middle"
+                fill={stroke}
+                fontSize={9}
+                fontWeight={700}
+                fontFamily="Inter, system-ui, sans-serif"
+              >
+                {shortStateLabel(n.state)}
+              </text>
               <text
                 x={10}
-                y={22}
+                y={26}
                 fill="rgb(var(--c-ink))"
                 fontSize={12}
                 fontWeight={500}
                 fontFamily="Inter, system-ui, sans-serif"
               >
-                {truncate(n.title, 26)}
+                {truncate(n.title, TITLE_MAX_CHARS)}
               </text>
               <text
                 x={10}
-                y={40}
+                y={44}
                 fill="rgb(var(--c-ink-muted))"
                 fontSize={10}
                 fontFamily="JetBrains Mono, ui-monospace, monospace"
@@ -296,35 +359,28 @@ export function DagGraph({
                   ? `${n.task_id.slice(0, 20)}…`
                   : n.task_id}
               </text>
-              <text
-                x={n.w - 8}
-                y={22}
-                textAnchor="end"
-                fill={stroke}
-                fontSize={9}
-                fontWeight={700}
-                fontFamily="Inter, system-ui, sans-serif"
-              >
-                {n.state.toUpperCase()}
-              </text>
             </g>
           );
         })}
       </svg>
 
-      {/* Legend — color reference only; the interactive click-to-
-       * filter legend lives upstream in `<StatusLegend>` when the
-       * caller wires one. We suppress this fallback when
-       * `hideLegend` is set to avoid two side-by-side legends. */}
+      {/* Fallback legend — one chip per kernel TaskState tone
+       * family, in lifecycle order: muted (not running yet) →
+       * info (running) → warn (gated) → ok (terminal-ok) →
+       * bad (terminal-fail) → block (operator-cancelled). The
+       * interactive click-to-filter legend lives upstream in
+       * `<StatusLegend>` when the caller wires one; we
+       * suppress this fallback via `hideLegend` to avoid two
+       * side-by-side legends in that case. */}
       {!hideLegend && (
         <div className="flex flex-wrap gap-1.5 mt-2 text-[11px]">
           {[
-            "Pending",
+            "Admitted",
             "Running",
+            "GatesPending",
             "Completed",
             "Failed",
-            "Blocked",
-            "Reviewing",
+            "Cancelled",
           ].map((s) => (
             <span key={s} className={`badge ${toneClasses(stateTone(s))}`}>
               {s}
