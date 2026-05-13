@@ -1095,7 +1095,88 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// INV-NETISO-A3-UNIVERSAL-NO-NIC-01 witness for the
+    /// Firecracker substrate. Re-uses the same Unix-socket
+    /// capture rig as the `tier1` companion test, but asserts
+    /// the OPPOSITE shape: under `EgressTier::Mediated` the
+    /// boot driver MUST NOT emit a `PUT /network-interfaces/eth0`
+    /// frame, because A3 strips the NIC entirely.
     #[test]
+    fn drive_boot_omits_network_interface_under_egress_tier_mediated() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let api_sock = dir.path().join("api.sock");
+        let vsock_uds = dir.path().join("vsock.sock");
+        let listener = UnixListener::bind(&api_sock).unwrap();
+
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_thread = std::sync::Arc::clone(&captured);
+
+        // 5 requests, not 6 — the network-interfaces PUT is the
+        // one that drops out under Mediated.
+        let server = std::thread::spawn(move || {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = Vec::with_capacity(4096);
+                let mut tmp = [0u8; 1024];
+                loop {
+                    let n = stream.read(&mut tmp).unwrap();
+                    if n == 0 { break; }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&buf[..end]).unwrap();
+                        let cl: usize = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("Content-Length:")
+                                    .or_else(|| l.strip_prefix("content-length:"))
+                                    .map(|s| s.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + cl { break; }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).into_owned();
+                let request_line = text.lines().next().unwrap_or("").to_owned();
+                captured_thread.lock().unwrap().push(request_line);
+                stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let api = FirecrackerApi::new(&api_sock).with_timeout(Duration::from_secs(2));
+        let img = fixture_image_with_path(PathBuf::from("/tmp/vmlinux.bin"));
+        let mut spec = fixture_spec("session-fixture-a3");
+        spec.egress_tier = EgressTier::Mediated;
+        drive_boot(&api, &img, &[], &spec, &vsock_uds).unwrap();
+
+        server.join().unwrap();
+        let cap = captured.lock().unwrap();
+        // Five PUTs total: machine-config, boot-source, drives,
+        // vsock, actions — no network-interfaces.
+        assert_eq!(
+            cap.len(),
+            5,
+            "INV-NETISO-A3-UNIVERSAL-NO-NIC-01: Mediated must skip \
+             PUT /network-interfaces (got {} requests: {:?})",
+            cap.len(),
+            *cap,
+        );
+        assert!(
+            cap.iter().all(|line| !line.starts_with("PUT /network-interfaces")),
+            "INV-NETISO-A3-UNIVERSAL-NO-NIC-01: Mediated emitted a \
+             network-interfaces PUT — captured: {:?}",
+            *cap,
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
     fn drive_boot_emits_network_interface_when_egress_tier_is_tier1() {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;

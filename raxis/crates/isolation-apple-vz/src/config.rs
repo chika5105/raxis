@@ -674,6 +674,56 @@ mod tests {
 
     // ---- happy path ----------------------------------------------------
 
+    // ---- INV-NETISO-A3-UNIVERSAL-NO-NIC-01 witness --------------------
+    //
+    // The substrate MUST refuse to provision a NIC for any role that
+    // boots under `EgressTier::Mediated` (Path A3) or
+    // `EgressTier::None` (legacy reviewer / orchestrator + every role
+    // when A3 is active). These tests pin that contract: a single bug
+    // that re-adds `Some(AvfNetworkDevice { … })` to the Mediated arm
+    // surfaces here at compile-and-test time, before it can ship.
+
+    #[test]
+    fn translate_provisions_no_nic_under_egress_tier_mediated() {
+        let mut spec = fixture_spec();
+        spec.egress_tier = EgressTier::Mediated;
+        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
+        assert!(
+            cfg.network.is_none(),
+            "INV-NETISO-A3-UNIVERSAL-NO-NIC-01: \
+             EgressTier::Mediated MUST produce no virtio-net device \
+             (got: {:?})",
+            cfg.network,
+        );
+    }
+
+    #[test]
+    fn translate_provisions_no_nic_under_egress_tier_none() {
+        let mut spec = fixture_spec();
+        spec.egress_tier = EgressTier::None;
+        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
+        assert!(
+            cfg.network.is_none(),
+            "INV-NETISO-01: EgressTier::None MUST produce no \
+             virtio-net device (got: {:?})",
+            cfg.network,
+        );
+    }
+
+    #[test]
+    fn translate_provisions_no_nic_under_egress_tier_cred_proxy() {
+        let mut spec = fixture_spec();
+        spec.egress_tier = EgressTier::Tier2CredProxy;
+        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
+        assert!(
+            cfg.network.is_none(),
+            "Tier2CredProxy MUST produce no virtio-net device \
+             (cred proxies tunnel over vsock loopback)",
+        );
+    }
+
+    // -------------------------------------------------------------------
+
     #[test]
     fn translate_produces_canonical_default_shape() {
         let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
@@ -1012,7 +1062,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn translate_attaches_nat_device_for_tier1_tproxy() {
+        // Legacy Tier1Tproxy default-off path — pinned because the
+        // V2 baseline iter42 + the existing live-e2e harness depend on
+        // virtio-net + NAT being attached when the kernel selects
+        // this tier. Path A3 supersedes this with `EgressTier::Mediated`
+        // (no NIC); the bit-identical default-off path keeps this
+        // arm verbatim.
         let mut spec = fixture_spec();
         spec.egress_tier = EgressTier::Tier1Tproxy;
         let cfg = translate(&fixture_image(), &[], &spec).unwrap();

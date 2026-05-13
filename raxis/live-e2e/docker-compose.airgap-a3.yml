@@ -1,0 +1,147 @@
+# live-e2e/docker-compose.airgap-a3.yml
+#
+# Path A3 opt-in variant of the live-e2e substrate. This file is a
+# THIN extension of `live-e2e/docker-compose.e2e.yml` — it pulls in
+# the same upstream service containers (postgres, redis, mongodb,
+# smtp, mysql, mssql) and adds a single environment-injection
+# wrapper so the kernel-under-test boots with the universal-airgap
+# gate engaged.
+#
+# Normative reference: `specs/v2/airgap-architecture.md §6`.
+# Operator-facing how-to: `guides/operator/21-airgap-a3-egress-allowlist.md`.
+#
+# # When to use this file
+#
+# This compose file is for one purpose: exercising the Path A3
+# universal-airgap end-to-end lifecycle in CI / dev. The default
+# `docker-compose.e2e.yml` boots the kernel in its V2 baseline
+# posture (executor VM has a virtio-net device, Tier-1 tproxy is
+# advisory). That posture is what `iter42` and the existing realistic
+# scenario test pin. We deliberately do NOT flip the default-off
+# path to A3 — that would make the V2 baseline test suite assert
+# against a different substrate shape than the operator deploys.
+#
+# Use this file when:
+#   * You have already authored a policy `[egress] domains` /
+#     `[egress] patterns` list that covers everything the
+#     realistic-scenario plan needs (npm install, pip install,
+#     cargo build, git clone, the LLM provider). The recipe at
+#     `guides/operator/21-airgap-a3-egress-allowlist.md` documents
+#     the canonical baseline.
+#   * Your kernel binary was built with the `runtime-airgap-a3`
+#     cargo feature (default-off; see `kernel/Cargo.toml`).
+#   * You want a regression gate that the executor cannot reach an
+#     unallowlisted host even with a malicious bash invocation.
+#
+# # What this file does
+#
+# It re-uses every `services:` entry from `docker-compose.e2e.yml`
+# verbatim (via `extends:`) so the upstream containers stay
+# byte-identical between baseline and A3 mode. The only A3-specific
+# bit is a `kernel-env` "service" that exists purely to stamp the
+# `RAXIS_AIRGAP_A3=1` env var into an `.env`-style file the host
+# harness reads when it spawns the kernel binary. That keeps the
+# composition entirely declarative.
+#
+# # How the kernel actually gets the env var
+#
+# The live-e2e harness reads `live-e2e/.env.airgap-a3` (produced by
+# the `kernel-env` service below) before invoking the kernel binary.
+# See `kernel/tests/full_e2e_session_lifecycle.rs` for the env-merge
+# path. When the file is absent (baseline mode) the harness keeps
+# the legacy V2 env.
+#
+# # Run
+#
+#   # 1. Build the kernel with the A3 feature.
+#   cargo build --release -p raxis-kernel --features runtime-airgap-a3
+#
+#   # 2. Bring up the substrate.
+#   docker compose -f live-e2e/docker-compose.airgap-a3.yml up -d --wait
+#
+#   # 3. Run the realistic scenario test against the A3 kernel.
+#   RAXIS_LIVE_E2E=1 RAXIS_AIRGAP_A3=1 cargo test \
+#       --release --features runtime-airgap-a3 \
+#       -p raxis-kernel --test extended_e2e_realistic_scenario \
+#       -- --nocapture
+#
+#   # 4. Tear it down.
+#   docker compose -f live-e2e/docker-compose.airgap-a3.yml down -v
+#
+# # Why not a separate kernel/tests/extended_e2e_airgap_a3_*.rs?
+#
+# The existing realistic-scenario test already covers every
+# operational behaviour we care about under A3 (LLM calls, package
+# fetches, git operations). The ONLY difference under A3 is the
+# substrate-level no-NIC posture, which is already pinned by the
+# witness tests in:
+#
+#   * `crates/isolation-apple-vz/src/config.rs::tests::translate_provisions_no_nic_under_egress_tier_mediated`
+#   * `crates/isolation-firecracker/src/lib.rs::tests::drive_boot_omits_network_interface_under_egress_tier_mediated`
+#
+# Running the same realistic-scenario test against an A3-engaged
+# kernel via this compose file is the lifecycle-level regression
+# gate: if the chokepoint breaks (a host falls out of the
+# allowlist, an audit emission fails, a tunnel handshake regresses)
+# the test fails. Building a fully-separate test crate would
+# duplicate ~1500 LOC of scenario plumbing for no incremental
+# coverage.
+
+name: raxis-live-e2e-airgap-a3
+
+services:
+  # ---------------------------------------------------------------
+  # Upstream service containers — re-used from the baseline compose
+  # file via Docker Compose's `extends:` mechanism. Bumping a tag
+  # in `docker-compose.e2e.yml` is automatically inherited.
+  # ---------------------------------------------------------------
+  postgres:
+    extends:
+      file: docker-compose.e2e.yml
+      service: postgres
+  mongodb:
+    extends:
+      file: docker-compose.e2e.yml
+      service: mongodb
+  redis:
+    extends:
+      file: docker-compose.e2e.yml
+      service: redis
+  smtp:
+    extends:
+      file: docker-compose.e2e.yml
+      service: smtp
+  mysql:
+    extends:
+      file: docker-compose.e2e.yml
+      service: mysql
+  mssql:
+    extends:
+      file: docker-compose.e2e.yml
+      service: mssql
+
+  # ---------------------------------------------------------------
+  # Kernel-env stamper — writes the `.env.airgap-a3` file the host
+  # harness reads when constructing the kernel command. Runs to
+  # completion in <1 s, then exits.
+  # ---------------------------------------------------------------
+  kernel-env:
+    image: alpine:3.20
+    command: |
+      sh -c '
+        cat > /env-out/.env.airgap-a3 <<-EOF
+        # Auto-generated by live-e2e/docker-compose.airgap-a3.yml.
+        # Read by kernel/tests/full_e2e_session_lifecycle.rs before
+        # spawning the kernel binary. See
+        # specs/v2/airgap-architecture.md for the runtime contract.
+        RAXIS_AIRGAP_A3=1
+        EOF
+        echo "wrote /env-out/.env.airgap-a3"
+      '
+    volumes:
+      - ../live-e2e:/env-out:rw
+    restart: "no"
+
+# No top-level `volumes:` block — everything tmpfs / bind-mounted.
+# No top-level `networks:` block — using docker's default bridge
+# (raxis-live-e2e-airgap-a3_default) keeps the rig self-contained.

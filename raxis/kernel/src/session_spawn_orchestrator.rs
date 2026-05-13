@@ -2799,6 +2799,80 @@ mod retry_tests {
         assert_eq!(compute_backoff_ms(initial, max, 64), max);
     }
 
+    // -------------------------------------------------------------
+    // Path A3 feature-gate witness tests
+    //
+    // Pin the double-gating contract: even with the
+    // `runtime-airgap-a3` cargo feature compiled in, the runtime
+    // env var MUST be `1` / `true` for `airgap_a3_active()` to
+    // return true. Default-off path (env var unset) MUST return
+    // false. The companion `#[cfg(not(feature = "..."))]` version
+    // of the function returns false unconditionally — that's
+    // exercised by `cargo check -p raxis-kernel` (default features)
+    // compiling clean without `RAXIS_AIRGAP_A3` ever being set.
+    //
+    // INV-NETISO-A3-UNIVERSAL-NO-NIC-01: drift in this gate would
+    // either silently disable A3 (operator sets env but kernel
+    // ignores it) or silently enable A3 (kernel forces Mediated
+    // when operator did not opt in). Both are visible regressions
+    // here.
+    // -------------------------------------------------------------
+
+    #[cfg(feature = "runtime-airgap-a3")]
+    #[test]
+    fn airgap_a3_active_recognises_canonical_env_values() {
+        use super::airgap_a3_active;
+        // Snapshot the env var so concurrent tests in this binary
+        // do not race against our writes — the kernel test binary
+        // runs each test in its own thread, but cargo runs tests
+        // in parallel by default; a tighter contract would use
+        // tokio::sync::Mutex over a global but the canonical
+        // raxis_test_support helpers are scoped to the
+        // FakeAuditSink path. We just snapshot+restore here.
+        let prev = std::env::var("RAXIS_AIRGAP_A3").ok();
+        for v in ["1", "true", "True", "TRUE"] {
+            std::env::set_var("RAXIS_AIRGAP_A3", v);
+            assert!(
+                airgap_a3_active(),
+                "expected airgap_a3_active() to be true for env={v:?}",
+            );
+        }
+        for v in ["", "0", "false", "FALSE", "no", "yes"] {
+            std::env::set_var("RAXIS_AIRGAP_A3", v);
+            assert!(
+                !airgap_a3_active(),
+                "expected airgap_a3_active() to be false for env={v:?}",
+            );
+        }
+        std::env::remove_var("RAXIS_AIRGAP_A3");
+        assert!(
+            !airgap_a3_active(),
+            "expected airgap_a3_active() to be false when env unset",
+        );
+        if let Some(v) = prev {
+            std::env::set_var("RAXIS_AIRGAP_A3", v);
+        }
+    }
+
+    #[cfg(not(feature = "runtime-airgap-a3"))]
+    #[test]
+    fn airgap_a3_active_is_unconditionally_false_when_feature_off() {
+        use super::airgap_a3_active;
+        // Even if a vendor or operator typo'd
+        // `RAXIS_AIRGAP_A3=1` into the kernel's env, the feature
+        // being compiled out MUST short-circuit the gate to
+        // false. This is the load-bearing safety property that
+        // keeps default-off builds bit-identical to the V2
+        // baseline.
+        let prev = std::env::var("RAXIS_AIRGAP_A3").ok();
+        std::env::set_var("RAXIS_AIRGAP_A3", "1");
+        assert!(!airgap_a3_active());
+        std::env::remove_var("RAXIS_AIRGAP_A3");
+        if let Some(v) = prev {
+            std::env::set_var("RAXIS_AIRGAP_A3", v);
+        }
+    }
+
     #[test]
     fn classify_spawn_isolation_spawn_uses_isolation_classify() {
         let transient = SpawnError::IsolationSpawn(
