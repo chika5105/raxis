@@ -452,6 +452,41 @@ The xtask command honors `RAXIS_E2E_NO_OPEN=1`, `CI`, and
 `SSH_CONNECTION` to suppress the auto-open step for CI / SSH
 contexts.
 
+### Cursor in-IDE browser vs system browser
+
+The auto-open step detects whether you're running inside
+Cursor's integrated terminal and routes accordingly:
+
+| Host                                   | URL opens in                                                                          |
+|---                                     | ---                                                                                    |
+| Cursor integrated terminal             | Cursor's in-IDE Simple Browser pane (via the `cursor --open-url` CLI flag).            |
+| Any other terminal (Terminal.app, iTerm, JetBrains, plain shell, ...) | OS default browser (`open` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows). |
+| Headless / CI / SSH-without-DISPLAY    | Suppressed — URLs still printed for copy-paste.                                       |
+
+Detection signals (any one is sufficient):
+
+  * `TERM_PROGRAM=cursor` (case-insensitive).
+  * `CURSOR_TRACE_ID` set.
+  * `CURSOR_LAYOUT` set (Cursor's Glass-layout marker).
+  * `VSCODE_IPC_HOOK` contains `/Cursor/`.
+
+Explicit override via `RAXIS_E2E_BROWSER`:
+
+| Value                          | Effect                                                                          |
+|---                             | ---                                                                              |
+| `RAXIS_E2E_BROWSER=cursor`     | Force the Cursor CLI path (falls back to system default if the CLI is missing). |
+| `RAXIS_E2E_BROWSER=system`     | Force the OS default browser; never invoke `cursor`.                            |
+| `RAXIS_E2E_BROWSER=none`       | Suppress opening entirely; URLs are still printed.                              |
+| (unset / any other value)      | Auto-detect from the signals above.                                              |
+
+The Cursor CLI is located either on `$PATH` (after running
+"Cursor → Shell Command: Install `cursor` command in PATH") or at
+the canonical macOS bundle path
+`/Applications/Cursor.app/Contents/Resources/app/bin/cursor`. If
+neither is available, the auto-open falls back to the system
+browser and prints a one-line hint pointing at the Shell-Command
+install action.
+
 ### URL block at startup and end-of-run
 
 When the `extended_e2e_realistic_scenario` or
@@ -484,7 +519,8 @@ docker volume rm raxis-live-e2e-test_prometheus_data raxis-live-e2e-test_grafana
 
 | Variable                       | Default | Effect |
 |---|---|---|
-| `RAXIS_E2E_OPEN_OBSERVABILITY` | OFF     | Print + open Grafana / Prometheus / OTel URLs at end of run. |
+| `RAXIS_E2E_OPEN_OBSERVABILITY` | OFF     | At end of run (`Tier3Reporter::with_observability_urls()` opted in), open Grafana home + `raxis-00-overview` in the best browser (Cursor in-IDE if detected, else system default). |
+| `RAXIS_E2E_BROWSER`            | (auto)  | Override Cursor-vs-system detection: `cursor` / `system` / `none`. |
 | `RAXIS_E2E_OBS_FRESH`          | OFF     | Wipe volumes BEFORE the live-e2e run for a clean baseline. |
 | `RAXIS_E2E_OBS_KEEP_UP`        | ON      | Leave the compose stack running after the test exits. |
 

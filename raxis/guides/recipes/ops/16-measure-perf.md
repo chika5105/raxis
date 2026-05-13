@@ -14,12 +14,26 @@ perf run end-to-end (Prometheus + Grafana + dashboards + report).
 If you only want to *look* at the dashboards (no perf run, no
 live-e2e harness), one command brings up the observability subset
 of the live-e2e compose stack, prints copy-pasteable Grafana /
-Prometheus / OTel URLs, and on macOS / Linux opens the Grafana
-home + the `raxis-00-overview` dashboard in your default browser:
+Prometheus / OTel URLs, and opens the Grafana home + the
+`raxis-00-overview` dashboard in the right browser surface:
 
 ```bash
 cd raxis && cargo xtask observability up
 ```
+
+  * **Inside Cursor's integrated terminal** — the URLs auto-open
+    in Cursor's in-IDE browser pane (Simple Browser), so the
+    dashboards land alongside your editor without context-switching.
+  * **Outside Cursor** (any other terminal — Terminal.app, iTerm,
+    plain `bash` / `zsh`, VS Code, JetBrains, etc.) — the URLs
+    open in your system default browser via `open` (macOS) /
+    `xdg-open` (Linux) / `cmd /C start` (Windows).
+  * **Headless / CI / SSH** — auto-open is suppressed; the URL
+    block is still printed for copy-paste.
+
+The `RAXIS_E2E_BROWSER` env var overrides the auto-detection:
+`cursor` forces the in-IDE browser path, `system` forces the
+OS default, `none` suppresses opening entirely.
 
 The dashboards will be EMPTY of kernel data until a kernel or
 `cargo xtask perf` run actively pushes OTLP — see Step 3 below.
