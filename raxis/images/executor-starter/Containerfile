@@ -44,6 +44,8 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     git \
     gnupg \
     grep \
+    iproute2 \
+    iptables \
     jq \
     less \
     make \
@@ -55,6 +57,23 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     wget \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Path A3 universal-airgap (`specs/v2/airgap-architecture.md §6`)
+# requires `iptables` inside the guest to install the `nat OUTPUT`
+# REDIRECT chain at PID-1 setup time. Debian bookworm ships
+# `iptables-nft` as the default backend (xtables-nft variant);
+# both binaries are installed by the `iptables` package above and
+# `raxis_planner_core::guest_init::linux_a3::install_iptables_redirect`
+# tries them in order (`iptables-nft` first, falling back to plain
+# `iptables`). `iproute2` is pulled in for the cred-proxy
+# loopback-forwarder + the A3 stub if a future operator wants to
+# debug the chain interactively.
+#
+# These packages add ~5 MB to the canonical executor rootfs and
+# are unconditionally enabled because the kernel-side `EgressTier`
+# selection is the cgroup that decides whether they are
+# load-bearing — under the default-off path the iptables binary
+# is present but never invoked.
 
 # Node 20 LTS via NodeSource.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \

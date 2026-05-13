@@ -18,9 +18,10 @@
 //! scaffold.
 
 use raxis_planner_core::{
-    hydrate_from_proc_cmdline, init_pid1_filesystem, mount_workspace_shares, park_on_signal,
-    render_boot_log, run_role_session, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
-    HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
+    airgap_a3_active, hydrate_from_proc_cmdline, init_pid1_a3_egress, init_pid1_filesystem,
+    mount_workspace_shares, park_on_signal, render_boot_log, run_role_session, shutdown_or_exit,
+    BootContext, DriverError, DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role,
+    WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
@@ -48,6 +49,19 @@ fn main() -> ! {
     let mount_outcome = mount_workspace_shares();
     log_workspace_mount_outcome(&mount_outcome);
 
+    // Step 3b: Path A3 — when the kernel stamped
+    // `RAXIS_AIRGAP_A3=1` into the env (i.e. the
+    // `runtime-airgap-a3` cargo feature was compiled into the
+    // kernel binary AND the operator set the env on the kernel
+    // process), install the in-guest egress chokepoint:
+    //   * disable IPv6 (sysfs writes)
+    //   * point `/etc/resolv.conf` at the in-guest DNS stub
+    //   * install iptables REDIRECT chains for outbound TCP
+    //     and UDP/53
+    // No-op when the env var is unset — the default-off path is
+    // bit-identical to the V2 baseline.
+    init_pid1_a3_egress();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -65,6 +79,16 @@ async fn async_main() -> u8 {
     if let Err(code) = activate_vsock_loopback_forwarder().await {
         return code;
     }
+    // Path A3 — spawn the in-guest tproxy + DNS stub iff
+    // `RAXIS_AIRGAP_A3=1` was stamped into the env. The kernel
+    // only stamps this when its `runtime-airgap-a3` cargo
+    // feature is on AND it sees `RAXIS_AIRGAP_A3=1` in its own
+    // env (double-gated; see `session_spawn_orchestrator`).
+    if airgap_a3_active() {
+        if let Err(code) = activate_airgap_a3_chokepoint().await {
+            return code;
+        }
+    }
     match run().await {
         Ok(())  => 0,
         Err(e)  => {
@@ -76,6 +100,123 @@ async fn async_main() -> u8 {
             e.exit_code() as u8
         }
     }
+}
+
+/// Env var that names the kernel CID the in-guest tproxy /
+/// DNS-stub dial when admission is mediated over AF_VSOCK.
+/// Defaults to `VMADDR_CID_HOST` (2) which is the only value
+/// the AVF / Firecracker substrates expose.
+const A3_HOST_CID_ENV:        &str = "RAXIS_AIRGAP_A3_HOST_CID";
+/// Env var that names the kernel-side admission listener port.
+/// Defaults to a stable canonical port — `kernel/src/main.rs`
+/// binds the same one when the A3 feature is active.
+const A3_ADMISSION_PORT_ENV:  &str = "RAXIS_AIRGAP_A3_ADMISSION_PORT";
+/// Env var that names the kernel-side byte-tunnel listener port.
+const A3_TUNNEL_PORT_ENV:     &str = "RAXIS_AIRGAP_A3_TUNNEL_PORT";
+
+/// Default kernel admission port (`spec §3.1`).
+const DEFAULT_ADMISSION_PORT: u32 = 5380;
+/// Default kernel tunnel port (`spec §4`).
+const DEFAULT_TUNNEL_PORT:    u32 = 5381;
+/// Default host CID — `VMADDR_CID_HOST` (2).
+const DEFAULT_HOST_CID:       u32 = 2;
+
+/// Bring up the in-guest tproxy listener and DNS stub when Path
+/// A3 is active. The accept loop runs on the same tokio runtime
+/// as the executor dispatcher so a single failure mode (process
+/// exit) cleanly tears both halves down.
+async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
+    let session_token = match std::env::var("RAXIS_SESSION_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
+                  \"role\":\"executor\",\"outcome\":\"missing-session-token\",\
+                  \"reason\":\"RAXIS_SESSION_TOKEN required for A3 admission auth\"}}"
+            );
+            return Err(64);
+        }
+    };
+    let host_cid       = env_u32_or(A3_HOST_CID_ENV,        DEFAULT_HOST_CID);
+    let admission_port = env_u32_or(A3_ADMISSION_PORT_ENV,  DEFAULT_ADMISSION_PORT);
+    let tunnel_port    = env_u32_or(A3_TUNNEL_PORT_ENV,     DEFAULT_TUNNEL_PORT);
+
+    #[cfg(target_os = "linux")]
+    {
+        use raxis_tproxy::linux::{accept_loop_a3, bind_default_listener};
+        let listener = match bind_default_listener().await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
+                      \"role\":\"executor\",\"outcome\":\"bind-failed\",\
+                      \"reason\":{:?}}}",
+                    e.to_string(),
+                );
+                return Err(64);
+            }
+        };
+        let token_for_loop = session_token.clone();
+        tokio::spawn(async move {
+            let res = accept_loop_a3(
+                listener,
+                host_cid,
+                admission_port,
+                tunnel_port,
+                token_for_loop,
+            )
+            .await;
+            if let Err(e) = res {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
+                      \"role\":\"executor\",\"outcome\":\"accept-loop-exit\",\
+                      \"reason\":{:?}}}",
+                    e.to_string(),
+                );
+            }
+        });
+        let token_for_dns = session_token.clone();
+        tokio::spawn(async move {
+            let res = raxis_tproxy::dns_stub::run_dns_stub(
+                host_cid,
+                admission_port,
+                token_for_dns,
+            )
+            .await;
+            if let Err(e) = res {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
+                      \"role\":\"executor\",\"outcome\":\"dns-stub-exit\",\
+                      \"reason\":{:?}}}",
+                    e.to_string(),
+                );
+            }
+        });
+        eprintln!(
+            "{{\"level\":\"info\",\"step\":\"airgap-a3-chokepoint\",\
+              \"role\":\"executor\",\"outcome\":\"activated\",\
+              \"host_cid\":{host_cid},\"admission_port\":{admission_port},\
+              \"tunnel_port\":{tunnel_port}}}"
+        );
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (host_cid, admission_port, tunnel_port, session_token);
+        eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"airgap-a3-chokepoint\",\
+              \"role\":\"executor\",\"outcome\":\"skipped-non-linux\",\
+              \"reason\":\"AF_VSOCK is Linux-only; A3 chokepoint disabled\"}}"
+        );
+        Ok(())
+    }
+}
+
+fn env_u32_or(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default)
 }
 
 /// Bring up the in-guest TCP→AF_VSOCK fan-out for the

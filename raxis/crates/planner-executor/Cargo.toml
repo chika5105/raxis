@@ -22,14 +22,17 @@ tokio              = { workspace = true }
 # AND stamps `RAXIS_VSOCK_LOOPBACK_PLAN` into `vm_spec.env`. The matching
 # in-guest TCP→AF_VSOCK fan-out lives in `raxis_tproxy::loopback_forwarder`.
 #
-# `raxis-tproxy` is NOT shipped as a separate binary in the executor
-# canonical rootfs (`planner-harness.md §14.4` confirms only the
-# `raxis-executor` binary is on the cpio.gz initramfs — no /usr/bin/git,
-# no /bin/bash, no /usr/local/bin/raxis-tproxy). So we link the
-# forwarder's library API directly into the executor binary and call
-# `spawn_forwarder` from `async_main` BEFORE the dispatch loop opens
-# its first credential-proxy connection. Without this dep the in-VM
-# `127.0.0.1:<port>` URLs the kernel stamps into the agent's env are
-# unreachable and every credential-bearing task fails with
-# `error connecting to server`.
+# Default-off path: `raxis-tproxy` is consumed as a library here so
+# the credential-proxy vsock-loopback fan-out runs inside the
+# executor binary without a separate process. Path A3
+# (`RAXIS_AIRGAP_A3=1` + `runtime-airgap-a3` cargo feature on the
+# kernel side) additionally drives the in-guest tproxy accept loop
+# (`raxis_tproxy::linux::accept_loop_a3`) and the DNS stub
+# (`raxis_tproxy::dns_stub::run_dns_stub`) from this binary —
+# `images/executor-starter/Containerfile` still ships only one
+# binary on the canonical executor rootfs, the egress chokepoint
+# is statically linked into it.
+#
+# See `specs/v2/airgap-architecture.md §6` for the feature-gate
+# rationale.
 raxis-tproxy      = { workspace = true }

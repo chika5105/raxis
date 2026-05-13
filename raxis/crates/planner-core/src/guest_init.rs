@@ -462,6 +462,297 @@ pub fn init_pid1_filesystem() {
 }
 
 // ---------------------------------------------------------------------------
+// Path A3 egress chokepoint setup
+// ---------------------------------------------------------------------------
+
+/// Env var that activates the A3 universal-airgap egress
+/// chokepoint inside the guest. Set by
+/// `kernel::session_spawn_orchestrator` when the
+/// `runtime-airgap-a3` cargo feature is compiled in AND the
+/// kernel process sees `RAXIS_AIRGAP_A3=1` in its own env. Absent
+/// ⇒ default-off path (NIC + cred-proxy loopback only).
+pub const A3_ACTIVE_ENV: &str = "RAXIS_AIRGAP_A3";
+
+/// Env var consumed by [`init_pid1_a3_egress`] to size the
+/// iptables REDIRECT chain that catches outbound TCP from agent
+/// processes. Default `3129` matches
+/// `raxis_tproxy::linux::bind_default_listener`.
+pub const A3_TPROXY_PORT_ENV: &str = "RAXIS_AIRGAP_A3_TPROXY_PORT";
+
+/// Default in-guest port the iptables REDIRECT chain forwards
+/// outbound TCP to. Mirrors `raxis_tproxy::linux::bind_default_listener`.
+pub const A3_DEFAULT_TPROXY_PORT: u16 = 3129;
+
+/// `true` iff the calling process should treat itself as running
+/// under Path A3. Both the planner-executor entrypoint and the
+/// test harness use this to decide whether to spawn the in-guest
+/// tproxy + DNS stub.
+#[must_use]
+pub fn airgap_a3_active() -> bool {
+    matches!(
+        std::env::var(A3_ACTIVE_ENV).ok().as_deref(),
+        Some("1") | Some("true") | Some("True") | Some("TRUE")
+    )
+}
+
+/// Install the in-guest egress chokepoint when [`airgap_a3_active`]
+/// is true and the calling process is PID 1 on Linux.
+///
+/// Steps:
+///   1. Disable IPv6 entirely (sysfs writes to
+///      `/proc/sys/net/ipv6/conf/{all,default,lo}/disable_ipv6`).
+///      The substrate refuses to provision a NIC under
+///      [`raxis_isolation::EgressTier::Mediated`], so the guest
+///      has no IPv6 interface to begin with, but defence in
+///      depth: a future substrate that exposes an IPv6
+///      auto-configured device cannot leak via SLAAC.
+///   2. Write `/etc/resolv.conf` so the libc resolver dispatches
+///      every `getaddrinfo` through `127.0.0.1:53` — i.e. the
+///      in-guest DNS stub that fans queries out over vsock to
+///      the kernel-side resolver.
+///   3. Install `iptables -t nat OUTPUT` REDIRECT rules to send
+///      outbound TCP to the local tproxy listener
+///      (`127.0.0.1:<tproxy_port>`). UDP port 53 is REDIRECTed
+///      to the local DNS stub on port 53.
+///
+/// Failures on any individual step are logged but non-fatal:
+/// the kernel-side admission listener is the load-bearing
+/// chokepoint (`INV-NETISO-A3-VSOCK-CHOKEPOINT-01`) and refuses
+/// every connection that arrives from a guest with no admission
+/// token. A botched iptables install therefore degrades to
+/// "guest cannot reach the network at all" rather than "guest
+/// has bypassed the chokepoint".
+pub fn init_pid1_a3_egress() {
+    #[cfg(target_os = "linux")]
+    {
+        if std::process::id() != 1 {
+            return;
+        }
+        if !airgap_a3_active() {
+            return;
+        }
+        let tproxy_port = std::env::var(A3_TPROXY_PORT_ENV)
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(A3_DEFAULT_TPROXY_PORT);
+        linux_a3::disable_ipv6_via_sysfs();
+        linux_a3::write_resolv_conf_for_stub();
+        linux_a3::install_iptables_redirect(tproxy_port);
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_a3 {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+
+    /// Hard-disable IPv6 on every interface (incl. future
+    /// auto-configured ones) via the `disable_ipv6` sysfs knob.
+    pub(super) fn disable_ipv6_via_sysfs() {
+        for scope in ["all", "default", "lo"] {
+            let path = format!("/proc/sys/net/ipv6/conf/{scope}/disable_ipv6");
+            match OpenOptions::new().write(true).open(&path) {
+                Ok(mut f) => {
+                    if let Err(e) = f.write_all(b"1") {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                              \"event\":\"ipv6_disable_write_failed\",\
+                              \"path\":{path:?},\"err\":{:?}}}",
+                            e.to_string(),
+                        );
+                    } else {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                              \"event\":\"ipv6_disabled\",\"scope\":{scope:?}}}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // sysfs path missing ⇒ kernel was built without
+                    // IPv6 support (CONFIG_IPV6=n). Already safe.
+                    eprintln!(
+                        "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"ipv6_sysfs_unavailable\",\
+                          \"path\":{path:?},\"err\":{:?}}}",
+                        e.to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Point the libc resolver at the in-guest stub on
+    /// `127.0.0.1:53`. The stub binds at PID-1 setup time inside
+    /// the planner-executor entry point.
+    pub(super) fn write_resolv_conf_for_stub() {
+        // glibc and musl both treat `nameserver 127.0.0.1` as the
+        // sole resolver target when no `search` / `options` lines
+        // are present. The stub forwarder is the dispatcher to
+        // the kernel-side resolver via vsock.
+        let contents: &[u8] =
+            b"# raxis Path A3 universal airgap -- kernel-mediated DNS.\n\
+              nameserver 127.0.0.1\n\
+              options single-request-reopen timeout:5 attempts:2\n";
+        // `/etc` may or may not exist in the canonical executor
+        // rootfs; `mkdir -p` is cheap.
+        if let Err(e) = std::fs::create_dir_all("/etc") {
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                  \"event\":\"resolv_mkdir_failed\",\"err\":{:?}}}",
+                e.to_string(),
+            );
+            return;
+        }
+        if let Err(e) = std::fs::write("/etc/resolv.conf", contents) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                  \"event\":\"resolv_write_failed\",\"err\":{:?}}}",
+                e.to_string(),
+            );
+            return;
+        }
+        eprintln!(
+            "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+              \"event\":\"resolv_conf_pointed_at_stub\"}}"
+        );
+    }
+
+    /// Shell out to `iptables` (`iptables-nft` or
+    /// `iptables-legacy`, whichever is on PATH) to install the
+    /// A3 REDIRECT chain. We try each binary candidate in turn
+    /// because the canonical executor rootfs may ship either —
+    /// the `images/executor-starter/Containerfile` is the
+    /// authoritative source of truth.
+    pub(super) fn install_iptables_redirect(tproxy_port: u16) {
+        // RULES — applied in order. Each rule is a list of argv
+        // tokens; empty list = end of rules.
+        //
+        // 1. Skip the cred-proxy loopback range (already on
+        //    127.0.0.1, which is INPUT not OUTPUT — we let it
+        //    through unconditionally).
+        // 2. REDIRECT outbound TCP (any dest, any port) to the
+        //    in-guest tproxy listener.
+        // 3. REDIRECT outbound UDP port 53 (DNS) to the in-guest
+        //    DNS stub on port 53.
+        let tproxy_port_s = tproxy_port.to_string();
+        let rules: Vec<Vec<&str>> = vec![
+            // Don't REDIRECT traffic that is already loopback —
+            // the cred-proxy loopback forwarder and the DNS stub
+            // both bind 127.0.0.1.
+            vec![
+                "-t", "nat", "-A", "OUTPUT",
+                "-o", "lo", "-j", "RETURN",
+            ],
+            // Default-deny REJECT-as-RST equivalent is implicit:
+            // anything that doesn't hit one of the REDIRECT rules
+            // below has no upstream NIC anyway (substrate gave us
+            // EgressTier::Mediated), so connect(2) returns
+            // ENETUNREACH / EHOSTUNREACH which surfaces to the
+            // agent's libc as a clean failure.
+            vec![
+                "-t", "nat", "-A", "OUTPUT",
+                "-p", "tcp", "!", "-d", "127.0.0.1/32",
+                "-j", "REDIRECT", "--to-port", &tproxy_port_s,
+            ],
+            vec![
+                "-t", "nat", "-A", "OUTPUT",
+                "-p", "udp", "--dport", "53",
+                "!", "-d", "127.0.0.1/32",
+                "-j", "REDIRECT", "--to-port", "53",
+            ],
+        ];
+
+        let binaries: &[&str] = &["iptables-nft", "iptables"];
+        let mut installed_any = false;
+        for binary in binaries {
+            let mut ok = true;
+            for argv in &rules {
+                let status = std::process::Command::new(binary)
+                    .args(argv)
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                              \"event\":\"iptables_rule_failed\",\
+                              \"binary\":{binary:?},\"argv\":{argv:?},\
+                              \"exit\":{:?}}}",
+                            s.code(),
+                        );
+                        ok = false;
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                              \"event\":\"iptables_binary_missing\",\
+                              \"binary\":{binary:?},\"err\":{:?}}}",
+                            e.to_string(),
+                        );
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                installed_any = true;
+                eprintln!(
+                    "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                      \"event\":\"iptables_redirect_installed\",\
+                      \"binary\":{binary:?},\"tproxy_port\":{tproxy_port}}}"
+                );
+                break;
+            }
+        }
+        if !installed_any {
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                  \"event\":\"iptables_install_failed\",\
+                  \"note\":\"egress will fail closed — substrate has no NIC \
+                  and the in-guest tproxy listener is unreachable from \
+                  agent processes without the REDIRECT chain\"}}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_a3 {
+    use super::*;
+
+    #[test]
+    fn a3_env_vars_pinned() {
+        // Pin the env-var names so a rename in the kernel side
+        // (session_spawn_orchestrator) breaks both halves of the
+        // contract at compile time, not at runtime.
+        assert_eq!(A3_ACTIVE_ENV,        "RAXIS_AIRGAP_A3");
+        assert_eq!(A3_TPROXY_PORT_ENV,   "RAXIS_AIRGAP_A3_TPROXY_PORT");
+        assert_eq!(A3_DEFAULT_TPROXY_PORT, 3129);
+    }
+
+    #[test]
+    fn a3_active_recognises_canonical_values() {
+        // The kernel stamps "1"; tests / operators may set
+        // "true" / "True" / "TRUE" — accept all four shapes.
+        let prev = std::env::var(A3_ACTIVE_ENV).ok();
+        for v in ["1", "true", "True", "TRUE"] {
+            std::env::set_var(A3_ACTIVE_ENV, v);
+            assert!(airgap_a3_active(), "should be active when set to {v:?}");
+        }
+        for v in ["0", "false", "no", ""] {
+            std::env::set_var(A3_ACTIVE_ENV, v);
+            assert!(!airgap_a3_active(), "should NOT be active when set to {v:?}");
+        }
+        std::env::remove_var(A3_ACTIVE_ENV);
+        assert!(!airgap_a3_active());
+        if let Some(v) = prev {
+            std::env::set_var(A3_ACTIVE_ENV, v);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VirtioFS workspace-share mounts
 // ---------------------------------------------------------------------------
 
