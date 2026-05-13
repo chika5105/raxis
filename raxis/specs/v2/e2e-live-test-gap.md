@@ -112,35 +112,36 @@ The test creates them programmatically before plan submission.
 
 ### §3.1 — `test-pg-dev.env`
 
-```env
-# Postgres connection details for the Docker instance.
-# The proxy reads these to connect upstream.
-PGHOST=127.0.0.1
-PGPORT=54399
-PGUSER=raxis_test
-PGPASSWORD=raxis_test_pass
-PGDATABASE=raxis_e2e
-PGSSLMODE=disable
+```text
+postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e
 ```
 
-**Proxy behaviour:** `PostgresProxy` reads `PGHOST`/`PGPORT`/
-`PGUSER`/`PGPASSWORD` from the credential value. The agent-side
-connection uses dummy credentials (the proxy intercepts
+**Credential format is normative per `credential-proxy.md §3`**:
+the resolved credential value MUST be a libpq URL (RFC 3986). The
+file suffix `.env` is purely the on-disk path convention
+(`<data_dir>/credentials/<name>.env`); the file contents are the
+URL bytes, not a `KEY=VALUE` env file. The Postgres proxy's
+upstream parser is `credential-proxy-postgres::ParsedUpstreamUrl::parse`;
+non-URL bytes are rejected with `FAIL_PROXY_UPSTREAM_URL_INVALID`.
+
+**Proxy behaviour:** `PostgresProxy` parses the libpq URL,
+extracts `host`/`port`/`user`/`password`/`dbname`, and delegates
+SCRAM-SHA-256 / MD5 / cleartext auth to `tokio-postgres`. The
+agent-side connection uses dummy credentials (the proxy intercepts
 `AuthenticationOk`); the proxy uses real credentials upstream.
 
 ### §3.2 — `test-mongo-dev.env`
 
-```env
-# MongoDB connection URI with SCRAM-SHA-256 credentials.
-# The proxy parses this as a mongodb:// URI to extract
-# host, port, username, password, and authSource.
-MONGO_HOST=127.0.0.1
-MONGO_PORT=27399
-MONGO_USER=raxis_test
-MONGO_PASSWORD=raxis_test_pass
-MONGO_AUTH_DB=admin
-MONGO_DATABASE=raxis_e2e
+```text
+mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e?authSource=admin
 ```
+
+**Credential format is normative per `credential-proxy.md §3`**:
+the resolved credential value MUST be a plaintext `mongodb://`
+URI. `mongodb+srv://` is rejected for the V2 MVP. The MongoDB
+proxy's upstream parser is
+`credential-proxy-mongodb::ParsedUpstreamUrl::parse`; non-URL
+bytes are rejected with `FAIL_PROXY_UPSTREAM_URL_INVALID`.
 
 **Proxy behaviour:** `MongodbProxy` must complete the SCRAM-SHA-256
 4-message handshake (`SASLStart → ServerFirst → SASLContinue →
@@ -420,23 +421,13 @@ kernel.wait_until_ready_or_panic(Duration::from_secs(15));
 let cred_dir = kernel.data_dir().join("credentials");
 std::fs::create_dir_all(&cred_dir).unwrap();
 
-// §3.1 — Postgres
-std::fs::write(cred_dir.join("test-pg-dev.env"), "\
-PGHOST=127.0.0.1\n\
-PGPORT=54399\n\
-PGUSER=raxis_test\n\
-PGPASSWORD=raxis_test_pass\n\
-PGDATABASE=raxis_e2e\n\
-PGSSLMODE=disable\n").unwrap();
+// §3.1 — Postgres (libpq URL per credential-proxy.md §3)
+std::fs::write(cred_dir.join("test-pg-dev.env"),
+    "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e").unwrap();
 
-// §3.2 — MongoDB
-std::fs::write(cred_dir.join("test-mongo-dev.env"), "\
-MONGO_HOST=127.0.0.1\n\
-MONGO_PORT=27399\n\
-MONGO_USER=raxis_test\n\
-MONGO_PASSWORD=raxis_test_pass\n\
-MONGO_AUTH_DB=admin\n\
-MONGO_DATABASE=raxis_e2e\n").unwrap();
+// §3.2 — MongoDB (plaintext mongodb:// URI per credential-proxy.md §3)
+std::fs::write(cred_dir.join("test-mongo-dev.env"),
+    "mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e?authSource=admin").unwrap();
 
 // §3.3 — GCP (copy ADC)
 let adc = dirs::home_dir().unwrap()

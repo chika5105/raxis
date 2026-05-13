@@ -243,7 +243,7 @@ The proxy listeners + the egress-admission listener + the VM itself are bound an
 1. `CredentialProxyManager::start_for_session(session_id, task_id, &decls)` binds one listener per `[[tasks.credentials]]` declaration on `127.0.0.1:0`.
 2. A per-session egress-admission `tokio::net::TcpListener::bind("127.0.0.1:0")` is bound for the in-guest `raxis-tproxy` to phone home to.
 3. The composer stamps four classes of values into `VmSpec.env` (per `extensibility-traits.md §3.5`):
-   * One entry per credential proxy keyed by the operator-declared `mount_as` field, value = the proxy's loopback URL (`postgresql://raxis@127.0.0.1:NNN/` for postgres, `http://127.0.0.1:NNN` for HTTP/k8s).
+   * One entry per credential proxy keyed by the operator-declared `mount_as` field, value = the proxy's loopback URL. **The URL scheme MUST match the wire-protocol scheme the agent's standard client expects for that `proxy_type`** (rendered by `credential_proxy_manager::SessionProxyHandles::loopback_env`): `postgresql://raxis@127.0.0.1:NNN/` for `postgres`, `mysql://raxis@127.0.0.1:NNN/` for `mysql`, `mssql://raxis@127.0.0.1:NNN/` for `mssql`, `mongodb://127.0.0.1:NNN/` for `mongodb` (no userinfo — pymongo and the official Node / Java drivers reject `user@` URIs that omit a password), `redis://127.0.0.1:NNN` for `redis`, bare `127.0.0.1:NNN` for `smtp`, and `http://127.0.0.1:NNN` for `http` / `k8s` / `aws` / `gcp` / `azure`. Mismatched schemes are NOT a stylistic concern — agents (pymongo, libpq, etc.) reject foreign schemes with `InvalidURI`, and client-side rewrites still fail because the proxy's wire-protocol `serve_one()` reads the connection as malformed and closes it (Live-e2e iter28 reproduced this for mongodb: the catch-all `http://` arm was rendering `MONGO_URL=http://127.0.0.1:NNN`, executor's pymongo bailed out with "connection closed").
    * `RAXIS_SESSION_ID`.
    * `RAXIS_TPROXY_KERNEL_TCP` = the per-session admission listener address.
    * `RAXIS_VSOCK_LOOPBACK_PLAN` = comma-separated `<vsock_port>:<guest_loopback_port>` pairs, one per credential proxy (per `raxis-vsock-loopback`'s wire format). Stamped only when the session declared at least one credential.
@@ -1447,12 +1447,13 @@ and runs a database migration against the staging PostgreSQL instance.
 # The service account has deploy permissions in the 'staging' namespace only
 cp ~/staging-sa-kubeconfig.yaml $RAXIS_DATA_DIR/credentials/k8s-staging.yaml
 
-# PostgreSQL credential: a .env file with the real connection parameters
+# PostgreSQL credential: a single libpq URL with the real connection parameters
+# (per `§3` table — `postgres` proxy_type accepts `postgresql://user:pass@host:port/db`).
+# The file suffix `.env` is the on-disk path convention
+# (`<data_dir>/credentials/<name>.env`); the file contents are the URL bytes,
+# not a KEY=VALUE env file.
 cat > $RAXIS_DATA_DIR/credentials/postgres-staging.env << 'EOF'
-PGHOST=postgres-staging.company.internal
-PGPORT=5432
-PGUSER=raxis_staging_svc
-PGPASSWORD=real-secret-password-here
+postgresql://raxis_staging_svc:real-secret-password-here@postgres-staging.company.internal:5432/staging?sslmode=require
 EOF
 ```
 
@@ -1772,12 +1773,14 @@ docker run -d --name dev-redis \
 #### Step 2: Store credentials
 
 ```bash
-# Postgres credential — the real connection string with real password
-printf "PGHOST=localhost\nPGPORT=5432\nPGUSER=devuser\nPGPASSWORD=devpass" | \
+# Postgres credential — a single libpq URL (per `§3` proxy_type=postgres).
+# The proxy parses `postgresql://user:pass@host:port/db`; non-URL bytes
+# fail with `FAIL_PROXY_UPSTREAM_URL_INVALID`.
+printf "postgresql://devuser:devpass@localhost:5432/postgres" | \
   raxis credential add dev-pg --type postgres --stdin
 
-# Redis credential — the real password
-printf "REDIS_HOST=localhost\nREDIS_PORT=6379\nREDIS_PASSWORD=redispass" | \
+# Redis credential — a single `redis://` URL (per `§3` proxy_type=redis).
+printf "redis://:redispass@localhost:6379/0" | \
   raxis credential add dev-redis --type redis --stdin
 
 # Verify both are reachable
@@ -1885,7 +1888,8 @@ r.set("session:abc", ...)    1. Agent connects to :54322
 |---|---|---|
 | Proxy can't connect upstream | Docker not running or port not mapped | `docker ps` — verify `-p 5432:5432` |
 | Agent gets "connection refused" | VM firewall blocking | Check that `mount_as` env var matches what the agent's code reads |
-| Wrong database | Credential file has wrong `PGHOST` | `raxis credential rotate dev-pg` with corrected values |
+| Wrong database | Credential URL points at wrong host/db | `raxis credential rotate dev-pg` with corrected libpq URL |
+| `FAIL_PROXY_UPSTREAM_URL_INVALID` | Credential file contains `PGHOST=…` env-style instead of `postgresql://…` URL | Replace contents with a libpq URL — see `§3` proxy_type table |
 | `DuplicateMountAs` error | Two credentials share the same `mount_as` name | Use distinct names: `USERS_DATABASE_URL`, `CACHE_REDIS_URL` |
 
 ---
@@ -2031,17 +2035,24 @@ exploration, not a V2 deliverable.
 The operator is responsible for pre-populating credentials on the Kernel host.
 The Kernel reads these files at proxy startup — they are never sent into the VM.
 
+The file *suffix* `.env`/`.yaml`/`.json` is the on-disk **path
+convention** (`<data_dir>/credentials/<name>.<ext>`); for database
+and HTTP proxies the file *contents* are the wire-protocol URL the
+proxy parses (per `§3` proxy_type table), **not** a KEY=VALUE env
+file. The proxy rejects non-URL bytes with
+`FAIL_PROXY_UPSTREAM_URL_INVALID`.
+
 | Credential name | File path | Format |
 |---|---|---|
 | `k8s-*` | `credentials/<name>.yaml` | kubeconfig YAML |
-| `postgres-*` | `credentials/<name>.env` | `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` as env file |
-| `mysql-*` | `credentials/<name>.env` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD` |
-| `mssql-*` | `credentials/<name>.env` | `MSSQL_HOST`, `MSSQL_PORT`, `MSSQL_USER`, `MSSQL_PASSWORD` |
-| `aws-*` | `credentials/<name>.env` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| `postgres-*` | `credentials/<name>.env` | libpq URL `postgresql://user:pass@host:port/db[?sslmode=…]` |
+| `mysql-*` | `credentials/<name>.env` | `mysql://user:pass@host:port/db[?ssl-mode=…]` |
+| `mssql-*` | `credentials/<name>.env` | `mssql://user:pass@host:port/db[?encrypt=true]` |
+| `aws-*` | `credentials/<name>.env` | AWS credentials INI block (`aws_access_key_id`, `aws_secret_access_key`) |
 | `gcp-*` | `credentials/<name>.json` | Google service account key JSON |
 | `azure-*` | `credentials/<name>.json` | Azure service principal JSON |
-| `mongodb-*` | `credentials/<name>.env` | `MONGO_URI_WITH_CREDENTIALS` |
-| `redis-*` | `credentials/<name>.env` | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` |
+| `mongodb-*` | `credentials/<name>.env` | `mongodb://user:pass@host:port/db?authSource=…` (plaintext URI; `mongodb+srv://` not yet supported) |
+| `redis-*` | `credentials/<name>.env` | `redis://[user]:pass@host:port/dbnum` |
 
 **Permissions:**
 ```bash
@@ -2261,7 +2272,8 @@ Verifying postgres-staging...
   Status:    ✗ Connection refused (timeout after 5000ms)
   Error:     connect: connection refused (postgres-staging.company.internal:5432)
   Hint:      Check that the host is reachable and the port is open.
-             Check that PGHOST/PGPORT in the credential file are correct.
+             Check that the host:port in the libpq URL stored at
+             `<data_dir>/credentials/<name>.env` is correct.
 ```
 
 ---
@@ -2335,8 +2347,7 @@ The manual file creation steps from §11.2 are replaced with CLI commands:
 ```bash
 cp ~/staging-sa-kubeconfig.yaml $RAXIS_DATA_DIR/credentials/k8s-staging.yaml
 cat > $RAXIS_DATA_DIR/credentials/postgres-staging.env << 'EOF'
-PGHOST=postgres-staging.company.internal
-PGPASSWORD=real-secret-password-here
+postgresql://raxis_staging_svc:real-secret-password-here@postgres-staging.company.internal:5432/staging?sslmode=require
 EOF
 ```
 
@@ -3414,8 +3425,9 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [ ] **Deferred V3:** real upstream forwarding via `tiberius`; `LOGIN7` parsing for db / hostname / appname routing; `RPC` packet handling (binary parameter binding); Azure AD token auth via the Azure proxy; `forbidden_schemas`.
 - [x] **Implement `MongodbProxy`** (V2 handshake-tier MVP). **Implementation reference:** `raxis/crates/credential-proxy-mongodb/` (lib + 8 unit tests + live-e2e slice `live-e2e/src/slice_mongodb_proxy.rs`). Surface: `MongodbProxy::bind` + `serve()` accept loop, configured by `ProxyDecl::Mongodb { restrictions }` (`raxis-plan-credentials`) and wired through `CredentialProxyManager::bind_mongodb`. The `mount_as` env var receives a `mongodb://127.0.0.1:NNNN/db` URI — the V2 proxy advertises **no supported auth mechanisms** in its `hello` reply so `pymongo`, `mongosh`, and the official Node driver skip SCRAM/X.509 entirely (the kernel-resolved credential is what V3 will send to a real upstream after the SCRAM dance lands).
       - [x] 16-byte header parser + `OP_MSG` framing (op code 2013); inbound message length capped at 64 MiB to bound buffering.
+      - [x] **Legacy `OP_QUERY` initial-handshake support** (op code 2004 → `OP_REPLY` op code 1). Modern drivers (pymongo 4.x, the official Java driver, Node, Go, Rust) negotiate down to `OP_MSG` after the first reply, but the **first** message of every session is sent as `OP_QUERY` against collection `<db>.$cmd` with a query document like `{ ismaster: 1, helloOk: true, client: {…} }` — the legacy pre-`hello` lowest-common-denominator handshake form. The proxy parses the `OP_QUERY` frame (`wire::parse_op_query_command`), pulls the fully-qualified collection name + first command-doc field name, and answers with an `OP_REPLY` (`wire::build_op_reply`) carrying the same synthesised hello document `build_reply_for` returns over `OP_MSG`. Live-e2e iter33 root cause: without this branch the proxy closed every inbound TCP connection on the legacy opcode, pymongo's SDAM monitor surfaced it as `ServerSelectionTimeoutError: connection closed`, and the `materialize-records` / `sibling-materialize-records` Executor tasks failed with no MongoDB documents materialised. The branch fails-closed on any non-`<db>.$cmd` collection name (V2 refuses pre-3.6-style data reads over OP_QUERY) and on any command other than `hello` / `isMaster` / `ismaster` / `ping` / `buildInfo`. Regression tests: `parse_op_query_pulls_collection_and_first_command_field` and `build_op_reply_stamps_op_code_1_and_one_returned` in `wire.rs`.
       - [x] First-command-name extraction: walks kind-0 (Body) and kind-1 (Document Sequence) sections, pulls the first BSON element's name (e.g. `"find"`, `"insert"`, `"hello"`).
-      - [x] Synthetic replies for `hello` / `isMaster` / `ismaster` (advertises `isWritablePrimary: true`, `maxWireVersion: 17`, `topologyVersion`); `ping` (`{ ok: 1.0 }`); `buildInfo` / `buildinfo` (`{ ok: 1.0, version: "raxis-mongo-proxy-v2" }`).
+      - [x] Synthetic replies for `hello` / `isMaster` / `ismaster` (advertises `isWritablePrimary: true`, `maxWireVersion: 17`, `minWireVersion: 0`, `readOnly: false`, the canonical `max{Bson,Message,WriteBatch}Size` caps; **`topologyVersion` is intentionally omitted** — the SDAM spec types it as `{ processId: ObjectId, counter: Int64 }`, and Live-e2e iter32 reproduced `pymongo.errors.AutoReconnect: connection closed` when the proxy emitted `topologyVersion` as a BSON string (`type 0x02`): pymongo's SDAM monitor parses the hello, runs `_is_stale_error_topology_version`, fails on the mismatched-type attribute lookup, flags the socket as stale, and tears the connection down before the first user command can issue, surfacing in the executor VM as `ServerSelectionTimeoutError`. The SDAM spec permits servers to omit `topologyVersion` — clients track topology with a null version, which is the safer contract for a synthesised proxy that never legitimately rotates its `processId`. The regression test `reply_for_hello_does_not_emit_topology_version_as_string` in `credential-proxy-mongodb/src/lib.rs` pins this contract.); `ping` (`{ ok: 1.0 }`); `buildInfo` / `buildinfo` (`{ ok: 1.0, version: "raxis-mongo-proxy-v2" }`).
       - [x] Restriction enforcement: `allow_read_only` (writes → `{ ok: 0.0, code: 13, codeName: "Unauthorized", errmsg: "..." }`); `is_read_command` covers `find`, `aggregate`, `count`, `distinct`, `getMore`, `listCollections`, `listIndexes`, `listDatabases`, `dbStats`, `collStats`, `connectionStatus`, `whatsmyuri`, etc. — see `restriction::is_read_command` for the full list.
       - [x] Audit emission: every classified command emits `MongoCommandExecuted { command, body_sha256, blocked }` translated by the manager into `AuditEventKind::MongoCommandExecuted`.
       - [x] Stats surface (`ProxyStats { connections_served, commands_audited, commands_blocked, bytes_observed }`) feeds the manager's `CredentialProxyStopped` event.

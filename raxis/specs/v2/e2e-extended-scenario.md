@@ -272,7 +272,10 @@ kernel emits a terminal `orchestrator_spawn_failed` JSON line
 for either watched initiative,
 `poll_for_dual_lifecycle_completion` surfaces the kernel's own
 `error` + `hint` and panics — rather than wait the full
-`realistic_lifecycle_deadline` (30 min default) for an
+`realistic_lifecycle_deadline` (60 min default; iter31 sized
+this up from 30 min after empirically observing 9-task primary
+lane × ~4 min/task linear-extrapolated to ~40 min + 1-task
+sibling + integration-merge overhead) for an
 `IntegrationMergeCompleted` event that the kernel has already
 documented as un-driveable without operator-side
 `recovery::reconcile`. The most common trigger today is an

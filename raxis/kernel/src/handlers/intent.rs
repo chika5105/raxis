@@ -2391,7 +2391,7 @@ fn increment_executor_review_reject_count(
 /// hostile planner from gaming the counter, NOT about exempting
 /// self-declared failures from the crash budget. The wire surface
 /// (the `RetrySubTask` ceiling check) does not change.
-fn bump_executor_crash_retry_count_in_tx(
+pub(crate) fn bump_executor_crash_retry_count_in_tx(
     tx:               &rusqlite::Transaction<'_>,
     executor_task_id: &str,
 ) -> Result<usize, rusqlite::Error> {
@@ -4250,10 +4250,27 @@ async fn handle_activate_sub_task(
             // is revoked so the recovery sweep can reclaim it.
             // INV-08 — wire surface stays coarse; the structured
             // error is logged here for forensic analysis.
+            //
+            // `initiative_id` is included so the live-e2e harness
+            // (`poll_for_dual_lifecycle_completion`) can match
+            // terminal sub-task spawn failures against its watched
+            // initiative set; without it the harness can't
+            // distinguish a fatal failure in one initiative from
+            // a transient retry in another running concurrently.
+            // The `hint` field mirrors the existing
+            // `orchestrator_spawn_failed` schema so audit-poll
+            // consumers can format the panic body uniformly.
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"ActivateSubTaskSpawnFailed\",\
-                 \"task_id\":\"{}\",\"new_session_id\":\"{}\",\"error\":\"{}\"}}",
-                task_id_owned, lookup.new_session_id, e,
+                 \"task_id\":\"{}\",\"new_session_id\":\"{}\",\
+                 \"initiative_id\":\"{}\",\
+                 \"agent_kind\":\"{:?}\",\
+                 \"error\":\"{}\",\
+                 \"hint\":\"sub-task activation exhausted its transient-retry budget; \
+                            the parent initiative cannot make further progress \
+                            without operator-driven recovery (recovery::reconcile)\"}}",
+                task_id_owned, lookup.new_session_id, lookup.initiative_id,
+                lookup.agent_kind, e,
             );
             // Best-effort: revoke the freshly-minted session row.
             let store_arc = Arc::clone(&ctx.store);

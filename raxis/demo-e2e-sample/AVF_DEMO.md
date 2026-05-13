@@ -187,22 +187,100 @@ The AVF substrate boots the guest with `vmlinux` from
 either a local file or a URL (with mandatory SHA-256 verification) and
 atomically writes the binary to the canonical layout.
 
-If you already have a `vmlinux` for `aarch64`:
+If you already have a compatible `vmlinux` for `aarch64`:
 
 ```bash
 cargo xtask images dev-kernel --from-file /path/to/vmlinux-aarch64-virt
 ```
 
-If you do not, the easiest hermetic source is the
-[Firecracker quickstart kernel
-artifacts](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md#downloading-pre-built-kernel-and-rootfs):
+### §5.1 — Required kernel `CONFIG_*` flags (READ BEFORE choosing a kernel)
+
+AVF advertises every virtio device — block, console, vsock, network,
+and filesystem — over **virtio-pci**, never via virtio-mmio. The guest
+kernel MUST enumerate them through the PCI bus or the boot dies
+silently the moment `unpack_to_rootfs` finishes (AVF reports
+`startWithCompletionHandler:` success, the console FIFO closes without
+emitting a single byte, and every `connect_vsock` from the host
+returns `ECONNRESET`). The substrate's symptom suite is:
+
+```
+{"event":"avf_vm_started","vcpu":1,"mem_mib":1024}
+{"event":"avf_console_pump_eof","path":"…/console.log"}
+isolation spawn failed: transport fault: apple-vz-14.x: vsock CONNECT 1024: \
+  AVF connect_vsock did not succeed within 30s; \
+  last guest-side error: The operation couldn't be completed. \
+  Connection reset by peer
+```
+
+A guest kernel intended for the AVF substrate MUST be built with at
+least the following config flags `=y`:
+
+| Flag                                  | Why                                                  |
+|---------------------------------------|------------------------------------------------------|
+| `CONFIG_VIRTIO_PCI`                   | AVF advertises virtio devices on the PCI bus.        |
+| `CONFIG_VIRTIO_BLK`                   | Rootfs as virtio-blk drive (`RootfsErofs` path).     |
+| `CONFIG_VIRTIO_NET`                   | NAT bridge for `EgressTier::Tier1Tproxy`.            |
+| `CONFIG_VIRTIO_CONSOLE`               | `console=hvc0` lines reach the host console-log.     |
+| `CONFIG_VIRTIO_VSOCKETS`              | Kernel↔planner control channel (port 1024).         |
+| `CONFIG_VSOCKETS`                     | Guest userspace `AF_VSOCK` socket support.           |
+| `CONFIG_FUSE_FS` + `CONFIG_VIRTIO_FS` | Workspace + meta-sidecar shares (`/workspace`, `/raxis-meta`). |
+| `CONFIG_BLK_DEV_INITRD`               | Initramfs `RootfsInitramfsCpio` path (the dev pipeline). |
+| `CONFIG_TMPFS`                        | The unpacker mounts the cpio.gz contents into a tmpfs rootfs. |
+
+**Firecracker reference kernels (the docs/getting-started kernels)
+DO NOT satisfy this list.** They ship with `CONFIG_VIRTIO_MMIO=y` and
+no `CONFIG_VIRTIO_PCI`, `CONFIG_FUSE_FS`, or `CONFIG_VIRTIO_FS`. The
+guest boots, fails to enumerate any virtio device because the AVF
+bus advertises them on PCI, hangs without producing console output,
+and AVF tears the VM down. **Do NOT use Firecracker reference kernels
+with this substrate.** The earlier revision of this doc recommended
+them; that recommendation was a regression and has been removed.
+
+Acceptable hermetic sources for an AVF-compatible aarch64 vmlinux:
+
+1. **Apple's recommended Fedora pxeboot kernel** — the kernel Apple's
+   own AVF sample code reference for Linux guests. Available at
+   `https://download.fedoraproject.org/pub/fedora/linux/releases/<rel>/Everything/aarch64/os/images/pxeboot/vmlinuz`.
+   Note that recent Fedora releases (≥ 38) ship the kernel in EFI
+   `zboot` wrapper format (PE32+ executable, zstd-compressed payload);
+   the `VZLinuxBootLoader` direct-kernel path requires the
+   uncompressed Image, so you must extract the inner kernel via
+   `Documentation/admin-guide/kernel-parameters/extract-vmlinux` or
+   boot via `VZEFIBootLoader` instead (V2 ships only `VZLinuxBootLoader`).
+
+2. **A custom kernel built from upstream Linux** with the config
+   above. The Cloud Hypervisor reference defconfig
+   (`https://github.com/cloud-hypervisor/linux/blob/ch-6.12.8/arch/arm64/configs/ch_defconfig`)
+   covers every flag in the table; the resulting `arch/arm64/boot/Image`
+   is the canonical AVF-compatible kernel format.
+
+3. **The historical kernel staged at
+   `~/.raxis-install/kernel/vmlinux`** if you have an existing
+   "working e2e" install on this host — that kernel was built against
+   the AVF spec and is preserved across re-installs (the
+   `--install-dir` flag on `dev-kernel` does not touch the user's
+   default $HOME copy).
+
+If the kernel you stage trips the symptom suite above, run
 
 ```bash
-# Pin a known-good ARM64 kernel digest. Replace the URL + sha if you
-# want a newer release; the `--sha256` flag is mandatory and the
-# subcommand refuses to install on mismatch.
+file "$RAXIS_INSTALL_DIR/kernel/vmlinux"
+strings "$RAXIS_INSTALL_DIR/kernel/vmlinux" | rg "CONFIG_VIRTIO_(PCI|MMIO|FS)" | head
+```
+
+If `strings` shows `CONFIG_VIRTIO_MMIO=y` and the PCI / FUSE flags are
+absent, the kernel is Firecracker-targeted and will not work — re-stage
+from one of the three sources above.
+
+If you do not yet have a kernel and need a working hermetic default,
+the Fedora pxeboot kernel is the path Apple's own AVF sample code
+takes:
+
+```bash
+# Pin a known-good Fedora ARM64 vmlinuz; the `--sha256` flag is
+# mandatory and the subcommand refuses to install on mismatch.
 cargo xtask images dev-kernel \
-    --url    "https://example/path/to/vmlinux-aarch64-5.10" \
+    --url    "https://mirrors.kernel.org/fedora/releases/<rel>/Everything/aarch64/os/images/pxeboot/vmlinuz" \
     --sha256 "<hex sha256 of the file>"
 ```
 
@@ -337,6 +415,8 @@ rm -rf "$HOME/.config/raxis/keys"
 | `KernelPathMissing` at session spawn | `$RAXIS_INSTALL_DIR/kernel/vmlinux` absent | Run §5 (`cargo xtask images dev-kernel`) |
 | `manifest signature does not verify` at boot | `RAXIS_KERNEL_SIGNING_KEY_HEX` not exported when `cargo build` ran | Re-`cargo build --release -p raxis-kernel` with the env var live (§2). The kernel's trust anchor is build-pinned. |
 | `canonical image not found` at boot | `cargo xtask images build-all` not run, or `RAXIS_INSTALL_DIR` mismatched | Re-run §4 with the same `RAXIS_INSTALL_DIR` value used in §7 |
+| `avf_vm_started` immediately followed by `avf_console_pump_eof` and a `vsock CONNECT 1024 … Connection reset by peer` failure | Kernel at `$RAXIS_INSTALL_DIR/kernel/vmlinux` does not have `CONFIG_VIRTIO_PCI` / `CONFIG_VIRTIO_FS` / `CONFIG_FUSE_FS` compiled in — typically because it is a Firecracker reference kernel. AVF advertises virtio over PCI; the guest enumerates nothing on the MMIO bus, the console never receives any printk, and the VM exits before binding `AF_VSOCK`. | Re-stage a kernel built per §5.1 (Apple's recommended Fedora pxeboot kernel, a Cloud Hypervisor `ch_defconfig`-built upstream kernel, or restore from `~/.raxis-install/kernel/vmlinux` if you have a historical working install). |
+| `Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)` in the guest console.log, immediately after `tmpfs: incomplete write (-28 != …)` | Executor-starter VM was spawned with too little memory; the initramfs unpacker ran out of tmpfs budget partway through `unpack_to_rootfs`. The ~560 MiB dev-host cpio.gz needs ≥ 6 GiB to unpack cleanly. | The kernel-internal default (`ExecutorSpawnContext::executor_mem_mib`) is 6 GiB as of `host-capacity.md §5.1`. If a plan overrode `vm_memory_mb` to a smaller value, restore the per-task default or pin a production EROFS image (which skips the unpacker entirely). |
 
 ---
 

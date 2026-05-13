@@ -1528,22 +1528,60 @@ impl SessionProxyHandles {
     /// `DATABASE_URL` is ambiguous and should only be used when
     /// exactly one database credential is declared.
     ///
-    /// The URL shape is per-proxy: postgres proxies emit
-    /// `postgresql://raxis@<host>:<port>/`, HTTP/k8s proxies emit
-    /// `http://<host>:<port>`. The URL is the surface the agent
-    /// dials; the credential VALUE is never embedded — the proxy
-    /// injects auth on the wire.
+    /// The URL shape is per-proxy and MUST match the wire-protocol
+    /// scheme the agent's standard client expects (see
+    /// `credential-proxy.md §3` and the `§11.x` per-proxy_type
+    /// examples — e.g. mongodb→`mongodb://`, mysql→`mysql://`,
+    /// mssql→`mssql://`, redis→`redis://`). HTTP/k8s/aws/gcp/azure
+    /// proxies stay on `http://` because their canonical clients
+    /// (kubectl, aws CLI, …) dial an HTTP endpoint. The credential
+    /// VALUE is never embedded — the proxy injects auth on the wire.
+    ///
+    /// **Bug history.** Until iter28 of the realistic-scenario live-e2e
+    /// the catch-all arm emitted `http://` for every non-postgres /
+    /// non-smtp proxy. mongodb agents (pymongo) reject `http://`
+    /// URLs with `InvalidURI`, and even after a client-side rewrite
+    /// to `mongodb://` they reach the proxy with no
+    /// `mongodb`-protocol handshake context, which the proxy's
+    /// `serve_one()` discards as a malformed greeting — surfacing
+    /// to the agent as "connection closed". Adding explicit
+    /// per-proxy_type arms here is the structural fix.
     pub fn loopback_env(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
         for p in &self.proxies {
             let url = match p.proxy_type {
-                "postgres" => format!("postgresql://raxis@{}/", p.addr,),
+                "postgres" => format!("postgresql://raxis@{}/", p.addr),
+                "mysql"    => format!("mysql://raxis@{}/", p.addr),
+                "mssql"    => format!("mssql://raxis@{}/", p.addr),
+                // MongoDB clients (pymongo, mongo-rust-driver,
+                // mongoose) reject userinfo-without-password URIs:
+                // pymongo's `auth.parse_userinfo` raises
+                // `InvalidURI` when `username` is present but
+                // `password` is `None`, and the official Node and
+                // Java drivers behave the same way. The proxy's
+                // own contract is that the agent-side connection
+                // is no-auth (`lib.rs` §"`mount_as` URI =
+                // `mongodb://127.0.0.1:PORT/db` with no
+                // credentials, hello response advertises an empty
+                // `saslSupportedMechs`"), so the URL we hand the
+                // agent must omit userinfo entirely. Live-e2e
+                // iter29 reproduced this: with `mongodb://raxis@…`
+                // pymongo bailed with `InvalidURI` before opening
+                // a TCP socket, surfacing to the executor as
+                // "connection closed" (the absence of any TCP
+                // accept on the proxy is indistinguishable from a
+                // local-loopback-RST from the agent's perspective).
+                "mongodb"  => format!("mongodb://{}/", p.addr),
+                "redis"    => format!("redis://{}", p.addr),
                 // SMTP proxies are dialed as a host:port pair (no
                 // scheme). Common SMTP client libraries expect a
                 // bare `host:port`; surface that exactly so the
                 // injected env var (e.g. `SMTP_URL` or `SMTP_HOST`)
                 // is plug-compatible.
                 "smtp" => p.addr.to_string(),
+                // `http` / `k8s` / `aws` / `gcp` / `azure` and any
+                // future REST-shaped proxy: agent dials an HTTP
+                // endpoint on loopback.
                 _ => format!("http://{}", p.addr),
             };
             out.insert(p.mount_as.clone(), url);

@@ -464,8 +464,77 @@ async fn serve_one(
         stream.read_exact(&mut body).await?;
         stats.bytes_observed.fetch_add(body_len as u64, Ordering::Relaxed);
 
-        // Only OP_MSG is supported. Everything else gets a clean
-        // close so a confused client backs off rather than hanging.
+        // ─── Legacy `OP_QUERY` initial-handshake handler ───
+        //
+        // Pymongo 4.x, the Java driver, Node, Go, Rust, etc. all
+        // send the **first** message of a session as `OP_QUERY`
+        // (`op_code 2004`) targeting collection `admin.$cmd`
+        // with a query document like
+        // `{ ismaster: 1, helloOk: true, client: {…} }`. The
+        // server reply must be an `OP_REPLY` (`op_code 1`)
+        // carrying the synthesised hello document. Without this
+        // path the driver's SDAM monitor reports
+        // `ServerSelectionTimeoutError: connection closed`
+        // (live-e2e iter33 root cause).
+        //
+        // Subsequent messages from the same driver always switch
+        // to `OP_MSG` once the negotiated `maxWireVersion` is
+        // ≥ 6, so this branch is **only** the handshake hop —
+        // restriction enforcement still runs against `OP_MSG`
+        // bodies on the same connection. Per `OP_QUERY` legacy
+        // spec, write-bearing collection names look like
+        // `db.coll` (not `db.$cmd`); the proxy enforces the V2
+        // contract by **rejecting** every non-`$cmd` OP_QUERY
+        // with a clean close, so an agent cannot smuggle data
+        // commands through the legacy path to bypass the V2
+        // walker.
+        if header.op_code == wire::OP_QUERY {
+            let (collection, command) = match wire::parse_op_query_command(&body) {
+                Some(pair) => pair,
+                None => {
+                    tracing::debug!("mongodb proxy received malformed OP_QUERY, closing");
+                    break;
+                }
+            };
+            // Only the legacy command channel (`<db>.$cmd`) is
+            // honoured. A normal data collection arriving on
+            // OP_QUERY would be a pre-3.6 read; V2 fail-closes.
+            if !collection.ends_with(".$cmd") {
+                tracing::debug!(
+                    collection = %collection,
+                    "mongodb proxy received OP_QUERY against non-$cmd collection, closing",
+                );
+                break;
+            }
+            stats.commands_audited.fetch_add(1, Ordering::Relaxed);
+            // Only `hello` / `isMaster` / `ismaster` / `ping`
+            // / `buildInfo` are accepted on the legacy channel —
+            // every other command must come over `OP_MSG`.
+            let is_handshake = matches!(
+                command.as_str(),
+                "hello" | "isMaster" | "ismaster" | "ping" | "buildInfo" | "buildinfo",
+            );
+            if !is_handshake {
+                tracing::debug!(
+                    command = %command,
+                    "mongodb proxy received OP_QUERY for non-handshake command, closing",
+                );
+                break;
+            }
+            let reply_doc = build_reply_for(&command);
+            let reply_msg = wire::build_op_reply(
+                header.request_id.wrapping_add(0x4000_0000),
+                header.request_id,
+                &reply_doc,
+            );
+            stream.write_all(&reply_msg).await?;
+            stream.flush().await?;
+            continue;
+        }
+
+        // Only OP_MSG is supported beyond the handshake. Everything
+        // else gets a clean close so a confused client backs off
+        // rather than hanging.
         if header.op_code != wire::OP_MSG {
             tracing::debug!(op_code = header.op_code, "mongodb proxy received non-OP_MSG, closing");
             break;
@@ -960,6 +1029,32 @@ fn build_reply_for(command: &str) -> Vec<u8> {
     use wire::BsonBuilder as B;
     match command {
         "hello" | "isMaster" | "ismaster" => {
+            // V2 wire-protocol hello reply.
+            //
+            // **`topologyVersion` is intentionally omitted.** The
+            // MongoDB driver spec
+            // (`drivers/server-discovery-and-monitoring.rst`)
+            // declares `topologyVersion` as
+            // `{ processId: ObjectId, counter: Int64 }` — a BSON
+            // *sub-document*, not a BSON string. Live-e2e iter32
+            // reproduced
+            // `pymongo.errors.AutoReconnect: connection closed`
+            // when the proxy emitted `topologyVersion` as a BSON
+            // string (`type 0x02`): `pymongo` deserialises the
+            // hello, runs the SDAM topology-change handler, and
+            // calls `_is_stale_error_topology_version` over the
+            // mismatched-type value; the resulting attribute
+            // lookup raises and pymongo treats it as a stale
+            // socket and tears the connection down before the
+            // first user command can be issued, surfacing in the
+            // executor VM as `ServerSelectionTimeoutError`. The
+            // spec also permits servers to omit `topologyVersion`
+            // entirely; clients then track topology state with a
+            // null version, which is the safer contract for a
+            // synthesised proxy that never legitimately rotates
+            // its `processId`. The proxy-version banner is still
+            // exposed via `buildInfo.version` for operator
+            // inspection.
             B::new()
                 .double("ok",                  1.0)
                 .bool  ("isWritablePrimary",   true)
@@ -970,7 +1065,6 @@ fn build_reply_for(command: &str) -> Vec<u8> {
                 .int32 ("maxWireVersion",      17)
                 .int32 ("minWireVersion",      0)
                 .bool  ("readOnly",            false)
-                .string("topologyVersion",     "raxis-mongo-proxy-v2")
                 .finish()
         }
         "ping" => {
@@ -1028,6 +1122,46 @@ mod tests {
         assert!(
             doc.windows(needle.len()).any(|w| w == needle),
             "maxWireVersion:17 not found in hello reply",
+        );
+    }
+
+    /// Regression test for Live-e2e iter32: `topologyVersion`
+    /// MUST NOT appear as a BSON *string* (`type 0x02`) in the
+    /// hello reply.
+    ///
+    /// The MongoDB driver SDAM spec
+    /// (`drivers/server-discovery-and-monitoring.rst §"Hello
+    /// response"`) declares `topologyVersion` as
+    /// `{ processId: ObjectId, counter: Int64 }`. `pymongo` 4.x,
+    /// the Node native driver, and the official Java driver all
+    /// store the field verbatim into a per-server descriptor and
+    /// invoke `_is_stale_error_topology_version` on subsequent
+    /// hello responses; if the stored value is a string the
+    /// attribute lookup raises `KeyError` / `TypeError` deep in
+    /// the SDAM monitor thread, the driver flags the socket as
+    /// stale, and the next user command surfaces as
+    /// `ServerSelectionTimeoutError: connection closed`.
+    ///
+    /// The contract this regression test pins is the simpler
+    /// "omit `topologyVersion` entirely"; if a future revision
+    /// emits it as a sub-document, expand this test to assert
+    /// the BSON type byte is `0x03` (document) and that
+    /// `processId` / `counter` sub-fields are present.
+    #[test]
+    fn reply_for_hello_does_not_emit_topology_version_as_string() {
+        let doc = build_reply_for("hello");
+        // `02` = BSON string type, followed by C-string key
+        // `topologyVersion\0`.
+        let string_typed_topology_key = [
+            0x02, b't', b'o', b'p', b'o', b'l', b'o', b'g', b'y',
+                  b'V', b'e', b'r', b's', b'i', b'o', b'n', 0x00,
+        ];
+        assert!(
+            !doc.windows(string_typed_topology_key.len())
+                .any(|w| w == string_typed_topology_key),
+            "topologyVersion present as BSON string in hello \
+             reply — this trips pymongo/Node/Java SDAM and \
+             surfaces as `connection closed` (Live-e2e iter32)"
         );
     }
 }

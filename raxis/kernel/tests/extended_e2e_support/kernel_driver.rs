@@ -1194,24 +1194,66 @@ pub fn write_credentials(data_dir: &Path) {
     let cred_dir = data_dir.join("credentials");
     std::fs::create_dir_all(&cred_dir).expect("mkdir credentials");
 
+    // Credential value format is normative per `credential-proxy.md §3`
+    // (table at "proxy_type": `postgres` row): the resolved credential
+    // bytes MUST be a libpq URL `postgresql://user:pass@host:port/db`
+    // (RFC 3986). `credential-proxy-postgres::ParsedUpstreamUrl::parse`
+    // is the consumer; non-URL bytes are rejected with
+    // `FAIL_PROXY_UPSTREAM_URL_INVALID`. The `.env` file extension is
+    // a path-suffix convention (`<name>.env`), independent of the
+    // value encoding — the legacy `PGHOST=...\nPGPORT=...` env-style
+    // form documented in operator examples was never wired through
+    // and is being aligned with §3 in the same commit.
     write_with_mode_0600(
         &cred_dir.join("test-pg-dev.env"),
-        b"PGHOST=127.0.0.1\n\
-          PGPORT=54399\n\
-          PGUSER=raxis_test\n\
-          PGPASSWORD=raxis_test_pass\n\
-          PGDATABASE=raxis_e2e_pg\n\
-          PGSSLMODE=disable\n",
+        b"postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e_pg",
     );
 
+    // MongoDB proxy expects a plaintext `mongodb://` URI per
+    // `credential-proxy.md §3` and
+    // `credential-proxy-mongodb::ParsedUpstreamUrl::parse`.
+    // `mongodb+srv://` is explicitly rejected for the MVP.
     write_with_mode_0600(
         &cred_dir.join("test-mongo-dev.env"),
-        b"MONGO_HOST=127.0.0.1\n\
-          MONGO_PORT=27399\n\
-          MONGO_USER=raxis_test\n\
-          MONGO_PASSWORD=raxis_test_pass\n\
-          MONGO_AUTH_DB=admin\n\
-          MONGO_DATABASE=raxis_e2e_mongo\n",
+        b"mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e_mongo?authSource=admin",
+    );
+
+    // Redis proxy expects either a single password line OR a
+    // `.env`-style `RAXIS_REDIS_USER=…\nRAXIS_REDIS_PASSWORD=…`
+    // pair per `credential-proxy.md §3` (Redis row) and
+    // `credential-proxy-redis::parse_redis_credential`. The
+    // extended docker-compose stack runs `redis-server` with
+    // `--requirepass raxis_test_pass` and no ACL user
+    // (`live-e2e/docker-compose.extended.e2e.yml §redis`), so the
+    // single-line password form is the canonical wire match. The
+    // `realistic_session_lifecycle` service-round-trip task mounts
+    // this credential as `REDIS_URL` against
+    // `127.0.0.1:63799` — without this file the proxy's
+    // `backend.resolve` call hard-fails, the listener accepts the
+    // agent's TCP connection, and serve_one closes it before
+    // sending a single byte of RESP. The executor sees "TCP
+    // accept + immediate close" which surfaces as
+    // `redis.exceptions.ConnectionError: Connection closed by
+    // server` (live-e2e iter34 root cause).
+    write_with_mode_0600(
+        &cred_dir.join("test-redis-dev.env"),
+        b"raxis_test_pass",
+    );
+
+    // SMTP proxy expects raw upstream-relay password bytes per
+    // `credential-proxy.md §3` (SMTP row). The wire driver
+    // (`credential-proxy-smtp::wire::drive_auth_through_quit`)
+    // assembles the on-wire `AUTH PLAIN base64("\0<user>\0<pw>")`
+    // payload using the password from this file and the username
+    // from the plan's `tasks.credentials.auth_mode.user`
+    // (`SmtpAuthMode::Plain { user: "raxis-tenant@live-e2e.test" }`
+    // in the realistic plan). The docker-mailserver container
+    // (`live-e2e/seed/smtp/postfix-accounts.cf`) stores the
+    // single account `raxis-tenant@live-e2e.test` with the
+    // password baked in below as a plaintext SASL secret.
+    write_with_mode_0600(
+        &cred_dir.join("test-smtp-dev.env"),
+        b"live-e2e-upstream-secret",
     );
 }
 
@@ -1445,12 +1487,28 @@ fn policy_fingerprint_32(pubkey: &[u8; 32]) -> String {
 /// carries materializer + cross-file refactor + lint-defect +
 /// path-allowlist + secrets + reviewer-substantive + sibling
 /// initiative — three executor re-spawns and two review rounds
-/// across two initiatives.
+/// across two initiatives, plus a one-shot sibling initiative.
+///
+/// **Empirical sizing (Live-e2e iter31, 2026-05-13).** The
+/// realistic plan submits **9 primary-lane tasks + 1 sibling
+/// task = 10 executor sessions**. Each session is one Apple-VZ
+/// VM boot (~30 s) + 1-5 min of planner dispatch + 1 orchestrator
+/// respawn cycle in between (~15 s). The empirical wall-clock
+/// breakdown observed in iter31 was: 6 primary tasks completed
+/// in 25 min (avg ~4 min / task), with 3 tasks still
+/// `Admitted` + 1 task `Active` at the 1800 s deadline. Linear
+/// extrapolation: 10 tasks × ~4 min = ~40 min + integration-merge
+/// orchestrator + sibling initiative ≈ 50 min worst case.
+/// `3600` (60 min) gives the lifecycle deadline 20 % headroom
+/// over the linear projection, and the harness still cleanly
+/// fast-fails on any spawn-failure event via
+/// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` so the deadline
+/// is the worst-case wait, not the typical wait.
 pub fn realistic_lifecycle_deadline() -> Duration {
     let secs = std::env::var("RAXIS_E2E_REALISTIC_DEADLINE_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(1800); // 30 min
+        .unwrap_or(3600); // 60 min
     Duration::from_secs(secs)
 }
 
@@ -1460,18 +1518,31 @@ pub fn realistic_lifecycle_deadline() -> Duration {
 ///
 /// **Fast-fail on terminal spawn failure** (extension of
 /// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`):
-/// the kernel emits a structured `orchestrator_spawn_failed`
-/// JSON line on `stderr` after exhausting its transient-retry
-/// budget for a session VM. Once that event lands for one of
-/// the watched initiatives the lifecycle cannot make further
-/// progress without an operator command (`recovery::reconcile`
-/// is not driven by the harness), so polling further is a
-/// guaranteed indefinite wait. The harness scans
-/// `<data_dir>/kernel.stderr.log` for the matching JSON token
-/// on every poll iteration and panics immediately with the
-/// kernel's own `error` + `hint` fields surfaced so the
-/// operator sees the root cause in seconds instead of waiting
-/// 30 min for [`realistic_lifecycle_deadline`].
+/// the kernel emits structured terminal-failure events on
+/// `stderr` after exhausting its transient-retry budget for a
+/// session VM. Two event shapes both qualify as a terminal
+/// failure that the harness must surface:
+///
+///   * `orchestrator_spawn_failed` — the root Orchestrator VM
+///     for an initiative could not be spawned. Emitted by
+///     `kernel/src/ipc/operator.rs::handle_approve_plan_op`.
+///   * `ActivateSubTaskSpawnFailed` — an Executor or Reviewer
+///     sub-session VM for a sub-task of the initiative could
+///     not be spawned (cpio.gz unpack ENOSPC, vsock listener
+///     bind timeout, kernel-config mismatch on the AVF kernel,
+///     …). Emitted by
+///     `kernel/src/handlers/intent.rs::handle_activate_sub_task`.
+///
+/// Once either event lands for one of the watched initiatives
+/// the lifecycle cannot make further progress without an
+/// operator command (`recovery::reconcile` is not driven by
+/// the harness), so polling further is a guaranteed indefinite
+/// wait. The harness scans `<data_dir>/kernel.stderr.log` for
+/// the matching JSON token on every poll iteration and panics
+/// immediately with the kernel's own `error` + `hint` fields
+/// surfaced so the operator sees the root cause in seconds
+/// instead of waiting 30 min for
+/// [`realistic_lifecycle_deadline`].
 ///
 /// The bound on filesystem reads is the deadline itself: the
 /// scan reads `kernel.stderr.log` at most once per 500 ms
@@ -1520,8 +1591,8 @@ pub fn poll_for_dual_lifecycle_completion(
         // `RootfsErofs`) leaves the test waiting the full
         // [`realistic_lifecycle_deadline`] for an event that will
         // never arrive.
-        if let Some((bad_initiative, error, hint)) =
-            scan_stderr_for_terminal_orchestrator_spawn_failed(
+        if let Some(failure) =
+            scan_stderr_for_terminal_spawn_failure(
                 &stderr_path,
                 &initiative_ids,
             )
@@ -1536,8 +1607,8 @@ pub fn poll_for_dual_lifecycle_completion(
                 })
                 .unwrap_or_else(|| "<no kernel.stderr.log on disk>".to_owned());
             panic!(
-                "kernel emitted terminal `orchestrator_spawn_failed` \
-                 for initiative {bad_initiative} after exhausting its \
+                "kernel emitted terminal `{event}` \
+                 for initiative {bad_initiative}{role_tail} after exhausting its \
                  transient-retry budget; the lifecycle cannot complete \
                  without operator-driven recovery, so the harness will \
                  not poll further (would be a guaranteed indefinite \
@@ -1547,6 +1618,15 @@ pub fn poll_for_dual_lifecycle_completion(
                  kernel.hint:  {hint}\n\
                  \n\
                  ── kernel.stderr (tail) ──\n{stderr_tail}",
+                event          = failure.event,
+                bad_initiative = failure.initiative_id,
+                role_tail      = failure
+                    .agent_kind
+                    .as_deref()
+                    .map(|k| format!(" (sub-task role={k})"))
+                    .unwrap_or_default(),
+                error          = failure.error,
+                hint           = failure.hint,
             );
         }
 
@@ -1587,44 +1667,87 @@ pub fn poll_for_dual_lifecycle_completion(
     }
 }
 
-/// Scan `kernel.stderr.log` for the kernel's terminal
-/// `orchestrator_spawn_failed` JSON line bound to one of
-/// `watched_initiatives`. Returns
-/// `(initiative_id, error, hint)` on the first match, `None`
+/// Structured shape returned by [`scan_stderr_for_terminal_spawn_failure`]
+/// when a terminal spawn-failure event is observed against one of the
+/// watched initiatives. The `event` field distinguishes the two
+/// terminal-failure schemas the kernel can emit (orchestrator vs
+/// sub-task) so the surfaced panic body can format both uniformly.
+#[derive(Debug)]
+struct TerminalSpawnFailure {
+    /// `"orchestrator_spawn_failed"` or
+    /// `"ActivateSubTaskSpawnFailed"` — verbatim from the JSON
+    /// `event` field.
+    event:         String,
+    /// Watched initiative whose lifecycle is now blocked.
+    initiative_id: String,
+    /// Sub-task role (`Executor` / `Reviewer`) for
+    /// `ActivateSubTaskSpawnFailed`; `None` for the orchestrator
+    /// schema (whose role is implied).
+    agent_kind:    Option<String>,
+    /// Kernel's `error` field, surfaced verbatim.
+    error:         String,
+    /// Kernel's `hint` field, surfaced verbatim.
+    hint:          String,
+}
+
+/// Scan `kernel.stderr.log` for either of the kernel's terminal
+/// spawn-failure JSON lines bound to one of `watched_initiatives`.
+/// Returns a [`TerminalSpawnFailure`] on the first match, `None`
 /// otherwise.
 ///
-/// The shape we match on (verbatim from
-/// `kernel/src/initiatives/orchestrator_spawn.rs`):
+/// The two schemas we match on, verbatim from the kernel:
 ///
 /// ```jsonc
+/// // orchestrator root-VM failure (kernel/src/ipc/operator.rs):
 /// {"level":"error","event":"orchestrator_spawn_failed",
 ///  "initiative_id":"019e20c9-…","session_id":"…",
 ///  "error":"session-spawn failed: …",
 ///  "hint":"PlanApproved was committed; …"}
+///
+/// // sub-task (executor/reviewer) VM failure
+/// // (kernel/src/handlers/intent.rs::handle_activate_sub_task):
+/// {"level":"error","event":"ActivateSubTaskSpawnFailed",
+///  "task_id":"…","new_session_id":"…",
+///  "initiative_id":"019e20c9-…","agent_kind":"Executor",
+///  "error":"…","hint":"sub-task activation exhausted its …"}
 /// ```
 ///
 /// We intentionally do NOT match on
 /// `session_vm_transient_retry` — those are mid-flight retries
-/// the kernel may still resolve. Only `orchestrator_spawn_failed`
-/// is a *terminal* state for the boot path.
-fn scan_stderr_for_terminal_orchestrator_spawn_failed(
+/// the kernel may still resolve. Only the two
+/// `*_spawn_failed` / `*SpawnFailed` events are *terminal* for
+/// the boot path.
+fn scan_stderr_for_terminal_spawn_failure(
     stderr_path:        &Path,
     watched_initiatives: &[&str; 2],
-) -> Option<(String, String, String)> {
+) -> Option<TerminalSpawnFailure> {
+    /// Token shared by both terminal-failure event names.
+    const TERMINAL_TOKEN: &[u8] = b"SpawnFailed";
+    /// The historical orchestrator schema uses snake_case.
+    const ORCH_TOKEN: &[u8] = b"orchestrator_spawn_failed";
+
     let bytes = std::fs::read(stderr_path).ok()?;
     for line in bytes.split(|&b| b == b'\n') {
         if line.is_empty() { continue; }
         // Cheap pre-filter so we don't parse every line as JSON.
-        if !memmem(line, b"\"orchestrator_spawn_failed\"") { continue; }
+        // We accept either spelling because the two schemas differ
+        // in case but share the "SpawnFailed" / "spawn_failed"
+        // tail; the second `memmem` keeps the false-positive rate
+        // low for unrelated `*spawn_failed*` log lines like
+        // `gateway_spawn_failed` (gateway / git-push spawn failure
+        // never causes the lifecycle to wedge).
+        if !memmem(line, TERMINAL_TOKEN) && !memmem(line, ORCH_TOKEN) {
+            continue;
+        }
         let value: serde_json::Value = match serde_json::from_slice(line) {
             Ok(v)  => v,
             Err(_) => continue,
         };
-        if value.get("event").and_then(|e| e.as_str())
-            != Some("orchestrator_spawn_failed")
-        {
-            continue;
-        }
+        let event = match value.get("event").and_then(|e| e.as_str()) {
+            Some("orchestrator_spawn_failed")  => "orchestrator_spawn_failed",
+            Some("ActivateSubTaskSpawnFailed") => "ActivateSubTaskSpawnFailed",
+            _ => continue,
+        };
         let initiative_id = match value.get("initiative_id")
             .and_then(|i| i.as_str()) {
             Some(s) => s.to_owned(),
@@ -1634,12 +1757,22 @@ fn scan_stderr_for_terminal_orchestrator_spawn_failed(
             continue;
         }
         let error = value.get("error").and_then(|e| e.as_str())
-            .unwrap_or("<no `error` field on orchestrator_spawn_failed>")
+            .unwrap_or("<no `error` field on terminal spawn-failure event>")
             .to_owned();
         let hint = value.get("hint").and_then(|h| h.as_str())
-            .unwrap_or("<no `hint` field on orchestrator_spawn_failed>")
+            .unwrap_or("<no `hint` field on terminal spawn-failure event>")
             .to_owned();
-        return Some((initiative_id, error, hint));
+        let agent_kind = value
+            .get("agent_kind")
+            .and_then(|k| k.as_str())
+            .map(|s| s.to_owned());
+        return Some(TerminalSpawnFailure {
+            event: event.to_owned(),
+            initiative_id,
+            agent_kind,
+            error,
+            hint,
+        });
     }
     None
 }
@@ -1931,19 +2064,109 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+        let hit = scan_stderr_for_terminal_spawn_failure(
             &log,
             &[initiative_a, initiative_b],
         )
         .expect("scanner must surface the matching line");
-        assert_eq!(hit.0, initiative_b,
+        assert_eq!(hit.event, "orchestrator_spawn_failed",
+            "event field must propagate verbatim");
+        assert_eq!(hit.initiative_id, initiative_b,
             "initiative_id of the matched line must surface verbatim");
-        assert!(hit.1.contains("Invalid disk image"),
+        assert!(
+            hit.agent_kind.is_none(),
+            "orchestrator schema has no agent_kind (got: {:?})", hit.agent_kind,
+        );
+        assert!(hit.error.contains("Invalid disk image"),
             "kernel `error` field must propagate to the panic body \
-             (got: {})", hit.1);
-        assert!(hit.2.contains("recovery::reconcile"),
+             (got: {})", hit.error);
+        assert!(hit.hint.contains("recovery::reconcile"),
             "kernel `hint` field must propagate so the operator sees \
-             the kernel's own remediation hint (got: {})", hit.2);
+             the kernel's own remediation hint (got: {})", hit.hint);
+    }
+
+    /// The sub-task schema (`ActivateSubTaskSpawnFailed`) is the
+    /// twin of the orchestrator schema for Executor / Reviewer VMs.
+    /// The watchdog must surface both with the same urgency: an
+    /// Executor that cannot boot blocks the parent initiative's
+    /// completion just as definitively as a root-Orchestrator that
+    /// cannot boot. Regression for the
+    /// `Kernel panic - not syncing: VFS: Unable to mount root fs`
+    /// failure mode on the dev-host AVF substrate (host-capacity.md
+    /// §5.1 — under-sized `executor_mem_mib`).
+    #[test]
+    fn scan_stderr_matches_terminal_subtask_spawn_failed_for_watched_initiative() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("kernel.stderr.log");
+        let initiative_a = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+        let initiative_b = "019e20c9-e093-7052-a0d1-1ca53d8b8fd8";
+        let body = format!(
+            "{{\"level\":\"info\",\"event\":\"session_vm_transient_retry\",\
+              \"session_id\":\"sess-1\",\"attempt\":1}}\n\
+             {{\"level\":\"error\",\"event\":\"ActivateSubTaskSpawnFailed\",\
+              \"task_id\":\"sibling-materialize-records\",\
+              \"new_session_id\":\"sess-7\",\
+              \"initiative_id\":\"{initiative_a}\",\
+              \"agent_kind\":\"Executor\",\
+              \"error\":\"session-spawn failed: isolation spawn failed: \
+              transport fault: apple-vz-14.x: vsock CONNECT 1024: AVF \
+              connect_vsock did not succeed within 30s\",\
+              \"hint\":\"sub-task activation exhausted its transient-retry \
+              budget; the parent initiative cannot make further progress \
+              without operator-driven recovery (recovery::reconcile)\"}}\n",
+        );
+        std::fs::write(&log, body).expect("write stderr fixture");
+
+        let hit = scan_stderr_for_terminal_spawn_failure(
+            &log,
+            &[initiative_a, initiative_b],
+        )
+        .expect("scanner must surface the sub-task failure line");
+        assert_eq!(hit.event, "ActivateSubTaskSpawnFailed",
+            "event field must propagate verbatim");
+        assert_eq!(hit.initiative_id, initiative_a);
+        assert_eq!(
+            hit.agent_kind.as_deref(),
+            Some("Executor"),
+            "Executor / Reviewer role must surface in the panic body so \
+             the operator knows which canonical image to inspect",
+        );
+        assert!(hit.error.contains("vsock CONNECT 1024"),
+            "kernel `error` field must propagate (got: {})", hit.error);
+        assert!(hit.hint.contains("sub-task activation exhausted"),
+            "kernel `hint` field must propagate (got: {})", hit.hint);
+    }
+
+    /// Unrelated `*spawn_failed*` events (`gateway_spawn_failed`,
+    /// `verifier` spawn failure in a gate) must NOT trip the
+    /// initiative-lifecycle watchdog. They are independent failure
+    /// modes the kernel surfaces via separate audit-event paths;
+    /// folding them into the audit-poll watchdog would short-circuit
+    /// the gateway-respawn supervisor's own retry budget before it
+    /// has a chance to recover.
+    #[test]
+    fn scan_stderr_ignores_unrelated_spawn_failed_events() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("kernel.stderr.log");
+        let initiative_watched = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+        let body = format!(
+            "{{\"level\":\"error\",\"event\":\"gateway_spawn_failed\",\
+              \"binary_path\":\"/var/empty/raxis-gateway\",\"attempt\":1,\
+              \"reason\":\"No such file or directory\"}}\n\
+             {{\"level\":\"error\",\"event\":\"orchestrator_respawn_failed\",\
+              \"initiative_id\":\"{initiative_watched}\",\"reason\":\"…\"}}\n",
+        );
+        std::fs::write(&log, body).expect("write stderr fixture");
+
+        let hit = scan_stderr_for_terminal_spawn_failure(
+            &log,
+            &[initiative_watched, initiative_watched],
+        );
+        assert!(
+            hit.is_none(),
+            "unrelated spawn-failed events (gateway / respawn) must NOT \
+             trip the audit-poll watchdog; got {hit:?}",
+        );
     }
 
     /// `session_vm_transient_retry` is a mid-flight retry the kernel
@@ -1967,7 +2190,7 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+        let hit = scan_stderr_for_terminal_spawn_failure(
             &log,
             &[initiative_a, initiative_b],
         );
@@ -1995,7 +2218,7 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+        let hit = scan_stderr_for_terminal_spawn_failure(
             &log,
             &[initiative_watched, initiative_watched],
         );
@@ -2013,7 +2236,7 @@ mod tests {
     fn scan_stderr_missing_file_returns_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let log = tmp.path().join("does-not-exist.log");
-        let hit = scan_stderr_for_terminal_orchestrator_spawn_failed(
+        let hit = scan_stderr_for_terminal_spawn_failure(
             &log,
             &["a", "b"],
         );

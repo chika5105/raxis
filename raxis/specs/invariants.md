@@ -3726,7 +3726,8 @@ committed; recovery::reconcile or a follow-up operator command
 is needed to drive the orchestrator boot once the substrate is
 available" — neither of which the harness performs.
 Polling further is therefore a guaranteed indefinite wait
-until [`realistic_lifecycle_deadline`] (30 min default). The
+until [`realistic_lifecycle_deadline`] (60 min default,
+iter31). The
 scanner is a pure substring-prefilter over `kernel.stderr.log`
 (read at the existing 500 ms poll cadence) that surfaces the
 kernel's own `error` + `hint` in the panic body so the operator

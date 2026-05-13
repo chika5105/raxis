@@ -847,24 +847,22 @@ fn write_credentials(data_dir: &Path) {
     let cred_dir = data_dir.join("credentials");
     std::fs::create_dir_all(&cred_dir).expect("mkdir credentials");
 
+    // Credential value format is normative per `credential-proxy.md §3`:
+    // the resolved credential bytes MUST be a libpq URL
+    // `postgresql://user:pass@host:port/db` (RFC 3986). The MongoDB
+    // form is a plaintext `mongodb://user:pass@host:port/db?authSource=…`
+    // URI. `credential-proxy-postgres::ParsedUpstreamUrl::parse` and
+    // `credential-proxy-mongodb::ParsedUpstreamUrl::parse` are the
+    // consumers; non-URL bytes are rejected with
+    // `FAIL_PROXY_UPSTREAM_URL_INVALID`.
     write_with_mode_0600(
         &cred_dir.join("test-pg-dev.env"),
-        b"PGHOST=127.0.0.1\n\
-          PGPORT=54399\n\
-          PGUSER=raxis_test\n\
-          PGPASSWORD=raxis_test_pass\n\
-          PGDATABASE=raxis_e2e\n\
-          PGSSLMODE=disable\n",
+        b"postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e",
     );
 
     write_with_mode_0600(
         &cred_dir.join("test-mongo-dev.env"),
-        b"MONGO_HOST=127.0.0.1\n\
-          MONGO_PORT=27399\n\
-          MONGO_USER=raxis_test\n\
-          MONGO_PASSWORD=raxis_test_pass\n\
-          MONGO_AUTH_DB=admin\n\
-          MONGO_DATABASE=raxis_e2e\n",
+        b"mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e?authSource=admin",
     );
 
     let adc = dirs_home()

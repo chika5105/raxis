@@ -77,6 +77,30 @@ pub const HEADER_LEN: usize = 16;
 /// `OP_MSG` op code (modern wire).
 pub const OP_MSG: i32 = 2013;
 
+/// `OP_QUERY` op code (legacy wire, op code 2004).
+///
+/// Modern drivers (pymongo 4.x, the official Java driver, Node, Go,
+/// Rust) negotiate down to `OP_MSG` after the first reply, but the
+/// **initial handshake** — `{ ismaster: 1, helloOk: true, ... }`
+/// targeting collection `admin.$cmd` — is still sent as `OP_QUERY`
+/// against the legacy collection contract per the
+/// `Server Discovery and Monitoring` driver spec (the legacy
+/// pre-`hello` handshake form is the universal lowest common
+/// denominator before the server's `maxWireVersion` is known).
+/// The proxy MUST answer with an `OP_REPLY` (op code 1) carrying
+/// the synthesised hello document; without it pymongo's SDAM monitor
+/// reports `ServerSelectionTimeoutError: connection closed`. See
+/// the iter33 root-cause note inline in `serve_one` and the
+/// `op_query_initial_handshake_replied_with_op_reply` regression
+/// test.
+pub const OP_QUERY: i32 = 2004;
+
+/// `OP_REPLY` op code (legacy wire, op code 1). Reply form to
+/// `OP_QUERY`; required by the initial handshake even though the
+/// V2 proxy never speaks `OP_REPLY` for any later command (those
+/// all flow through `OP_MSG`).
+pub const OP_REPLY: i32 = 1;
+
 /// Parsed message header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MsgHeader {
@@ -162,6 +186,82 @@ pub fn first_bson_field_name(doc: &[u8]) -> Option<String> {
     let nul = after_type.iter().position(|&b| b == 0)?;
     let name_bytes = &after_type[..nul];
     Some(String::from_utf8_lossy(name_bytes).into_owned())
+}
+
+/// Decode an `OP_QUERY` body and pull out:
+///
+///   * The fully-qualified collection name (e.g. `"admin.$cmd"`).
+///   * The first BSON field name from the query document, which —
+///     by the legacy command-on-collection-`$cmd` contract — is the
+///     name of the command (e.g. `"ismaster"` / `"isMaster"` /
+///     `"hello"`).
+///
+/// Returns `None` on a malformed frame.
+///
+/// `OP_QUERY` body layout
+/// (`https://www.mongodb.com/docs/manual/legacy-opcodes/#op_query`):
+///
+/// ```text
+///   int32  flags
+///   cstring fullCollectionName     // e.g. "admin.$cmd"
+///   int32  numberToSkip
+///   int32  numberToReturn
+///   document query
+///   [document returnFieldsSelector] // optional, ignored
+/// ```
+pub fn parse_op_query_command(body: &[u8]) -> Option<(String, String)> {
+    if body.len() < 4 + 1 + 4 + 4 + 5 { return None; }
+    let mut i = 4; // skip flags
+    // fullCollectionName cstring.
+    let nul = body[i..].iter().position(|&b| b == 0)?;
+    let coll = String::from_utf8_lossy(&body[i..i + nul]).into_owned();
+    i += nul + 1;
+    // numberToSkip + numberToReturn.
+    if i + 8 > body.len() { return None; }
+    i += 8;
+    // Query BSON doc starts at i.
+    let cmd = first_bson_field_name(&body[i..])?;
+    Some((coll, cmd))
+}
+
+/// Build an `OP_REPLY` frame (`op_code 1`) carrying a single
+/// BSON document. Required by the legacy initial-handshake
+/// contract (see [`OP_QUERY`]).
+///
+/// `OP_REPLY` body layout
+/// (`https://www.mongodb.com/docs/manual/legacy-opcodes/#op_reply`):
+///
+/// ```text
+///   int32   responseFlags          // 8 = AwaitCapable
+///   int64   cursorID               // 0 for a one-shot command reply
+///   int32   startingFrom           // 0
+///   int32   numberReturned         // 1 for the single hello doc
+///   document* documents
+/// ```
+pub fn build_op_reply(request_id: i32, response_to: i32, bson_doc: &[u8]) -> Vec<u8> {
+    let body_len = 4 /* responseFlags */
+                 + 8 /* cursorID */
+                 + 4 /* startingFrom */
+                 + 4 /* numberReturned */
+                 + bson_doc.len();
+    let total    = HEADER_LEN + body_len;
+    let mut out  = Vec::with_capacity(total);
+    out.extend_from_slice(&MsgHeader {
+        message_length: total as i32,
+        request_id,
+        response_to,
+        op_code: OP_REPLY,
+    }.encode());
+    // responseFlags = 8 (AwaitCapable). Pymongo accepts 0 as well;
+    // the canonical mongod sets `AwaitCapable` for legacy `find` /
+    // `getMore` cursor compatibility. For a hello reply either is
+    // fine.
+    out.extend_from_slice(&8i32.to_le_bytes());
+    out.extend_from_slice(&0i64.to_le_bytes()); // cursorID = 0 (no cursor)
+    out.extend_from_slice(&0i32.to_le_bytes()); // startingFrom = 0
+    out.extend_from_slice(&1i32.to_le_bytes()); // numberReturned = 1
+    out.extend_from_slice(bson_doc);
+    out
 }
 
 /// Build an `OP_MSG` reply with a single kind-0 body section
@@ -335,6 +435,57 @@ mod tests {
         body.push(0); // kind = body
         body.extend_from_slice(&bson_doc);
         assert_eq!(first_command_name(&body).as_deref(), Some("find"));
+    }
+
+    /// Regression test for live-e2e iter33.
+    ///
+    /// Pymongo 4.x (and several other modern drivers) negotiate
+    /// down to `OP_MSG` only **after** the initial handshake.
+    /// The initial handshake itself is sent as legacy `OP_QUERY`
+    /// targeting collection `admin.$cmd` with the query document
+    /// `{ ismaster: 1, helloOk: true, ... }`. The parser must
+    /// recover the collection name AND the first command-doc
+    /// field name from such a frame so the proxy can respond
+    /// with a synthesised hello via `OP_REPLY`.
+    #[test]
+    fn parse_op_query_pulls_collection_and_first_command_field() {
+        // Construct the OP_QUERY body pymongo would send.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0i32.to_le_bytes()); // flags = 0
+        body.extend_from_slice(b"admin.$cmd\0");
+        body.extend_from_slice(&0i32.to_le_bytes());   // skip = 0
+        body.extend_from_slice(&(-1i32).to_le_bytes()); // return = -1
+        // Query doc: { ismaster: 1, helloOk: true }
+        let q = BsonBuilder::new()
+            .int32("ismaster", 1)
+            .bool ("helloOk",  true)
+            .finish();
+        body.extend_from_slice(&q);
+
+        let (coll, cmd) = parse_op_query_command(&body).expect("parse");
+        assert_eq!(coll, "admin.$cmd");
+        assert_eq!(cmd,  "ismaster");
+    }
+
+    /// Regression test for live-e2e iter33: `build_op_reply` MUST
+    /// stamp `op_code = 1` (`OP_REPLY`) and `numberReturned = 1`
+    /// so pymongo's SDAM monitor recognises the frame as a
+    /// command reply rather than tearing the socket down.
+    #[test]
+    fn build_op_reply_stamps_op_code_1_and_one_returned() {
+        let q = BsonBuilder::new().double("ok", 1.0).finish();
+        let frame = build_op_reply(1234, 42, &q);
+        // Header op_code at bytes 12..16.
+        let op = i32::from_le_bytes([
+            frame[12], frame[13], frame[14], frame[15],
+        ]);
+        assert_eq!(op, OP_REPLY);
+        // numberReturned at body offset 4+8+4 = 16 → frame
+        // offset 16 + 16 = 32.
+        let n = i32::from_le_bytes([
+            frame[16 + 16], frame[16 + 17], frame[16 + 18], frame[16 + 19],
+        ]);
+        assert_eq!(n, 1);
     }
 
     #[test]

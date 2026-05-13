@@ -67,7 +67,7 @@ external signal.
 | Variable | Required | Default | Effect |
 |---|---|---|---|
 | `RAXIS_PLANNER_BASE_URL` | optional | `https://api.anthropic.com` | Override the model API base URL. Used by tests to point at a local mock. The kernel stamps this from the active gateway provider. |
-| `RAXIS_PLANNER_MAX_TURNS` | optional | `20` | Hard turn ceiling per session. Beyond this the planner stops the loop and submits whatever it has. |
+| `RAXIS_PLANNER_MAX_TURNS` | optional | `100` | Hard turn ceiling per session. Beyond this the planner stops the loop and submits whatever it has. Default raised from `20` to `50` after Live-e2e iter25 showed the `credential-substitution-canary` task reproducibly exhausted a 20-turn budget on natural tool-error retry cycles, then raised again from `50` to `100` after Live-e2e iter31 reproduced `MaxTurnsExceeded` at turn 50 on the realistic `materialize-records` Executor (25 postgres rows + 25 mongo docs + per-row write + commit + complete — a strictly larger fanout than the canary). The token-cap ceiling (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` / `…_OUTPUT_TOTAL`) remains the cost-side bound. Operators can still pin lower (`= 5`) in policy via `[gateway].planner_max_turns_default` for CI / known-easy scenarios. |
 | `RAXIS_PLANNER_MAX_TOKENS` | optional | `4096` | Per-request `max_tokens` value sent to the model API. |
 
 `RAXIS_PLANNER_BASE_URL` must parse as an `http` or `https` URL.
@@ -110,7 +110,7 @@ RAXIS_KERNEL_PLANNER_SOCKET=/run/raxis/sockets/planner-c4f1e8.sock
 RAXIS_PLANNER_KSB={"session_id":"c4f1e8...","task_id":"implementer",...}
 RAXIS_PLANNER_TASK_PROMPT="Implement IP-based rate limiting on POST /auth/login. ..."
 RAXIS_PLANNER_BASE_URL=https://api.anthropic.com
-RAXIS_PLANNER_MAX_TURNS=20
+RAXIS_PLANNER_MAX_TURNS=100
 RAXIS_PLANNER_MAX_TOKENS=4096
 RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL=200000
 RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL=100000

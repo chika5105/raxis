@@ -1228,7 +1228,13 @@ pub fn spawn_planner_dispatcher(
             ),
         }
 
-        // ── V2 §Step 6 — orchestrator post-exit respawn hook. ─────
+        // ── V2 §Step 6 — post-exit recovery dispatch. ─────────────
+        //
+        // Two distinct recovery modes are folded into this single
+        // post-revoke chokepoint, branched by the just-revoked
+        // session's `session_agent_type`:
+        //
+        // **Mode A — Orchestrator post-exit respawn.**
         //
         // The Orchestrator is short-lived per decision: it boots,
         // calls one terminal DAG tool (`activate_subtask` /
@@ -1264,8 +1270,6 @@ pub fn spawn_planner_dispatcher(
         //
         // **Guard.** Respawn only when ALL of:
         //   * The just-revoked session was an `Orchestrator`.
-        //     Executor / Reviewer exits don't drive a respawn —
-        //     their terminal intent's EarlyResponse dispatch does.
         //   * The session row carries a non-empty `initiative_id`
         //     (defensive — orchestrator rows are guaranteed to
         //     have one by `auto_spawn_orchestrator_session_in_tx`).
@@ -1282,12 +1286,93 @@ pub fn spawn_planner_dispatcher(
         // if the EarlyResponse dispatch fires concurrently for a
         // late-arriving worker intent, only one respawn wins.
         // Errors are logged structurally and never propagate.
+        //
+        // **Mode B — Worker (Executor / Reviewer) premature-exit
+        // failure synthesis.**
+        //
+        // The Executor / Reviewer contract is that the planner
+        // dispatch loop ends by submitting a terminal intent —
+        // `CompleteTask` / `SubmitReview` / `ReportFailure` — and
+        // the EarlyResponse dispatch on that intent transitions the
+        // task FSM (Running → Completed / Failed) AND triggers an
+        // orchestrator respawn so the DAG can advance.
+        //
+        // But a planner CAN exit without submitting a terminal
+        // intent. Documented failure modes that surface this:
+        //
+        //   * `DispatchOutcome::MaxTurnsExceeded` — the dispatch
+        //     loop hit `RAXIS_PLANNER_MAX_TURNS` without selecting
+        //     a terminal tool. `planner-executor` returns
+        //     `PlannerError::MaxTurnsExceeded` (exit code 4) and
+        //     PID 1 `reboot(POWER_OFF)`s the VM.
+        //   * `DispatchOutcome::TokensExceeded` — the cumulative
+        //     token-cap ceiling tripped. Exit code 6.
+        //   * `DispatchOutcome::Idle` — the model emitted no tool
+        //     call. Exit code 5.
+        //   * Process death — the planner crashed (SIGSEGV / panic
+        //     / OOM-killed), or the substrate observed an
+        //     abnormal shutdown without a paired terminal intent.
+        //
+        // In every one of these cases the kernel-side state pre-
+        // this-hook was:
+        //
+        //   * Session row: `revoked = 1` (the revoke step above).
+        //   * Subtask activation row: still `Active` (no terminal
+        //     intent fired, so the cascade in
+        //     `transition_task_in_tx` never ran).
+        //   * Task row: still `Admitted` or `Running`.
+        //   * Orchestrator session: gone (the matching
+        //     ActivateSubTask's orchestrator exited normally).
+        //
+        // The orchestrator post-exit hook's Mode-A guard
+        // (`pending_exists && !active_exists`) is `false` because
+        // the stranded `Active` activation row blocks the respawn.
+        // No EarlyResponse dispatch fires because no terminal
+        // intent arrives. The DAG deadlocks.
+        //
+        // Mode B closes the loop: when an Executor / Reviewer
+        // session is revoked, the kernel synthesises the
+        // `ReportFailure` shape — bumps `crash_retry_count`,
+        // walks the FSM Admitted → Running → Failed (mirroring
+        // `handle_report_failure`'s Admitted-fold), and triggers
+        // an orchestrator respawn so the Orchestrator can decide
+        // whether to `retry_subtask` (subject to
+        // `max_crash_retries`) or settle the initiative as
+        // `Blocked`.
+        //
+        // Symptom this hook fixes (live e2e iter25): the
+        // `credential-substitution-canary` realistic-scenario
+        // executor (parse `.env` → connect via credential proxy
+        // → SELECT → write/commit → `task_complete`)
+        // reproducibly hit `MaxTurnsExceeded` on natural tool-
+        // error retry cycles; the executor VM exited with code 4
+        // and the kernel went idle (0.0% CPU) waiting for an
+        // orchestrator respawn that never arrived.
+        //
+        // **Guard.** Synthesise only when ALL of:
+        //   * The just-revoked session was an `Executor` or
+        //     `Reviewer`.
+        //   * The session row carries a non-empty `initiative_id`.
+        //   * There is exactly one `subtask_activations` row with
+        //     `session_id = <this session>` and
+        //     `activation_state = 'Active'` (defensive — the
+        //     EarlyResponse dispatch on a normal terminal intent
+        //     would have closed it, so an `Active` row here is
+        //     proof the exit was premature).
+        //   * The task's current state is `Admitted` or `Running`
+        //     (anything terminal — Completed / Failed / Aborted /
+        //     Cancelled — means the EarlyResponse dispatch did
+        //     fire and we should not double-transition).
+        //
+        // Like Mode A, errors are logged structurally and never
+        // propagate; the audit chain still has the matching
+        // `SessionVmExited` from the substrate.
         let store_for_post_exit = Arc::clone(&ctx.store);
         let session_for_post_exit = session_id.clone();
         let preflight = tokio::task::spawn_blocking(
-            move || -> Option<String> {
+            move || -> Option<PostExitAction> {
                 use raxis_store::Table;
-                let conn = store_for_post_exit.lock_sync();
+                let mut conn = store_for_post_exit.lock_sync();
                 let row: Option<(String, String)> = conn
                     .query_row(
                         &format!(
@@ -1299,67 +1384,291 @@ pub fn spawn_planner_dispatcher(
                         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                     )
                     .ok();
-                let (agent_type, initiative_id) = row?;
+                let (agent_type, session_initiative_id) = row?;
+                // Mode A (Orchestrator) requires `sessions.initiative_id` to
+                // be populated — the orchestrator-spawn path always sets it.
+                // Mode B (Executor/Reviewer), however, must NOT depend on
+                // `sessions.initiative_id`: the executor-spawn path does
+                // not currently populate the column, so the canonical
+                // source of truth for the initiative binding of a worker
+                // session is the `subtask_activations.initiative_id`
+                // column on the row that holds this session_id (the
+                // schema enforces `Active` rows always carry a non-null
+                // `session_id`, and the row is created by the same
+                // `activate_subtask` transaction that booted the VM).
+                // Without this distinction Mode B never fires for the
+                // realistic-scenario executors (iter27 reproduced the
+                // exact iter15/iter20 deadlock — 4 sessions revoked,
+                // 0 `worker_post_exit_respawn_trigger` events,
+                // kernel CPU 0% with `Active` activation rows stranded).
                 if agent_type
-                    != raxis_types::SessionAgentType::Orchestrator.as_sql_str()
+                    == raxis_types::SessionAgentType::Orchestrator.as_sql_str()
                 {
+                    let initiative_id = session_initiative_id;
+                    if initiative_id.is_empty() {
+                        return None;
+                    }
+                    // ── Mode A: Orchestrator post-exit respawn. ──
+                    let pending_exists: bool = conn
+                        .query_row(
+                            &format!(
+                                "SELECT 1 FROM {sa} \
+                                   WHERE initiative_id   = ?1 \
+                                     AND activation_state = 'PendingActivation' \
+                                   LIMIT 1",
+                                sa = Table::SubtaskActivations.as_str(),
+                            ),
+                            rusqlite::params![&initiative_id],
+                            |_| Ok(true),
+                        )
+                        .unwrap_or(false);
+                    let active_exists: bool = conn
+                        .query_row(
+                            &format!(
+                                "SELECT 1 FROM {sa} \
+                                   WHERE initiative_id   = ?1 \
+                                     AND activation_state = 'Active' \
+                                   LIMIT 1",
+                                sa = Table::SubtaskActivations.as_str(),
+                            ),
+                            rusqlite::params![&initiative_id],
+                            |_| Ok(true),
+                        )
+                        .unwrap_or(false);
+                    // INV-RESPAWN-STORM: only respawn from post-exit hook
+                    // when there is at least one PendingActivation AND
+                    // NO Active worker. An Active worker's terminal
+                    // intent (CompleteTask / SubmitReview / ReportFailure)
+                    // will trigger an EarlyResponse respawn anyway, and
+                    // letting both paths fire ends up in a respawn-storm
+                    // when an LLM session keeps emitting rejected
+                    // ActivateSubTask intents (live e2e iter 7 reproduced
+                    // ~30 respawns in 90s with the unconditional version).
+                    if pending_exists && !active_exists {
+                        return Some(PostExitAction::OrchestratorRespawn { initiative_id });
+                    }
                     return None;
                 }
-                if initiative_id.is_empty() {
+
+                // ── Mode B: worker (Executor/Reviewer) premature-exit
+                //    failure synthesis. ─────────────────────────────
+                let is_executor = agent_type
+                    == raxis_types::SessionAgentType::Executor.as_sql_str();
+                let is_reviewer = agent_type
+                    == raxis_types::SessionAgentType::Reviewer.as_sql_str();
+                if !(is_executor || is_reviewer) {
+                    // Unknown agent type — defensively skip rather than
+                    // risk synthesising a transition on an unsupported
+                    // session class.
                     return None;
                 }
-                let pending_exists: bool = conn
+                // Find the Active activation row bound to THIS session
+                // (not just any active row on the initiative — a
+                // sibling executor on the same initiative is its own
+                // story). The activation row is also the canonical
+                // source of truth for the worker's initiative binding
+                // — `sessions.initiative_id` is empty on executor /
+                // reviewer rows by current spawn-path convention, but
+                // the activation row's `initiative_id` is NOT NULL by
+                // schema and was set in the same transaction that
+                // booted the VM.
+                let row: Option<(String, String)> = conn
                     .query_row(
                         &format!(
-                            "SELECT 1 FROM {sa} \
-                               WHERE initiative_id   = ?1 \
-                                 AND activation_state = 'PendingActivation' \
-                               LIMIT 1",
-                            sa = Table::SubtaskActivations.as_str(),
-                        ),
-                        rusqlite::params![&initiative_id],
-                        |_| Ok(true),
-                    )
-                    .unwrap_or(false);
-                let active_exists: bool = conn
-                    .query_row(
-                        &format!(
-                            "SELECT 1 FROM {sa} \
-                               WHERE initiative_id   = ?1 \
+                            "SELECT task_id, initiative_id FROM {sa} \
+                               WHERE session_id      = ?1 \
                                  AND activation_state = 'Active' \
                                LIMIT 1",
                             sa = Table::SubtaskActivations.as_str(),
                         ),
-                        rusqlite::params![&initiative_id],
-                        |_| Ok(true),
+                        rusqlite::params![&session_for_post_exit],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                     )
-                    .unwrap_or(false);
-                // INV-RESPAWN-STORM: only respawn from post-exit hook
-                // when there is at least one PendingActivation AND
-                // NO Active worker. An Active worker's terminal
-                // intent (CompleteTask / SubmitReview / ReportFailure)
-                // will trigger an EarlyResponse respawn anyway, and
-                // letting both paths fire ends up in a respawn-storm
-                // when an LLM session keeps emitting rejected
-                // ActivateSubTask intents (live e2e iter 7 reproduced
-                // ~30 respawns in 90s with the unconditional version).
-                if pending_exists && !active_exists {
-                    Some(initiative_id)
-                } else {
-                    None
+                    .ok();
+                let (task_id, initiative_id) = row?;
+                let task_state_str: String = conn
+                    .query_row(
+                        &format!(
+                            "SELECT state FROM {tasks} WHERE task_id = ?1",
+                            tasks = Table::Tasks.as_str(),
+                        ),
+                        rusqlite::params![&task_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()?;
+                let task_state = raxis_types::TaskState::from_sql_str(&task_state_str)?;
+                if !matches!(
+                    task_state,
+                    raxis_types::TaskState::Admitted | raxis_types::TaskState::Running
+                ) {
+                    // Terminal — EarlyResponse already drove the FSM
+                    // through its terminal transition.
+                    return None;
                 }
+
+                // Perform the synthetic Failed transition in a single
+                // SQLite transaction so the bump + FSM walk + activation-
+                // row close commit atomically. Matches the
+                // `handle_report_failure` shape verbatim.
+                use crate::initiatives::task_transitions::{
+                    transition_task_in_tx, TransitionActor,
+                };
+                let tx = match conn.transaction() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"worker_post_exit_synth_tx_open_failed\",\
+                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                             \"error\":\"{err}\"}}",
+                            sid = &session_for_post_exit,
+                            tid = &task_id,
+                            err = e,
+                        );
+                        return None;
+                    }
+                };
+                if matches!(task_state, raxis_types::TaskState::Admitted) {
+                    if let Err(e) = transition_task_in_tx(
+                        &tx,
+                        &task_id,
+                        raxis_types::TaskState::Running,
+                        None,
+                        TransitionActor::Kernel,
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"worker_post_exit_synth_admitted_to_running_failed\",\
+                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                             \"error\":\"{err}\"}}",
+                            sid = &session_for_post_exit,
+                            tid = &task_id,
+                            err = e,
+                        );
+                        return None;
+                    }
+                }
+                // V2 §Step 12 crash-retry bump — must land BEFORE the
+                // Failed cascade closes the activation row.
+                if let Err(e) = crate::handlers::intent::bump_executor_crash_retry_count_in_tx(
+                    &tx,
+                    &task_id,
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_post_exit_synth_crash_bump_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    // Continue: the FSM transition is the structural
+                    // unstall; a missed counter increment is forensic.
+                }
+                let justification = format!(
+                    "session_spawn_orchestrator: {role} VM exited without \
+                     submitting a terminal intent (MaxTurnsExceeded / \
+                     TokensExceeded / DispatchIdle / process death). \
+                     Kernel synthesised Running → Failed so the orchestrator \
+                     can decide retry_subtask vs. settle Blocked.",
+                    role = if is_executor { "executor" } else { "reviewer" },
+                );
+                if let Err(e) = transition_task_in_tx(
+                    &tx,
+                    &task_id,
+                    raxis_types::TaskState::Failed,
+                    Some(justification.as_str()),
+                    TransitionActor::Kernel,
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_post_exit_synth_failed_transition_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    return None;
+                }
+                if let Err(e) = tx.commit() {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_post_exit_synth_commit_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    return None;
+                }
+                eprintln!(
+                    "{{\"level\":\"info\",\
+                     \"event\":\"TaskFailedOnWorkerPrematureExit\",\
+                     \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                     \"role\":\"{role}\"}}",
+                    sid = &session_for_post_exit,
+                    tid = &task_id,
+                    role = if is_executor { "executor" } else { "reviewer" },
+                );
+                Some(PostExitAction::WorkerFailureRespawn {
+                    initiative_id,
+                    task_id,
+                    role: if is_executor { "executor" } else { "reviewer" },
+                })
             },
         )
         .await;
 
-        if let Ok(Some(initiative_id)) = preflight {
-            eprintln!(
-                "{{\"level\":\"info\",\"event\":\"orchestrator_post_exit_respawn_trigger\",\
-                 \"session_id\":\"{session_id}\",\"initiative_id\":\"{initiative_id}\"}}",
-            );
-            respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
+        match preflight {
+            Ok(Some(PostExitAction::OrchestratorRespawn { initiative_id })) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"orchestrator_post_exit_respawn_trigger\",\
+                     \"session_id\":\"{session_id}\",\"initiative_id\":\"{initiative_id}\"}}",
+                );
+                respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
+            }
+            Ok(Some(PostExitAction::WorkerFailureRespawn {
+                initiative_id,
+                task_id,
+                role,
+            })) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"worker_post_exit_respawn_trigger\",\
+                     \"session_id\":\"{session_id}\",\"initiative_id\":\"{initiative_id}\",\
+                     \"task_id\":\"{task_id}\",\"role\":\"{role}\"}}",
+                );
+                respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
+            }
+            Ok(None) => { /* nothing to do */ }
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"post_exit_preflight_join_failed\",\
+                     \"session_id\":\"{session_id}\",\"error\":\"{err}\"}}",
+                    err = e,
+                );
+            }
         }
     });
+}
+
+/// Internal: the action the post-exit hook decided to take after
+/// reading the just-revoked session's bookkeeping. Returned from
+/// the blocking preflight so the async-side dispatch can fire
+/// `respawn_orchestrator_for_initiative` outside the SQLite mutex.
+enum PostExitAction {
+    /// Mode A — see `spawn_planner_dispatcher` comments.
+    OrchestratorRespawn { initiative_id: String },
+    /// Mode B — see `spawn_planner_dispatcher` comments.
+    /// `role` is the string used in the structured log
+    /// (`"executor"` / `"reviewer"`).
+    WorkerFailureRespawn {
+        initiative_id: String,
+        task_id:       String,
+        role:          &'static str,
+    },
 }
 
 /// Tear down a previously-spawned Orchestrator VM. Returns the
@@ -2548,16 +2857,37 @@ impl ExecutorSpawnContext {
             // `raxis-policy::IsolationConfig`; until then this
             // hardcoded default matches the spec reference.
             executor_vcpu_count: 2,
-            // The dev-host executor-starter initramfs image expands to
-            // ~448 MiB in tmpfs (full Debian + Node + Python + Rust +
-            // Go + Git CLI). 2 GiB covers the worst-case dev image
-            // with headroom for the agent's working set; production
-            // EROFS images run comfortably in 1 GiB.
-            executor_mem_mib:    2048,
+            // The dev-host executor-starter initramfs cpio.gz is
+            // currently ~560 MiB on disk (full Debian + Node + Python
+            // + Rust + Go + Git CLI). The Linux initramfs unpacker
+            // needs simultaneous host capacity for **three** copies:
+            //
+            //   * the compressed payload mapped into guest RAM by the
+            //     loader (`initrd memory` line in the kernel log),
+            //   * the decompressed cpio stream walked by `gen_init_cpio`
+            //     in kernel mode, and
+            //   * the unpacked tmpfs rootfs the running guest mounts
+            //     as `/`.
+            //
+            // With a 2 GiB ceiling the 560 MiB compressed payload
+            // triggers `tmpfs: incomplete write (-28 != …)` on the
+            // dev-host stack — the kernel fills its rootfs tmpfs
+            // budget partway through `unpack_to_rootfs` and panics
+            // with `Kernel panic - not syncing: VFS: Unable to mount
+            // root fs on unknown-block(0,0)`. 6 GiB is the smallest
+            // round number that survives the worst-case dev image
+            // plus a working agent (cargo + rustc + node) without
+            // dropping the panic, and still fits comfortably in the
+            // 16 GiB-ceiling MacBook Pro reference dev host. Production
+            // EROFS images skip the unpacker entirely (the rootfs is a
+            // virtio-blk drive), so the production budget remains the
+            // 1 GiB documented in `host-capacity.md §4.1`.
+            executor_mem_mib:    6 * 1024,
             reviewer_vcpu_count: 1,
-            // The dev-host reviewer-core initramfs image expands to
-            // ~127 MiB in tmpfs. 1 GiB covers the image plus the
-            // reviewer's static-analysis working set.
+            // The dev-host reviewer-core initramfs cpio.gz is ~5 MiB
+            // on disk and decompresses to ~127 MiB in tmpfs (planner
+            // binary only, no toolchain). 1 GiB covers the image plus
+            // the reviewer's static-analysis working set.
             reviewer_mem_mib:    1024,
             data_dir:            None,
             scale_down_history:  Arc::new(crate::elastic::ScaleDownHistory::new()),
@@ -3633,7 +3963,13 @@ mod tests {
         // image-size budget (executor 2 vCPU / 2 GiB; reviewer
         // 1 vCPU / 1 GiB).
         assert_eq!(ctx.executor_vcpu_count, 2);
-        assert_eq!(ctx.executor_mem_mib, 2048);
+        // 6 GiB — see `ExecutorSpawnContext::new` for the dev-host
+        // initramfs unpacker capacity rationale (560 MiB cpio.gz +
+        // decompressor working set + tmpfs rootfs); the floor is
+        // pinned because dropping it back to 2 GiB regresses every
+        // realistic-scenario dev-host run with a kernel-mode panic
+        // (`VFS: Unable to mount root fs on unknown-block(0,0)`).
+        assert_eq!(ctx.executor_mem_mib, 6 * 1024);
         assert_eq!(ctx.reviewer_vcpu_count, 1);
         assert_eq!(ctx.reviewer_mem_mib, 1024);
     }

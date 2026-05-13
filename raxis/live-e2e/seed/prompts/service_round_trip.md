@@ -159,6 +159,22 @@ When `MSSQL_URL` is mounted, repeat the postgres shape against
 * Your `path_allowlist` is `out/services/` only. Do NOT touch
   any other directory; the kernel's INV-TASK-PATH-01 gate will
   reject the commit otherwise.
+* **TWO distinct file locations.** Read this carefully — confusing
+  these two is the #1 way the task fails:
+  1. **Helper scripts go in `/tmp/`.** The Python / shell driver
+     code itself MUST live at `/tmp/round_trip.py` (or similar
+     `/tmp/*.py`). `/tmp/` is mounted ephemerally inside the
+     executor VM and never appears in the diff. Any `.py` /
+     `.sh` driver you write inside the worktree root will land
+     in the commit and trip `FailPathPolicyViolation`.
+  2. **OUTPUT data files go in `out/services/<service>.txt`
+     INSIDE the worktree.** These are the files the witness
+     reads. The Python script you put in `/tmp/` writes its
+     output INTO the worktree's `out/services/` directory
+     (relative paths work because your cwd IS the worktree
+     root, but the explicit absolute form `f.write_text(...)`
+     against an absolute path under `os.getcwd()` is safer
+     against subprocess cwd quirks).
 * Do NOT make any HTTP request other than the proxy-mediated
   database / SMTP calls. Network egress is policy-gated and any
   other host is blocked at the host boundary.
@@ -166,9 +182,155 @@ When `MSSQL_URL` is mounted, repeat the postgres shape against
   computes the SAME canonical bytes from the formula and rejects
   any byte-level drift with a per-service diff preview.
 
+## Copy-paste-ready helper
+
+The following script is a working starting point. Save it AS-IS
+to `/tmp/round_trip.py`, run it once, then `git add` + commit
++ `task_complete`. Adjust only the service-specific blocks if
+the seed shape changes.
+
+```bash
+mkdir -p out/services
+cat > /tmp/round_trip.py <<'PY'
+# /tmp/round_trip.py — service-evidence round-trip writer.
+#   Reads seeded rows / docs / keys / SMTP envelope through the
+#   credential proxies mounted in the executor env, then writes
+#   one canonical-form file per service into out/services/.
+#   Idempotent: rerunning overwrites any prior partial output.
+import json, os, smtplib, ssl, sys, time
+from email.message import EmailMessage
+from pathlib import Path
+
+WORKTREE = Path(os.getcwd()).resolve()
+OUT_DIR  = WORKTREE / "out" / "services"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── postgres ────────────────────────────────────────────────
+import psycopg2
+pg = psycopg2.connect(os.environ["DATABASE_URL"])
+pg.autocommit = True
+with pg.cursor() as cur:
+    cur.execute(
+        "SELECT id, name, value FROM service_evidence_pg "
+        "ORDER BY id ASC"
+    )
+    rows = cur.fetchall()
+pg.close()
+pg_lines = [f"{r[0]}|{r[1]}|{r[2]}\n" for r in rows]
+(OUT_DIR / "postgres.txt").write_text("".join(pg_lines))
+
+# ── mongodb ─────────────────────────────────────────────────
+import pymongo
+mongo = pymongo.MongoClient(
+    os.environ["MONGO_URL"],
+    serverSelectionTimeoutMS=60_000,
+    directConnection=True,
+)
+# Force a server-selection round-trip so the connection error
+# surfaces here, not inside the find() iterator below.
+mongo.admin.command("ping")
+mdb     = mongo["raxis_e2e_mongo"]
+docs    = list(
+    mdb["service_evidence_mongo"]
+        .find({}, {"_id": 0, "doc_id": 1, "label": 1, "magic": 1})
+        .sort("doc_id", 1)
+)
+mongo_lines = [
+    # Canonical key order: doc_id, label, magic — match the
+    # witness exactly.
+    json.dumps(
+        {"doc_id": d["doc_id"], "label": d["label"], "magic": d["magic"]},
+        separators=(",", ":"),
+    ) + "\n"
+    for d in docs
+]
+(OUT_DIR / "mongodb.txt").write_text("".join(mongo_lines))
+mongo.close()
+
+# ── redis ───────────────────────────────────────────────────
+import redis
+r = redis.Redis.from_url(os.environ["REDIS_URL"])
+r.ping()
+keys = sorted(
+    k.decode() for k in r.scan_iter(match="service-evidence:*")
+)
+redis_lines = []
+for k in keys:
+    v = r.get(k)
+    redis_lines.append(f"{k}={v.decode()}\n")
+(OUT_DIR / "redis.txt").write_text("".join(redis_lines))
+
+# ── smtp ────────────────────────────────────────────────────
+# SMTP_URL is `smtp://127.0.0.1:NNN` (no auth in the agent-side
+# URL — the proxy injects upstream auth). Compose the canonical
+# envelope and let the proxy relay it.
+import urllib.parse as _u
+smtp_url = _u.urlparse(os.environ["SMTP_URL"])
+host = smtp_url.hostname
+port = smtp_url.port
+
+msg = EmailMessage()
+msg["From"]    = "sender@live-e2e.test"
+msg["To"]      = "raxis-tenant@live-e2e.test"
+msg["Subject"] = "smtp_seed_subject_1"
+msg.set_content("smtp_seed_body_1: service-evidence smtp round-trip")
+
+with smtplib.SMTP(host, port, timeout=30) as s:
+    # No EHLO/STARTTLS — the proxy speaks plain SMTP on
+    # loopback and synthesises a `250 2.0.0 Ok` for the agent.
+    s.send_message(msg)
+
+# Canonical envelope record (lowercase keys, one field per line).
+smtp_lines = [
+    "from: sender@live-e2e.test\n",
+    "to: raxis-tenant@live-e2e.test\n",
+    "subject: smtp_seed_subject_1\n",
+    "body: smtp_seed_body_1: service-evidence smtp round-trip\n",
+]
+(OUT_DIR / "smtp.txt").write_text("".join(smtp_lines))
+
+# ── opt-in services (mysql / mssql) — silently skip when the env
+#    var is not exported.
+if "MYSQL_URL" in os.environ:
+    import pymysql
+    cn = pymysql.connect(**{
+        # Parse from MYSQL_URL if provided; left as a stub.
+    })
+    # Stub: leave as a TODO once RAXIS_LIVE_MYSQL_URL is
+    # routinely set — the witness short-circuits otherwise.
+if "MSSQL_URL" in os.environ:
+    # Same opt-in shape as mysql.
+    pass
+
+print("service-evidence round-trip wrote:", sorted(p.name for p in OUT_DIR.iterdir()))
+PY
+
+python3 /tmp/round_trip.py
+```
+
 ## After every file is written
 
-1. `git add out/services/`
-2. `git commit -m "service-evidence: round-trip"`
-3. Call `task_complete` with a brief summary of which services
-   round-tripped.
+1. **Verify the files exist on disk** with
+   `ls out/services/` — you should see at minimum `postgres.txt`,
+   `mongodb.txt`, `redis.txt`, `smtp.txt`. If a file is missing
+   the python script crashed; fix it and rerun before
+   committing. **Do not call `task_complete` until every
+   in-scope file is present** — the kernel's
+   `compute_touched_paths` runs over the commit you submit and
+   the witness re-reads the files from `out/services/`, so a
+   missing file fails both gates.
+2. `git add out/services/` (explicit path; do NOT run
+   `git add .` / `git add -A` / `git commit -a` — those stage
+   every untracked file in the worktree, including any helper
+   scratch you forgot was there).
+3. `git commit -m "service-evidence: round-trip"`
+4. **Capture the new HEAD SHA** with `git rev-parse HEAD` and
+   pass it as the `head_sha` argument to `task_complete`. If
+   you submit a head_sha that doesn't match the actual commit
+   the kernel returns `FailInvalidDiff` and the task burns a
+   crash-retry slot (live-e2e iter35 root cause: agent called
+   `task_complete` without ever running `git commit`, so the
+   submitted head_sha referenced a SHA that didn't exist in
+   the worktree's history).
+5. Call `task_complete` with `head_sha = <the SHA above>` and
+   a brief summary of which services round-tripped.

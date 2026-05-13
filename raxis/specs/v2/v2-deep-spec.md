@@ -321,12 +321,12 @@ Aborted / Cancelled edges) + `kernel/src/handlers/intent.rs::
 commit_task_completion` (cascade for the Completed edge).
 
 **Orchestrator-continuation re-spawn architecture (V2.5 hardening —
-`3e3605e` + `d7ca482` + `aafd4f2`).** The DAG advances by chaining
-orchestrator sessions: each orchestrator turn emits zero or more
-`ActivateSubTask` / `RetrySubTask` / `CompleteTask` / `SubmitReview` /
-`ReportFailure` intents, then the session exits. Re-spawning the next
-orchestrator session is a load-bearing kernel concern with **two
-mutually exclusive paths**:
+`3e3605e` + `d7ca482` + `aafd4f2` + Live-e2e iter26 worker-premature-exit
+fix).** The DAG advances by chaining orchestrator sessions: each
+orchestrator turn emits zero or more `ActivateSubTask` / `RetrySubTask`
+/ `CompleteTask` / `SubmitReview` / `ReportFailure` intents, then the
+session exits. Re-spawning the next orchestrator session is a load-
+bearing kernel concern with **three mutually exclusive paths**:
 
 1. **EarlyResponse-dispatched re-spawn.** When Phase A returns
    `EarlyResponse(resp)` for a worker terminal intent (`CompleteTask`,
@@ -338,10 +338,11 @@ mutually exclusive paths**:
    Phase A (`return handle_retry_sub_task(...)`) so the EarlyResponse
    never fires.
 
-2. **Post-exit-hook re-spawn.** `session_spawn_orchestrator::
-   spawn_planner_dispatcher`'s tokio-spawn block runs the post-exit
-   hook after the `planner_session_revoked_on_exit` emit. The hook:
-   * skips if the just-exited session was not an Orchestrator;
+2. **Post-exit-hook re-spawn (Mode A — Orchestrator).**
+   `session_spawn_orchestrator::spawn_planner_dispatcher`'s tokio-spawn
+   block runs the post-exit hook after the
+   `planner_session_revoked_on_exit` emit. The Mode-A branch fires when
+   the just-exited session is an Orchestrator. It:
    * skips if the initiative has no `PendingActivation` row
      (`!pending_exists` ⇒ DAG is settling or fully running);
    * **skips if any worker is in flight** (`active_exists` ⇒ that
@@ -356,6 +357,82 @@ mutually exclusive paths**:
    (`handlers/intent.rs::handle_retry_sub_task`) explicitly defers
    re-spawn here (see the §"Step 6 — orchestrator continuation re-spawn
    is NOT fired here" doc-comment in that function).
+
+3. **Post-exit-hook re-spawn (Mode B — Worker premature-exit failure
+   synthesis).** When the just-exited session is an Executor or
+   Reviewer that did NOT submit a terminal intent before the VM
+   powered off, the Mode-B branch synthesises a `ReportFailure`-
+   equivalent transition so the DAG can advance. Trigger conditions
+   (ALL of):
+   * Session `session_agent_type` is `Executor` or `Reviewer`.
+   * A `subtask_activations` row with `session_id = <this session>` is
+     in `activation_state = 'Active'` (proof the EarlyResponse
+     dispatch did not fire a terminal intent first). The
+     `initiative_id` for the Mode-B respawn is read from this
+     activation row — NOT from `sessions.initiative_id`, which is
+     empty on Executor / Reviewer rows by current spawn-path
+     convention. The `subtask_activations.initiative_id` column is
+     `NOT NULL` by schema and was bound in the same
+     `activate_subtask` transaction that booted the VM, so it is
+     the canonical source of truth for a worker's initiative
+     binding (Live-e2e iter27 reproduced the iter15/iter20 deadlock
+     because Mode B short-circuited on `sessions.initiative_id =
+     ''` — fixed by reading the column from the activation row).
+   * The bound task's `tasks.state` is `Admitted` or `Running`
+     (anything terminal means path (1) already fired).
+
+   The hook runs the canonical FSM walk under a single SQLite
+   transaction:
+   1. If `Admitted`, transition `Admitted → Running`
+      (`TransitionActor::Kernel`) — mirrors `handle_report_failure`'s
+      Admitted-fold so the legal transition graph is preserved.
+   2. Bump `subtask_activations.crash_retry_count` via
+      `bump_executor_crash_retry_count_in_tx` — Step 12 budget
+      enforcement; without this a misbehaving planner could exit-
+      and-be-retried unboundedly.
+   3. Transition `Running → Failed` with a structured justification
+      (`"session_spawn_orchestrator: <role> VM exited without
+      submitting a terminal intent (MaxTurnsExceeded / TokensExceeded
+      / DispatchIdle / process death) …"`). The cascade in
+      `transition_task_in_tx` closes the `Active` activation row.
+   4. Commit, then fire `respawn_orchestrator_for_initiative` so the
+      Orchestrator's next decision-cycle observes the Failed task and
+      can choose `retry_subtask` (subject to `max_crash_retries`) vs.
+      settle the initiative as `Blocked`.
+
+   Each step logs a structured event prefixed
+   `worker_post_exit_synth_…` on failure (forensic-only — never
+   propagates); the success path emits `TaskFailedOnWorkerPrematureExit`
+   + `worker_post_exit_respawn_trigger`.
+
+   Documented failure modes Mode B covers (all observed in the wild):
+   * `DispatchOutcome::MaxTurnsExceeded` — planner-executor exits
+     with code 4 after `RAXIS_PLANNER_MAX_TURNS` turns.
+   * `DispatchOutcome::TokensExceeded` — exits with code 6.
+   * `DispatchOutcome::Idle` — exits with code 5 (model emitted no
+     tool call).
+   * Process death — SIGSEGV / panic / OOM-kill / kernel-side AVF
+     shutdown without a paired terminal intent.
+
+   Symptom this hook fixes (live e2e iter25): the
+   `credential-substitution-canary` realistic-scenario executor (parse
+   `.env` → connect via credential proxy → `SELECT` → write/commit →
+   `task_complete`) reproducibly hit `MaxTurnsExceeded` at turn 20;
+   the executor VM powered off with code 4 and the kernel went idle
+   (0.0% CPU) waiting for an orchestrator respawn that never arrived
+   (Mode A's storm-guard `!active_exists` was false because the
+   stranded `Active` row blocked the path). Mode B closes the loop
+   by retiring the stranded row and firing the respawn explicitly.
+   The companion `DEFAULT_PLANNER_MAX_TURNS` bump (`20 → 50 → 100`
+   in `crates/planner-core/src/driver.rs`) was the cost-side fix:
+   iter25 reproduced the canary trip at 20, iter31 reproduced the
+   `materialize-records` two-fanout trip at 50 (25 postgres rows +
+   25 mongo docs + per-row writes), and `100` clears both empirical
+   workloads with headroom while the token-cap envelope
+   (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` / `…_OUTPUT_TOTAL`)
+   remains the spend bound. Mode B + the turn-cap bump together
+   form the two halves of the "executor exits without a terminal
+   intent" recovery contract.
 
 The storm-guard's `pending_exists && !active_exists` predicate is
 load-bearing: without `!active_exists` the hook re-fires on every

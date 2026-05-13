@@ -59,7 +59,7 @@
 //! | `RAXIS_PLANNER_BASE_URL`       | no                      | `https://api.anthropic.com`          | Model API base URL — tests override         |
 //! | `RAXIS_MODEL_ID`               | no                      | [`crate::DEFAULT_MODEL`]             | Model id stamped into every request         |
 //! | `RAXIS_WORKSPACE_PATH`         | no                      | `/workspace`                         | Tool sandbox root                           |
-//! | `RAXIS_PLANNER_MAX_TURNS`      | no                      | `20`                                 | Hard turn ceiling per session               |
+//! | `RAXIS_PLANNER_MAX_TURNS`      | no                      | `50`                                 | Hard turn ceiling per session               |
 //! | `RAXIS_PLANNER_MAX_TOKENS`     | no                      | `4096`                               | Per-request `max_tokens`                    |
 //!
 //! When `RAXIS_PLANNER_TASK_PROMPT` is **absent or empty**, the
@@ -145,7 +145,40 @@ pub const DEFAULT_WORKSPACE_PATH: &str = "/workspace";
 /// Default per-session max turns. Mirrors
 /// [`DispatchConfig::new`] so the driver and the dispatch loop
 /// share one source of truth.
-pub const DEFAULT_PLANNER_MAX_TURNS: u32 = 20;
+///
+/// **Rationale for `100`.** The dispatch loop counts one *turn* per
+/// `(model_request, tool_calls_batch)` cycle. The original ceiling
+/// of `20` was chosen against the V2.3 unit-test fixtures — those
+/// scenarios converged in <10 turns end-to-end. Live-e2e workloads
+/// against real Anthropic/OpenAI endpoints regularly need more
+/// turns: the `credential-substitution-canary` realistic-scenario
+/// task (parse `.env` → connect via credential-proxied
+/// `$DATABASE_URL` → `SELECT` rows → render to text → `git
+/// add/commit` → `task_complete`) reproducibly hit the
+/// `MaxTurnsExceeded` ceiling at turn 20, exhausting the budget
+/// on natural retry-after-tool-error cycles before the terminal
+/// `task_complete` could fire. The bump to `50` covered the
+/// canary-style single-table case, but the realistic-scenario
+/// `materialize-records` Executor (25 postgres rows + 25 mongo
+/// docs + per-row `out/<id>.json` writes + commit + complete)
+/// reproducibly hit `MaxTurnsExceeded` at turn 50 in live-e2e
+/// iter31 — the dispatch loop spent turns 1-30 on database
+/// connectivity exploration, turns 31-45 on per-document writes,
+/// and never reached `task_complete`. `100` covers the two-fanout
+/// (`postgres + mongo`) worst case with headroom; the token-cap
+/// ceiling
+/// (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` /
+/// `…_OUTPUT_TOTAL`) remains the cost-side bound, so raising the
+/// turn ceiling does not unbound LLM spend.
+///
+/// Operators who want a tighter ceiling (e.g. CI runs against
+/// known-easy tasks) set `RAXIS_PLANNER_MAX_TURNS=<n>` per-spawn
+/// or `[gateway].planner_max_turns_default = <n>` in policy.
+/// Operators who want a looser ceiling for exploratory
+/// long-horizon planning sessions set the env var higher; the
+/// token-cap ceiling (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` /
+/// `…_OUTPUT_TOTAL`) is the cost-side bound.
+pub const DEFAULT_PLANNER_MAX_TURNS: u32 = 100;
 
 /// Default per-request max-tokens. Mirrors
 /// [`DispatchConfig::new`].

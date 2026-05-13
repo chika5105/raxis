@@ -111,10 +111,18 @@ pub struct DispatchConfig {
 impl DispatchConfig {
     /// Sensible default for production reviewer / executor. Callers
     /// override per role + per task.
+    ///
+    /// `max_turns = 100` mirrors
+    /// [`crate::driver::DEFAULT_PLANNER_MAX_TURNS`]. See that
+    /// constant's doc-comment for the rationale (Live-e2e
+    /// realistic-scenario `credential-substitution-canary` tripped
+    /// the original `20` ceiling, `materialize-records` tripped the
+    /// `50` follow-up ceiling on the two-fanout
+    /// postgres-plus-mongo path in iter31).
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model:         model.into(),
-            max_turns:     20,
+            max_turns:     100,
             max_tokens:    4096,
             temperature:   Some(0.7),
             tool_deadline: Some(Duration::from_secs(120)),

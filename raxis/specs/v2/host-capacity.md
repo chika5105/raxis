@@ -137,6 +137,43 @@ VMs are budgeted by their declared memory, not their actual usage. Plans declare
 
 The kernel reserves additional memory for itself: `kernel_reserved_memory_mb` (default 1024). The effective budget is `max_aggregate_vm_memory_mb` plus `kernel_reserved_memory_mb`; the operator must ensure the host has at least that much physical memory plus swap headroom. The kernel does NOT check host physical memory against this — that is the operator's responsibility, validated by the operator's deployment checklist.
 
+### 5.1 Per-role spawn defaults (kernel-internal)
+
+In addition to the operator-set caps, `ExecutorSpawnContext::new()` carries
+the kernel-internal **per-role default memory budgets** used when a plan
+omits an explicit `[[plan.tasks]] vm_memory_mb`. These defaults are sized
+for the dev-host canonical-image lifecycle, not just for the agent
+working set:
+
+| Role            | vCPU | mem_mib (default) | Rationale                                                                                               |
+|-----------------|------|-------------------|---------------------------------------------------------------------------------------------------------|
+| Orchestrator    |   1  |  1024             | tiny planner-only initramfs (~5 MiB cpio.gz, ~16 MiB unpacked); 1 GiB is comfortable headroom.          |
+| Reviewer-core   |   1  |  1024             | planner-only initramfs (~5 MiB cpio.gz, ~127 MiB unpacked); 1 GiB covers ctags + symbol-index buffers.  |
+| Executor-starter|   2  |  6144             | dev-host cpio.gz is ~560 MiB on disk; see invariant note below.                                         |
+
+The 6 GiB Executor-starter default is a **hard panic-floor**, not a
+performance preference: the Linux initramfs unpacker (`unpack_to_rootfs`)
+needs simultaneous capacity for **three** copies of the rootfs payload —
+the compressed initrd memory the loader hands to the kernel, the
+decompressed cpio stream walked in kernel mode, and the unpacked tmpfs
+rootfs the running guest mounts as `/`. A 2 GiB ceiling triggers
+`tmpfs: incomplete write (-28 != …)` (ENOSPC) on dev-host runs partway
+through `unpack_to_rootfs`, leading to
+`Kernel panic - not syncing: VFS: Unable to mount root fs on
+unknown-block(0,0)` and a guaranteed orchestrator spawn failure
+(`session-spawn failed: isolation spawn failed: transport fault: …
+vsock CONNECT 1024: AVF connect_vsock did not succeed within 30s`).
+
+Production EROFS images skip the unpacker entirely (the rootfs is
+attached as a virtio-blk drive), so production deployments may pin a
+smaller per-task `vm_memory_mb` for Executors without regressing the
+boot path. The 6 GiB floor applies only when the kernel falls back to
+the canonical dev-host initramfs cpio.gz (i.e. no operator
+`[[plan.tasks]] vm_memory_mb` override AND no `[[vm_images]]` EROFS
+binding).
+
+Wire reference: `kernel/src/session_spawn_orchestrator.rs::ExecutorSpawnContext::new`.
+
 ---
 
 ## 6. Disk Quota Subsystems

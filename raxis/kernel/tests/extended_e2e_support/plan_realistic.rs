@@ -382,7 +382,20 @@ const REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS: &str = r#"
   name               = "test-smtp-dev"
   proxy_type         = "smtp"
   mount_as           = "SMTP_URL"
-  upstream_host_port = "127.0.0.1:25199""#;
+  upstream_host_port = "127.0.0.1:25199"
+
+    # `auth_mode.user` MUST match the SASL username configured in
+    # `live-e2e/seed/smtp/postfix-accounts.cf`
+    # (`raxis-tenant@live-e2e.test`). Without it the proxy's
+    # `drive_auth_through_quit` synthesises
+    # `AUTH PLAIN base64("\0\0<password>")` (empty user), the
+    # docker-mailserver SASL daemon (`saslauthd`) rejects it with
+    # `535 5.7.8 Error: authentication failed`, and the executor
+    # task fails with `451 4.4.0 upstream relay failed`
+    # (live-e2e iter34 root cause).
+    [tasks.credentials.auth_mode]
+    kind = "plain"
+    user = "raxis-tenant@live-e2e.test""#;
 
 const REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD: &str = r#"# -- Transparent-proxy real-scripts Executor (P3-10) ------
 [[tasks]]
@@ -416,7 +429,14 @@ const REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS: &str = r#"
   name               = "test-smtp-dev"
   proxy_type         = "smtp"
   mount_as           = "SMTP_URL"
-  upstream_host_port = "127.0.0.1:25199""#;
+  upstream_host_port = "127.0.0.1:25199"
+
+    # See `REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS` for the
+    # iter34 rationale: empty SMTP user trips
+    # `535 5.7.8 Error: authentication failed` upstream.
+    [tasks.credentials.auth_mode]
+    kind = "plain"
+    user = "raxis-tenant@live-e2e.test""#;
 
 /// Credential-substitution-canary executor task block. Runs last in
 /// the dependency graph, predecessors include the upstream

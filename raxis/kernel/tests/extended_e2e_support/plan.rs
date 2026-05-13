@@ -36,6 +36,23 @@ pub const LANE_ID: &str = "e2e-extended-lane";
 
 /// Materializer prompt loaded verbatim from
 /// `live-e2e/seed/prompts/materializer.md`.
+///
+/// **Plan-TOML embedding contract.** This string is interpolated
+/// inside a TOML `description = """...""" ` multi-line literal in
+/// [`extended_plan_toml`] / [`super::plan_realistic::realistic_plan_toml`] /
+/// [`super::multi_initiative::sibling_plan_toml`]. The prompt
+/// content MUST therefore contain **no `"""` sequence anywhere**;
+/// any such sequence would close the enclosing TOML string early
+/// and surface to operators as
+/// `FAIL_PLAN_INVALID_TOML: plan.toml parse error … expected
+/// newline, '#'`. Live-e2e iter32 hit this when the prompt's
+/// Python helper used a `"""..."""` docstring; the
+/// `realistic_toml_decodes_and_carries_executors` /
+/// `sibling_plan_toml_decodes_and_carries_sibling_task` unit
+/// tests under `#[cfg(test)] mod tests` catch it on the next
+/// `cargo test -p raxis-kernel`. When authoring or revising
+/// prompts, prefer `# ...` line comments inside Python and back-
+/// ticked inline code in prose over triple-double-quoted blocks.
 pub const MATERIALIZER_PROMPT_MD: &str = include_str!(
     "../../../live-e2e/seed/prompts/materializer.md"
 );
