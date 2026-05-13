@@ -418,6 +418,27 @@ operator surface.
 
 ### Open the dashboards
 
+The fastest path for an operator who just wants to *look* at the
+dashboards (no live-e2e run, no perf harness) is the standalone
+xtask wrapper that brings up only the observability triple, waits
+for the healthchecks, and (on macOS / Linux) auto-opens Grafana
+home + the `raxis-00-overview` dashboard in the default browser:
+
+```bash
+cd raxis && cargo xtask observability up
+```
+
+Companion subcommands:
+
+| Subcommand                                                 | Effect                                                                        |
+|---                                                         | ---                                                                            |
+| `cargo xtask observability up [--full] [--no-open]`        | Bring up the obs triple (or `--full` for the entire compose stack).            |
+| `cargo xtask observability status`                         | Probe each endpoint with a 1s TCP / HTTP check and print `UP` / `DOWN`.       |
+| `cargo xtask observability urls [--open] [--dashboard ID]` | Print URL block + per-dashboard deep links; `--open` re-opens in the browser. |
+| `cargo xtask observability down [-v]`                      | Tear down. `-v` also drops named volumes for a clean baseline.                |
+
+Or hit the URLs directly:
+
 ```bash
 open http://127.0.0.1:3000/d/raxis-00-overview
 open http://127.0.0.1:9090/
@@ -426,6 +447,22 @@ open http://127.0.0.1:13133/
 
 The Grafana admin login (`admin` / `raxis-e2e`) is needed only
 to edit a dashboard; viewing is anonymous.
+
+The xtask command honors `RAXIS_E2E_NO_OPEN=1`, `CI`, and
+`SSH_CONNECTION` to suppress the auto-open step for CI / SSH
+contexts.
+
+### URL block at startup and end-of-run
+
+When the `extended_e2e_realistic_scenario` or
+`full_e2e_session_lifecycle` test drivers run, they print the
+same observability URL block at kernel-ready time AND again as
+part of the Tier-3 reporter's post-run artifact dump. Each URL
+line is annotated with `(up)` / `(down — bring up via
+`cargo xtask observability up`)` based on a 250 ms TCP probe, so
+an operator skimming a live-e2e stderr capture sees the metric
+dashboards in the same block they see the kernel-log path, the
+audit dir, and the merged worktree.
 
 ### Persistence
 

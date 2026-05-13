@@ -9,6 +9,40 @@ perf run end-to-end (Prometheus + Grafana + dashboards + report).
 
 ---
 
+## TL;DR — just open the dashboards
+
+If you only want to *look* at the dashboards (no perf run, no
+live-e2e harness), one command brings up the observability subset
+of the live-e2e compose stack, prints copy-pasteable Grafana /
+Prometheus / OTel URLs, and on macOS / Linux opens the Grafana
+home + the `raxis-00-overview` dashboard in your default browser:
+
+```bash
+cd raxis && cargo xtask observability up
+```
+
+The dashboards will be EMPTY of kernel data until a kernel or
+`cargo xtask perf` run actively pushes OTLP — see Step 3 below.
+The dashboards themselves, the Prometheus / OTel collector
+self-metrics, and the per-dashboard deep-links are all populated
+immediately.
+
+Companion subcommands:
+
+```bash
+cargo xtask observability status      # probe each endpoint (TCP probe)
+cargo xtask observability urls        # print URLs + per-dashboard deep links
+cargo xtask observability down        # tear down (keeps named volumes)
+cargo xtask observability down -v     # tear down AND wipe the volumes
+```
+
+Honors `RAXIS_E2E_NO_OPEN=1`, `CI`, and `SSH_CONNECTION` to
+suppress the auto-browser-open step. The compose project name is
+pinned to `raxis-live-e2e-test` so resources never collide with
+non-raxis projects on a shared developer host.
+
+---
+
 ## What you get
 
 After running this recipe you will have:
@@ -25,13 +59,23 @@ After running this recipe you will have:
 ## Step 1 — bring up the stack
 
 ```bash
-docker compose -f raxis/live-e2e/docker-compose.e2e.yml up -d --wait \
+cd raxis && cargo xtask observability up
+```
+
+The xtask is a thin wrapper around the equivalent
+`docker compose` invocation — use that directly if you prefer:
+
+```bash
+docker compose -f raxis/live-e2e/docker-compose.e2e.yml \
+    -p raxis-live-e2e-test up -d --wait \
     otel-collector prometheus grafana
 ```
 
 (Starting the entire live-e2e stack — the upstream service
 containers PLUS the observability triple — is also fine; the
-perf harness only depends on the observability triple.)
+perf harness only depends on the observability triple. Pass
+`--full` to `cargo xtask observability up` to bring up
+everything.)
 
 Verify the three observability containers are healthy:
 
@@ -45,6 +89,16 @@ docker ps --format '{{.Names}}: {{.Status}}' \
 ```
 
 ## Step 2 — open Grafana
+
+`cargo xtask observability up` already opened the Grafana home +
+the `raxis-00-overview` dashboard on macOS / Linux. To re-open
+on demand, or to point at a specific dashboard:
+
+```bash
+cargo xtask observability urls --open --dashboard raxis-30-audit
+```
+
+Or directly:
 
 ```bash
 open 'http://127.0.0.1:3000/d/raxis-00-overview'
