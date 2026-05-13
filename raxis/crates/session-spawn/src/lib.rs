@@ -493,6 +493,56 @@ impl SessionSpawnService {
             admission_addr.to_string(),
         );
 
+        // ── Step 3a: build the credential-proxy vsock-loopback plan.
+        //           For each bound credential proxy at host
+        //           `127.0.0.1:<host_loopback_port>` we:
+        //
+        //             - allocate a vsock port on the VM's vsock
+        //               device (we use the host loopback port
+        //               number itself to keep the host-loopback /
+        //               guest-loopback / vsock triple aligned, so
+        //               an operator triaging the audit chain sees
+        //               one port number per proxy across all three
+        //               namespaces);
+        //             - bind the in-guest forwarder on
+        //               `127.0.0.1:<host_loopback_port>` so the
+        //               agent's URL — already stamped above — reaches
+        //               the forwarder transparently;
+        //             - register a host-side
+        //               `VZVirtioSocketListener` on the same vsock
+        //               port that splices to host
+        //               `127.0.0.1:<host_loopback_port>` after Step
+        //               4 boots the VM (Step 4a below).
+        //
+        //           The kernel substrate, the in-guest forwarder,
+        //           and the host-side accepter all agree on the same
+        //           per-proxy port number so the audit chain is
+        //           directly readable: a single `host_loopback_port`
+        //           number tells you which credential proxy was
+        //           involved in any vsock-loopback line.
+        let mut loopback_plan = raxis_vsock_loopback::LoopbackPlan::new();
+        let proxy_summaries = cred_handles.started_summaries();
+        for summary in &proxy_summaries {
+            let port = summary.addr.port();
+            loopback_plan.entries.push(raxis_vsock_loopback::LoopbackEntry {
+                vsock_port:          u32::from(port),
+                guest_loopback_port: port,
+            });
+        }
+        if !loopback_plan.is_empty() {
+            req.vm_spec.env.insert(
+                raxis_vsock_loopback::ENV_VAR_LOOPBACK_PLAN.to_owned(),
+                loopback_plan.to_env_string(),
+            );
+            tracing::info!(
+                session_id = %session_id,
+                entries    = loopback_plan.len(),
+                plan       = %loopback_plan.to_env_string(),
+                "session-spawn: vsock-loopback fan-out plan stamped \
+                 (INV-CRED-PROXY-VM-REACHABILITY-01)",
+            );
+        }
+
         // ── Step 4: boot the VM. ─────────────────────────────────────
         //
         // `Backend::spawn` is a synchronous trait method that does not
@@ -572,6 +622,50 @@ impl SessionSpawnService {
             }
         };
         let perf_guest_t0 = std::time::Instant::now();
+
+        // ── Step 4a: register the credential-proxy vsock-loopback
+        //            listeners on the live substrate session.
+        //            Each call binds a `VZVirtioSocketListener` (or
+        //            substrate equivalent) on the VM's vsock device
+        //            for one `(vsock_port, host_loopback_port)`
+        //            pair. The in-guest forwarder will start
+        //            accepting on `127.0.0.1:<guest_loopback_port>`
+        //            once it observes the env-stamped plan; the
+        //            substrate's listener routes those vsock
+        //            connections to host
+        //            `127.0.0.1:<host_loopback_port>`.
+        //
+        //            Failure here is fail-closed: any session that
+        //            declared credentials cannot proceed without
+        //            its proxies being reachable. We tear down the
+        //            VM, the admission listener, and the
+        //            credential proxies before surfacing the error.
+        for entry in loopback_plan.iter() {
+            if let Err(e) = session.register_loopback_listener(
+                entry.vsock_port,
+                entry.guest_loopback_port,
+            ) {
+                tracing::error!(
+                    session_id = %session_id,
+                    vsock_port = entry.vsock_port,
+                    host_port  = entry.guest_loopback_port,
+                    error      = %e,
+                    "session-spawn: register_loopback_listener failed",
+                );
+                let _ = session.terminate();
+                drop(admission_listener);
+                let _ = cred_handles.shutdown();
+                return Err(SpawnError::IsolationSpawn(e));
+            }
+        }
+        if !loopback_plan.is_empty() {
+            tracing::info!(
+                session_id = %session_id,
+                entries    = loopback_plan.len(),
+                "session-spawn: vsock-loopback listeners registered on substrate \
+                 (INV-CRED-PROXY-VM-REACHABILITY-01)",
+            );
+        }
 
         // ── Step 4.5: surrender the kernel-side IPC stream. ─────────
         //

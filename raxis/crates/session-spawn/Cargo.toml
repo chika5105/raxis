@@ -25,6 +25,13 @@ raxis-egress-admission  = { path = "../egress-admission" }
 # consumes when building a SpawnRequest).
 raxis-plan-credentials  = { path = "../plan-credentials" }
 
+# Wire format for the substrate-level vsock-loopback fan-out that
+# bridges in-VM `127.0.0.1:<port>` URLs to host-side credential
+# proxies. The kernel allocates per-session vsock ports here, stamps
+# the env var the in-guest forwarder reads, and registers the
+# host-side listeners on the substrate session.
+raxis-vsock-loopback    = { workspace = true }
+
 # Shared tooling.
 raxis-audit-tools       = { workspace = true }
 raxis-credentials       = { workspace = true }
