@@ -235,6 +235,38 @@ landed — it connects to each DB and counts rows / docs before
 spawning the kernel, with a clean error message naming the
 `docker compose -f ... up` invocation if not.
 
+#### §3.5a — Harness auto-bring-up + bounded waits
+
+Per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`
+(see `specs/invariants.md §11.10`) the realistic-scenario harness
+verifies the docker-compose project `raxis-live-e2e-test` is up
++ healthy BEFORE the first `seed_*` call:
+
+1. `docker compose -p raxis-live-e2e-test ps --format json`
+   probe (bounded by `DOCKER_PROBE_TIMEOUT`, 30 s).
+2. If every service is `running` AND `healthy`, proceed.
+3. Otherwise the harness auto-brings-it-up via
+   `docker compose -p raxis-live-e2e-test -f
+   live-e2e/docker-compose.extended.e2e.yml up -d --wait`
+   (bounded by `DOCKER_BRINGUP_TIMEOUT`, 240 s) and re-probes.
+4. Operator opt-out: `RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1` skips the
+   auto-bring-up and surfaces `RAXIS_LIVE_E2E_DOCKER_STACK_DOWN`
+   for grep-friendly CI failure mode pinning.
+
+Every per-service `seed_*` helper is preceded by the protocol's
+canonical reachability probe (`pg_isready`, `mongosh ping`,
+`redis-cli PING`, …) bounded by `HEALTH_PROBE_TIMEOUT` (5 s),
+and every external-process spawn (probe + seeder + verifier +
+reseed) is bounded by `SEED_TIMEOUT` (30 s) so a missing or
+unhealthy container fails the test fast with a typed error
+naming the seed + target service URL — never as an indefinite
+hang.
+
+The wrappers live in
+`kernel/tests/extended_e2e_support/{harness_timeout,health_probe,docker_stack}.rs`;
+the operator-facing recipe + env-var documentation lives in
+`live-e2e/README.md`.
+
 ---
 
 ## §4 — Executor task contract

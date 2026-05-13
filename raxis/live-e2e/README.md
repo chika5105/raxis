@@ -120,6 +120,93 @@ Each slice prints `OK — all selected slices passed` on success
 and exits non-zero with an actionable error (which compose
 service to start, which env var to set) on failure.
 
+---
+
+## Harness preflight: auto-bring-up + bounded waits
+
+The realistic-scenario kernel test
+(`kernel/tests/extended_e2e_realistic_scenario.rs`) verifies the
+docker-compose project `raxis-live-e2e-test` is up and healthy
+**before** any `seed_*` helper runs. The default behaviour is
+operator-ergonomic: if the stack is not running the harness
+auto-brings-it-up via
+
+```bash
+docker compose -p raxis-live-e2e-test \
+    -f live-e2e/docker-compose.extended.e2e.yml up -d --wait
+```
+
+and re-probes for health afterwards. The whole probe + bring-up
++ re-probe sequence is bounded — see the timeout table below —
+so a missing `docker` binary, an unhealthy container, or a
+firewall blocking image pulls all surface as a typed error
+within seconds to a few minutes rather than hanging the test
+runner indefinitely.
+
+### Opting out of auto-bring-up
+
+Set `RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1` to disable the harness
+auto-bring-up. In that mode the harness fail-fast surfaces the
+literal token `RAXIS_LIVE_E2E_DOCKER_STACK_DOWN` so a CI log
+scraper can pin the failure mode without parsing the full panic
+message:
+
+```text
+RAXIS_LIVE_E2E_DOCKER_STACK_DOWN: docker-compose project
+`raxis-live-e2e-test` is not up + healthy and
+`RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1` opted out of harness
+auto-bring-up. Bring up the backing services first via
+`docker compose -p raxis-live-e2e-test -f
+.../docker-compose.extended.e2e.yml up -d --wait` or unset
+RAXIS_LIVE_E2E_NO_AUTO_DOCKER. (Probe details: ...)
+```
+
+CI pipelines that pre-bring the stack up themselves should
+typically set `RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1` so a stack
+that's *missing* fails the build clearly instead of having the
+harness paper over the missing pre-step.
+
+### Timeout contract
+
+Per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`
+(see `specs/invariants.md §11.10`) every external-process spawn
+in the harness is bounded:
+
+| Phase                                 | Constant                  | Default |
+| ------------------------------------- | ------------------------- | ------- |
+| Pre-seed reachability probe           | `HEALTH_PROBE_TIMEOUT`    | **5 s** |
+| Per-seeder subprocess (psql / mongosh / redis-cli / mysql / sqlcmd) | `SEED_TIMEOUT`            | **30 s** |
+| `docker compose ps` probe             | `DOCKER_PROBE_TIMEOUT`    | **30 s** |
+| `docker compose up -d --wait`         | `DOCKER_BRINGUP_TIMEOUT`  | **240 s** |
+
+On expiry the wrapper SIGKILLs and reaps the child, returning a
+typed `BoundedWaitError::Timeout` (lifted to
+`ServiceEvidenceError::SeedTimedOut` at the seed call sites).
+The error carries the seed name, the wrapped subprocess label
+(e.g. `"psql"`, `"mongosh"`), and the target service URL so an
+operator finds the failure mode without grepping the audit
+chain.
+
+### Pre-seed health probes
+
+Before each `seed_*` call the harness runs the protocol's
+canonical "is the server up" check (`pg_isready`, `mongosh
+ping`, `redis-cli PING`, `mysqladmin ping`, `sqlcmd -Q "SELECT
+1"`, or a TCP handshake against the SMTP submission port). A
+failed probe surfaces a typed
+`ServiceEvidenceError::PreSeedHealthCheckFailed` within ~5 s —
+well before the seeder gets to wait the full 30 s for the same
+root cause.
+
+The harness ships these wrappers in:
+
+* `kernel/tests/extended_e2e_support/harness_timeout.rs` — generic
+  bounded-wait + spawn wrappers.
+* `kernel/tests/extended_e2e_support/health_probe.rs` —
+  per-protocol probe helpers.
+* `kernel/tests/extended_e2e_support/docker_stack.rs` —
+  auto-bring-up + opt-out gate.
+
 ### Postgres + MySQL + MSSQL — active by default
 
 All three SQL-database proxy slices now exercise the real

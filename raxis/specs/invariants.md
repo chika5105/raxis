@@ -74,7 +74,8 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| **Total** | | **72** |
+| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01 | 1 |
+| **Total** | | **73** |
 
 ---
 
@@ -3554,6 +3555,99 @@ operator and the engineering team see the same red badge they'd
 see for any other failure.
 
 **Canonical home.** `v2/dashboard-hardening.md §5`.
+
+---
+
+## §11.10 — Live-e2e test harness (INV-LIVE-E2E-*)
+
+The live-e2e harness drives real docker-compose-backed services
+(postgres / mongo / redis / smtp / mysql / mssql) through real
+database client subprocesses (`psql` / `mongosh` / `redis-cli`
+/ `mysql` / `sqlcmd`). Every one of those subprocesses talks
+TCP to a container that may not be up; the invariant below
+forces every spawn to be bounded so a missing container fails
+the test fast instead of hanging the test runner forever.
+
+**Canonical home.** `kernel/tests/extended_e2e_support/harness_timeout.rs`,
+`kernel/tests/extended_e2e_support/health_probe.rs`,
+`kernel/tests/extended_e2e_support/docker_stack.rs`,
+`live-e2e/README.md`.
+
+### INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01 — Every external-process spawn is bounded
+
+**Statement.** Every external-process spawn in the live-e2e
+harness (`psql` / `mongosh` / `redis-cli` / `swaks` / `mysql` /
+`sqlcmd` / `docker` / `pg_isready` / `mysqladmin` / etc.) MUST be
+wrapped in a bounded timeout: 30 s default for seeding
+([`SEED_TIMEOUT`]), 5 s default for health probes
+([`HEALTH_PROBE_TIMEOUT`]), 30 s for `docker compose ps`
+([`DOCKER_PROBE_TIMEOUT`]), 240 s for `docker compose up -d --wait`
+([`DOCKER_BRINGUP_TIMEOUT`]). The harness MUST NOT contain any
+unbounded `Child::wait()`, `Child::wait_with_output()`, or pipe
+`read_to_end()` call in any `seed_*` / `verify_*` / `probe_*` /
+`ensure_*` path. On timeout the wrapper SIGKILLs and reaps the
+child before returning.
+
+The realistic-scenario harness MUST verify the
+`raxis-live-e2e-test` docker-compose project is up + healthy
+BEFORE the first `seed_*` call. Auto-bring-up is the operator-
+ergonomic default; opt out via
+`RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1`, in which case the harness
+fail-fast surfaces the literal token
+`RAXIS_LIVE_E2E_DOCKER_STACK_DOWN` so a CI log scraper can pin
+the failure mode.
+
+[`SEED_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
+[`HEALTH_PROBE_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
+[`DOCKER_PROBE_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
+[`DOCKER_BRINGUP_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
+
+**Justification.** A single unbounded `Child::wait_with_output()`
+is enough to hang the entire test runner indefinitely when its
+target service is not reachable. Witnessed in iter 17 of the
+`realistic_session_lifecycle` fix-loop: `seed_postgres` blocked
+on `psql`'s pipe `read2 → poll` against a postgres container
+that wasn't up. The single-thread, 0% CPU, no-progress, no-VM
+failure mode wasted ~6 minutes per iteration before the operator
+manually killed the runner — every silent hang is a forensic
+black hole the harness's three-tier diagnostic block cannot
+unwind. A bounded wait turns it into a typed `SeedTimedOut`
+(or `PreSeedHealthCheckFailed`) carrying the seed name, the
+wrapped subprocess label, and the target service URL, so an
+operator finds the failure mode in seconds rather than blaming
+the kernel.
+
+**Scenario.** Operator runs `cargo test -p raxis-kernel --test
+extended_e2e_realistic_scenario` without first bringing up the
+docker-compose stack. With this invariant in force the harness
+auto-brings-up the stack via `docker compose ... up -d --wait`
+within 240 s and proceeds; in the opt-out mode it fail-fast
+surfaces `RAXIS_LIVE_E2E_DOCKER_STACK_DOWN: docker-compose
+project raxis-live-e2e-test is not up + healthy ...` within the
+30 s probe timeout. Without it the runner blocks indefinitely on
+the first `seed_postgres` call.
+
+**Witness.**
+[`extended_e2e_support::harness_timeout::tests::sleep_9999_killed_by_timeout_wrapper`](../kernel/tests/extended_e2e_support/harness_timeout.rs):
+spawns `Command::new("sleep").arg("9999")` through the wrapper
+with a 2 s timeout; asserts the typed
+`BoundedWaitError::Timeout` variant is returned within
+`timeout + 5 s`. Pairs with
+[`extended_e2e_support::docker_stack::tests::opt_out_against_missing_project_surfaces_stack_down_token`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+which exercises the auto-bring-up opt-out path against a
+synthetic non-existent project name and asserts the
+`RAXIS_LIVE_E2E_DOCKER_STACK_DOWN` token surfaces in the panic
+message.
+
+**Canonical home.**
+`kernel/tests/extended_e2e_support/harness_timeout.rs` (wrapper
++ regression test);
+`kernel/tests/extended_e2e_support/health_probe.rs` (probe
+helpers);
+`kernel/tests/extended_e2e_support/docker_stack.rs` (auto-bring-
+up + opt-out gate);
+`live-e2e/README.md` (operator-facing recipe + env-var
+documentation).
 
 ---
 
