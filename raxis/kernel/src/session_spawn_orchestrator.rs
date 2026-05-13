@@ -1227,6 +1227,116 @@ pub fn spawn_planner_dispatcher(
                 err = e,
             ),
         }
+
+        // ── V2 §Step 6 — orchestrator post-exit respawn hook. ─────
+        //
+        // The Orchestrator is short-lived per decision: it boots,
+        // calls one terminal DAG tool (`activate_subtask` /
+        // `retry_subtask` / `integration_merge`), and exits. The
+        // EarlyResponse dispatch in `handlers/intent.rs` already
+        // handles the respawn for `CompleteTask` / `SubmitReview`
+        // / `ReportFailure` (worker-tier intents that fire AFTER
+        // the prior orchestrator already exited). But
+        // `RetrySubTask` is fired BY the orchestrator itself — it
+        // mints a fresh `subtask_activations` row in
+        // `PendingActivation`, resets the executor's
+        // `tasks.state = Admitted`, and exits. No worker intent
+        // fires afterwards (the next executor only spawns when the
+        // follow-up `ActivateSubTask` lands), so without a
+        // post-exit hook here the chain DEAD-ENDS at the retry
+        // edge: kernel CPU goes to 0% and the DAG silently stalls.
+        //
+        // The matching `IntegrationMerge` exit is also covered by
+        // this hook for free — if it leaves nothing PendingActivation
+        // (the normal terminal path), we skip; if it leaves the
+        // initiative pending another sub-task (legal for
+        // multi-merge plans), we respawn.
+        //
+        // Symptom this hook fixes (live e2e iter 6, after `c986e6d`
+        // + `3e3605e` landed): every `RetrySubTaskAdmitted` event
+        // landed cleanly, the orchestrator session exited via
+        // `planner_session_revoked_on_exit`, and then NOTHING
+        // happened. `sample(1)` of the kernel pid showed only
+        // detached terminate_session tasks parked on the AVF
+        // shutdown sync call (the `3e3605e` watchdog correctly
+        // freed the retry handler workers); the orchestrator
+        // workers were idle because no respawn was scheduled.
+        //
+        // **Guard.** Respawn only when ALL of:
+        //   * The just-revoked session was an `Orchestrator`.
+        //     Executor / Reviewer exits don't drive a respawn —
+        //     their terminal intent's EarlyResponse dispatch does.
+        //   * The session row carries a non-empty `initiative_id`
+        //     (defensive — orchestrator rows are guaranteed to
+        //     have one by `auto_spawn_orchestrator_session_in_tx`).
+        //   * At least one `subtask_activations` row for the
+        //     initiative is in `PendingActivation`. If every row
+        //     is `Active` (worker is running) or terminal
+        //     (Completed / Failed), the EarlyResponse dispatch on
+        //     a worker terminal intent will eventually pick up
+        //     the chain — no need to spawn a no-op orchestrator
+        //     turn here.
+        //
+        // `respawn_orchestrator_for_initiative` is itself
+        // idempotent on the active-orchestrator preflight, so even
+        // if the EarlyResponse dispatch fires concurrently for a
+        // late-arriving worker intent, only one respawn wins.
+        // Errors are logged structurally and never propagate.
+        let store_for_post_exit = Arc::clone(&ctx.store);
+        let session_for_post_exit = session_id.clone();
+        let preflight = tokio::task::spawn_blocking(
+            move || -> Option<String> {
+                use raxis_store::Table;
+                let conn = store_for_post_exit.lock_sync();
+                let row: Option<(String, String)> = conn
+                    .query_row(
+                        &format!(
+                            "SELECT session_agent_type, COALESCE(initiative_id, '') \
+                               FROM {sessions} WHERE session_id = ?1",
+                            sessions = Table::Sessions.as_str(),
+                        ),
+                        rusqlite::params![&session_for_post_exit],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )
+                    .ok();
+                let (agent_type, initiative_id) = row?;
+                if agent_type
+                    != raxis_types::SessionAgentType::Orchestrator.as_sql_str()
+                {
+                    return None;
+                }
+                if initiative_id.is_empty() {
+                    return None;
+                }
+                let pending_exists: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT 1 FROM {sa} \
+                               WHERE initiative_id   = ?1 \
+                                 AND activation_state = 'PendingActivation' \
+                               LIMIT 1",
+                            sa = Table::SubtaskActivations.as_str(),
+                        ),
+                        rusqlite::params![&initiative_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if pending_exists {
+                    Some(initiative_id)
+                } else {
+                    None
+                }
+            },
+        )
+        .await;
+
+        if let Ok(Some(initiative_id)) = preflight {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"orchestrator_post_exit_respawn_trigger\",\
+                 \"session_id\":\"{session_id}\",\"initiative_id\":\"{initiative_id}\"}}",
+            );
+            respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
+        }
     });
 }
 
