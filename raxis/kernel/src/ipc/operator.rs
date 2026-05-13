@@ -1489,12 +1489,18 @@ async fn handle_approve_plan(
 /// listeners for at this point). The per-task `allowed_egress`
 /// surface is folded in by the per-session admission service the
 /// kernel constructs at executor-spawn time, not here.
+///
+/// V2 reviewer-egress-defaults-decision.md §5: feeds the EFFECTIVE
+/// allowlist (operator `[egress] domains` ∪ implicit-provider FQDNs
+/// derived from `[[providers]]`) so a Tier-1 transparent-proxy
+/// admission decision matches the gateway URL allowlist; both
+/// share one source of truth.
 fn build_egress_allowlist_from_policy(
     policy: &raxis_policy::PolicyBundle,
 ) -> raxis_egress_admission::EgressAllowlist {
     raxis_egress_admission::EgressAllowlist {
-        exact_hosts: policy.egress_domains().to_vec(),
-        patterns:    policy.egress_patterns().to_vec(),
+        exact_hosts: policy.effective_egress_domains(),
+        patterns:    policy.effective_egress_patterns(),
         credential_proxy_real_targets: Default::default(),
     }
 }

@@ -178,10 +178,16 @@ pub fn load_policy_view_with_credential_backend(
         );
     }
 
+    // V2 reviewer-egress-defaults-decision.md §5: the gateway URL
+    // allowlist consumes the EFFECTIVE egress domains (operator-
+    // declared ∪ implicit-provider-FQDN grants). Without this,
+    // every operator who declares `[[providers]]` but forgets to
+    // mirror the provider FQDN under `[egress] domains` gets a
+    // `DomainNotAllowed` rejection on the first inference call.
     Ok(PolicyView {
         epoch: bundle.epoch(),
-        egress_domains: bundle.egress_domains().to_vec(),
-        egress_patterns: bundle.egress_patterns().to_vec(),
+        egress_domains: bundle.effective_egress_domains(),
+        egress_patterns: bundle.effective_egress_patterns(),
         providers,
     })
 }

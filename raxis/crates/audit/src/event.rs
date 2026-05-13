@@ -1859,6 +1859,81 @@ pub enum AuditEventKind {
         reason:            String,
     },
 
+    // --- V2 reviewer-egress-defaults-decision.md §5.
+
+    /// Emitted ONCE per implicit-provider grant when the kernel /
+    /// gateway materialises the effective egress allowlist from
+    /// `PolicyBundle::default_provider_egress_grants`. Provides
+    /// the audit trail for "what's enforced is more permissive
+    /// than what's written in `policy.toml`". Operators
+    /// dashboarding `kind=DefaultProviderEgressApplied` see every
+    /// FQDN that was auto-added on their behalf and from which
+    /// `[[providers]]` entry it was derived.
+    ///
+    /// Single-class event — emitted at policy-install time on the
+    /// kernel boot and credential-rotation hot-paths. Suppressed
+    /// when `[egress] implicit_provider_grants = false`.
+    DefaultProviderEgressApplied {
+        /// Policy epoch this grant was materialised under. Lets
+        /// the operator correlate the grant against the
+        /// `policy_epoch_history` row that introduced or removed
+        /// the underlying `[[providers]]` entry.
+        policy_epoch:  u64,
+        /// `provider_id` of the originating `[[providers]]` entry
+        /// (e.g. `"anthropic-prod"`).
+        provider_id:   String,
+        /// Provider `kind` string (e.g. `"Anthropic"`,
+        /// `"http_sidecar"`).
+        provider_kind: String,
+        /// Implicitly granted FQDN (e.g. `"api.anthropic.com"`).
+        fqdn:          String,
+    },
+
+    /// Emitted when the kernel detects an egress-denial *stall*:
+    /// the same `(session_id, destination)` tuple has been denied
+    /// at least `block_count_in_window` times within
+    /// `window_seconds`. Surfaces silent failure modes — agents
+    /// that retry indefinitely against a denied destination would
+    /// otherwise spin without ever surfacing the misconfiguration
+    /// to the operator dashboard.
+    ///
+    /// Fires from BOTH egress chokepoints: the Tier-1 transparent-
+    /// proxy admission loop (`raxis-egress-admission`) and the
+    /// kernel-mediated `PlannerFetchRequest` handler. The kernel
+    /// does NOT auto-respawn or auto-kill the agent — that's the
+    /// elastic-VM-scaling worker's territory and the stall might
+    /// be intentional in some test scenarios. The event is a
+    /// structured signal for downstream tooling.
+    ///
+    /// One event per detection (the tracker debounces inside the
+    /// window so a hot stall doesn't spam the audit log).
+    SessionEgressStallDetected {
+        /// Session whose VM is stalling.
+        session_id:            String,
+        /// `(host_or_sni, port)` the agent has been retrying.
+        /// `host_or_sni == None` for raw-TCP destinations where
+        /// the in-VM proxy could not extract an SNI.
+        host_or_sni:           Option<String>,
+        /// Original destination port the in-VM proxy observed.
+        original_dst_port:     u16,
+        /// Stable short reason string from the underlying
+        /// `TransparentProxyDenied` events
+        /// (e.g. `host_not_in_allowlist`).
+        reason:                String,
+        /// Number of denials inside the sliding window that
+        /// triggered the detection.
+        block_count_in_window: u32,
+        /// Window length in seconds (`30` per the decision spec
+        /// default).
+        window_seconds:        u32,
+        /// Origin tag — `"tproxy"` for Tier-1 transparent-proxy
+        /// admission denials, `"kernel_mediated_fetch"` for
+        /// `PlannerFetchRequest` `DomainNotAllowed` rejections.
+        /// Lets the operator dashboard segment by chokepoint
+        /// without re-deriving from the destination.
+        source:                String,
+    },
+
     // --- Credential proxy lifecycle (`credential-proxy.md §5`).
     /// Emitted when the kernel binds a credential-proxy listener
     /// for a task. Carries the `proxy_type` (`postgres`, `http`,
@@ -2636,6 +2711,8 @@ impl AuditEventKind {
             Self::KernelPushEnqueued { .. } => "KernelPushEnqueued",
             Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
             Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
+            Self::DefaultProviderEgressApplied { .. } => "DefaultProviderEgressApplied",
+            Self::SessionEgressStallDetected { .. } => "SessionEgressStallDetected",
             Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",
             Self::CredentialProxyStopped { .. } => "CredentialProxyStopped",
             Self::DatabaseQueryExecuted { .. } => "DatabaseQueryExecuted",

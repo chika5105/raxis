@@ -674,6 +674,20 @@ pub fn advance_epoch(
         audit.as_ref(), &new_bundle, Some(&*prev_bundle_arc), new_epoch_id,
     );
 
+    // ── Phase 1.5d: implicit-provider-egress grant audit-chain mirror.
+    //
+    // V2 reviewer-egress-defaults-decision.md §5: emit one
+    // `DefaultProviderEgressApplied` record per implicit grant
+    // applied by the new policy bundle. Surfaces the audit trail
+    // for "what's enforced is more permissive than what's
+    // operator-declared in `[egress] domains`". Failures DO NOT
+    // unwind the epoch advance — the in-memory swap below must
+    // still happen so the operator gets the new epoch's
+    // enforcement; an audit gap here is forensically captured by
+    // the same `ReconciliationGap` mechanism used for cert
+    // emits.
+    emit_default_provider_egress_applied(audit.as_ref(), &new_bundle);
+
     // ── Phase 2: in-memory visibility flip ───────────────────────────
     // `ArcSwap::store` is sequentially consistent (`AcqRel` ordering on
     // the swap), so subsequent reader `load`s observe the new bundle.
@@ -689,6 +703,51 @@ pub fn advance_epoch(
         n_sessions_invalidated,
         advanced_at_unix_secs,
     })
+}
+
+/// V2 reviewer-egress-defaults-decision.md §5 — emit one
+/// `DefaultProviderEgressApplied` record per implicit grant
+/// projected by the bundle. No-ops when the bundle has zero
+/// implicit grants (operator opted out via `[egress]
+/// implicit_provider_grants = false` or every provider is in
+/// `deny_provider`, or the bundle simply has no `[[providers]]`).
+///
+/// Public so the kernel boot path (`main.rs`) can call it once the
+/// audit sink is live to log the ACTIVE bundle's grants — without
+/// it the only audit record of the implicit grants would come at
+/// the next `RotateEpoch`, which can be days or weeks later. The
+/// genesis bundle's grants need to be visible from boot.
+///
+/// Failure posture: per-event emit errors are logged and dropped
+/// (same contract as `cert_audit_emit::emit_cert_chain_mirror`).
+/// The audit-after-commit ordering means the SQL transaction has
+/// already landed; failing the epoch advance now would leave the
+/// kernel running on an out-of-date in-memory bundle.
+pub fn emit_default_provider_egress_applied(
+    audit:  &dyn AuditSink,
+    bundle: &PolicyBundle,
+) {
+    let policy_epoch = bundle.epoch();
+    for grant in bundle.default_provider_egress_grants() {
+        if let Err(e) = audit.emit(
+            AuditEventKind::DefaultProviderEgressApplied {
+                policy_epoch,
+                provider_id:   grant.provider_id.clone(),
+                provider_kind: grant.provider_kind.clone(),
+                fqdn:          grant.fqdn.clone(),
+            },
+            None,
+            None,
+            None,
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"DefaultProviderEgressApplied\",\
+                 \"audit_emit_failed\":\"{e}\",\"policy_epoch\":{policy_epoch},\
+                 \"provider_id\":\"{}\",\"fqdn\":\"{}\"}}",
+                grant.provider_id, grant.fqdn,
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

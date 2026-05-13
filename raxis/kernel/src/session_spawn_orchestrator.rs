@@ -1468,9 +1468,16 @@ pub async fn respawn_orchestrator_for_initiative(
     //    snapshot so a credential rotation between admission and
     //    re-spawn is observed.
     let policy_snapshot = ctx.policy.load_full();
+    // V2 reviewer-egress-defaults-decision.md §5: the Tier-1
+    // transparent-proxy admission service receives the EFFECTIVE
+    // allowlist (operator `[egress] domains` ∪ implicit-provider
+    // FQDNs). Mirrors the gateway URL allowlist so direct VM
+    // egress and kernel-mediated fetches share one source of
+    // truth and an executor reaching `api.anthropic.com` succeeds
+    // without an explicit `[egress]` entry.
     let allowlist = raxis_egress_admission::EgressAllowlist {
-        exact_hosts: policy_snapshot.egress_domains().to_vec(),
-        patterns:    policy_snapshot.egress_patterns().to_vec(),
+        exact_hosts: policy_snapshot.effective_egress_domains(),
+        patterns:    policy_snapshot.effective_egress_patterns(),
         credential_proxy_real_targets: Default::default(),
     };
 

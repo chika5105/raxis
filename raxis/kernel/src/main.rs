@@ -345,6 +345,21 @@ async fn main() {
         );
     }
 
+    // V2 reviewer-egress-defaults-decision.md §5: emit one
+    // `DefaultProviderEgressApplied` per implicit-provider grant
+    // applied by the active policy bundle. No-op when the operator
+    // opted out via `[egress] implicit_provider_grants = false`.
+    // Bypass the notifying wrapper for the same reason
+    // `KernelStarted` does — boot-time audit emits don't need to
+    // dispatch to inboxes nobody has subscribed to yet.
+    {
+        let bundle_at_boot = policy.load();
+        policy_manager::emit_default_provider_egress_applied(
+            inner_audit.as_ref(),
+            &bundle_at_boot,
+        );
+    }
+
     // Step 8a (V2.5 `integration-merge.md §11.3`): git_apply_pending
     // recovery sweep. Cases A/B/C — see
     // `recovery::reconcile_git_apply_pending`. Runs AFTER the audit

@@ -3636,9 +3636,13 @@ async fn handle_activate_sub_task(
     // SpawnRequest construction — keeping that logic out of the
     // intent handler.
     let policy_snapshot = ctx.policy.load_full();
+    // V2 reviewer-egress-defaults-decision.md §5: use EFFECTIVE
+    // egress domains so the per-session admission service mirrors
+    // the gateway URL allowlist (operator-declared ∪ implicit
+    // provider-FQDN grants).
     let allowlist = raxis_egress_admission::EgressAllowlist {
-        exact_hosts: policy_snapshot.egress_domains().to_vec(),
-        patterns:    policy_snapshot.egress_patterns().to_vec(),
+        exact_hosts: policy_snapshot.effective_egress_domains(),
+        patterns:    policy_snapshot.effective_egress_patterns(),
         credential_proxy_real_targets: Default::default(),
     };
 
