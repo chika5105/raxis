@@ -20,6 +20,7 @@ pub mod auth;
 pub mod budget;
 pub mod cert;
 pub mod credential;
+pub mod dashboard;
 pub mod delegation;
 pub mod doctor;
 pub mod epoch;

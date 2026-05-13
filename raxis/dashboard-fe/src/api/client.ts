@@ -25,6 +25,7 @@ import type {
   InitiativeListEntry,
   InitiativePlanView,
   InitiativeView,
+  KernelLifecycleResponse,
   MarkAllReadResponse,
   MarkReadResponse,
   NotificationView,
@@ -203,6 +204,21 @@ export const dashboardApi = {
   ): Promise<SubsystemHealthResponse> =>
     apiFetch<SubsystemHealthResponse>(
       "/api/health/subsystems",
+      signal ? { signal } : {},
+    ),
+
+  // Supervisor sentinel snapshot for the kernel-lifecycle banner
+  // (`self-healing-supervisor.md §5.2`). Polled every 5 s by
+  // `<KernelLifecycleBanner>` while the operator is on any page;
+  // the kernel's handler is best-effort (returns a synthetic
+  // `Healthy { fresh: true }` envelope when no sentinel file
+  // exists, so an operator who never opted into the supervisor
+  // sees no banner at all).
+  kernelLifecycle: (
+    signal?: AbortSignal,
+  ): Promise<KernelLifecycleResponse> =>
+    apiFetch<KernelLifecycleResponse>(
+      "/api/health/kernel-lifecycle",
       signal ? { signal } : {},
     ),
 

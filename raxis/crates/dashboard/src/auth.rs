@@ -13,9 +13,24 @@
 //!    monotonically increasing kernel-process-local counter,
 //!    expire after 60 seconds, and are consumed on first use
 //!    (replay-protected).
-//! 3. **JWT secret is ephemeral.** Generated via `OsRng` at boot
-//!    and discarded on kernel shutdown. There is no on-disk
-//!    HS256 key. JWT TTL defaults to 1 hour (configurable).
+//! 3. **JWT secret is persisted (V2.5+).** A 32-byte HMAC-SHA-256
+//!    signing key is minted on first kernel boot via
+//!    `getrandom::getrandom` and persisted to
+//!    `<data_dir>/auth/dashboard_jwt.secret` (`0600`). Subsequent
+//!    boots reload the file so operator JWTs survive the
+//!    supervisor-triggered restarts introduced in
+//!    `self-healing-supervisor.md` (per
+//!    `INV-SUPERVISOR-OPERATOR-CONTINUITY-01` /
+//!    `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`). A
+//!    `secret_generation` counter is bound into every JWT claim
+//!    (`gen`); operators rotate via
+//!    `raxis dashboard rotate-jwt-secret`, which bumps the
+//!    counter and invalidates every pre-rotation token. JWT TTL
+//!    defaults to 1 hour (configurable). When the dashboard is
+//!    constructed without a `data_dir` (in-process tests, the
+//!    `InMemoryDashboardData` wiring path) the signer falls back
+//!    to a process-local ephemeral secret at generation `1`,
+//!    matching the legacy semantics.
 //! 4. **Bounded memory.** Both the pending-challenge map and the
 //!    revocation set have configurable upper bounds. Eviction
 //!    is FIFO + age-based; an attacker cannot DoS the dashboard
@@ -30,6 +45,7 @@
 //!    the next request without waiting for JWT expiry.
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +56,7 @@ use sha2::Sha256;
 
 use crate::config::DashboardConfig;
 use crate::error::ApiError;
+use crate::jwt_secret;
 
 /// Hex-encoded 32-byte SHA-256 fingerprint of an operator's
 /// pubkey (matches `OperatorEntry::pubkey_fingerprint`).
@@ -279,6 +296,22 @@ pub struct OperatorClaims {
     /// JWT id (random 16 bytes hex). Used as the revocation
     /// key.
     pub jti: String,
+    /// Secret-generation counter at mint time. Bound into the
+    /// claims so an operator-initiated
+    /// `raxis dashboard rotate-jwt-secret` (which bumps the
+    /// on-disk generation) immediately invalidates every
+    /// pre-rotation token: `JwtSigner::verify` rejects tokens
+    /// whose `gen` ≠ the current generation. See
+    /// `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`.
+    ///
+    /// `serde(default)` so JWTs minted by pre-V2.5 kernels
+    /// (which never set this field) deserialize cleanly and are
+    /// compared against generation `0` — they will fail verify
+    /// against any persisted-secret signer (generation `≥1`),
+    /// which is the desired "rotate to V2.5 ⇒ everyone re-auths
+    /// once" behaviour.
+    #[serde(default)]
+    pub gen: u32,
 }
 
 impl OperatorClaims {
@@ -289,30 +322,77 @@ impl OperatorClaims {
     }
 }
 
-/// HS256 JWT minter / verifier. The signing secret is held in
-/// memory only and rotated at every kernel boot.
+/// HS256 JWT minter / verifier. The signing secret is loaded
+/// from `<data_dir>/auth/dashboard_jwt.secret` on kernel boot
+/// (or minted there on first boot). The `generation` counter is
+/// bound into every minted JWT and re-checked on verify, so a
+/// `raxis dashboard rotate-jwt-secret` invalidates every
+/// pre-rotation token without requiring a kernel restart.
+///
+/// In-process tests / `InMemoryDashboardData` paths that don't
+/// have a `data_dir` use [`JwtSigner::new_ephemeral`], which
+/// mints a process-local secret at generation `1` (legacy
+/// behaviour).
 pub struct JwtSigner {
     secret: Arc<[u8; 32]>,
     ttl_secs: u64,
+    generation: u32,
 }
 
 impl JwtSigner {
-    /// Build a fresh signer with a freshly-minted 32-byte secret.
+    /// Build a signer backed by a process-local ephemeral
+    /// secret at generation `1`. Used by in-process tests, the
+    /// `InMemoryDashboardData` wiring, and any caller that
+    /// doesn't have a `data_dir` to persist into. Kernel boot
+    /// uses [`JwtSigner::load_or_mint`] instead so JWTs survive
+    /// supervisor-triggered restarts.
+    ///
     /// `ttl_secs` MUST be >= 60 in production; smaller values are
     /// clamped to 60 to prevent operator-self-DoS via accidentally
     /// short-lived tokens.
-    pub fn new(ttl_secs: u64) -> Result<Self, ApiError> {
+    pub fn new_ephemeral(ttl_secs: u64) -> Result<Self, ApiError> {
         let mut buf = [0u8; 32];
         getrandom::getrandom(&mut buf)
             .map_err(|e| ApiError::Internal { log_only: format!("rng: {e}") })?;
         Ok(Self {
             secret: Arc::new(buf),
             ttl_secs: ttl_secs.max(60),
+            generation: 1,
         })
+    }
+
+    /// Build a signer backed by the persisted secret at
+    /// `<data_dir>/auth/dashboard_jwt.secret`. Mints a fresh
+    /// secret + writes the file (`0600`) on first call;
+    /// subsequent calls load the same bytes + generation. Per
+    /// `INV-SUPERVISOR-OPERATOR-CONTINUITY-01` /
+    /// `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`.
+    pub fn load_or_mint(
+        data_dir: &Path,
+        ttl_secs: u64,
+    ) -> Result<(Self, jwt_secret::LoadOutcome), ApiError> {
+        let (file, outcome) = jwt_secret::load_or_mint(data_dir).map_err(|e| {
+            ApiError::Internal { log_only: format!("jwt-secret load: {e}") }
+        })?;
+        let bytes = file.secret_bytes().map_err(|e| ApiError::Internal {
+            log_only: format!("jwt-secret decode: {e}"),
+        })?;
+        Ok((
+            Self {
+                secret: Arc::new(bytes),
+                ttl_secs: ttl_secs.max(60),
+                generation: file.generation,
+            },
+            outcome,
+        ))
     }
 
     /// JWT TTL in seconds.
     pub fn ttl_secs(&self) -> u64 { self.ttl_secs }
+
+    /// Current secret-generation counter. Bound into every
+    /// minted JWT's `gen` claim; verify rejects mismatches.
+    pub fn generation(&self) -> u32 { self.generation }
 
     /// Mint a JWT for the given operator. Returns
     /// `(jwt_string, expires_at_unix_secs, jti_for_revocation)`.
@@ -334,6 +414,7 @@ impl JwtSigner {
             iat: now,
             exp: now.saturating_add(self.ttl_secs),
             jti: jti.clone(),
+            gen: self.generation,
         };
         let header = b"{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
         let header_b64 = b64url_encode(header);
@@ -376,6 +457,16 @@ impl JwtSigner {
         let claims: OperatorClaims = serde_json::from_slice(&payload_bytes)
             .map_err(|_| ApiError::InvalidJwt)?;
         if claims.exp <= now_secs() {
+            return Err(ApiError::InvalidJwt);
+        }
+        // INV-DASHBOARD-JWT-SECRET-PERSISTENT-01: reject any JWT
+        // whose secret-generation no longer matches the live
+        // signer. The HMAC check above rules out spoofed `gen`
+        // values (the attacker would need to forge the signature
+        // under the *new* secret, which they don't have), so this
+        // branch only triggers for legitimately-pre-rotation
+        // tokens we want to invalidate.
+        if claims.gen != self.generation {
             return Err(ApiError::InvalidJwt);
         }
         Ok(claims)
@@ -443,14 +534,34 @@ pub fn now_secs() -> u64 {
 
 /// Convenience constructor for the dashboard's auth state from a
 /// validated [`DashboardConfig`].
+///
+/// **JWT secret resolution.** If `cfg.data_dir` is `Some(_)` the
+/// signer is constructed via [`JwtSigner::load_or_mint`] — i.e.
+/// the kernel boots against the persistent secret at
+/// `<data_dir>/auth/dashboard_jwt.secret`, satisfying
+/// `INV-SUPERVISOR-OPERATOR-CONTINUITY-01` /
+/// `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`. If `cfg.data_dir`
+/// is `None` (in-process tests, the `InMemoryDashboardData`
+/// wiring path) the signer falls back to
+/// [`JwtSigner::new_ephemeral`] for legacy semantics. The boot
+/// outcome (`Minted` vs `Reloaded`) is logged at the call site
+/// in `kernel/src/main.rs`.
 pub fn build_auth_state(cfg: &DashboardConfig) -> Result<AuthState, ApiError> {
+    let jwt = match cfg.data_dir.as_deref() {
+        Some(dir) => {
+            let path = std::path::Path::new(dir);
+            let (signer, _outcome) = JwtSigner::load_or_mint(path, cfg.jwt_ttl_secs)?;
+            Arc::new(signer)
+        }
+        None => Arc::new(JwtSigner::new_ephemeral(cfg.jwt_ttl_secs)?),
+    };
     Ok(AuthState {
         challenges: Arc::new(ChallengeStore::new(
             cfg.max_pending_challenges,
             Duration::from_secs(60).as_secs(),
         )),
         revocations: Arc::new(RevocationSet::new(cfg.max_revoked_jwts)),
-        jwt: Arc::new(JwtSigner::new(cfg.jwt_ttl_secs)?),
+        jwt,
     })
 }
 
@@ -496,12 +607,13 @@ mod tests {
 
     #[test]
     fn jwt_round_trip_verifies() {
-        let signer = JwtSigner::new(3600).unwrap();
+        let signer = JwtSigner::new_ephemeral(3600).unwrap();
         let m = signer.mint("ABCDEF1234567890", "alice",
             vec!["read".into(), "write_policy".into()]).unwrap();
         let claims = signer.verify(&m.token).unwrap();
         assert_eq!(claims.fingerprint, "ABCDEF1234567890");
         assert_eq!(claims.display_name, "alice");
+        assert_eq!(claims.gen, signer.generation());
         assert!(claims.has_role(DashboardRole::Read));
         assert!(claims.has_role(DashboardRole::WritePolicy));
         assert!(!claims.has_role(DashboardRole::Admin));
@@ -509,7 +621,7 @@ mod tests {
 
     #[test]
     fn jwt_with_tampered_payload_fails() {
-        let signer = JwtSigner::new(3600).unwrap();
+        let signer = JwtSigner::new_ephemeral(3600).unwrap();
         let m = signer.mint("F", "x", vec!["read".into()]).unwrap();
         // Flip a single character in the payload b64.
         let parts: Vec<&str> = m.token.split('.').collect();
@@ -523,10 +635,103 @@ mod tests {
 
     #[test]
     fn jwt_with_swapped_secret_fails() {
-        let s1 = JwtSigner::new(3600).unwrap();
-        let s2 = JwtSigner::new(3600).unwrap();
+        let s1 = JwtSigner::new_ephemeral(3600).unwrap();
+        let s2 = JwtSigner::new_ephemeral(3600).unwrap();
         let m = s1.mint("F", "x", vec!["read".into()]).unwrap();
         assert!(s2.verify(&m.token).is_err());
+    }
+
+    /// Witness for `INV-SUPERVISOR-OPERATOR-CONTINUITY-01`: a
+    /// JWT minted by one signer survives a kernel "restart" if
+    /// the next signer reloads the same persisted secret. We
+    /// model the restart by dropping `s1` after minting and
+    /// constructing `s2` from the same `data_dir`.
+    #[test]
+    fn jwt_minted_pre_restart_verifies_post_restart_via_persisted_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s1, outcome1) =
+            JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
+        assert_eq!(outcome1, jwt_secret::LoadOutcome::Minted);
+        let m = s1.mint(
+            "ABCDEF1234567890",
+            "alice",
+            vec!["read".into()],
+        )
+        .unwrap();
+        drop(s1);
+        let (s2, outcome2) =
+            JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
+        assert_eq!(outcome2, jwt_secret::LoadOutcome::Reloaded);
+        assert_eq!(s2.generation(), 1);
+        let claims = s2.verify(&m.token).expect(
+            "JWT minted pre-restart MUST verify post-restart \
+             (INV-SUPERVISOR-OPERATOR-CONTINUITY-01)",
+        );
+        assert_eq!(claims.fingerprint, "ABCDEF1234567890");
+        assert_eq!(claims.gen, 1);
+    }
+
+    /// Witness for the rotation contract
+    /// (`INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`, rotation
+    /// clause): after `jwt_secret::rotate`, every pre-rotation
+    /// token fails verification. New tokens minted post-rotation
+    /// verify cleanly.
+    #[test]
+    fn jwt_rotation_invalidates_pre_rotation_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s1, _) = JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
+        assert_eq!(s1.generation(), 1);
+        let pre = s1
+            .mint("F", "alice", vec!["read".into()])
+            .unwrap();
+        // Operator runs `raxis dashboard rotate-jwt-secret`.
+        let rotated = jwt_secret::rotate(dir.path()).unwrap();
+        assert_eq!(rotated.generation, 2);
+        // The next kernel boot loads the rotated secret.
+        let (s2, outcome) =
+            JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
+        assert_eq!(outcome, jwt_secret::LoadOutcome::Reloaded);
+        assert_eq!(s2.generation(), 2);
+        // Pre-rotation token fails — both because the HMAC no
+        // longer matches and (defensively) because gen != 2.
+        assert!(
+            s2.verify(&pre.token).is_err(),
+            "pre-rotation token MUST fail verify post-rotation",
+        );
+        // Post-rotation token mints + verifies fine.
+        let post = s2
+            .mint("F", "alice", vec!["read".into()])
+            .unwrap();
+        let claims = s2.verify(&post.token).unwrap();
+        assert_eq!(claims.gen, 2);
+    }
+
+    /// Defensive witness: even if the HMAC happened to match
+    /// (impossible in practice without the new secret), the
+    /// generation check would still reject the stale token. We
+    /// model this by minting at generation `1` and verifying
+    /// against a signer that uses the SAME secret bytes but a
+    /// fabricated higher generation.
+    #[test]
+    fn verify_rejects_mismatched_generation() {
+        let signer_g1 = JwtSigner {
+            secret: Arc::new([42u8; 32]),
+            ttl_secs: 3600,
+            generation: 1,
+        };
+        let m = signer_g1
+            .mint("F", "alice", vec!["read".into()])
+            .unwrap();
+        let signer_g2 = JwtSigner {
+            secret: Arc::new([42u8; 32]),
+            ttl_secs: 3600,
+            generation: 2,
+        };
+        let res = signer_g2.verify(&m.token);
+        assert!(
+            res.is_err(),
+            "JWT with gen=1 MUST fail verify under gen=2 signer",
+        );
     }
 
     #[test]

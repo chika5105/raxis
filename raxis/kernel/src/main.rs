@@ -1518,7 +1518,63 @@ async fn main() {
     // shutdown path so `serve_with_shutdown` drains in-flight
     // requests cleanly.
     let dashboard_handle = match raxis_dashboard_kernel::load_dashboard_config(&policy_path) {
-        Ok(Some(cfg)) => {
+        Ok(Some(mut cfg)) => {
+            // Pin the kernel's data_dir into the dashboard config so
+            // `GET /api/health/kernel-lifecycle` can locate the
+            // supervisor's sentinel file (`<data_dir>/kernel_lifecycle_status.json`).
+            // Without this the handler returns a static `Healthy { fresh: true }`
+            // response — which is the correct fallback when the operator has
+            // not opted into the supervisor (RAXIS_SUPERVISOR_AUTO_RESTART unset),
+            // but is wrong when the supervisor IS in play.
+            // See `INV-DASHBOARD-KERNEL-LIFECYCLE-01` (specs/v2/self-healing-supervisor.md §4.6).
+            if cfg.data_dir.is_none() {
+                cfg.data_dir = Some(data_dir.to_string_lossy().into_owned());
+            }
+            // INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 /
+            // INV-SUPERVISOR-OPERATOR-CONTINUITY-01: probe the
+            // persisted JWT secret BEFORE handing the config to
+            // `build_auth_state` so we can surface a structured
+            // boot log line (Minted / Reloaded). The
+            // `build_auth_state` call inside the dashboard
+            // server will hit the same file moments later via
+            // `JwtSigner::load_or_mint`, but its outcome value
+            // is currently swallowed (the function builds an
+            // `AuthState` and discards the bool). Doing the
+            // probe here lets the operator see "first boot
+            // mint" vs "subsequent boot reload" in the kernel
+            // stderr — the audit-trail equivalent for the
+            // supervisor-triggered restart story.
+            //
+            // Probe failures are LOGGED but NOT FATAL: if the
+            // file system is broken in a way that defeats the
+            // dashboard auth path, the downstream
+            // `build_auth_state` call inside
+            // `start_dashboard_with_advancer` will surface the
+            // same error with full context. This probe is purely
+            // a logging convenience.
+            match raxis_dashboard::jwt_secret::load_or_mint(&data_dir) {
+                Ok((file, raxis_dashboard::jwt_secret::LoadOutcome::Minted)) => {
+                    eprintln!(
+                        "raxis-kernel: dashboard JWT secret minted \
+                         (generation={}) at <data_dir>/auth/dashboard_jwt.secret",
+                        file.generation,
+                    );
+                }
+                Ok((file, raxis_dashboard::jwt_secret::LoadOutcome::Reloaded)) => {
+                    eprintln!(
+                        "raxis-kernel: dashboard JWT secret reloaded \
+                         (generation={}) — operator JWTs from prior boot \
+                         remain valid (INV-SUPERVISOR-OPERATOR-CONTINUITY-01)",
+                        file.generation,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "raxis-kernel: dashboard JWT secret probe failed: {e} \
+                         (build_auth_state will retry — non-fatal here)",
+                    );
+                }
+            }
             // Wire the kernel-resident policy advancer so the
             // dashboard's `PUT /api/policy/toml` write surface
             // can drive the same `advance_epoch` pipeline as

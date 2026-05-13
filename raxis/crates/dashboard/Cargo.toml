@@ -47,6 +47,14 @@ chrono       = { workspace = true }
 thiserror    = { workspace = true }
 tracing      = "0.1"
 
+# Used by `routes::health::supervisor_pid_alive` to probe the
+# supervisor PID liveness with `kill(pid, 0)` per
+# `self-healing-supervisor.md §5.2` staleness rules. `nix` ships
+# a typed wrapper so the dashboard crate can keep
+# `forbid(unsafe_code)` even with a libc-flavoured probe.
+[target.'cfg(unix)'.dependencies]
+nix          = { version = "0.27", default-features = false, features = ["signal", "process"] }
+
 [dev-dependencies]
 tokio        = { workspace = true, features = ["test-util", "macros"] }
 tempfile     = "3"

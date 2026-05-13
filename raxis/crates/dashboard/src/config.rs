@@ -91,6 +91,18 @@ pub struct DashboardConfig {
     /// JSON API and returns 404 for unknown routes.
     #[serde(default)]
     pub static_dir: Option<String>,
+
+    /// Kernel data directory (the same path the kernel writes
+    /// to via `--data-dir` / `RAXIS_DATA_DIR`). Used by the
+    /// `GET /api/health/kernel-lifecycle` handler per
+    /// `self-healing-supervisor.md §5.2` to read the
+    /// `kernel_lifecycle_status.json` sentinel file the
+    /// `raxis-supervisor` writes. When `None` (the default,
+    /// supervisor not in play) the handler returns
+    /// `status: "Healthy"` + `fresh: true` so the dashboard
+    /// banner stays clean.
+    #[serde(default)]
+    pub data_dir: Option<String>,
 }
 
 impl Default for DashboardConfig {
@@ -105,6 +117,7 @@ impl Default for DashboardConfig {
             max_pending_challenges: default_max_pending_challenges(),
             max_revoked_jwts: default_max_revoked_jwts(),
             static_dir: None,
+            data_dir: None,
         }
     }
 }

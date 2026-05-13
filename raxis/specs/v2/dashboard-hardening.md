@@ -864,6 +864,98 @@ signature verification). The dashboard panel is the
 operator-facing witness; the checked-in files are the
 developer-facing fixture.
 
+## 5.9 JWT-secret persistence (`INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`)
+
+Pre-V2.5 the dashboard's HS256 signing secret was minted via
+`OsRng` on every kernel boot and discarded on shutdown. That
+contract was operator-friendly while the only way the kernel
+restarted was an operator-initiated stop+start (rare, expected
+session loss). After `self-healing-supervisor.md` shipped, the
+kernel can autonomously restart on deadlock detection, panic,
+or OOM — at which point operators in the middle of reviewing
+an initiative would silently lose their JWT, get bounced to
+`/login`, and lose any unsaved React state (a partially-filled
+escalation response, an editor cursor mid-policy, etc.) with
+no signal that "this was an automatic restart, not your
+fault".
+
+V2.5 fixes this by persisting the HS256 secret to
+`<data_dir>/auth/dashboard_jwt.secret` (`0600`, auth dir
+`0700`). The on-disk format also persists a `secret_generation`
+counter that is bound into every JWT claim's `gen` field.
+Operators retain explicit "kick everyone out" control via the
+`raxis dashboard rotate-jwt-secret` CLI command, which bumps
+the on-disk generation and mints fresh bytes — every
+pre-rotation token immediately fails verification (the `gen`
+claim no longer matches the live signer).
+
+The full design — including the file format, the boot path,
+the rotation contract, and the operator UX — is normative in
+`specs/v2/self-healing-supervisor.md §10`. The witness tests
+live in `crates/dashboard/src/jwt_secret.rs::tests` and
+`crates/dashboard/src/auth.rs::tests`. Cross-reference
+`INV-SUPERVISOR-OPERATOR-CONTINUITY-01` (the operator-facing
+property) and `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01` (the
+on-disk contract that enables it).
+
+## 5.10 Kernel-lifecycle banner (`INV-DASHBOARD-KERNEL-LIFECYCLE-01`)
+
+The dashboard ships a global `<KernelLifecycleBanner>` (mounted
+in `Shell.tsx`) that polls `GET /api/health/kernel-lifecycle`
+every 5 s and renders the supervisor's view of the kernel
+process: `Healthy` (no banner), `Restarting` (amber, with
+attempt N/M and reason), or `Halted` (rose, with sub-state and
+operator-action hint). The banner is the operator's primary
+window into supervisor activity — it is what tells them
+"this is an automatic restart, not a network glitch" before
+their JWT seamlessly verifies under the post-restart kernel
+(per §5.9 above).
+
+**Banner-source contract.** The verdict in the banner comes
+from a single source: the supervisor's atomic sentinel file
+(`<data_dir>/kernel_lifecycle_status.json`) read by
+`crates/dashboard/src/routes/health.rs::read_kernel_lifecycle_response`.
+The dashboard NEVER infers a lifecycle state from any other
+signal (e.g. counting recent `KernelStarted` audit rows or
+querying the supervisor over IPC). The handler returns a
+synthetic `Healthy { fresh: true }` envelope when the sentinel
+is missing or `data_dir` is unconfigured — this is the
+intentional default for operators who never opted into
+`RAXIS_SUPERVISOR_AUTO_RESTART=1`, so they see no supervisor
+chrome on every page.
+
+**Staleness handling.** When the sentinel's `updated_at_unix_secs`
+is older than `2 × window_secs` AND its recorded supervisor PID
+is no longer alive (probed via `nix::sys::signal::kill(pid, None)`
+with `Errno::ESRCH` ⇒ gone), the handler returns
+`Halted { sub_state: "SupervisorGone", fresh: false }` and the
+banner renders the same rose treatment as a CircuitOpen halt.
+This is the contract for "the supervisor process itself died
+mid-supervision" — the operator should still see actionable
+chrome rather than a stale Healthy badge.
+
+**Cross-reference: orchestrator respawn-ceiling.** A separate
+in-flight worker (`worker/fix-loop-respawn2`) is adding an
+`OrchestratorRespawnCeilingExceeded` audit event to the kernel
+for the *logical* respawn-loop case (kernel alive, audit chain
+growing, but the orchestrator is stuck issuing rejected
+RetrySubTask intents in a tight loop). When that event lands,
+the supervisor sentinel will gain a new `Halted` sub-state
+(`OrchestratorRespawnCeiling`) and this banner MUST surface it
+under the same rose treatment so operators see both flavours
+of recovery in one panel — supervisor-side process recovery
+(this spec) and kernel-side logical recovery (the fix-loop
+worker's invariant). The banner switch is a one-liner in
+`KernelLifecycleBanner::headlineFor`; the cross-spec coordination
+ticket lives in `self-healing-supervisor.md §10.7`.
+
+Cross-reference: `INV-DASHBOARD-KERNEL-LIFECYCLE-01`
+(`specs/invariants.md §11.12`),
+`specs/v2/self-healing-supervisor.md §5.4`,
+`specs/v2/self-healing-supervisor.md §10.7`,
+`crates/dashboard/src/routes/health.rs`,
+`dashboard-fe/src/components/KernelLifecycleBanner.tsx`.
+
 ## 6. Rationale (why these bounds)
 
 * **30 s handler timeout.** Gives the audit-chain walk

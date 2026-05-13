@@ -51,6 +51,16 @@ raxis-credentials-file = { workspace = true }
 # from this crate. The CLI does not write anything; it only renders
 # the post-install verification result.
 raxis-canonical-images = { workspace = true }
+# `raxis dashboard rotate-jwt-secret` (self-healing-supervisor.md §10
+# / INV-DASHBOARD-JWT-SECRET-PERSISTENT-01) bumps the persisted HS256
+# generation under `<data_dir>/auth/dashboard_jwt.secret`. The CLI
+# uses the same `jwt_secret` module the kernel boots from so the on-
+# disk format cannot drift between the two writers. The dashboard
+# crate's HTTP surface (axum / tower-http / reqwest) is pulled in
+# transitively — acceptable here because the CLI is already a
+# kitchen-sink binary, and the operator dashboard is operator-tier
+# tooling, not a kernel-side dep.
+raxis-dashboard        = { workspace = true }
 # `raxis doctor cache prune` (image-cache.md §8) consumes the
 # production resolver's `prune_unreferenced` walker over both
 # `images/sha256/` and `blobs/sha256/`. The CLI builds a fresh

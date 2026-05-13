@@ -60,6 +60,7 @@ pub mod auth;
 pub mod config;
 pub mod data;
 pub mod error;
+pub mod jwt_secret;
 pub mod routes;
 pub mod server;
 pub mod stream;

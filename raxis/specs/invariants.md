@@ -35,7 +35,8 @@
 > `INV-EXEC-DISCOVERY-01` (§10.4a),
 > `INV-VERIFIER-*` (§11), `INV-ENV-01` (§11.5),
 > `INV-AUDIT-PAIRED-01..07` (§11.6),
-> `INV-SUPERVISOR-*` + `INV-DASHBOARD-KERNEL-LIFECYCLE-01` (§11.12). V2 invariants in their canonical
+> `INV-SUPERVISOR-*` + `INV-DASHBOARD-KERNEL-LIFECYCLE-01` +
+> `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01` (§11.12). V2 invariants in their canonical
 > homes that have NOT yet been mirrored here include:
 > `INV-VM-CAP-01..05`, `INV-PUSH-01..05`, `INV-KEY-01..08`,
 > `INV-MERGE-WORKTREE-RETAIN`, `INV-MERGE-CONSISTENCY`,
@@ -82,9 +83,9 @@
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
-| Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01 | 7 |
-| Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01 | 1 |
-| **Total** | | **101** |
+| Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01 | 8 |
+| Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
+| **Total** | | **103** |
 
 ---
 
@@ -5029,17 +5030,174 @@ the operator the kernel is restarting and that this is
 attempt 1 of 3. After the kernel boots, the supervisor
 writes sentinel `Healthy`; within 5 s the banner clears.
 
-**Witness.** Pair of tests:
-*  `raxis/crates/dashboard/tests/kernel_lifecycle_endpoint.rs::sentinel_transitions_round_trip_through_handler`
-   writes the sentinel, hits `GET /api/health/kernel-lifecycle`,
-   asserts every sub-state of the §4.6 schema round-trips.
-*  `raxis/dashboard-fe/src/components/banners/__tests__/KernelLifecycleBanner.test.tsx`
-   asserts the React banner renders the expected tone +
-   headline + detail for each sub-state.
+**Witness.** Pair of mechanical test bundles:
+*  `raxis/crates/dashboard/src/routes/health.rs::tests::*` —
+   eight round-trip tests (`missing_sentinel_returns_healthy_fresh`,
+   `missing_data_dir_returns_healthy_fresh`,
+   `fresh_healthy_sentinel_passes_through`,
+   `fresh_restarting_sentinel_passes_through`,
+   `fresh_halted_circuit_open_sentinel_passes_through`,
+   `stale_sentinel_with_dead_supervisor_pid_reports_supervisor_gone`,
+   `corrupted_sentinel_returns_supervisor_gone_no_panic`,
+   `unknown_future_field_silently_ignored`) drive
+   `read_kernel_lifecycle_response` directly with hand-built
+   sentinel files and assert every sub-state of the §4.6
+   schema round-trips with the correct freshness verdict.
+*  `raxis/dashboard-fe/src/test/kernel-lifecycle-banner.test.tsx` —
+   fifteen tests covering `bannerTone`, `headlineFor`, and the
+   pure-presentation `<KernelLifecycleBannerView>`. They assert
+   (a) the banner is hidden whenever `supervisor_pid === 0` OR
+   `status === "Healthy"` (the "no chrome leak" guard for
+   operators who never opted in), (b) the rose / amber tone
+   pair fires for every documented sub-state
+   (`CircuitOpen`, `OperatorStop`, `OperatorStopForced`,
+   `SupervisorGone`, `Restarting`), and (c) the stale-data
+   note appears when `fresh === false`.
 
 **Canonical home.** `v2/self-healing-supervisor.md` §5;
 `v2/dashboard-hardening.md §6` (kernel-lifecycle banner
 contract addendum).
+
+---
+
+### INV-SUPERVISOR-OPERATOR-CONTINUITY-01 — Operator JWTs survive supervisor-triggered restarts
+
+**Statement.** When the supervisor auto-restarts the kernel
+(deadlock, panic, OOM, signal-crash — any
+`Outcome::restart_eligible() == true` per `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`),
+the new kernel boot MUST produce a `JwtSigner` that verifies
+every JWT minted by the prior boot whose `exp > now` and
+whose `gen` matches the persisted `secret_generation`. In
+plain English: an operator with a valid open dashboard tab
+MUST NOT be bounced to `/login` as a side effect of the
+supervisor doing its job. The operator is bounced to `/login`
+ONLY when (a) the JWT has expired, (b) the JWT has been
+revoked, or (c) the operator explicitly ran
+`raxis dashboard rotate-jwt-secret` between the two boots.
+
+**Justification.** Pre-V2.5 the dashboard's HS256 secret was
+ephemeral per kernel boot. The only way the kernel restarted
+was operator-initiated (controlled, expected, infrequent), so
+re-login on every restart was acceptable. The supervisor
+changes the contract: the kernel can now restart
+**autonomously** within ~3 seconds of a deadlock. Without
+this invariant, every autonomous restart would silently log
+out every operator currently using the dashboard — losing
+unsaved React state (a partially-typed escalation response,
+a partially-edited `policy.toml` draft, an unscrolled audit-
+log filter) — with no causal explanation visible to the
+operator. That is the worst possible UX failure for a self-
+healing system: the kernel did the right thing
+(restart promptly + cleanly) and the operator experiences it
+as the system having **failed**. This invariant closes that
+failure mode by persisting the secret across boots so the
+new kernel reloads the same bytes the previous kernel was
+using.
+
+**Scenario.** Operator is reviewing an escalation in the
+dashboard. The kernel deadlocks at `T+0`, watcher writes a
+forensic dump and exits 70 at `T+50ms`. Supervisor sees
+exit 70, classifies as `DeadlockDetected`, updates the
+sentinel to `Restarting (1/3)`, forks a new kernel at
+`T+100ms`. New kernel calls `JwtSigner::load_or_mint(&data_dir)`,
+**reloads** the same secret bytes + same generation. Sentinel
+flips back to `Healthy` at `T+2.5s`. Meanwhile the operator's
+browser was polling `/api/health/kernel-lifecycle`; it showed
+the yellow `Restarting (1/3)` banner for ~2.5 s; the banner
+cleared once the new kernel was up. The operator's existing
+JWT verifies cleanly under the new signer (same secret, same
+gen). **They keep their unsaved escalation draft.** No
+re-login.
+
+**Witness.** Pair of mechanically-enforced tests:
+* `raxis/crates/dashboard/src/jwt_secret.rs::tests::load_or_mint_reloads_existing_file_byte_identical`
+  asserts the persisted file round-trips byte-identically.
+* `raxis/crates/dashboard/src/auth.rs::tests::jwt_minted_pre_restart_verifies_post_restart_via_persisted_secret`
+  models the restart by minting a JWT under one signer,
+  dropping it, constructing a fresh signer from the same
+  data dir, and asserting the JWT verifies — including
+  asserting `claims.gen == 1` (the persisted generation).
+
+**Canonical home.** `v2/self-healing-supervisor.md` §10
+(Operator session continuity across supervisor-triggered
+restarts).
+
+---
+
+### INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 — Dashboard JWT secret is persisted with rotation
+
+**Statement.** The dashboard's HS256 signing secret MUST be
+persisted to `<data_dir>/auth/dashboard_jwt.secret` whenever
+the dashboard is constructed with a configured `data_dir`
+(every production kernel boot). The on-disk file MUST:
+
+1. Hold `{schema_version, generation, secret_hex,
+   updated_at_unix_secs}` as JSON.
+2. Be `0600` permissions on Unix; the parent `<data_dir>/auth/`
+   dir MUST be `0700`.
+3. Be written via `tempfile + rename` with the tempfile
+   `chmod 0600` BEFORE the rename (so the canonical filename
+   never transiently appears with looser perms).
+
+The signer MUST bind `secret_generation` into every minted
+JWT's `gen` claim, and `JwtSigner::verify` MUST reject any
+token whose `gen` ≠ the live generation. Operators MUST be
+able to invoke `raxis dashboard rotate-jwt-secret` to bump
+the on-disk generation and mint a fresh secret, immediately
+invalidating every pre-rotation token.
+
+**Justification.** This invariant is the on-disk layer that
+enables `INV-SUPERVISOR-OPERATOR-CONTINUITY-01`. Persistence
+alone is insufficient — without a generation counter bound
+into the claims, an operator who suspects a dashboard
+compromise has no way to mechanically invalidate every
+issued token short of waiting for the 1h TTL or deleting
+the secret file by hand and restarting the kernel. The `gen`
+binding gives the operator an explicit "kick everyone out"
+lever (`raxis dashboard rotate-jwt-secret`) that does not
+require kernel restart privilege, does not open
+`operator.sock`, and does not require `--operator-key` —
+because the rotation is a local file-system mutation under
+the data dir, which the operator already owns. The
+generation check on verify is also a defence-in-depth lane
+against any future change that re-uses secret bytes (e.g. a
+hypothetical KDF-from-root scheme).
+
+**Scenario.** A forensic event reveals that a contractor
+laptop with a copy of `<data_dir>` was lost. The on-call
+operator runs `raxis dashboard rotate-jwt-secret` from
+their workstation, sees `generation: 2` in the output. The
+running kernel keeps using its in-memory secret until its
+next restart (the operator schedules a `raxis-supervisor
+stop`+`start` in the maintenance window 3 hours later).
+During those 3 hours, every operator with a valid dashboard
+session continues to work normally — their JWTs were minted
+under generation 1 and the live signer is still on
+generation 1. Once the kernel restarts and reloads the file
+at generation 2, every pre-rotation operator's next request
+fails with `InvalidJwt` and their browser bounces to
+`/login`. They re-auth via challenge+sign and continue. The
+JWT minted by the lost-laptop attacker (assuming they got
+that far) likewise bounces.
+
+**Witness.** Test matrix in §10.6 of
+`v2/self-healing-supervisor.md`:
+* `secret_file_is_0600_after_mint` (Unix) — perm contract.
+* `auth_dir_is_0700_after_mint` (Unix) — perm contract.
+* `rotate_bumps_generation_and_changes_secret_bytes` —
+  rotation semantics.
+* `jwt_rotation_invalidates_pre_rotation_tokens` — end-to-end
+  rotation contract: pre-rotation token MUST fail verify
+  post-rotation; post-rotation token MUST verify cleanly.
+* `verify_rejects_mismatched_generation` — defence-in-depth:
+  even if HMAC happens to match, mismatched `gen` is
+  rejected.
+* `unknown_future_field_is_silently_ignored` — forward-compat
+  on the on-disk schema.
+
+**Canonical home.** `v2/self-healing-supervisor.md` §10;
+`v2/dashboard-hardening.md` §7 (persistent JWT secret
+addendum).
 
 ---
 

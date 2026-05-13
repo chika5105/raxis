@@ -8,6 +8,7 @@ import {
   CommandPalette,
   type PaletteCommand,
 } from "@/components/CommandPalette";
+import { KernelLifecycleBanner } from "@/components/KernelLifecycleBanner";
 import { clearStoredToken, getStoredProfile, getStoredToken } from "@/lib/auth-store";
 import { shortFingerprint } from "@/lib/format";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -296,6 +297,15 @@ export function Shell({ children }: ShellProps) {
         </header>
         <div className="flex-1 overflow-y-auto scroll-thin">
           <div className="px-5 py-5 max-w-[1600px] mx-auto w-full space-y-3">
+            {/*
+              Supervisor lifecycle banner. Mounted globally so an
+              operator-noticed restart-in-flight or halted state
+              follows them across navigation. Renders nothing
+              until the supervisor reports a non-Healthy state OR
+              `supervisor_pid !== 0`. See
+              `INV-DASHBOARD-KERNEL-LIFECYCLE-01`.
+            */}
+            {profile && <KernelLifecycleBanner />}
             {children}
           </div>
         </div>

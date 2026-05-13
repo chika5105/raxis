@@ -22,7 +22,9 @@
 >   `INV-SUPERVISOR-SIGTERM-RESPECT-01`,
 >   `INV-SUPERVISOR-SIGINT-RESPECT-01`,
 >   `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`,
->   `INV-SUPERVISOR-SHUTDOWN-GRACE-01`.
+>   `INV-SUPERVISOR-SHUTDOWN-GRACE-01`,
+>   `INV-SUPERVISOR-OPERATOR-CONTINUITY-01`,
+>   `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01` (§10).
 > - `guides/operator/19-supervisor-and-restart.md` — operator
 >   recipe for the opt-in env var, circuit-breaker reset, and
 >   shutdown signal contract.
@@ -523,3 +525,272 @@ Launchd / systemd spawns `raxis-kernel` directly; the in-kernel deadlock detecto
 | Dashboard sentinel handler | `raxis/crates/dashboard/src/routes/health.rs::kernel_lifecycle` |
 | Dashboard React banner | `raxis/dashboard-fe/src/components/banners/KernelLifecycleBanner.tsx` |
 | Operator recipe | `raxis/guides/operator/19-supervisor-and-restart.md` |
+| Persistent JWT secret | `raxis/crates/dashboard/src/jwt_secret.rs` |
+| `JwtSigner::load_or_mint` + `gen` claim | `raxis/crates/dashboard/src/auth.rs` |
+| Rotation CLI | `raxis/cli/src/commands/dashboard.rs::run_rotate_jwt_secret` |
+
+---
+
+## §10 — Operator session continuity across supervisor-triggered restarts
+
+> **Status:** V2.5 normative, opt-in-coupled. Activates whenever a
+> kernel boot has a `data_dir` (i.e. every production kernel) and
+> the dashboard listener is enabled. Pre-V2.5 kernels mint an
+> ephemeral secret and discard it on shutdown; V2.5+ persists.
+>
+> **Witness invariants:** `INV-SUPERVISOR-OPERATOR-CONTINUITY-01`
+> + `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`. Both are mechanically
+> witnessed via unit tests in `crates/dashboard/src/jwt_secret.rs`
+> and `crates/dashboard/src/auth.rs`.
+
+### §10.1 The operator UX problem the supervisor surfaces
+
+Pre-V2.5, the dashboard's HS256 JWT signing secret was minted via
+`getrandom::getrandom` on every kernel boot and discarded on
+shutdown (`auth.rs::JwtSigner::new` — see git history). That
+invariant was operator-friendly when the **only** way the kernel
+restarted was an operator-initiated stop+start (rare, expected,
+explicitly chosen).
+
+The supervisor changes that contract: the kernel can now restart
+**autonomously** on deadlock detection, panic, or OOM-kill (per
+the §4.4 exit-code classification table). With ephemeral
+secrets, every autonomous restart silently invalidates every
+operator JWT in every operator's browser — operators in the
+middle of reviewing an initiative get bounced to `/login` with
+no causal explanation, and lose unsaved React state (e.g. a
+partially-typed escalation response, a partially-edited
+`policy.toml` draft, an unscrolled audit-log filter).
+
+This is the **worst possible UX failure** for a self-healing
+system: the system does the right thing (restart the kernel) and
+the operator experiences it as the system having **failed**.
+
+### §10.2 Decision: persist the secret (Option A)
+
+V2.5 adopts **Option A — persist the HS256 secret across kernel
+boots**:
+
+* Mint once on first boot via `getrandom::getrandom` (32 bytes).
+* Persist to `<data_dir>/auth/dashboard_jwt.secret` (`0600`
+  perms, parent dir `0700`).
+* Reload on every subsequent boot.
+* Bind a `secret_generation: u32` counter into every JWT claim
+  (`gen` field) so a manual operator-triggered rotation
+  (`raxis dashboard rotate-jwt-secret`) immediately invalidates
+  every pre-rotation token.
+
+**Why Option A over Option B (re-mint + reconnect URL via the
+supervisor banner):** Option B keeps the per-boot ephemeral
+invariant intact at the cost of a forced `Click here to
+reconnect` interstitial after every autonomous restart. Even with
+the most graceful possible flow, the operator's browser loses
+its current React state when they click reconnect — defeating
+the entire point of "transparent self-healing." Option A trades
+secret-on-disk for true session continuity: the operator's
+browser sees a transient `Restarting (attempt N/3)` banner via
+the existing `KernelLifecycleBanner`, the request retries
+automatically once the new kernel is `Healthy`, and the operator
+keeps their place in their initiative.
+
+The on-disk secret lives under the same `<data_dir>/` boundary
+that already trusts the audit chain, the worktree storage, and
+the operator certificates. Compromise of `<data_dir>` is already
+a P0 (root key for everything) — adding the JWT secret to that
+trust set does not introduce a new sensitivity tier.
+
+### §10.3 File format
+
+`<data_dir>/auth/dashboard_jwt.secret`:
+
+```json
+{
+  "schema_version": 1,
+  "generation": 1,
+  "secret_hex": "<64 hex chars = 32 bytes>",
+  "updated_at_unix_secs": 1714500000
+}
+```
+
+* `schema_version` — currently always `1`. Future migrations bump
+  this and gate parsing on the value.
+* `generation` — monotonic counter. Starts at `1` on initial
+  mint; bumped by every `raxis dashboard rotate-jwt-secret`.
+* `secret_hex` — 32-byte HMAC-SHA-256 signing key, hex-encoded.
+* `updated_at_unix_secs` — wall-clock time of the last write.
+  Forensic only; not consulted by the auth path.
+
+Permissions are tightened on every write:
+
+* Parent directory: `0700` on Unix (auth dir).
+* File: `0600` on Unix.
+* Atomic via `tempfile + rename`; the tempfile is `chmod 0600`
+  **before** the rename so the canonical filename never
+  transiently appears with looser permissions.
+
+The on-disk format is forward-compatible — every field is
+`serde(default)`. An older kernel reading a future file
+(e.g. one with extra fields a V3 kernel writes) parses cleanly,
+ignores unknown fields, and proceeds.
+
+### §10.4 The `gen` claim + verify path
+
+`OperatorClaims` gains a `gen: u32` field
+(`#[serde(default)]` so JWTs minted by pre-V2.5 kernels — which
+will never appear in a V2.5 deployment in practice but cost
+nothing to handle defensively — deserialise as `gen = 0`).
+
+`JwtSigner::mint` writes `claims.gen = self.generation` (the
+generation loaded from the on-disk file at boot).
+
+`JwtSigner::verify` enforces:
+
+1. The HMAC matches in constant time.
+2. `claims.exp > now`.
+3. **`claims.gen == self.generation`** (NEW). Mismatch → `InvalidJwt`.
+
+The HMAC check (#1) already rejects forged-`gen` values: an
+attacker would need to forge a signature under the **new** secret
+to pass HMAC, and they don't have it. Check #3 is a defence-in-
+depth lane that catches any future change which happens to reuse
+secret bytes (e.g. a hypothetical KDF-from-root scheme). Both
+checks must pass for the token to verify.
+
+### §10.5 Operator rotation (`raxis dashboard rotate-jwt-secret`)
+
+Rotation is the explicit "kick everyone out" lever an operator
+reaches for after a suspected dashboard compromise — without
+having to wait for every JWT to expire (1h default TTL) or to
+delete the secret file and restart the kernel by hand.
+
+```
+$ raxis dashboard rotate-jwt-secret
+✓ rotated dashboard JWT signing secret
+generation:  2
+path:        /home/op/.raxis/auth/dashboard_jwt.secret
+
+Every previously-issued operator JWT is now invalid. Operators
+currently logged into the dashboard will be bounced to /login on
+their next request. The running kernel keeps using its in-memory
+secret until it next restarts; restart the kernel (or run
+`raxis-supervisor stop` then `raxis-supervisor start`) to make
+rotation take effect immediately.
+```
+
+Notes:
+
+* Rotation is a **local file-system mutation** under
+  `<data_dir>/auth/`. It does NOT open `operator.sock`, does NOT
+  require `--operator-key`, and works even when the kernel is not
+  running.
+* The running kernel keeps using its in-memory secret until its
+  next restart. Operators wanting immediate effect either restart
+  the kernel directly or use the supervisor's `stop`+`start`
+  pair.
+* `rotate` on an empty data dir produces `generation = 1` (same
+  as a first-boot mint), so the command is safe to run as part
+  of operator setup.
+
+### §10.6 Witness coverage (mechanically enforced)
+
+| # | Witness | File / test name |
+|---|---|---|
+| W1 | `load_or_mint` creates the file on first call and starts at `generation=1` | `crates/dashboard/src/jwt_secret.rs::tests::load_or_mint_creates_file_on_first_call` |
+| W2 | Reload returns byte-identical `SecretFile` | `crates/dashboard/src/jwt_secret.rs::tests::load_or_mint_reloads_existing_file_byte_identical` |
+| W3 | `rotate` bumps generation + changes secret bytes | `crates/dashboard/src/jwt_secret.rs::tests::rotate_bumps_generation_and_changes_secret_bytes` |
+| W4 | Secret file is `0600` after mint (Unix) | `crates/dashboard/src/jwt_secret.rs::tests::secret_file_is_0600_after_mint` |
+| W5 | Auth dir is `0700` after mint (Unix) | `crates/dashboard/src/jwt_secret.rs::tests::auth_dir_is_0700_after_mint` |
+| W6 | Corrupt JSON / wrong-length secret surfaces as `LoadError::Corrupt` | `crates/dashboard/src/jwt_secret.rs::tests::corrupt_*` |
+| W7 | Unknown future fields are silently ignored (forward-compat) | `crates/dashboard/src/jwt_secret.rs::tests::unknown_future_field_is_silently_ignored` |
+| W8 | **JWT minted pre-restart verifies post-restart via persisted secret** (`INV-SUPERVISOR-OPERATOR-CONTINUITY-01`) | `crates/dashboard/src/auth.rs::tests::jwt_minted_pre_restart_verifies_post_restart_via_persisted_secret` |
+| W9 | Rotation invalidates pre-rotation tokens | `crates/dashboard/src/auth.rs::tests::jwt_rotation_invalidates_pre_rotation_tokens` |
+| W10 | `gen` mismatch is rejected even if HMAC happens to match (defence-in-depth) | `crates/dashboard/src/auth.rs::tests::verify_rejects_mismatched_generation` |
+
+### §10.7 Composition with the supervisor restart story
+
+The supervisor flow is unchanged by this section. From the
+operator's perspective:
+
+1. Kernel deadlocks → watcher writes forensic dump → kernel exits
+   70 (per §3).
+2. Supervisor classifies exit 70 as `DeadlockDetected` → updates
+   sentinel to `Restarting{attempt=1/3}` → forks a new kernel
+   (per §4).
+3. New kernel boots → calls `JwtSigner::load_or_mint(&data_dir)`
+   → reloads the **same** secret bytes + same `generation`.
+4. Operator's browser was polling `GET /api/health/kernel-
+   lifecycle`; the dashboard banner showed `Restarting (1/3)`
+   for ~2 s; once the new kernel is up the banner clears.
+5. Operator's existing JWT — minted by the *previous* kernel —
+   verifies cleanly under the new kernel's signer (same secret
+   bytes, same generation). **No re-login. No lost React state.**
+   `INV-SUPERVISOR-OPERATOR-CONTINUITY-01` is satisfied.
+
+The boot-time stderr log surfaces the outcome explicitly:
+
+```
+raxis-kernel: dashboard JWT secret reloaded (generation=1) —
+  operator JWTs from prior boot remain valid
+  (INV-SUPERVISOR-OPERATOR-CONTINUITY-01)
+```
+
+(or, on first boot of a fresh data_dir):
+
+```
+raxis-kernel: dashboard JWT secret minted (generation=1) at
+  <data_dir>/auth/dashboard_jwt.secret
+```
+
+### §10.8 Coordination with the orchestrator respawn-ceiling worker
+
+A complementary in-flight workstream (`worker/fix-loop-respawn2`)
+is adding an `OrchestratorRespawnCeilingExceeded` kernel audit
+event for the *logical* respawn-loop case the supervisor cannot
+catch: kernel is alive, audit chain is growing, no
+`parking_lot` deadlock — but the orchestrator is stuck issuing
+rejected `RetrySubTask` intents in a tight respawn loop (e.g.
+iter42 saw 45 `SessionVmSpawned` rows in 18 minutes with zero
+task FSM advance). The kernel-side invariant for that case
+(`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) is owned by the
+fix-loop worker, NOT this spec — the supervisor's exit-code
+classifier (`§4.4`) and the kernel's `parking_lot::deadlock`
+watcher (`§3.2`) only react to *process-level* failure; a
+process that is producing audit rows but no useful work is, by
+construction, healthy at the supervisor's layer.
+
+**Surface coordination.** When the fix-loop worker's invariant
+ships:
+
+1. The kernel adds a new audit-event variant
+   `OrchestratorRespawnCeilingExceeded { initiative_id, attempts,
+   window_secs }` and an enforcement that fails the initiative
+   when the ceiling is exceeded.
+2. The kernel ALSO writes a transition row into the supervisor's
+   sentinel file (`<data_dir>/kernel_lifecycle_status.json`)
+   with `status: "Halted"`, `sub_state:
+   "OrchestratorRespawnCeiling"`. This is a layering compromise
+   — the kernel does not normally write the supervisor's
+   sentinel — but it is the cleanest way to surface a
+   *kernel-detected* recovery event in the *operator-facing*
+   banner without inventing a parallel polling path. The
+   supervisor binary itself does not need to take any action;
+   the kernel keeps running and the initiative is failed in the
+   audit chain.
+3. `<KernelLifecycleBanner>` matches the new sub_state in
+   `headlineFor` and renders rose chrome with the wording
+   "Initiative auto-failed — orchestrator respawn ceiling
+   exceeded" plus the initiative-id link.
+
+This composition keeps the operator's mental model simple:
+"the dashboard's red banner means SOMETHING in the recovery
+machinery surfaced, click for the audit-chain link". They do
+not need to know whether the trigger was a process-level
+deadlock (this spec) or a logic-level ceiling (the fix-loop
+worker's invariant) — both flavours render in the same panel,
+both link to the same audit chain, both unblock via the same
+operator action (click through to the relevant initiative or
+restart the supervisor).
+
+Cross-reference: `worker/fix-loop-respawn2`,
+`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` (when shipped),
+`specs/v2/dashboard-hardening.md §5.9`.

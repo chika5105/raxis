@@ -52,6 +52,11 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "setup",
     // V2 §4.2 — operator-dashboard auth helper (`raxis auth sign`).
     "auth",
+    // V2.5 self-healing-supervisor.md §10 — dashboard maintenance
+    // (`raxis dashboard rotate-jwt-secret`). Local file-system
+    // mutation under `<data_dir>/auth/`; does NOT open
+    // operator.sock and does NOT require `--operator-key`.
+    "dashboard",
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff", "generate-sidecar-secret"];
@@ -93,6 +98,12 @@ const KERNEL_SUBCOMMANDS:      &[&str] = &["install", "uninstall"];
 const PROVIDERS_SUBCOMMANDS:   &[&str] = &["status", "reset"];
 /// V2 §4.2 — operator-dashboard auth helper (challenge-response signing).
 const AUTH_SUBCOMMANDS:        &[&str] = &["sign"];
+/// V2.5 self-healing-supervisor.md §10 / dashboard-hardening.md
+/// §INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 — dashboard-side
+/// maintenance ops. `rotate-jwt-secret` is the explicit "kick
+/// everyone out" lever; future entries (e.g. a `clear-revocations`
+/// op for after a kernel forensic event) plug in here.
+const DASHBOARD_SUBCOMMANDS:   &[&str] = &["rotate-jwt-secret"];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -357,6 +368,17 @@ fn run() -> Result<(), CliError> {
                 "sign" => commands::auth::run_sign(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "auth sub-command", sub2, AUTH_SUBCOMMANDS,
+                ))),
+            }
+        }
+        "dashboard" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "rotate-jwt-secret" => {
+                    commands::dashboard::run_rotate_jwt_secret(&flags, &rest[1..])
+                }
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "dashboard sub-command", sub2, DASHBOARD_SUBCOMMANDS,
                 ))),
             }
         }
@@ -641,6 +663,16 @@ SUBCOMMANDS:
         key + Ed25519 signature so the dashboard can complete the
         POST /api/auth/verify call without ever seeing the private key.
         Spec: v2_extended_gaps.md §4.2.
+
+    dashboard rotate-jwt-secret [--json]
+        Rotate the dashboard's persisted HS256 signing secret at
+        <data_dir>/auth/dashboard_jwt.secret. Bumps the
+        secret_generation counter and mints a fresh 32-byte key.
+        Every pre-rotation operator JWT immediately fails verification
+        (the `gen` claim no longer matches). Local file-system mutation
+        only — does NOT open operator.sock and does NOT require
+        --operator-key. Spec: self-healing-supervisor.md §10 +
+        dashboard-hardening.md §INV-DASHBOARD-JWT-SECRET-PERSISTENT-01.
 
 READ-ONLY OBSERVATION:
 
@@ -991,6 +1023,7 @@ mod catalog_consistency_tests {
             ("auth",       AUTH_SUBCOMMANDS),
             ("providers",  PROVIDERS_SUBCOMMANDS),
             ("task",       TASK_SUBCOMMANDS),
+            ("dashboard",  DASHBOARD_SUBCOMMANDS),
         ] {
             assert!(!list.is_empty(), "{name}_SUBCOMMANDS is empty");
         }
@@ -1024,6 +1057,7 @@ mod catalog_consistency_tests {
             ("\"credential\" => {", CREDENTIAL_SUBCOMMANDS),
             ("\"kernel\" => {",     KERNEL_SUBCOMMANDS),
             ("\"submit\" => {",     SUBMIT_SUBCOMMANDS),
+            ("\"dashboard\" => {",  DASHBOARD_SUBCOMMANDS),
         ];
 
         for (anchor, catalog) in pairs {

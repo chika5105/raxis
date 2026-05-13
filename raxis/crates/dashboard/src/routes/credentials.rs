@@ -415,6 +415,7 @@ mod tests {
                 exp: 0,
                 iat: 0,
                 jti: "jti-1".into(),
+                gen: 1,
             },
         }
     }
@@ -431,6 +432,7 @@ mod tests {
                 exp: 0,
                 iat: 0,
                 jti: "jti-2".into(),
+                gen: 1,
             },
         }
     }

@@ -159,14 +159,46 @@ result it:
   2. logs one `event = "deadlock_cycle_member"` line per
      thread per cycle, carrying the `thread_id` and the full
      `backtrace` of where the thread is parked;
-  3. `panic!`s. With `panic = "abort"` pinned at the workspace
-     root (`raxis/Cargo.toml [profile.release]`), the panic
-     becomes a non-zero process exit and the process supervisor
-     (systemd / launchd / the live-e2e harness) sees it.
+  3. **(V2.5+)** writes a forensic `DeadlockDump` to
+     `<data_dir>/deadlock_dump_<unix_ts>.json` via the
+     `kernel::deadlock_dump` module — atomic `tempfile + rename`
+     with no kernel-state dependencies (the dumper deliberately
+     avoids the audit sink, the store, and any global lock that
+     could itself be the wedged mutex). The next kernel boot
+     synthesises a `KernelDeadlockDetected` audit row from this
+     dump (see `kernel::restart_lifecycle`) and moves the file
+     to `<data_dir>/deadlock_dump_consumed/<filename>` so the
+     boot path is idempotent.
+  4. exits the process via `std::process::exit(70)` (V2.5+;
+     pre-V2.5 was `panic!`). Exit code 70 is the wire signal to
+     the supervisor (`raxis-supervisor`) that the cause was a
+     parking_lot-detected cycle, distinct from a generic panic
+     (exit ≥101) or an OOM kill (SIGKILL). With `panic = "abort"`
+     pinned at the workspace root (`raxis/Cargo.toml [profile.release]`),
+     a generic panic also becomes a non-zero process exit and
+     the supervisor (systemd / launchd / `raxis-supervisor`) sees
+     it. The supervisor's exit-code classifier
+     (`INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`) maps exit 70
+     to `Outcome::DeadlockDetected` ⇒ restart-eligible (subject to
+     the circuit breaker per `INV-SUPERVISOR-CIRCUIT-BREAKER-01`).
 
 The watcher deliberately bypasses the audit sink (any of the
 sink decorators may itself be the wedged mutex) and emits
-straight to stderr.
+straight to stderr. The forensic dump writer follows the same
+no-kernel-state rule — see `kernel/src/deadlock_dump.rs` for the
+self-contained file-write API and witness tests.
+
+**Composition with the supervisor (V2.5+).** When the operator
+opts into `RAXIS_SUPERVISOR_AUTO_RESTART=1`, the deadlock watcher
+is the canonical trigger for the self-healing-supervisor recovery
+path: cycle detected → forensic dump written → exit 70 → supervisor
+classifies → fork new kernel → new kernel rehydrates the dump
+into the audit chain (`KernelDeadlockDetected` +
+`KernelRestartInitiated` + `KernelRestartCompleted` paired rows
+under `INV-SUPERVISOR-RESTART-AUDIT-01`) → operator's existing
+JWT verifies cleanly under the new kernel's signer
+(`INV-SUPERVISOR-OPERATOR-CONTINUITY-01`). See
+`specs/v2/self-healing-supervisor.md` for the full contract.
 
 **Cadence.** 2 seconds. The cadence is the upper-bound
 detection latency — a cycle that forms at `t=0` is detected

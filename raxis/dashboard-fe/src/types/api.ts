@@ -472,6 +472,42 @@ export interface HealthSnapshot {
   pending_escalations: number;
 }
 
+/// Wire shape served by `GET /api/health/kernel-lifecycle`.
+///
+/// Mirrors `raxis_dashboard::routes::health::KernelLifecycleResponse`
+/// in the kernel — see also `raxis-supervisor::sentinel::Sentinel`
+/// for the on-disk source of truth and `self-healing-supervisor.md
+/// §5.2` for the contract. The FE matches on `status` + optional
+/// `sub_state` to render `<KernelLifecycleBanner>`; every other
+/// field is metadata for the popover detail view.
+///
+/// `status` is one of `"Healthy"`, `"Restarting"`, `"Halted"`.
+/// `sub_state` is `"CircuitOpen"`, `"OperatorStop"`,
+/// `"OperatorStopForced"`, `"SupervisorGone"` (only set when
+/// `status === "Halted"`). The banner also surfaces a stale-data
+/// note when `fresh === false` so an operator who is staring at
+/// an old sentinel knows the numbers shouldn't be trusted.
+export interface KernelLifecycleResponse {
+  status: "Healthy" | "Restarting" | "Halted" | string;
+  sub_state?:
+    | "CircuitOpen"
+    | "OperatorStop"
+    | "OperatorStopForced"
+    | "SupervisorGone"
+    | string
+    | null;
+  attempt_n: number;
+  max_attempts: number;
+  last_restart_reason?: string | null;
+  last_restart_unix_ts: number;
+  attempts_in_window: number;
+  window_secs: number;
+  supervisor_pid: number;
+  kernel_pid: number;
+  updated_at_unix_secs: number;
+  fresh: boolean;
+}
+
 export interface WorktreeListEntry {
   name: string;
   label: string;
