@@ -95,6 +95,15 @@ pub struct MarkReadResponse {
 }
 
 /// `PATCH /api/notifications/:id/read`.
+///
+/// The kernel-side impl ([`crate::data::DashboardData::mark_notification_read`])
+/// takes a blocking SQLite write lock (`tokio::sync::Mutex::blocking_lock`
+/// under the hood). Calling that from inside the axum async handler would
+/// panic with `Cannot block the current thread from within a runtime` and
+/// surface as a connection reset (no JSON envelope) to the operator UI.
+/// We bounce the trait call onto `spawn_blocking` — same pattern as
+/// `routes::policy::update_toml` — so the tokio worker thread is not pinned
+/// on a syscall.
 pub async fn mark_read<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -106,7 +115,14 @@ where
     if !op.has_role(DashboardRole::Read) {
         return Err(ApiError::Forbidden { required: "read".into() });
     }
-    let updated = state.data.mark_notification_read(&notification_id)?;
+    let data = std::sync::Arc::clone(&state.data);
+    let updated = tokio::task::spawn_blocking(move || {
+        data.mark_notification_read(&notification_id)
+    })
+    .await
+    .map_err(|e| ApiError::Internal {
+        log_only: format!("mark_notification_read join error: {e}"),
+    })??;
     Ok(Json(MarkReadResponse { updated }))
 }
 
@@ -122,6 +138,12 @@ pub struct MarkAllReadResponse {
 }
 
 /// `POST /api/notifications/mark-all-read`.
+///
+/// Same `spawn_blocking` rationale as [`mark_read`] — the kernel-side
+/// impl takes a blocking SQLite write lock. Without this bounce the
+/// handler panics on every operator click of the "Mark all read"
+/// button, surfacing as a connection-reset rather than a structured
+/// JSON envelope.
 pub async fn mark_all_read<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -132,7 +154,14 @@ where
     if !op.has_role(DashboardRole::Read) {
         return Err(ApiError::Forbidden { required: "read".into() });
     }
-    let count = state.data.mark_all_notifications_read()?;
+    let data = std::sync::Arc::clone(&state.data);
+    let count = tokio::task::spawn_blocking(move || {
+        data.mark_all_notifications_read()
+    })
+    .await
+    .map_err(|e| ApiError::Internal {
+        log_only: format!("mark_all_notifications_read join error: {e}"),
+    })??;
     Ok(Json(MarkAllReadResponse { count }))
 }
 
