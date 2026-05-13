@@ -92,6 +92,8 @@
 // "wait-for-the-last-reviewer" pre-condition for the
 // `KernelPush::AllReviewersPassed` push.
 
+use rusqlite::Connection;
+
 use raxis_store::{Store, Table};
 use raxis_types::{ReviewVerdict, SessionAgentType};
 
@@ -210,6 +212,31 @@ pub enum AggregateReviewVerdict {
     NoSuccessors,
 }
 
+impl AggregateReviewVerdict {
+    /// Wire-stable name for this verdict, used by the KSB projection
+    /// to feed `DagRow::aggregate_verdict` and by the orchestrator
+    /// NNSP rule 3a to pivot on `aggregate=<value>` (see
+    /// `crates/planner-core/src/driver.rs::render_system_prompt_for_role`).
+    ///
+    /// The values mirror the variant names verbatim — DO NOT rename
+    /// without bumping `raxis_ksb::KSB_SCHEMA_VERSION`. Closes
+    /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` (the orchestrator
+    /// MUST pivot on this wire field, not on the per-reviewer
+    /// `reviewer_verdicts=` rows — those fire `approved=false` as
+    /// soon as the first sibling votes Reject, but
+    /// `retry_subtask` requires the kernel's cross-Reviewer
+    /// terminal verdict per
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Pending             => "Pending",
+            Self::AllPassed           => "AllPassed",
+            Self::AtLeastOneRejected  => "AtLeastOneRejected",
+            Self::NoSuccessors        => "NoSuccessors",
+        }
+    }
+}
+
 /// Aggregator outcome plus the cardinality the kernel observed.
 ///
 /// `count` is the number of Reviewer successor rows folded in; it is
@@ -299,7 +326,28 @@ pub fn compute_aggregate_review_outcome(
     agent_type_filter: Option<AgentTypeFilter<'_>>,
 ) -> Result<AggregateOutcome, rusqlite::Error> {
     let conn = store.lock_sync();
+    compute_aggregate_review_outcome_with_conn(
+        executor_task_id,
+        &*conn,
+        agent_type_filter,
+    )
+}
 
+/// `&Connection`-borrowing variant of
+/// [`compute_aggregate_review_outcome`]. Use this from call sites
+/// that already hold a `&Connection` (e.g. the KSB projection in
+/// `crates/kernel::initiatives::ksb_assembly`) so we do NOT
+/// re-acquire the store mutex per executor row.
+///
+/// Identical semantics; the lock-acquiring shim above just delegates
+/// to this function with `store.lock_sync()`. Pin this contract in
+/// tests so any divergence between the two surfaces is caught at
+/// build time, not at iter-N debugging time.
+pub fn compute_aggregate_review_outcome_with_conn(
+    executor_task_id:  &str,
+    conn:              &Connection,
+    agent_type_filter: Option<AgentTypeFilter<'_>>,
+) -> Result<AggregateOutcome, rusqlite::Error> {
     // Pull every successor's task_id + verdict in a single query.
     // NULL verdict is SQL-side, so we read into Option<String> and
     // parse to enum at the Rust layer (matches the
@@ -882,5 +930,77 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.verdict, AggregateReviewVerdict::NoSuccessors);
         assert_eq!(outcome.count, 0);
+    }
+
+    // ── Conn-borrowing variant + `wire_str` parity ─────────────────────
+
+    /// `compute_aggregate_review_outcome_with_conn` MUST return the
+    /// same `(verdict, count)` the store-borrowing variant returns,
+    /// for every reachable verdict. Pins the contract the KSB
+    /// projection (`ksb_assembly::read_dag_rows_for_initiative`)
+    /// relies on so a future refactor of the lock-acquiring shim
+    /// cannot silently desync the KSB-rendered `aggregate=` field
+    /// from the audit-emitted
+    /// `ReviewAggregationCompleted{verdict=...}` value.
+    #[test]
+    fn with_conn_variant_matches_store_variant_pending() {
+        let store = Store::open_in_memory().unwrap();
+        let exe   = seed_executor_with_n_reviewers(&store, 2);
+        set_verdict(&store, "rev-0", ReviewVerdict::Rejected);
+        // rev-1 still NULL → aggregator says Pending even though
+        // rev-0 voted Reject. This is the iter42 regression case.
+
+        let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
+        let via_conn  = {
+            let conn = store.lock_sync();
+            compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
+        };
+        assert_eq!(via_store.verdict, AggregateReviewVerdict::Pending);
+        assert_eq!(via_conn, via_store);
+    }
+
+    #[test]
+    fn with_conn_variant_matches_store_variant_at_least_one_rejected() {
+        let store = Store::open_in_memory().unwrap();
+        let exe   = seed_executor_with_n_reviewers(&store, 2);
+        set_verdict(&store, "rev-0", ReviewVerdict::Rejected);
+        set_verdict(&store, "rev-1", ReviewVerdict::Approved);
+
+        let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
+        let via_conn  = {
+            let conn = store.lock_sync();
+            compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
+        };
+        assert_eq!(via_store.verdict, AggregateReviewVerdict::AtLeastOneRejected);
+        assert_eq!(via_conn, via_store);
+    }
+
+    #[test]
+    fn with_conn_variant_matches_store_variant_all_passed() {
+        let store = Store::open_in_memory().unwrap();
+        let exe   = seed_executor_with_n_reviewers(&store, 2);
+        set_verdict(&store, "rev-0", ReviewVerdict::Approved);
+        set_verdict(&store, "rev-1", ReviewVerdict::Approved);
+
+        let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
+        let via_conn  = {
+            let conn = store.lock_sync();
+            compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
+        };
+        assert_eq!(via_store.verdict, AggregateReviewVerdict::AllPassed);
+        assert_eq!(via_conn, via_store);
+    }
+
+    /// `wire_str` MUST stamp the same byte-string the KSB projection
+    /// embeds into `DagRow::aggregate_verdict` and the orchestrator
+    /// NNSP rule scans for. Pins the wire contract so a typo or
+    /// rename in the variant block cannot silently break either
+    /// side. Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
+    #[test]
+    fn wire_str_returns_stable_variant_names() {
+        assert_eq!(AggregateReviewVerdict::Pending.wire_str(),            "Pending");
+        assert_eq!(AggregateReviewVerdict::AllPassed.wire_str(),          "AllPassed");
+        assert_eq!(AggregateReviewVerdict::AtLeastOneRejected.wire_str(), "AtLeastOneRejected");
+        assert_eq!(AggregateReviewVerdict::NoSuccessors.wire_str(),       "NoSuccessors");
     }
 }

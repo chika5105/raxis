@@ -42,8 +42,10 @@ use raxis_ksb::{
     KSB_SCHEMA_VERSION,
 };
 use raxis_store::Table;
+use raxis_types::SessionAgentType;
 
 use crate::initiatives::plan_registry::{PlanRegistry, TaskKey};
+use crate::initiatives::review_aggregation::compute_aggregate_review_outcome_with_conn;
 
 /// V2 `v2_extended_gaps.md §2.4` — `task_description` cap. The kernel
 /// truncates `[[tasks]] description` (already capped at admission
@@ -348,25 +350,47 @@ fn read_dag_rows_for_initiative(
     let reviewer_counts =
         read_reviewer_counts_per_executor(conn, initiative_id, registry)?;
 
-    Ok(rows.into_iter().map(|(task_id, state, evaluation_sha)| {
-        let title = registry
-            .get(&TaskKey::new(initiative_id.to_owned(), task_id.clone()))
-            .map(|t| {
-                t.description.lines().next().unwrap_or("").to_owned()
-            })
+    rows.into_iter().map(|(task_id, state, evaluation_sha)| {
+        let task_fields = registry
+            .get(&TaskKey::new(initiative_id.to_owned(), task_id.clone()));
+        let title = task_fields
+            .as_ref()
+            .map(|t| t.description.lines().next().unwrap_or("").to_owned())
             .unwrap_or_default();
         let reviewers: u32 = reviewer_counts
             .get(task_id.as_str())
             .copied()
             .unwrap_or(0);
-        DagRow {
+        // V2.5 — populate `aggregate_verdict` ONLY for Executor
+        // rows whose plan-declared `session_agent_type` is
+        // `Executor`. Reviewer / Orchestrator rows leave it empty
+        // so the renderer omits the `aggregate=` field on the
+        // wire (the LLM only sees signal where it is relevant).
+        // Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` (the
+        // orchestrator's NNSP rule 3a pivots on this field per
+        // `iter42` regression — see
+        // `crates/planner-core/src/driver.rs::render_system_prompt_for_role`).
+        let aggregate_verdict = match task_fields
+            .as_ref()
+            .map(|t| t.session_agent_type)
+        {
+            Some(SessionAgentType::Executor) => {
+                compute_aggregate_review_outcome_with_conn(&task_id, conn, None)?
+                    .verdict
+                    .wire_str()
+                    .to_owned()
+            }
+            _ => String::new(),
+        };
+        Ok::<DagRow, rusqlite::Error>(DagRow {
             task_id,
             state: state.to_lowercase(),
             title,
             reviewers,
             evaluation_sha: evaluation_sha.unwrap_or_default(),
-        }
-    }).collect())
+            aggregate_verdict,
+        })
+    }).collect()
 }
 
 /// Count the number of `Reviewer`-typed successors per executor task
@@ -867,6 +891,151 @@ mod tests {
             .expect("lint-defect dag row present");
         assert_eq!(lint_row.reviewers, 2,
             "lint-defect MUST surface its reviewer multiplicity in dag_rows");
+        // Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`: both
+        // siblings have voted, one Rejected, so the executor's
+        // dag row MUST carry `aggregate=AtLeastOneRejected` — the
+        // wire-stable trigger the orchestrator NNSP rule 3a
+        // pivots on.
+        assert_eq!(lint_row.aggregate_verdict, "AtLeastOneRejected",
+            "lint-defect MUST surface terminal aggregator verdict; got: {:?}",
+            lint_row.aggregate_verdict);
+        // Reviewer rows MUST NOT carry an aggregator verdict —
+        // they are not the predecessor of any reviewer; leaving
+        // the field empty keeps the wire compact and matches the
+        // renderer's omit-when-empty contract.
+        for rev in &[rev_a, rev_b] {
+            let row = snap.dag_rows.iter()
+                .find(|r| r.task_id == *rev)
+                .unwrap_or_else(|| panic!("reviewer {} dag row present", rev));
+            assert_eq!(row.aggregate_verdict, "",
+                "reviewer rows MUST NOT carry `aggregate_verdict`; got: {:?}",
+                row.aggregate_verdict);
+        }
+    }
+
+    /// Iter42 regression: when ONE of two sibling Reviewers has
+    /// voted and the other has not, the executor's KSB dag-row
+    /// MUST surface `aggregate=Pending` — NOT
+    /// `aggregate=AtLeastOneRejected`. The earlier orchestrator
+    /// NNSP rule 3a pivoted on per-Reviewer rows
+    /// (`reviewer_verdicts[*].approved=false`) and therefore fired
+    /// `retry_subtask` as soon as the FIRST sibling voted Reject,
+    /// before the kernel's aggregator had bumped
+    /// `review_reject_count`. The kernel correctly rejected every
+    /// retry per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`,
+    /// producing a respawn loop. This test pins the projection's
+    /// part of the fix: as long as ANY sibling is still
+    /// pending (NULL `review_verdict`), the dag row reads
+    /// `Pending` and the NNSP rule MUST NOT fire `retry_subtask`.
+    /// Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` and the
+    /// iter42 regression on the projection side.
+    #[test]
+    fn dag_row_aggregate_is_pending_when_only_one_of_two_reviewers_voted() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-iter42";
+        let exec = "lint-defect";
+        let rev_a = "review-lint-defect-A";
+        let rev_b = "review-lint-defect-B";
+
+        registry.insert_orchestrator(init.to_owned(), OrchestratorPlanFields {
+            cross_cutting_artifacts: vec![],
+            description:             "drive lint-defect to merge".to_owned(),
+            target_ref:              "refs/heads/main".to_owned(),
+            elastic:                 None,
+        });
+        registry.insert(TaskKey::new(init.to_owned(), exec.to_owned()),
+            TaskPlanFields {
+                description:        "introduce one lint defect".to_owned(),
+                session_agent_type: SessionAgentType::Executor,
+                ..Default::default()
+            });
+        registry.insert(TaskKey::new(init.to_owned(), rev_a.to_owned()),
+            TaskPlanFields {
+                description:        "Reviewer A".to_owned(),
+                session_agent_type: SessionAgentType::Reviewer,
+                ..Default::default()
+            });
+        registry.insert(TaskKey::new(init.to_owned(), rev_b.to_owned()),
+            TaskPlanFields {
+                description:        "Reviewer B".to_owned(),
+                session_agent_type: SessionAgentType::Reviewer,
+                ..Default::default()
+            });
+
+        let conn = store.lock_sync();
+        let exec_sha = "cafebabecafebabecafebabecafebabecafebabe";
+        // Reviewer A has voted Rejected; Reviewer B has NOT voted
+        // (review_verdict is NULL). This is the exact wire shape
+        // iter42 produced between the first SubmitReview and the
+        // second.
+        for (tid, role, verdict) in &[
+            (exec,  "Executor", None::<&str>),
+            (rev_a, "Reviewer", Some("Rejected")),
+            (rev_b, "Reviewer", None::<&str>),
+        ] {
+            conn.execute(
+                "INSERT INTO tasks (
+                     task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     evaluation_sha, last_critique, review_verdict
+                 ) VALUES (?1, ?2, 'default', 'Completed', 'op',
+                           0, 0, 0, ?3, ?4, ?5)",
+                rusqlite::params![
+                    tid, init,
+                    if *role == "Executor" { Some(exec_sha) } else { None },
+                    if *role == "Executor" {
+                        Some("[Reviewer review-lint-defect-A]: REJECTION\n\n")
+                    } else { None },
+                    *verdict,
+                ],
+            ).expect("insert task");
+        }
+        for rev in &[rev_a, rev_b] {
+            conn.execute(
+                "INSERT INTO task_dag_edges (
+                    initiative_id, predecessor_task_id, successor_task_id,
+                    predecessor_satisfied
+                 ) VALUES (?1, ?2, ?3, 1)",
+                rusqlite::params![init, exec, rev],
+            ).expect("insert dag edge");
+        }
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &*conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id:       None,
+                role:          KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+            },
+        ).expect("assemble orchestrator snapshot");
+        drop(conn);
+
+        let lint_row = snap.dag_rows.iter()
+            .find(|r| r.task_id == exec)
+            .expect("lint-defect dag row present");
+        assert_eq!(lint_row.aggregate_verdict, "Pending",
+            "lint-defect MUST read `Pending` while one Reviewer \
+             still owes a verdict — iter42 regression; got: {:?}",
+            lint_row.aggregate_verdict);
+
+        // Render and confirm the wire payload omits the
+        // misleading "aggregate=AtLeastOneRejected" the
+        // pre-fix code would have emitted.
+        let rendered = raxis_ksb::render_ksb(&snap).expect("render");
+        assert!(rendered.contains("aggregate=Pending"),
+            "rendered KSB MUST carry `aggregate=Pending` while \
+             one Reviewer is still pending; got: {rendered}");
+        assert!(!rendered.contains("aggregate=AtLeastOneRejected"),
+            "rendered KSB MUST NOT carry `AtLeastOneRejected` \
+             while any sibling Reviewer is pending — that is the \
+             iter42 race; got: {rendered}");
     }
 
     #[test]

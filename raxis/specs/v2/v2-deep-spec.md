@@ -1311,15 +1311,33 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
 - `raxis_types::ReviewVerdict` — the (Approved | Rejected) per-Reviewer outcome enum.
 - `raxis-store` Migration 7 — adds `tasks.review_verdict TEXT CHECK (review_verdict
   IN ('Approved', 'Rejected'))`. NULLable, no DEFAULT, V1 backward compatible.
-- `raxis-kernel::initiatives::review_aggregation::compute_aggregate_review_verdict` —
+- `raxis-kernel::initiatives::review_aggregation::compute_aggregate_review_verdict` /
+  `compute_aggregate_review_outcome` (the `&Store` shim) / `compute_aggregate_review_outcome_with_conn`
+  (the `&Connection`-borrowing variant the KSB projection uses without re-acquiring the store mutex) —
   the pure read predicate folding successor verdicts to `AggregateReviewVerdict`. Returns
   `Pending` when ANY successor's verdict is NULL (the wait-for-everyone gate);
   `AllPassed` when every successor is `Approved`; `AtLeastOneRejected` when every
   successor has submitted and at least one rejected; `NoSuccessors` when the executor has
   no successor edges (malformed plan; caller fail-closes).
+- `AggregateReviewVerdict::wire_str()` — the wire-stable variant-name projection
+  (`"Pending"` / `"AllPassed"` / `"AtLeastOneRejected"` / `"NoSuccessors"`) the KSB
+  projection stamps into `DagRow::aggregate_verdict` and the orchestrator NNSP rule 3a
+  parses positionally. Pinned by `wire_str_returns_stable_variant_names`. Closes
+  `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
 - `handlers/intent::handle_submit_review` — writes `tasks.review_verdict` BEFORE the
   Reviewer's FSM transition in the same SQLite transaction so the aggregator never
   observes a `(state=Completed, review_verdict=NULL)` row.
+- `kernel/src/initiatives/ksb_assembly.rs::read_dag_rows_for_initiative` — calls
+  `compute_aggregate_review_outcome_with_conn` per Executor row and stamps the result's
+  `wire_str()` into `DagRow::aggregate_verdict` so the orchestrator's NNSP rule 3a
+  pivots on the kernel's TERMINAL verdict (not the per-Reviewer `reviewer_verdicts=`
+  block, which fires `approved=false` as soon as the FIRST sibling votes Reject and
+  produces a respawn loop per the iter42 regression — see `agent-disagreement.md §3.6`
+  and `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`). The same function backs both the
+  kernel's admission gate (`handle_submit_review`'s post-commit aggregator branch) AND
+  the orchestrator's prompt logic — pinned equivalence in
+  `with_conn_variant_matches_store_variant_pending` /
+  `..._at_least_one_rejected` / `..._all_passed`.
 
 **Best-judgment scope decisions, recorded for spec/implementation lock-step:**
 

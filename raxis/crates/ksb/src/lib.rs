@@ -280,6 +280,52 @@ pub struct DagRow {
     /// snapshot from disk.
     #[serde(default)]
     pub evaluation_sha: String,
+    /// Aggregator's terminal cross-Reviewer verdict for this
+    /// Executor's reviewer set, per `v2-deep-spec.md §Step 25`.
+    /// Wire-stable values (sourced from
+    /// `raxis_kernel::initiatives::review_aggregation::
+    /// AggregateReviewVerdict::wire_str`):
+    ///
+    /// * `"Pending"`            — at least one sibling Reviewer
+    ///                            still owes a verdict.
+    /// * `"AllPassed"`          — every Reviewer Approved.
+    /// * `"AtLeastOneRejected"` — every Reviewer voted; at
+    ///                            least one Rejected (the kernel
+    ///                            already bumped
+    ///                            `subtask_activations.review_reject_count`
+    ///                            and a `retry_subtask` from this
+    ///                            executor's Completed activation
+    ///                            is now admission-eligible).
+    /// * `"NoSuccessors"`       — plan declares zero Reviewers
+    ///                            for this Executor (malformed in
+    ///                            V2; surface so the operator
+    ///                            sees the misconfiguration).
+    /// * `""`                   — non-Executor row (Reviewer /
+    ///                            Orchestrator) OR an Executor
+    ///                            row whose aggregate is not yet
+    ///                            relevant (kept empty to keep
+    ///                            the wire compact).
+    ///
+    /// Orchestrator NNSP rule 3a (see
+    /// `crates/planner-core/src/driver.rs::render_system_prompt_for_role`)
+    /// pivots on this field — NOT on the per-Reviewer
+    /// `reviewer_verdicts=` block — to decide
+    /// `retry_subtask` vs `activate_subtask` vs
+    /// `integration_merge`. The per-Reviewer block fires
+    /// `approved=false` as soon as the FIRST sibling Reviewer
+    /// votes Reject, but the kernel's cross-Reviewer aggregator
+    /// only emits
+    /// `ReviewAggregationCompleted{verdict=AtLeastOneRejected}`
+    /// AND bumps `review_reject_count` when the LAST sibling has
+    /// voted. Reading the per-Reviewer block to drive
+    /// `retry_subtask` therefore races the aggregator and
+    /// produces a respawn loop where the kernel rejects every
+    /// retry with `FAIL_INVALID_REQUEST` per
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` (see
+    /// `iter42` regression). Closes
+    /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
+    #[serde(default)]
+    pub aggregate_verdict: String,
 }
 
 /// One reviewer verdict against a prior executor attempt.
@@ -398,8 +444,8 @@ pub enum KsbError {
 ///   task_description=
 ///     <free-form text>
 ///   dag=
-///     - task-42 in_progress reviewers=2 "First sub-task"
-///     - task-43 pending     reviewers=1 ""
+///     - task-42 in_progress reviewers=2 aggregate=AtLeastOneRejected sha=abc12 "First sub-task"
+///     - task-43 pending     reviewers=1 sha=<none> ""
 ///   :KERNEL_STATE_END]
 /// ```
 ///
@@ -433,7 +479,7 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
         }
     }
     for row in &snapshot.dag_rows {
-        for s in [&row.task_id, &row.state, &row.title] {
+        for s in [&row.task_id, &row.state, &row.title, &row.aggregate_verdict] {
             if s.contains(KSB_DELIMITER_CLOSE) {
                 return Err(KsbError::DelimiterInjection { field: "dag_rows" });
             }
@@ -573,6 +619,19 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
             buf.push_str(&row.state);
             buf.push_str(" reviewers=");
             buf.push_str(&row.reviewers.to_string());
+            // V2.5 — `aggregate=` carries the cross-Reviewer
+            // aggregator's terminal verdict for this Executor row
+            // when the kernel has projected one. Omitted for
+            // Reviewer / Orchestrator rows and for Executor rows
+            // with no projected verdict (the projection leaves
+            // `aggregate_verdict` empty in both cases) so the
+            // wire stays compact and the LLM only sees the field
+            // where it carries signal. Closes
+            // `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
+            if !row.aggregate_verdict.is_empty() {
+                buf.push_str(" aggregate=");
+                buf.push_str(&row.aggregate_verdict);
+            }
             buf.push_str(" sha=");
             // Empty string when the task has not yet stamped an
             // evaluation_sha — the orchestrator's prompt teaches
@@ -657,18 +716,20 @@ mod tests {
             wallclock_budget_remaining_s:  600,
             dag_rows:                      vec![
                 DagRow {
-                    task_id:        "task-42".to_owned(),
-                    state:          "in_progress".to_owned(),
-                    title:          "First sub-task".to_owned(),
-                    reviewers:      2,
-                    evaluation_sha: String::new(),
+                    task_id:           "task-42".to_owned(),
+                    state:             "in_progress".to_owned(),
+                    title:             "First sub-task".to_owned(),
+                    reviewers:         2,
+                    evaluation_sha:    String::new(),
+                    aggregate_verdict: String::new(),
                 },
                 DagRow {
-                    task_id:        "task-43".to_owned(),
-                    state:          "pending".to_owned(),
-                    title:          String::new(),
-                    reviewers:      1,
-                    evaluation_sha: String::new(),
+                    task_id:           "task-43".to_owned(),
+                    state:             "pending".to_owned(),
+                    title:             String::new(),
+                    reviewers:         1,
+                    evaluation_sha:    String::new(),
+                    aggregate_verdict: String::new(),
                 },
             ],
             task_description:              "Make the executor land a commit.".to_owned(),
@@ -769,6 +830,63 @@ mod tests {
         let s = render_ksb(&snap).unwrap();
         assert!(s.contains("reviewer_verdicts=\n  - reviewer=task-99 sha=abc12 approved=false \"needs typed enum\""),
             "reviewer verdict row missing or malformed: {s}");
+    }
+
+    /// The renderer MUST omit the `aggregate=` field when
+    /// `DagRow::aggregate_verdict` is the empty string. Reviewer /
+    /// Orchestrator rows (and Executor rows the projection has not
+    /// stamped a verdict on yet) leave the field empty, and the
+    /// wire stays compact. Pins
+    /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` against an
+    /// accidental flip that would emit a spurious `aggregate=` for
+    /// every row.
+    #[test]
+    fn render_omits_aggregate_when_unset() {
+        let s = render_ksb(&fixture_snapshot()).unwrap();
+        assert!(!s.contains("aggregate="),
+            "renderer must not emit `aggregate=` when no DagRow \
+             carries a value; got: {s}");
+    }
+
+    /// The renderer MUST emit `aggregate=<value>` between
+    /// `reviewers=N` and `sha=` when `DagRow::aggregate_verdict`
+    /// is non-empty. The exact placement is pinned so the
+    /// orchestrator NNSP rule 3a can parse it positionally even
+    /// if a future iteration adds new fields elsewhere on the
+    /// row.
+    #[test]
+    fn render_emits_aggregate_when_set() {
+        let mut snap = fixture_snapshot();
+        // Hydrate the first row with `AtLeastOneRejected` to
+        // simulate the post-aggregator state the NNSP rule 3a
+        // pivots on.
+        snap.dag_rows[0].aggregate_verdict =
+            "AtLeastOneRejected".to_owned();
+        let s = render_ksb(&snap).unwrap();
+        assert!(
+            s.contains("reviewers=2 aggregate=AtLeastOneRejected sha="),
+            "renderer must place `aggregate=` between `reviewers=` \
+             and `sha=`; got: {s}",
+        );
+    }
+
+    /// Renderer MUST reject a `KSB_DELIMITER_CLOSE` byte sequence
+    /// in `DagRow::aggregate_verdict`. Defense-in-depth — the
+    /// projection only ever stamps wire-stable variant names from
+    /// `AggregateReviewVerdict::wire_str`, but if a future
+    /// refactor allows operator-supplied text into the field the
+    /// renderer must fail-closed.
+    #[test]
+    fn render_rejects_close_delimiter_in_aggregate_verdict() {
+        let mut snap = fixture_snapshot();
+        snap.dag_rows[0].aggregate_verdict =
+            format!("evil{}", KSB_DELIMITER_CLOSE);
+        match render_ksb(&snap).unwrap_err() {
+            KsbError::DelimiterInjection { field } => {
+                assert_eq!(field, "dag_rows");
+            }
+            other => panic!("expected DelimiterInjection, got {other:?}"),
+        }
     }
 
     #[test]

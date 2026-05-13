@@ -72,6 +72,7 @@
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
 | Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
 | Planner harness — orchestrator NNSP — V2 | INV-PLANNER-ORCH-RETRY-ON-REJECT-01 | 1 |
+| KSB projection — V2 | INV-KSB-AGGREGATE-VERDICT-PROJECTION-01 | 1 |
 | Retry preconditions — V2 | INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01 | 1 |
 | Executor / role-session capability discovery — V2 | INV-EXEC-DISCOVERY-01 | 1 |
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
@@ -80,7 +81,7 @@
 | Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 | 8 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
-| **Total** | | **86** |
+| **Total** | | **87** |
 
 ---
 
@@ -1946,26 +1947,47 @@ controls are in `policy.toml [orchestrator]`. See
 
 ---
 
-### INV-PLANNER-ORCH-RETRY-ON-REJECT-01 — Orchestrator NNSP MUST direct `retry_subtask` on `approved=false`
+### INV-PLANNER-ORCH-RETRY-ON-REJECT-01 — Orchestrator NNSP MUST direct `retry_subtask` on `aggregate=AtLeastOneRejected`
 
 **Statement.** The Orchestrator's NNSP — rendered by
 `crates/planner-core/src/driver.rs::render_system_prompt_for_role(
 Role::Orchestrator, …)` and version-locked with the kernel binary
 per `INV-PLANNER-HARNESS-06` — MUST instruct the model to:
 
-1. Inspect the `reviewer_verdicts=` block of the rendered KSB
-   (`crates/ksb/src/lib.rs::render_ksb`) before deciding the next
-   terminal tool to call.
+1. Inspect the `dag=` block's per-Executor-row `aggregate=` field
+   (rendered by `crates/ksb/src/lib.rs::render_ksb`, sourced from
+   `kernel/src/initiatives/ksb_assembly.rs::
+   read_dag_rows_for_initiative` calling
+   `review_aggregation::compute_aggregate_review_outcome_with_conn`
+   per `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`) before deciding
+   the next terminal tool to call. The `aggregate=` field carries
+   the kernel's terminal cross-Reviewer verdict: `Pending`,
+   `AllPassed`, `AtLeastOneRejected`, or `NoSuccessors`.
 2. Call `retry_subtask { subtask_task_id: "<executor_task_id>" }`
-   — NOT `integration_merge` — whenever any row of
-   `reviewer_verdicts=` reads `approved=false` against an
-   executor whose task row is `complete`.
-3. Defer to the kernel's `[plan.tasks.<exec>.review].max_rounds`
+   — NOT `integration_merge` — whenever an Executor row reads
+   `aggregate=AtLeastOneRejected`. At that point the kernel has
+   already bumped `subtask_activations.review_reject_count`, and
+   the retry is admission-eligible per
+   `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.
+3. NEVER call `retry_subtask` while an Executor row reads
+   `aggregate=Pending` — at least one sibling Reviewer still owes
+   a verdict, the aggregator has not fired, and
+   `review_reject_count` is still 0; the kernel will
+   `FAIL_INVALID_REQUEST` the retry. Activate the missing
+   reviewer first via rule 2 (`activate_subtask`).
+4. Defer to the kernel's `[plan.tasks.<exec>.review].max_rounds`
    ceiling (per `agent-disagreement.md §3`) for the retry-loop
    ceiling — the Orchestrator MUST NOT itself enforce a separate
    ceiling.
-4. Only call `integration_merge` after every executor's
-   `reviewer_verdicts=` row reads `approved=true`.
+5. Only call `integration_merge` after every Executor row reads
+   `aggregate=AllPassed` (or `aggregate=NoSuccessors` for the
+   rare review-less executor).
+6. Treat the `reviewer_verdicts=` block as the **forensic source
+   of per-Reviewer critique text** only — NOT as the retry
+   trigger. That block fires `approved=false` as soon as the
+   FIRST sibling Reviewer votes Reject (the iter42 race); the
+   aggregator-terminal `aggregate=AtLeastOneRejected` is the
+   trigger.
 
 **Justification.** The kernel's cross-Reviewer aggregator
 (`kernel/src/handlers/intent.rs::handle_submit_review` post-commit
@@ -1995,6 +2017,29 @@ unrecoverable ones, so the decision belongs to the Orchestrator
 agent reading the critique. This invariant is the NNSP-side
 contract that completes the retry loop.
 
+**Iter42 race + the `aggregate=` trigger.** The earlier
+formulation of rule 3a pivoted on the per-Reviewer
+`reviewer_verdicts=` block scanning for `approved=false`. That
+block is populated by `read_reviewer_verdicts_for_initiative`
+from EVERY voted Reviewer's row — including reviewers whose
+sibling has not yet voted. The kernel's cross-Reviewer
+aggregator (`review_aggregation::
+compute_aggregate_review_outcome`) only emits
+`ReviewAggregationCompleted{verdict=AtLeastOneRejected}` AND
+bumps `subtask_activations.review_reject_count` when EVERY
+sibling Reviewer has voted; until then the verdict is `Pending`.
+Pivoting the NNSP rule on `reviewer_verdicts[*].approved=false`
+therefore raced the aggregator: the Orchestrator fired
+`retry_subtask` after the first sibling Reject, the kernel
+correctly rejected per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
+(`review_reject_count == 0`), and the Orchestrator respawned
+into a loop. The fix moves the trigger to the kernel's terminal
+verdict, surfaced as `DagRow::aggregate_verdict` per
+`INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`. The per-Reviewer
+block remains as the forensic source for the critique TEXT — the
+Orchestrator quotes it when surfacing the rejection rationale on
+respawn — but the retry GATE is `aggregate=AtLeastOneRejected`.
+
 **Scenario (iter41 reproduction).** A two-reviewer Executor task
 `lint-defect` is followed by reviewers `review-lint-defect-A`
 (approves) and `review-lint-defect-B` (rejects with critique
@@ -2009,41 +2054,198 @@ is `failed`, call `retry_subtask`" — no rule for the
 proceeds to `integration_merge` and the
 `ReviewerSubstantiveDisagreementWitness` panics with
 `saw_executor_respawn = false` + `saw_aggregation_pass = false`.
-The fix adds rule 3a (scan `reviewer_verdicts=`; on
-`approved=false`, call `retry_subtask`) and tightens rule 4
-(merge only when all verdicts are `approved=true`).
+The fix adds rule 3a (pivot on `dag[*].aggregate=`; on
+`AtLeastOneRejected`, call `retry_subtask`) and tightens rule 4
+(merge only when every Executor row reads `aggregate=AllPassed`).
+
+**Scenario (iter42 reproduction).** Same plan, but reviewer A
+votes Reject FIRST (instead of Approve). The orchestrator NNSP
+under iter42 carries the early formulation of rule 3a — "scan
+`reviewer_verdicts=`; on `approved=false`, call `retry_subtask`".
+The post-A-`SubmitReview` Orchestrator respawn fires, sees a
+single row `reviewer=A approved=false`, calls `retry_subtask
+{ lint-defect }`. The kernel rejects with `FAIL_INVALID_REQUEST`
+(`prior_state=Completed, review_reject_count=0`) per
+`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` — the aggregator
+hasn't fired because reviewer B hasn't voted. The Orchestrator
+respawns again; reviewer-B never gets activated; the loop runs
+indefinitely (45 `SessionVmSpawned` events in 18 min, zero
+`ReviewAggregationCompleted`, zero
+`ExecutorRespawnFromReviewRejection`). The fix moves the trigger
+to `aggregate=AtLeastOneRejected` (terminal aggregator verdict)
+surfaced via `DagRow::aggregate_verdict` per
+`INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`, and adds the explicit
+"NEVER call `retry_subtask` while `aggregate=Pending`" clause to
+rule 3a + rule 2's "activate the missing reviewer first"
+fallback.
 
 **Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
 responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
 NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
 
 **Kernel-side projection contract.** The NNSP rule is dead-letter
-unless the kernel's KSB projection populates the
-`reviewer_verdicts=` block from live store rows.
+unless the kernel's KSB projection populates BOTH the
+`reviewer_verdicts=` block AND the per-Executor-row
+`aggregate=` field from live store rows.
 `kernel/src/initiatives/ksb_assembly.rs::read_reviewer_verdicts_for_initiative`
 joins `tasks.review_verdict` (Reviewer's per-vote outcome) +
 `tasks.last_critique` (executor's concatenated formatted
 critiques per Step 22 of `v2-deep-spec.md`) +
 `task_dag_edges` (reviewer → executor predecessor) so the
 orchestrator's KSB carries one `ReviewerVerdict` per voted
-Reviewer with the executor's `evaluation_sha`. Executor sessions
-get an empty list (executor KSB has no DAG visibility per
-`KsbRole::Executor`). `DagRow::reviewers` is sourced symmetrically
-via `read_reviewer_counts_per_executor` — only `Reviewer`-typed
-successors are counted (a downstream executor that depends on
-this executor does NOT inflate the count). Iter42 reproduced
-the gap — the orchestrator NNSP scanned correctly but the
-projection was hard-coded to `Vec::new()`, so the rule never
-fired.
+Reviewer with the executor's `evaluation_sha` (the forensic
+critique source).
+`read_dag_rows_for_initiative` then calls
+`review_aggregation::compute_aggregate_review_outcome_with_conn`
+per Executor row (filtered to `session_agent_type=Executor` via
+`PlanRegistry`) and stamps the resulting verdict's
+`wire_str()` value into `DagRow::aggregate_verdict` — the
+retry-gate signal. Reviewer / Orchestrator rows leave the field
+empty (renderer omits the `aggregate=` token on the wire to keep
+it compact). Executor sessions get an empty `dag_rows` list
+(executor KSB has no DAG visibility per `KsbRole::Executor`).
+Iter42 originally reproduced the gap as a missing
+`reviewer_verdicts=` projection; the same iteration after that
+fix reproduced the partial-reviewer race surfaced above; the
+projection now closes both fronts.
 
 **Pinned regression coverage.**
 - `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule`
-  (NNSP unit test).
+  (NNSP unit test — asserts `aggregate=AtLeastOneRejected`,
+  `aggregate=Pending`, and `aggregate=AllPassed` are cited).
+- `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_forbids_retry_while_aggregate_pending`
+  (iter42-specific regression — asserts the explicit
+  "NEVER call `retry_subtask` while `aggregate=Pending`"
+  clause).
+- `crates/ksb/src/lib.rs::tests::render_emits_aggregate_when_set`
+  + `render_omits_aggregate_when_unset` + 
+  `render_rejects_close_delimiter_in_aggregate_verdict`
+  (renderer wire contract).
+- `kernel/src/initiatives/review_aggregation.rs::tests::wire_str_returns_stable_variant_names`
+  + `with_conn_variant_matches_store_variant_pending`
+  + `with_conn_variant_matches_store_variant_at_least_one_rejected`
+  + `with_conn_variant_matches_store_variant_all_passed`
+  (aggregator wire contract + conn-borrowing parity).
 - `kernel/src/initiatives/ksb_assembly.rs::tests::assemble_orchestrator_snapshot_populates_reviewer_verdicts_from_store`
-  (kernel-side projection unit test).
+  (kernel-side per-Reviewer projection unit test).
+- `kernel/src/initiatives/ksb_assembly.rs::tests::dag_row_aggregate_is_pending_when_only_one_of_two_reviewers_voted`
+  (iter42 partial-reviewers regression — asserts
+  `aggregate=Pending` while one sibling Reviewer is unvoted).
 - `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
   (end-to-end audit-chain witness wired into
   `kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`).
+
+---
+
+### INV-KSB-AGGREGATE-VERDICT-PROJECTION-01 — Per-Executor `dag[*].aggregate=` MUST surface the kernel's terminal cross-Reviewer verdict
+
+**Statement.** The kernel's KSB projection
+(`crates/kernel/src/initiatives/ksb_assembly.rs::
+read_dag_rows_for_initiative`) MUST populate
+`raxis_ksb::DagRow::aggregate_verdict` for every Executor-typed
+row (`session_agent_type == Executor` per `PlanRegistry`) with
+the wire-stable variant name returned by
+`raxis_kernel::initiatives::review_aggregation::
+AggregateReviewVerdict::wire_str()` against the kernel's
+authoritative cross-Reviewer aggregator
+(`compute_aggregate_review_outcome_with_conn`). The values are:
+
+| `wire_str()` | Meaning | Orchestrator NNSP action |
+|---|---|---|
+| `"Pending"` | At least one sibling Reviewer still owes a verdict (the aggregator has NOT fired; `review_reject_count` is still 0). | NEVER call `retry_subtask`. Activate the missing reviewer via rule 2 (`activate_subtask`). The kernel `FAIL_INVALID_REQUEST`s any retry per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. |
+| `"AllPassed"` | Every Reviewer Approved (terminal). | Eligible for `integration_merge` when every Executor row reads `AllPassed`. |
+| `"AtLeastOneRejected"` | Every Reviewer voted; ≥ 1 Rejected (terminal). The kernel bumped `subtask_activations.review_reject_count` AND emitted `ReviewAggregationCompleted{verdict=AtLeastOneRejected}`. | MUST call `retry_subtask { subtask_task_id: "<executor_task_id>" }` — the only intent that closes the disagreement loop. |
+| `"NoSuccessors"` | Plan declares no Reviewer successors for this Executor (rare; V2 plans always declare ≥ 1 Reviewer). | Treat as `AllPassed` for `integration_merge` purposes; surface to operator. |
+| `""` (empty) | Non-Executor row (Reviewer / Orchestrator) OR projection encountered an unexpected role. | No action; the renderer omits `aggregate=` from the wire. |
+
+Reviewer and Orchestrator rows MUST carry an empty
+`aggregate_verdict` so the renderer omits the `aggregate=` token
+on the wire (Executor-only signal).
+
+**Justification.** The orchestrator NNSP retry-vs-merge decision
+(per `INV-PLANNER-ORCH-RETRY-ON-REJECT-01`) requires the kernel's
+TERMINAL cross-Reviewer verdict — not the per-Reviewer
+`reviewer_verdicts=` block. The per-Reviewer block fires
+`approved=false` as soon as the FIRST sibling Reviewer votes
+Reject, but the kernel's aggregator only emits
+`AtLeastOneRejected` and bumps `review_reject_count` when the
+LAST sibling has voted. Pivoting the NNSP rule on the
+per-Reviewer block races the aggregator and produces a respawn
+loop where the kernel correctly rejects every `retry_subtask`
+per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` (the iter42
+regression — see scenario below). The `aggregate=` field on the
+dag row is the wire-stable hand-off from the kernel's
+aggregator to the orchestrator's prompt logic.
+
+Equivalence: `DagRow::aggregate_verdict` is computed by the same
+function the kernel uses to drive its own admission gates
+(`compute_aggregate_review_outcome_with_conn`, the `&Connection`
+shim refactored out of `compute_aggregate_review_outcome` so the
+KSB projection can call it without re-acquiring the store
+mutex). Tests
+`with_conn_variant_matches_store_variant_pending`,
+`..._at_least_one_rejected`, `..._all_passed` pin the
+equivalence so a future refactor cannot silently desync the
+KSB-rendered `aggregate=` field from the audit-emitted
+`ReviewAggregationCompleted{verdict=...}` value.
+
+**Scenario (iter42 reproduction).** A two-reviewer Executor task
+`lint-defect` is followed by reviewers `review-lint-defect-A`
+and `review-lint-defect-B`. Reviewer A votes Reject; reviewer B
+has not yet been activated. Without this invariant, the KSB only
+carries `reviewer_verdicts[A].approved=false` and no
+aggregator-terminal signal; the orchestrator NNSP under iter42
+fires `retry_subtask { lint-defect }` immediately. The kernel
+checks `subtask_activations.review_reject_count` — still 0
+because the aggregator has not fired — and rejects with
+`FAIL_INVALID_REQUEST` per
+`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. The orchestrator
+respawns on `SessionVmTerminated`, re-reads the same KSB
+(reviewer B still pending), fires the same retry, gets rejected
+again. Observed in the iter42 install: 45 `SessionVmSpawned`
+audit events in 18 min, zero `ReviewAggregationCompleted`, zero
+`ExecutorRespawnFromReviewRejection`, zero progress.
+
+With this invariant active, the KSB carries
+`dag[lint-defect].aggregate=Pending` while reviewer B has not
+voted; the orchestrator's NNSP rule 3a refuses to fire
+`retry_subtask`; rule 2 activates reviewer B; after reviewer B
+submits its verdict the projection re-runs at the next spawn
+and stamps `aggregate=AtLeastOneRejected`; the orchestrator
+fires `retry_subtask` exactly once; the kernel admits it (per
+`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`) and emits
+`ExecutorRespawnFromReviewRejection`; the
+`ReviewerSubstantiveDisagreementWitness`'s
+`saw_executor_respawn` flips true.
+
+**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
+contract) and `v2/v2-deep-spec.md §Step 25` (cross-Reviewer
+aggregator).
+
+**Renderer wire format.** The rendered `dag=` block places
+`aggregate=<value>` between `reviewers=N` and `sha=<hex|<none>>`
+on each Executor row; Reviewer rows omit the token entirely. The
+exact placement is pinned by
+`crates/ksb/src/lib.rs::tests::render_emits_aggregate_when_set`.
+
+**Pinned regression coverage.**
+- `kernel/src/initiatives/review_aggregation.rs::tests::wire_str_returns_stable_variant_names`
+  (wire-stable variant names).
+- `kernel/src/initiatives/review_aggregation.rs::tests::with_conn_variant_matches_store_variant_pending`
+  + `..._at_least_one_rejected` + `..._all_passed`
+  (`&Connection` shim parity with the store-borrowing variant).
+- `crates/ksb/src/lib.rs::tests::render_emits_aggregate_when_set`
+  + `render_omits_aggregate_when_unset`
+  + `render_rejects_close_delimiter_in_aggregate_verdict`
+  (wire-format invariants).
+- `kernel/src/initiatives/ksb_assembly.rs::tests::dag_row_aggregate_is_pending_when_only_one_of_two_reviewers_voted`
+  (iter42 regression — partial-reviewer projection state).
+- `kernel/src/initiatives/ksb_assembly.rs::tests::assemble_orchestrator_snapshot_populates_reviewer_verdicts_from_store`
+  (extended to assert `aggregate=AtLeastOneRejected` once both
+  Reviewers have voted, and `aggregate_verdict == ""` on
+  Reviewer rows).
+- `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
+  (end-to-end audit-chain witness — closes the loop).
 
 ---
 

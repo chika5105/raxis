@@ -1066,35 +1066,61 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               1. Look at the `dag=` block inside \
                                  `[RAXIS:KERNEL_STATE …]` (below). Each row \
                                  has the shape `<task_id> <state> reviewers=N \
-                                 sha=<40-hex|<none>> \"<title>\"`. The \
-                                 `sha=` field is the executor's commit SHA \
-                                 once the task completes; it is `<none>` \
-                                 while the task is pending / in-progress / \
-                                 failed-before-commit.\n\
+                                 [aggregate=<verdict>] sha=<40-hex|<none>> \
+                                 \"<title>\"`. The `sha=` field is the \
+                                 executor's commit SHA once the task \
+                                 completes; it is `<none>` while the task \
+                                 is pending / in-progress / \
+                                 failed-before-commit. The optional \
+                                 `aggregate=` field appears ONLY on \
+                                 Executor rows and carries the kernel's \
+                                 cross-Reviewer terminal verdict (one of \
+                                 `Pending`, `AllPassed`, \
+                                 `AtLeastOneRejected`, or `NoSuccessors`). \
+                                 Reviewer / Orchestrator rows omit it.\n\
                               2. Find the first task whose `state` is `pending` \
                                  AND whose plan-declared predecessors are all \
                                  `complete`. Call `activate_subtask { \
                                  subtask_task_id: \"<task_id>\" }` with that \
-                                 row's task id (verbatim — case-sensitive).\n\
+                                 row's task id (verbatim — case-sensitive). \
+                                 This includes reviewer tasks: an Executor \
+                                 row whose `aggregate=Pending` means at \
+                                 least one of its reviewer dependents is \
+                                 still `pending` — activate the missing \
+                                 reviewer(s) first, do NOT call \
+                                 `retry_subtask` while `aggregate=Pending`.\n\
                               3. If a row's `state` is `failed` and you judge \
                                  a retry is warranted, call `retry_subtask { \
                                  subtask_task_id: \"<task_id>\" }` instead.\n\
-                              3a. SCAN the `reviewer_verdicts=` block. If ANY \
-                                 reviewer row reads `approved=false` (the \
-                                 reviewer's `reviewer=<task_id>` field always \
-                                 names a reviewer task; that reviewer's \
-                                 declared `predecessor` in `plan.toml` is the \
-                                 executor task it reviewed), you MUST call \
+                              3a. SCAN the `dag=` block for Executor rows \
+                                 reading `aggregate=AtLeastOneRejected`. \
+                                 For each such row you MUST call \
                                  `retry_subtask { subtask_task_id: \
                                  \"<executor_task_id>\" }` on that executor — \
-                                 NOT `integration_merge`. The rejection \
-                                 critique inside the quotes after \
-                                 `approved=false` describes the defect; \
-                                 retrying spawns a fresh executor session \
-                                 with that critique surfaced via push so \
-                                 the executor can revise. ONLY proceed to \
-                                 `integration_merge` after the executor's \
-                                 reviewers all read `approved=true`. The \
+                                 NOT `integration_merge`. \
+                                 `aggregate=AtLeastOneRejected` is the \
+                                 kernel's TERMINAL cross-Reviewer verdict, \
+                                 meaning every sibling reviewer has voted \
+                                 AND at least one Rejected; the kernel \
+                                 has bumped the executor's \
+                                 `subtask_activations.review_reject_count` \
+                                 and a `retry_subtask` is now \
+                                 admission-eligible per \
+                                 `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. \
+                                 NEVER call `retry_subtask` while \
+                                 `aggregate=Pending`: at least one sibling \
+                                 reviewer still owes a verdict and the \
+                                 kernel will reject the retry with \
+                                 `FAIL_INVALID_REQUEST` (the aggregator \
+                                 hasn't fired so `review_reject_count` is \
+                                 still 0). Cross-reference the \
+                                 `reviewer_verdicts=` block (below) for \
+                                 the per-Reviewer critique text — that \
+                                 block is forensic (one row per submitted \
+                                 reviewer verdict, includes intermediate \
+                                 partial-rejection state); the \
+                                 `aggregate=` field on the Executor row is \
+                                 the wire-stable retry trigger. The \
                                  plan's `[plan.tasks.<exec>.review].\
                                  max_rounds` ceiling (defaults from \
                                  `[plan.defaults.review]`) caps the retry \
@@ -1104,9 +1130,10 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                  you fall through to escalation per \
                                  `agent-disagreement.md` §3.\n\
                               4. When EVERY executor row is `complete` AND \
-                                 every reviewer row is `complete` AND no \
-                                 `reviewer_verdicts=` row reads \
-                                 `approved=false`, call \
+                                 every reviewer row is `complete` AND every \
+                                 executor row reads `aggregate=AllPassed` \
+                                 (or `aggregate=NoSuccessors` for the rare \
+                                 review-less executor), call \
                                  `integration_merge { base_sha, head_sha }` \
                                  to fast-forward the initiative's \
                                  `target_ref`. Source the SHAs as follows:\n\
@@ -1573,15 +1600,25 @@ mod tests {
     }
 
     /// The orchestrator NNSP MUST tell the model to call
-    /// `retry_subtask` (NOT `integration_merge`) whenever any
-    /// `reviewer_verdicts=` row reads `approved=false`. Without
+    /// `retry_subtask` (NOT `integration_merge`) whenever an
+    /// Executor row reads `aggregate=AtLeastOneRejected`. Without
     /// this rule the model defaults to `integration_merge` once
     /// every executor row reads `complete` regardless of verdict,
     /// and reviewer-substantive disagreement loops never close.
     /// Backed by `agent-disagreement.md` §3 (`max_review_rounds`)
-    /// + the `ReviewerSubstantiveDisagreementWitness` chain
-    /// expectation in `kernel/tests/extended_e2e_support/
-    /// reviewer_substantive_disagreement.rs`.
+    /// + `agent-disagreement.md` §3.6 + the
+    /// `ReviewerSubstantiveDisagreementWitness` chain expectation
+    /// in `kernel/tests/extended_e2e_support/
+    /// reviewer_substantive_disagreement.rs`. Closes
+    /// `INV-PLANNER-ORCH-RETRY-ON-REJECT-01` and
+    /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` (the trigger
+    /// MUST pivot on the kernel's terminal aggregator verdict,
+    /// not on per-Reviewer rows that flip `approved=false` as
+    /// soon as the FIRST sibling votes Reject — that race
+    /// produced the `iter42` respawn loop where the orchestrator
+    /// fired `retry_subtask` before the aggregator had bumped
+    /// `review_reject_count`, and the kernel correctly rejected
+    /// every retry per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).
     #[test]
     fn render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule() {
         let args = BootArgs {
@@ -1589,15 +1626,53 @@ mod tests {
             task_id: None,
         };
         let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(prompt.contains("aggregate="),
+            "orchestrator NNSP MUST cite the `aggregate=` field by name");
+        assert!(prompt.contains("aggregate=AtLeastOneRejected"),
+            "orchestrator NNSP MUST direct the model on \
+             `aggregate=AtLeastOneRejected` rows");
+        assert!(prompt.contains("aggregate=Pending"),
+            "orchestrator NNSP MUST forbid retry while \
+             `aggregate=Pending` (sibling reviewer still owes a \
+             vote — premature retry race per iter42)");
+        assert!(prompt.contains("aggregate=AllPassed"),
+            "orchestrator NNSP MUST gate `integration_merge` on \
+             `aggregate=AllPassed` for every executor row");
         assert!(prompt.contains("reviewer_verdicts="),
-            "orchestrator NNSP MUST cite the `reviewer_verdicts=` block by name");
-        assert!(prompt.contains("approved=false"),
-            "orchestrator NNSP MUST instruct the model on `approved=false` rows");
+            "orchestrator NNSP SHOULD still cite the \
+             `reviewer_verdicts=` block as the forensic source \
+             for per-Reviewer critique text");
         assert!(prompt.contains("retry_subtask"),
-            "orchestrator NNSP MUST direct `retry_subtask` on review rejection");
+            "orchestrator NNSP MUST direct `retry_subtask` on \
+             aggregator-terminal rejection");
         assert!(prompt.contains("max_rounds")
                 || prompt.contains("MAX_REVIEW_ROUNDS"),
             "orchestrator NNSP MUST acknowledge the `max_rounds` ceiling");
+    }
+
+    /// Regression test for the `iter42` respawn loop: the
+    /// orchestrator NNSP MUST forbid `retry_subtask` while the
+    /// aggregator is `Pending`. The exact phrasing this pins is
+    /// "NEVER call `retry_subtask` while `aggregate=Pending`" so
+    /// a future reword cannot weaken the rule without bumping the
+    /// witness. Pairs with the
+    /// `ReviewerSubstantiveDisagreementWitness` end-to-end
+    /// check that `saw_executor_respawn = true` only AFTER both
+    /// reviewers have voted (i.e. the aggregator has fired).
+    #[test]
+    fn render_system_prompt_for_orchestrator_forbids_retry_while_aggregate_pending() {
+        let args = BootArgs {
+            initiative_id: "init-A".to_owned(),
+            task_id: None,
+        };
+        let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(
+            prompt.contains("NEVER call `retry_subtask` while \
+                            `aggregate=Pending`"),
+            "orchestrator NNSP MUST explicitly forbid \
+             `retry_subtask` while `aggregate=Pending` per \
+             iter42 regression; got prompt: {prompt}",
+        );
     }
 
     #[test]
