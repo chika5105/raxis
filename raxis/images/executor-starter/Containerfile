@@ -109,8 +109,24 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # rg + fd via cargo (pinned to their stable versions).
 RUN cargo install ripgrep fd-find
 
-# `raxis-planner-executor` is built host-side and copied in.
-COPY rootfs/raxis-planner-executor /usr/local/bin/raxis-planner-executor
-
-# `/init` is the planner; PID 1.
-RUN ln -s /usr/local/bin/raxis-planner-executor /sbin/init
+# Note: `raxis-planner-executor` (the role's PID-1 entry point) is
+# **NOT** copied in by this Containerfile. The planner binary is
+# overlaid onto the baked rootfs by `cargo xtask images dev-stage
+# --role executor-starter` after this image is exported. Keeping the
+# two concerns separate (this file = base OS tooling; dev-stage =
+# planner binary) lets the Containerfile bake be cached across many
+# planner-binary rebuilds and matches the V2 manifest-trust pipeline
+# (the manifest's `image_artefact_sha256` covers the merged
+# rootfs+planner tree, computed at `build-all` time).
+#
+# Build pipeline:
+#   1. cargo xtask images bake-rootfs  --role executor-starter
+#        → docker/podman/buildah build of THIS Containerfile;
+#          export filesystem to images/executor-starter/rootfs/.
+#   2. cargo xtask images dev-stage    --role executor-starter
+#        → cross-compile raxis-planner-executor; overlay at
+#          images/executor-starter/rootfs/usr/local/bin/raxis-executor;
+#          create /init symlink.
+#   3. cargo xtask images build-all    [--role executor-starter]
+#        → pack into signed cpio.gz initramfs at
+#          $RAXIS_INSTALL_DIR/images/raxis-executor-starter-<kver>.{img,manifest.toml}.
