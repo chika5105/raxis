@@ -31,6 +31,7 @@ members = [
     "crates/credential-proxy-manager",
     "crates/plan-credentials",
     "crates/tproxy-protocol",
+    "crates/vsock-loopback",
     "crates/egress-admission",
     "crates/gateway-substrate",
     "tproxy",
@@ -225,6 +226,7 @@ raxis-credentials       = { path = "crates/raxis-credentials" }
 raxis-credentials-file  = { path = "crates/raxis-credentials-file" }
 raxis-credential-proxy-cloud-shared = { path = "crates/credential-proxy-cloud-shared" }
 raxis-tproxy-protocol   = { path = "crates/tproxy-protocol" }
+raxis-vsock-loopback    = { path = "crates/vsock-loopback" }
 raxis-egress-admission  = { path = "crates/egress-admission" }
 raxis-tproxy            = { path = "tproxy" }
 raxis-gateway-substrate = { path = "crates/gateway-substrate" }

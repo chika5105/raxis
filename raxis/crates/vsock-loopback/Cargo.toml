@@ -1,0 +1,49 @@
+[package]
+name              = "raxis-vsock-loopback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+description = """
+Substrate-level VM↔host loopback bridge for credential proxies and the
+egress-admission listener. The kernel binds proxy listeners on host
+`127.0.0.1` (so credential material never crosses the VM boundary —
+INV-SECRET-02 / INV-VM-CAP-04); a per-session vsock fan-out forwards
+guest `127.0.0.1:<port>` traffic to those host loopback addresses,
+preserving the stock-URL contract the in-VM agent toolchain (libpq /
+pymongo / redis-py) depends on.
+
+This crate ships:
+  * The wire format types describing the per-session forwarding plan
+    (`LoopbackPlan` + `LoopbackEntry`) — pure data, no I/O, no
+    platform gating, used by both the host-side composer and the
+    in-guest forwarder.
+  * Round-trip-stable env encoding so the kernel can stamp a single
+    `RAXIS_VSOCK_LOOPBACK_PLAN` env var into the guest envelope and
+    the in-guest forwarder can recover the same plan.
+
+Substrate-specific bridge implementations live elsewhere:
+  * Linux AF_VSOCK guest-side forwarder lives in `raxis-tproxy`
+    (the in-VM binary that already ships in the executor rootfs).
+  * macOS host-side `VZVirtioSocketListener` registration lives in
+    `raxis-isolation-apple-vz`.
+
+Why a dedicated crate (and not folded into one of the substrates):
+the wire format is the contract between the host-side stamping path
+(`raxis-session-spawn`) and the in-guest consumer (`raxis-tproxy`).
+Both crates depend on this one for the typed shape; neither depends
+on the other.
+"""
+
+[lib]
+name = "raxis_vsock_loopback"
+path = "src/lib.rs"
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
