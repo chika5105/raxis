@@ -382,6 +382,106 @@ truncates the `notifications` SQLite table and removes
 `<data_dir>/audit/`; the command's smoke test asserts the
 audit-segment file is byte-identical before/after.
 
+## 2.7 Credentials view (`INV-DASHBOARD-CREDENTIAL-*`)
+
+The dashboard surfaces every credential the kernel knows about
+(per-initiative + system-wide) through dedicated read-only and
+admin-only reveal endpoints. The contract is **default-masked
++ explicit reveal + audit-paired + auto-hide**.
+
+### 2.7.1 Listing surfaces
+
+  * `GET /api/initiatives/:id/credentials` — `read` role.
+    Returns metadata only (name, proxy type, mount alias,
+    format hint, byte size, SHA-256 prefix, on-disk path,
+    `is_revealable`, `reveal_required_role`). NEVER returns
+    plaintext. Wire shape pinned by
+    `crates/dashboard/src/data.rs::CredentialMetadata`; no
+    `plaintext` / `bytes` field.
+  * `GET /api/system/credentials` — `admin` role.
+    Same metadata wire shape; covers
+    `<data_dir>/providers/*.toml` (Anthropic, OpenAI, etc.).
+    `read`-role tokens cannot enumerate these.
+
+Both listings audit at emission time:
+`OperatorListedCredentials` and
+`OperatorListedSystemCredentials`. The audit row carries the
+operator fingerprint and the row count (no plaintext).
+
+### 2.7.2 Reveal surfaces
+
+  * `POST /api/initiatives/:id/credentials/:name/reveal` —
+    `admin` role. Returns `CredentialReveal { name, plaintext,
+    encoding, byte_size, expires_at_unix, sha256_prefix }`.
+    `expires_at_unix` is set to `now + 30s`.
+  * `POST /api/system/credentials/:name/reveal` — `admin`
+    role. Same wire shape; `expires_at_unix` is set to
+    `now + 15s` (shorter window because the system creds are
+    higher-impact).
+
+Both reveal endpoints emit BEFORE returning the body — the
+Anthropic-key invariant (no plaintext without an audit row)
+is crash-safe only with this ordering. Per-initiative
+reveals carry `severity = "high"`; system reveals carry
+`severity = "critical"`.
+
+### 2.7.3 Rate limit
+
+The reveal endpoints are throttled to 5 reveals per operator
+per 60-second sliding window (configurable via the
+`reveal_rate_limit_per_window` and
+`reveal_rate_limit_window_secs` fields on
+`KernelDashboardData`; defaults pinned in
+`raxis-dashboard-kernel`). Throttled callers receive HTTP
+429 with `Retry-After-Secs`; the rejection itself audits
+under `outcome = "RejectedValidation"`.
+
+### 2.7.4 Defence-in-depth
+
+  * `CredentialReveal` carries a manual `Debug` impl that
+    REDACTS the `plaintext` field — accidental
+    `tracing::error!("{reveal:?}")` does not leak.
+  * The kernel-side `read_credential_bytes` helper goes
+    through `FileCredentialBackend::resolve`, which in turn
+    runs `validate_path_security` (chmod-0600 + uid check).
+    A tampered file fails the reveal closed with
+    `ApiError::Internal`; no plaintext is returned.
+  * The bytes are projected onto the wire shape inside a
+    `CredentialValue::with_bytes` closure, so the SecretBox-
+    wrapped backend value zeros its inner copy on drop.
+  * No `Display` impl on the credential structs — the only
+    sanctioned exfil path is the `Serialize` derive that
+    ships the bytes inside the audited reveal response.
+
+### 2.7.5 Frontend contract
+
+  * Each credential renders as a card with metadata + a
+    `Reveal plaintext` button. `read`-role operators see the
+    button disabled with tooltip `Requires admin role`.
+  * Admin operators see a confirmation modal naming the
+    credential and the audit class before any reveal call
+    fires.
+  * On reveal, the plaintext is rendered in a Monaco viewer
+    (read-only, monospace, copy button) inside the card.
+    A countdown timer above the plaintext block shows
+    seconds until auto-hide.
+  * `Hide now` button gives the operator a manual early-mask
+    affordance.
+  * No `localStorage` / `sessionStorage` persistence —
+    closing the tab discards the cached plaintext.
+
+### 2.7.6 Anthropic special handling
+
+`INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` — the
+Anthropic key is the highest-value secret in the system. The
+reveal modal carries an explicit warning naming the
+credential and the audit class; the audit emission is
+`severity = "critical"`; the auto-hide is 15 seconds; the
+event surfaces in the operator notifications inbox at
+`Critical` priority so a second operator catches it in real
+time. See `dashboard-operator-action-audit-coverage.md §6`
+for the full contract.
+
 ---
 
 ## 3. SSE reconnection contract (frontend-facing)

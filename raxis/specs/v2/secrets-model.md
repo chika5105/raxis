@@ -305,6 +305,57 @@ form the complete secrets model.
 
 ---
 
+## 5.1 — Dashboard reveal contract (`INV-DASHBOARD-CREDENTIAL-*`)
+
+The dashboard's credential-viewer surface is the only path
+through which an operator inspects credential plaintext from
+inside the dashboard. The contract here mirrors the on-disk
+backend contract from §2.2 + the agent-isolation contract from
+§2.3, with three additional dashboard-specific properties:
+
+  * **Default-masked.** The listing endpoints
+    (`/api/initiatives/:id/credentials`,
+    `/api/system/credentials`) return metadata only — never
+    plaintext. The wire shape pins this at compile time
+    (`CredentialMetadata` has no `plaintext` / `bytes`
+    field).
+  * **Explicit reveal.** Plaintext is returned only via
+    `POST .../reveal`, which requires the `admin` role,
+    rate-limits to 5 reveals per operator per 60 s, and emits
+    `OperatorRevealedCredential` (per-initiative, severity
+    `high`) or `OperatorRevealedSystemCredential` (system /
+    Anthropic, severity `critical`) BEFORE the response.
+  * **Auto-hide.** Every reveal response carries
+    `expires_at_unix`; the FE re-masks at the deadline (30 s
+    for per-initiative; 15 s for system). `Hide now` button
+    gives an immediate manual mask.
+
+The reveal endpoints inherit every property from §2.2:
+plaintext is resolved by `FileCredentialBackend` (chmod-0600
++ uid validation), wrapped in `secrecy::SecretBox`, and
+projected onto the wire shape inside a `with_bytes` closure
+so the SecretBox zeros its inner copy on drop.
+
+The Anthropic key gets the strictest variant of the contract
+(`INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`):
+admin-only role gate + critical-severity audit + 15 s
+auto-hide + Critical-priority notification fan-out so a
+second operator sees the reveal in real time.
+
+The dashboard reveal surface is not a side door around the
+agent-isolation contract from §2.3 — agents still cannot reach
+this endpoint (no JWT, no UDS access), and the audit chain
+provides the same forensic trace whether the reveal happened
+on the dashboard or via direct file inspection on the kernel
+host.
+
+Cross-reference:
+`specs/v2/dashboard-hardening.md §2.7`,
+`specs/v2/dashboard-operator-action-audit-coverage.md §6`,
+`guides/operator/20-dashboard-credential-reveal.md`.
+
+---
+
 ## 6. Related specs
 
 * `credential-proxy.md` — proxy types, restrictions, audit events,

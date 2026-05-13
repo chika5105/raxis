@@ -4100,6 +4100,193 @@ or purged" inline (410), not a generic 5xx toast.
 
 **Canonical home.** `v2/dashboard-hardening.md §plan-view`.
 
+### INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01 — Credential plaintext is hidden by default
+
+**Statement.** The dashboard MUST never display credential
+plaintext to the operator without an explicit, deliberate
+reveal action. The default state for every credential surface
+(per-initiative listing AND system-wide listing) is metadata-
+only: name, proxy type, mount alias, format hint, byte size,
+SHA-256 prefix, and on-disk file path. The wire shape of
+the listing endpoints (`GET /api/initiatives/:id/credentials`,
+`GET /api/system/credentials`) MUST NOT include a `plaintext`
+or `bytes` field — adding one in a future refactor is a
+compile-time-detectable invariant violation
+(`raxis_dashboard::data::CredentialMetadata` has no plaintext
+field, and the `_credential_metadata_compiles` reference in
+`routes/credentials.rs` pins the wire-shape).
+
+**Justification.** The password-reveal pattern is the
+universally-understood operator affordance for "this is a
+secret; click to see it". Default-revealed plaintext makes
+shoulder-surfing trivial and makes the audit chain useless
+(every page mount would emit a "credential viewed" event).
+The split into a separate, role-gated, rate-limited reveal
+endpoint keeps the surface-area minimum and makes every
+plaintext exposure forensically traceable.
+
+**Canonical home.** `v2/secrets-model.md §dashboard-reveal`.
+
+### INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01 — Reveal emits audit BEFORE response
+
+**Statement.** Every successful credential reveal endpoint
+(`POST /api/initiatives/:id/credentials/:name/reveal`,
+`POST /api/system/credentials/:name/reveal`) MUST emit a
+paired audit event (`OperatorRevealedCredential` /
+`OperatorRevealedSystemCredential`) BEFORE the plaintext bytes
+leave the kernel — not after, not concurrently. A failed audit
+emit on the success path MUST surface as `InternalError` to
+the operator; the kernel MUST NOT return plaintext for which
+no audit row exists.
+
+Failure paths (auth-rejected, rate-limited, NotFound, internal-
+error) MUST also emit, with the rejection class on the
+`outcome` field. The audit row carries `severity = "high"` for
+per-initiative reveals and `severity = "critical"` for
+system-wide reveals (see
+`INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`).
+
+**Justification.** The reveal endpoint is the only sanctioned
+plaintext-exfil surface in the dashboard. Without paired
+auditing, an operator could read a credential and the kernel
+would have no record. With audit-after-response, a kernel
+crash between the response write and the audit append leaves
+the same gap. Audit-before-response is the only ordering that
+makes the "no plaintext without an audit row" property
+crash-safe.
+
+**Canonical home.** `v2/audit-paired-writes.md §credential-reveal`.
+
+### INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01 — Reveal endpoints require admin role
+
+**Statement.** The credential reveal endpoints MUST require
+the `admin` role on the dashboard JWT. `read` and
+`write_policy` tokens get HTTP 403 (NOT 401); the rejection
+audits with `outcome = "RejectedPermission"` so a forensic
+walk records the attempted access.
+
+The system-credential listing endpoint
+(`GET /api/system/credentials`) ALSO requires `admin` —
+`read`-role operators cannot even discover the names of
+provider-bound credentials.
+
+**Justification.** Credentials are the highest-value secrets
+in the system: a leaked Postgres URL is a database breach; a
+leaked Anthropic key is a billing event AND a prompt-injection
+vector. The `read` role is intended for the everyday operator
+surface (lifecycle, sessions, audit chain); `admin` is the
+break-glass tier reserved for credential rotation, policy
+edits, and forensic recovery. Pinning reveal to `admin`
+matches the existing `RotateEpoch`/`write_policy` boundary
+and prevents accidental exposure on a workstation logged in
+with the `read`-role token.
+
+**Canonical home.** `v2/dashboard-hardening.md §credentials-view`.
+
+### INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01 — Revealed plaintext auto-hides on a deadline
+
+**Statement.** Every successful credential reveal response
+carries an `expires_at_unix` field set to `now + 30s` for
+per-initiative credentials and `now + 15s` for system-wide
+credentials (Anthropic, other provider keys). The dashboard
+frontend MUST honour the deadline by re-masking the plaintext
+view at `expires_at_unix`, regardless of operator activity.
+The "Hide now" button gives the operator a manual early-mask
+affordance; closing the page tab also discards the cached
+plaintext (no `localStorage` / `sessionStorage` persistence).
+
+**Justification.** Operators leave dashboards open. A revealed
+credential that stays on screen indefinitely is functionally
+indistinguishable from default-revealed plaintext. The
+auto-hide deadline turns "I needed to see this for 5 seconds"
+back into "I needed to see this for 5 seconds" rather than
+"I left this open all afternoon". The shorter 15s window for
+system credentials matches their higher impact: the Anthropic
+key revealed for 15s is enough to copy/paste into a kubectl
+secret rotation, but not enough to act as a persistent
+shoulder-surf surface.
+
+**Canonical home.** `v2/dashboard-hardening.md §credentials-view`.
+
+### INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01 — Every dashboard endpoint that exposes operator-private data audits
+
+**Statement.** Every dashboard HTTP endpoint that mutates
+state OR exposes operator-private data MUST emit exactly one
+structured `Operator*` audit event before returning the
+response. The set of endpoints, their required emissions, and
+the exclusion criteria for non-audited endpoints are
+enumerated in `v2/dashboard-operator-action-audit-coverage.md`.
+
+**Exclusions** (UNAUDITED, by spec, with rationale):
+
+  * Pre-auth endpoints (`GET /api/auth/challenge`) — no
+    operator identity exists yet; the auth flow's own
+    `OperatorAuthSucceeded` / `OperatorAuthFailed` events
+    cover the boundary.
+  * Polled badge counters (`GET /api/notifications/unread-count`)
+    — the dashboard sidebar polls this every 5s; one audit
+    row per poll per operator would multiply the chain growth
+    rate by an order of magnitude. The list endpoint
+    (`GET /api/notifications`) IS audited.
+  * SSE keepalive frames — the SSE attach itself audits via
+    `OperatorOpenedSessionStream`; the per-15s keepalive
+    bytes do not.
+  * Healthcheck endpoint (`GET /api/health`) — already covered
+    by `OperatorHealthQueried`.
+  * Pure UI state (theme toggle, filter URL params, sidebar
+    collapse) — client-side only, never reaches the kernel.
+
+**Justification.** Operator-action audit is the forensic
+surface that lets a security review reconstruct who saw what
+and when. A read-only `GET` that exposes session prompts,
+audit-chain rows, or credential metadata is just as
+forensically interesting as a mutating `POST`; without
+coverage, the chain records the agent's behaviour with high
+fidelity and the operator's behaviour with massive blind
+spots.
+
+The exclusion list is closed and minimal: every endpoint
+NOT on the exclusion list MUST audit. Adding a new endpoint
+requires either an audit emission or an explicit exclusion
+entry in the gap-coverage spec.
+
+**Canonical home.** `v2/dashboard-operator-action-audit-coverage.md`.
+
+### INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01 — Anthropic reveals are Critical-severity + notify
+
+**Statement.** Every reveal of an Anthropic-bound provider
+credential (`providers.anthropic*`) MUST:
+
+  1. Require the `admin` role (no `read` access at all).
+  2. Surface a confirmation modal in the FE with an explicit
+     warning naming the credential and the audit class.
+  3. Emit `OperatorRevealedSystemCredential { severity =
+     "critical" }` (NOT `"high"`).
+  4. Auto-hide on a 15-second deadline (NOT the 30-second
+     default for per-initiative credentials).
+  5. Surface in the operator notifications inbox at `Critical`
+     priority — defence-in-depth so a second operator sees
+     that a reveal happened even if they were not in front of
+     the dashboard at the time.
+
+The Anthropic key MUST NEVER appear in any non-admin
+endpoint, log line, error envelope, or response body. The
+`CredentialReveal` struct's `Debug` impl redacts the
+`plaintext` field so an accidental
+`tracing::error!("{reveal:?}")` cannot leak the bytes.
+
+**Justification.** The Anthropic API key is the highest-value
+secret in the system: it gates the planner / reviewer model
+substrate, controls billing exposure, and (if leaked) is the
+single point of failure for prompt-injection across every
+session. Treating it identically to a per-initiative database
+URL would leave it under-protected. The Critical severity +
+inbox notification chain ensures every reveal is BOTH
+audited AND surfaced to the wider operator team in real time
+— accidental reveals get caught within minutes, not weeks.
+
+**Canonical home.** `v2/dashboard-operator-action-audit-coverage.md §anthropic`.
+
 ---
 
 ## §11.10 — Live-e2e test harness (INV-LIVE-E2E-*)

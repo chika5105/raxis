@@ -1815,6 +1815,70 @@ Changes to this spec affect the audit chain contract — the most R-7-bearing su
 
 This spec is the canonical source for the V2.1 paired-write protocol. When V2.2 lands the periodic checkpoint, that spec will reference §11.3 and `INV-AUDIT-PAIRED-05` as the floor it builds on.
 
+---
+
+## §18 — Credential reveal endpoints (`INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`)
+
+The dashboard's credential reveal endpoints
+(`POST /api/initiatives/:id/credentials/:name/reveal`,
+`POST /api/system/credentials/:name/reveal`) participate in
+this spec's contract through a NARROW, DASHBOARD-SCOPED variant
+of the paired-write rule:
+
+  * The reveal endpoints DO NOT mutate kernel state — they read
+    bytes from the on-disk credential backend and return them.
+    They are NOT paired-class events under §4.1 (no SQLite
+    write to pair against).
+  * They DO emit a single audit row per request via the
+    audit sink, regardless of branch.
+  * The audit emit MUST happen BEFORE the plaintext bytes leave
+    the kernel — the response writer MUST observe the audit-
+    sink return before flushing the JSON envelope.
+
+The ordering constraint is what makes the "no plaintext without
+an audit row" property crash-safe. With audit-after-response, a
+kernel crash between the response write and the audit append
+leaves the operator with bytes the chain doesn't record. With
+audit-before-response, the worst case is a successful audit row
++ a failed response (the operator doesn't see the bytes; the
+audit row is harmless because it carries no plaintext).
+
+The handler implementation in
+`crates/dashboard/src/routes/credentials.rs` follows this
+ordering on every branch:
+
+  1. Role gate (admin) — failure audits with
+     `RejectedPermission` and returns 403.
+  2. Rate limit — failure audits with `RejectedValidation`
+     and returns 429.
+  3. `reveal_*_credential` data-layer call — failure audits
+     with `RejectedValidation` (NotFound) or `InternalError`
+     (sink/store failure) and returns the corresponding HTTP
+     code.
+  4. Success path — emit
+     `OperatorRevealedCredential { outcome = "Accepted" }` (or
+     `OperatorRevealedSystemCredential { outcome = "Accepted",
+     severity = "critical" }`); a sink-emit failure here
+     converts the response to `InternalError` rather than
+     leaking the bytes silently.
+
+Severity column on the row:
+  * `OperatorRevealedCredential` — `severity = "high"`
+    (per-initiative reveals).
+  * `OperatorRevealedSystemCredential` — `severity =
+    "critical"` (Anthropic, OpenAI, other provider keys).
+
+The severity field flows through `notification_priority`
+(canonical home: `dashboard-kernel/src/notification_filter.rs`)
+and routes the row to the operator notifications inbox at the
+matching priority level — defence-in-depth so a reveal does
+not happen silently when a second operator could catch it.
+
+Cross-reference: `specs/v2/dashboard-hardening.md §2.7`,
+`specs/v2/dashboard-operator-action-audit-coverage.md`,
+`specs/v2/secrets-model.md §5.1`.
+
+
 
 
 
