@@ -2711,17 +2711,39 @@ automatically runs the three-step pipeline before proceeding. This
 removes the manual `cargo xtask images …` step from the live-e2e
 contributor workflow.
 
-**Per-role required-binary cpio-walk preflight (`680ea62`).** The
-live-e2e support code (`kernel/tests/extended_e2e_support/
-cpio_inspect.rs`) walks the resulting cpio.gz archive entries before
-the kernel mounts the image and asserts the same `required_os_binaries`
-list `dev-stage`'s fail-fast guard enforces. The preflight runs every
+**Per-role required-binary cpio-walk preflight (`680ea62` +
+`da6e8de`).** The live-e2e support code
+(`kernel/tests/extended_e2e_support/cpio_inspect.rs` +
+`kernel_driver::required_binaries_for_canonical_role`) walks the
+resulting cpio.gz archive entries before the kernel mounts the image
+and asserts a per-role required-binary list. The preflight runs every
 time a live-e2e test calls `require_canonical_images`, so a stub
 rootfs that slipped past the dev-stage guard (e.g., via
 `--allow-stub`) is caught at test-harness layer rather than at
 ENOENT-storm time inside the booted VM. Mismatches surface a
 deterministic remediation hint pointing the developer at
 `cargo xtask images bake-rootfs --role <ROLE>`.
+
+**Path-shape divergence between the two preflights (see L-3 in
+`known-latent-issues.md`).** The dev-stage guard runs against the
+staging tree on the host filesystem and uses `Path::exists()`, which
+follows symlinks; on a `usrmerge` tree (`bin -> usr/bin`) the staging
+guard's `bin/bash` lookup resolves through the symlink. The cpio
+walker is a literal `BTreeMap` lookup over the entry table the
+initramfs producer emits, and the producer
+(`raxis-initramfs-builder`) walks
+`walkdir::WalkDir::follow_links(false)` to preserve symlink
+semantics — the cpio archive encodes the usrmerge `bin` directory as
+ONE `S_IFLNK` entry and never emits `bin/<file>` entries. The cpio
+preflight therefore uses the **canonical post-usrmerge paths**
+(`usr/bin/bash`, `usr/bin/python3`, `usr/bin/git`,
+`usr/local/bin/raxis-executor`) where the dev-stage guard uses the
+short staging-tree paths (`bin/bash`, `usr/bin/python3`,
+`usr/bin/git`). The intentional divergence is recorded inline in
+both call sites; unifying them by teaching the cpio walker to chase
+`S_IFLNK` entries is deferred to the final-cleanup-sweep when a
+non-usrmerge base image (e.g. an Alpine reviewer-core variant) makes
+the divergence non-hypothetical.
 
 **Why the dev-stage guard and the cpio-walk preflight are both
 load-bearing.** The dev-stage guard runs against the **staging tree**
