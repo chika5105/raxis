@@ -465,17 +465,141 @@ the same reason. Run 3 priority.
   `http://test-fixture-not-a-real-dashboard.invalid/login`
   (RFC 2606 reserved TLD; unmistakable on first read).
 
-### Run 3 — pending
+### Run 3 — `extended_e2e_realistic_scenario` against fix-loop tip
+`91c26b7 fix(planner-core,kernel,e2e): retry-shell + gateway-watchdog + parallel orchestrator respawn`
 
-Waiting for the fix-loop worker to rebase onto `813b912` and
-re-run the realistic scenario. Run 3 will:
-1. Auto-attach via the kernel-printed `[realism-e2e] dashboard
-   autologin URL: …` line (no manual JWT mint).
-2. Complete the tour items Run 2 didn't reach (Health, Inbox,
-   Notifications, Escalations, Git list, Worktree Detail with
-   the seeded `rich-multilang-001` repo, Policy).
-3. Drive the DAG view + at least one SessionStream into `live`
-   while watching the audit-tone badges from `e66073e` light
-   up under load.
-4. Theme-toggle mid-stream + re-screenshot for theme-flip
-   regression detection.
+Tour driver: `cursor-ide-browser` MCP against the local Vite dev
+server at `127.0.0.1:5173` (proxying to the kernel-bound dashboard
+at `127.0.0.1:19820`). **Autologin worked end-to-end zero-touch
+for the first time on the realistic harness:** the fix-loop's
+rebase onto `813b912` activated `common::dashboard` and the
+realistic test now prints (verbatim, copy-pasted from
+`/tmp/raxis-e2e-realistic.log`):
+
+```
+[realism-e2e] kernel daemon up, accepting operator IPC
+[realism-e2e] dashboard manual-fallback (paste into /login if autologin fails):
+[realism-e2e]   1. CLI command   : raxis auth sign 11d9cfb3c472bc6c2f2cd19056a43f00bee60d59eddaba3ee07e90cc96c25dd3
+[realism-e2e]   2. Signature hex : 9ea6bfcdb0d4cc1afe31c83ce8f5b1c96f264ea22cb29fbc771996e0af94142a33954cfb37b1f01d1a87e3fec438be1eb37f831f5e775e06ed4aad6a6a9f0d07
+[realism-e2e]   3. Public key hex: e72c28fe718e3a30afc47438da779d508d2dad5a265fafeb4f377e1d57fb098c
+[realism-e2e] dashboard ready: http://127.0.0.1:19820/  (autologin URL printed below for manual fallback)
+[realism-e2e] dashboard autologin URL: http://127.0.0.1:19820/login#autologin=1&token=eyJ…&operator_id=…&display_name=realism-e2e-operator&roles=read&expires_at=1778639385&next=%2F
+[realism-e2e] dashboard opened in default browser as operator 'realism-e2e-operator' (roles=["read"])
+```
+
+This is exactly the contract the lifecycle test has: kernel-up
+→ manual-fallback `raxis auth sign` block → ready URL → autologin
+URL → best-effort `open(1)`. The `[realism-e2e] dashboard
+opened in default browser …` line is the proof that the
+`spawn_url_opener()` helper from `common/dashboard.rs` shelled
+out to `/usr/bin/open` cleanly. No port mismatch, no manual JWT
+mint, no apologetic comment — exactly what `813b912` shipped.
+
+Snapshot of kernel state at tour time (via Overview KPIs + REST):
+- Kernel `ok` (Booted ~47s ago at first attach, no panic during the
+  ~5-min tour).
+- Policy epoch #1 (active bundle, signed-by `realism-e2e-operator`).
+- 2 active `Executing` initiatives (same `019e1ef4-…ce68` primary
+  + `…bfc2` sibling shape as Run 2; full 10-task DAG admitted).
+- 4 active sessions (3× planner, 1× executor for
+  `allowlist-positive-codegen`).
+- 47 unread notifications, 0 pending escalations.
+- Audit chain: 50 events streamed live (#1 KernelStarted →
+  #50 DatabaseQueryCompleted) with `auditBadgeClasses` toning
+  applied (KernelStarted/Initiative/PlanApproved/Session…/
+  CredentialProxyStarted = `info`; CredentialAccessed and
+  CredentialProxyUpstreamConnected = `info`/`ok` family;
+  no `bad`/`warn` events fired — every task admitted clean).
+
+Per-view results (BOTH dark + light verified; theme persistence
+across navigation verified; **all previously-unreached items
+from Run 2 now PASS**):
+
+- Overview / `/`              PASS (KPI tiles, "Recent
+  initiatives" with deep-linkable rows, "Recent sessions"
+  with `materialize-records` + `sibling-materialize-records`
+  task breadcrumbs, "Recent activity" stream live with
+  toned badges; auto-refresh smoke-tested ≈ 30 s, no
+  console errors)
+- Health / `/health`          PASS (heading + "Subsystem
+  checks" rendered; 5 s auto-refresh fired without error)
+- Inbox / `/inbox`            PASS (renders empty since
+  the only operator-action gates in this run are the two
+  `PlanApproved` events that auto-cleared)
+- Notifications / `/notifications` PASS (47-row list under
+  "Unread only", per-row "Mark read" + global "Mark all
+  read" CTAs present, links to source events resolve)
+- Initiatives / `/initiatives`            PASS (both
+  initiatives listed; state filter dropdown +
+  search box rendered; row click → detail)
+- Initiative Detail / `/initiatives/019e1ef4-…ce68`
+  PASS (header, "Full DAG view →", DAG with all 10 tasks
+  in `Admitted`, Tasks table mirrored DAG, Task detail
+  aside showed correct empty-state copy)
+- Initiative DAG / `/initiatives/019e1ef4-…ce68/dag` PASS
+  (full-screen DAG; same 10-task admitted layout as the
+  inline DAG; breadcrumb truncates the UUID to `…ce68`)
+- Sessions / `/sessions`                  PASS (4 rows
+  with abbreviated UUIDs; role filter dropdown
+  `All / Orchestrator / Executor / Reviewer` rendered)
+- Session Detail / `/sessions/6ec1a5a8-…`  PASS (header
+  shows role `Planner`; `Copy to clipboard` CTA on the
+  session id; `Planner:6ec1a5a8-70d ↗` worktree link;
+  `Clear` + `Reconnect` SessionStream controls)
+- Escalations / `/escalations`            PASS ("No
+  pending escalations. Operator inbox is clear." empty
+  state; copy is correct)
+- Git Worktrees / `/git`                  PASS (4 planner
+  worktrees: `Planner:6ec1a5a8-70d` … `78e13bcd-51a`;
+  parent `worktrees` row links to the registered roots
+  view)
+- Audit Chain / `/audit`                  PASS (50 rows
+  collapsible/expandable; #1 KernelStarted expanded to
+  reveal the JSON payload `{"data_dir":…,"kind":
+  "KernelStarted","poli…}` with full event UUID +
+  absolute timestamp; "Load more" CTA at bottom; **the
+  500-flake from Run 2 did NOT recur** — kernel was
+  alive throughout)
+- Policy / `/policy`                      PASS (read-only
+  snapshot mode since `roles=["read"]`; Monaco editor
+  not shown — expected per RBAC)
+
+Console messages during the tour: clean. Standard Vite HMR
+chatter only.
+
+Theme tour: light → dark → re-attached audit page in dark
+(legible badge tones, no contrast collapse). Toggle button
+correctly flipped between "Switch to dark mode" and
+"Switch to light mode".
+
+#### Issue surfaced
+
+- **R3-1** Notifications page renders every row's body as
+  `(no summary)`. The notification-routing code is correctly
+  picking up event kinds + initiative ids + relative
+  timestamps, but the summary slot the UI renders is empty
+  for every event in this run. This is plausibly a
+  notification-policy-side gap (the event kinds the
+  realistic harness fires — `MongoCommandExecuted`,
+  `CredentialAccessed`, `CredentialProxyUpstreamConnected`,
+  `DatabaseQueryCompleted` — may not have human-summary
+  templates wired in `policy/notifications.toml` or its
+  Rust renderer counterpart). **Severity: low** (UX gap,
+  not a regression — the underlying data is intact and the
+  "Mark read" + filtering controls all work). Will revisit
+  once the green-test run is in to confirm whether this is
+  policy-template breadth vs a dashboard-side rendering bug.
+- **R3-2** Theme persistence across browser sessions: the
+  Run 2 tour ended in dark mode, but Run 3 attached in
+  light mode. This is consistent with the dashboard storing
+  the theme in `localStorage` and the new browser-context
+  starting fresh. Not a bug — documenting so future runs
+  don't flag it.
+
+#### Done before final report
+
+- Wait for fix-loop to push a `working e2e:` or `stable e2e`
+  commit to `main` → re-run the tour against the green
+  realistic scenario, confirm R3-1 (`(no summary)`) status,
+  refresh the visual screenshots, push to `main`, report
+  DONE.
