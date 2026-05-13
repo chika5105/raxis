@@ -72,6 +72,34 @@ returned `Ok(())`. There is no compile-time enforcement of this
 rule — the kernel review process treats any `audit.emit(..)` inside
 an open transaction as a P0 spec violation.
 
+**Coverage invariant (kernel-store.md §2.5.2).** Every successful
+intent admission — whether it commits via the generic Phase-C
+admission path (`handlers/intent.rs::run_phase_c` for
+`SingleCommit` / `IntegrationMerge`) **or** an early-dispatch
+handler (`handle_complete_task` for `CompleteTask`,
+`handle_submit_review` for `SubmitReview`, `handle_report_failure`
+for `ReportFailure`, `handle_activate_sub_task` for
+`ActivateSubTask`, `handle_retry_sub_task` for `RetrySubTask`,
+`handle_structured_output` for `StructuredOutput`) — MUST be
+followed by exactly one
+`audit_sink.emit(AuditEventKind::IntentAccepted { … })` post-commit.
+The audit-chain `IntentAccepted` row is the canonical signal every
+chain-side witness reads (`PathAllowlistPositiveWitness` matches
+`IntentAccepted { head_sha: Some(_), .. }` for the executor task;
+`ReviewerSubstantiveDisagreementWitness` matches `IntentAccepted {
+intent_kind: "SubmitReview", task_id: <reviewer_*> }` for each
+reviewer; `MultiInitiativeIsolationWitness` partitions the chain
+fan-out by `initiative_id`). Pre-fix the kernel emitted only an
+`eprintln!` log line and the audit chain carried zero
+`IntentAccepted` rows — the realistic-scenario fix-loop iter40
+reproduction (`/tmp/raxis-e2e-realistic-iter40.log`) showed every
+sub-task completing on first executor spawn, every chain-fanout
+witness then collapsing to a false negative because the chain had
+no `IntentAccepted` row to attribute. A failed `audit.emit` here is
+best-effort per `kernel-store.md §2.5.2` (logged on stderr; the
+boot-time reconciler closes any gap from the durable
+`task_intent_ranges` row the Phase-C tx persists).
+
 ---
 
 ## Step 2: Event kinds (selection)

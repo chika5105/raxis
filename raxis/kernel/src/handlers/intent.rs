@@ -1259,6 +1259,54 @@ fn run_phase_c(
         pending_gates.len()
     );
 
+    // V1 §2.5.2 + INV-AUDIT-PAIRED-01 + raxis-concepts/06-audit-chain.md §1
+    // — `IntentAccepted` audit-chain emission. Paired-write contract:
+    // every successful Phase-C intent commit (the `tx.commit()` above)
+    // MUST be followed by exactly one
+    // `audit_sink.emit(AuditEventKind::IntentAccepted { … })` so the
+    // audit chain carries a typed record per accepted intent. Without
+    // this emit, every witness that reads
+    // `AuditEventKind::IntentAccepted { intent_kind, head_sha, … }` from
+    // the chain (`PathAllowlistPositiveWitness`,
+    // `ReviewerSubstantiveDisagreementWitness`,
+    // `ReviewerSubstantiveDirectiveWitness`,
+    // `MultiInitiativeIsolationWitness` chain-fanout shape, …) collapses
+    // to a false negative — the realistic-scenario lifecycle was
+    // observed in iter40 to complete every sub-task and emit
+    // `IntegrationMergeCompleted` for both initiatives, then the
+    // `ReviewerSubstantiveDisagreementWitness` panicked with all four
+    // chain predicates `false` because the audit chain had zero
+    // `IntentAccepted` events. Best-effort post-commit per
+    // `kernel-store.md §2.5.2`: a failed audit emit is logged on stderr
+    // (the boot-time reconciler, INV-INIT-09, closes any gap on next
+    // boot from the `task_intent_ranges` row the tx persisted at
+    // Step 12A).
+    let remaining_units = lane_budget_snapshot(
+        &pre_state.task.lane_id, policy, store,
+    ).admission_units;
+    let initiative_id_for_audit = pre_state.task.initiative_id.clone();
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::IntentAccepted {
+            task_id:         task_id_owned.clone(),
+            session_id:      session_id_str.clone(),
+            intent_kind:     intent_kind.as_str().to_owned(),
+            base_sha:        Some(pre_state.base_sha_raw.clone()),
+            head_sha:        Some(pre_state.head_sha_raw.clone()),
+            sequence_number: seq,
+            remaining_units,
+        },
+        Some(session_id_str.as_str()),
+        Some(task_id_owned.as_str()),
+        Some(initiative_id_for_audit.as_str()),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+             \"audit_event\":\"IntentAccepted\",\"task_id\":\"{}\",\
+             \"reason\":\"{e}\"}}",
+            task_id_owned,
+        );
+    }
+
     // V2 Step 30 + integration-merge.md §7: emit a typed
     // `IntegrationMergeCompleted` audit record carrying the Step 30
     // attribution fields. Best-effort post-commit per
@@ -1801,7 +1849,7 @@ fn handle_report_failure(
 fn handle_complete_task(
     req:        IntentRequest,
     task_state: TaskState,
-    _session_id: &SessionId,
+    session_id: &SessionId,
     seq:        u64,
     store:      &Store,
     policy:     &raxis_policy::PolicyBundle,
@@ -2204,6 +2252,42 @@ fn handle_complete_task(
     );
 
     let remaining = lane_budget_snapshot(&task.lane_id, policy, store);
+
+    // V1 §2.5.2 + INV-AUDIT-PAIRED-01 + raxis-concepts/06-audit-chain.md §1
+    // — emit `IntentAccepted{intent_kind:"CompleteTask", head_sha:Some(_)}`
+    // post-commit so chain-side witnesses can attribute the task
+    // completion. `PathAllowlistPositiveWitness` reads
+    // `IntentAccepted { task_id == self.task_id, head_sha: Some(_) }`
+    // — without this emit, the realistic-scenario witness for
+    // `allowlist-positive-codegen` (and every other path-allowlist
+    // witness in the realistic + extended scenarios) collapses to a
+    // false negative because the chain has no admission row to
+    // attribute the on-disk worktree write to. Best-effort post-commit
+    // per `kernel-store.md §2.5.2`. The lane-budget snapshot reuses
+    // the value already computed above for the wire response.
+    let head_sha_audit = req.head_sha.as_ref().map(|s| s.as_str().to_owned());
+    let base_sha_audit = req.base_sha.as_ref().map(|s| s.as_str().to_owned());
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::IntentAccepted {
+            task_id:         req.task_id.as_str().to_owned(),
+            session_id:      session_id.as_str().to_owned(),
+            intent_kind:     "CompleteTask".to_owned(),
+            base_sha:        base_sha_audit,
+            head_sha:        head_sha_audit,
+            sequence_number: seq,
+            remaining_units: remaining.admission_units,
+        },
+        Some(session_id.as_str()),
+        Some(req.task_id.as_str()),
+        Some(task.initiative_id.as_str()),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+             \"audit_event\":\"IntentAccepted\",\"intent_kind\":\"CompleteTask\",\
+             \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
+            req.task_id.as_str(),
+        );
+    }
 
     Ok(IntentResponse {
         sequence_number: seq,
@@ -2727,6 +2811,66 @@ fn handle_submit_review(
         reviewer_task_id,
         approved,
     );
+
+    // V1 §2.5.2 + INV-AUDIT-PAIRED-01 + raxis-concepts/06-audit-chain.md §1
+    // — emit `IntentAccepted` to the audit chain so the
+    // `ReviewerSubstantiveDisagreementWitness` /
+    // `ReviewerSubstantiveDirectiveWitness` chain-side predicates
+    // can attribute this SubmitReview commit to the audit chain
+    // (they read `AuditEventKind::IntentAccepted { intent_kind ==
+    // "SubmitReview", task_id == reviewer_*_task_id, .. }`). Pre-fix
+    // the kernel emitted only the `eprintln!` log line above, leaving
+    // the audit chain with zero `IntentAccepted` rows — every
+    // reviewer-substantive witness collapsed to `saw_reviewer_a:
+    // false, saw_reviewer_b: false` (iter40 reproduction). Reviewer
+    // intents carry no commit deltas: `base_sha` / `head_sha` are
+    // `None` and `remaining_units` reflects the lane snapshot at
+    // post-commit time (Reviewer tasks are zero-cost on the lane,
+    // so the snapshot is the lane's full `max_cost_per_epoch`).
+    // Best-effort post-commit per kernel-store.md §2.5.2: a failed
+    // emit logs to stderr; the boot-time reconciler closes any gap.
+    let lane_id_for_audit = {
+        let conn_for_lane = store.lock_sync();
+        conn_for_lane
+            .query_row(
+                "SELECT lane_id FROM tasks WHERE task_id = ?1",
+                rusqlite::params![req.task_id.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default()
+    };
+    let remaining_units_audit =
+        lane_budget_snapshot(&lane_id_for_audit, policy, store).admission_units;
+    let initiative_id_audit = {
+        let conn_for_init = store.lock_sync();
+        conn_for_init
+            .query_row(
+                "SELECT initiative_id FROM tasks WHERE task_id = ?1",
+                rusqlite::params![req.task_id.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+    };
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::IntentAccepted {
+            task_id:         req.task_id.as_str().to_owned(),
+            session_id:      session_id.as_str().to_owned(),
+            intent_kind:     "SubmitReview".to_owned(),
+            base_sha:        None,
+            head_sha:        None,
+            sequence_number: seq,
+            remaining_units: remaining_units_audit,
+        },
+        Some(session_id.as_str()),
+        Some(req.task_id.as_str()),
+        initiative_id_audit.as_deref(),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+             \"audit_event\":\"IntentAccepted\",\"intent_kind\":\"SubmitReview\",\
+             \"reviewer_task_id\":\"{reviewer_task_id}\",\"reason\":\"{e}\"}}",
+        );
+    }
 
     // ── 6. Step 25 cross-Reviewer aggregation (V2 gap §12.2) ──────────────
     //
