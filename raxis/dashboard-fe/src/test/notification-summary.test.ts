@@ -150,7 +150,20 @@ describe("summarizeNotificationPayload", () => {
       task_id: "materialize-records",
     });
     expect(summary).toBe(
-      "Session 3258b2d3 VM spawned for materialize-records (backend=apple-vz-14.x, egress=Tier1Tproxy, 2 cred proxyies)",
+      "Session 3258b2d3 VM spawned for materialize-records (backend=apple-vz-14.x, egress=Tier1Tproxy, 2 cred proxies)",
+    );
+  });
+
+  it("pluralises cred proxy correctly when count=1", () => {
+    const summary = summarizeNotificationPayload("SessionVmSpawned", {
+      backend_id: "apple-vz-14.x",
+      credential_proxies: 1,
+      egress_tier: "Tier1Tproxy",
+      session_id: "3258b2d3-629d-4706-81cf-ac424df163b1",
+      task_id: "materialize-records",
+    });
+    expect(summary).toBe(
+      "Session 3258b2d3 VM spawned for materialize-records (backend=apple-vz-14.x, egress=Tier1Tproxy, 1 cred proxy)",
     );
   });
 

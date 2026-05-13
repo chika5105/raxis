@@ -145,7 +145,7 @@ export function summarizeNotificationPayload(
       if (backend) bits.push(`backend=${backend}`);
       if (tier) bits.push(`egress=${tier}`);
       if (proxies != null && proxies > 0) {
-        bits.push(`${proxies} cred proxy${proxies === 1 ? "" : "ies"}`);
+        bits.push(`${proxies} cred ${proxies === 1 ? "proxy" : "proxies"}`);
       }
       const tail = bits.length ? ` (${bits.join(", ")})` : "";
       if (sid && task) return `Session ${sid} VM spawned for ${task}${tail}`;
