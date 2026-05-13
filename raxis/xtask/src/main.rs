@@ -59,16 +59,17 @@ fn main() -> anyhow::Result<()> {
             // `cargo xtask images <subcommand> [args...]`
             let mut rest = args.into_iter().skip(1);
             let sub = rest.next().ok_or_else(|| anyhow::anyhow!(
-                "missing images subcommand; available: dev-kernel, dev-stage, build-all"
+                "missing images subcommand; available: dev-kernel, bake-rootfs, dev-stage, build-all"
             ))?;
             let tail: Vec<String> = rest.collect();
             match sub.as_str() {
-                "dev-kernel" => dev_kernel::run(&tail).context("images dev-kernel"),
-                "dev-stage"  => images::run_dev_stage(&tail).context("images dev-stage"),
-                "build-all"  => images::run_build_all(&tail).context("images build-all"),
-                other        => anyhow::bail!(
+                "dev-kernel"  => dev_kernel::run(&tail).context("images dev-kernel"),
+                "bake-rootfs" => images::run_bake_rootfs(&tail).context("images bake-rootfs"),
+                "dev-stage"   => images::run_dev_stage(&tail).context("images dev-stage"),
+                "build-all"   => images::run_build_all(&tail).context("images build-all"),
+                other         => anyhow::bail!(
                     "unknown images subcommand: {other:?}; \
-                     available: dev-kernel, dev-stage, build-all"
+                     available: dev-kernel, bake-rootfs, dev-stage, build-all"
                 ),
             }
         }
@@ -150,6 +151,7 @@ fn main() -> anyhow::Result<()> {
              dev-prereqs    [--install]                 — verify / install AVF demo prerequisites\n                 [--scope user|workspace]   (Homebrew, musl-cross, openssl@3,\n                 [--arch aarch64|x86_64]    rustup musl target, codesign, cargo);\n                 [--skip-cargo-config]     idempotently patches\n                                                 ~/.cargo/config.toml linker pin.\n                                                 (demo-e2e-sample/AVF_DEMO.md §0)\n  \
              dev-reset notifications                    — wipe the operator-notifications inbox\n                 [--data-dir <PATH>]                       projection (kernel.db::notifications\n                 [--dry-run]                               table + notifications/inbox.jsonl)\n                                                           so the next kernel boot starts empty\n                                                           AFTER the notification_priority\n                                                           filter took effect. The audit chain\n                                                           at <data_dir>/audit/ is NEVER touched\n                                                           (INV-NOTIF-SCOPE-01).\n  \
              images dev-kernel                          — stage Linux guest-kernel binary at\n                 (--from-file <PATH> | --url <URL> --sha256 <HEX>) \n                 [--install-dir <PATH>] [--arch <ARCH>] [--force]\n                                                 <install_dir>/kernel/vmlinux\n                                                 (system-requirements.md §11)\n  \
+             images bake-rootfs --role <ROLE>           — docker build per-role Containerfile\n                 [--builder docker|podman|buildah]         and extract OCI rootfs into\n                 [--platform <PLAT>] [--keep]              images/<role>/rootfs/. Auto-detects\n                                                           docker → podman → buildah on $PATH;\n                                                           --platform defaults to the OCI shape\n                                                           of `default_target_triple()`. Run\n                                                           BEFORE dev-stage; dev-stage overlays\n                                                           the planner binary on top.\n  \
              images dev-stage --role <ROLE>             — cross-compile raxis-planner-<role>\n                 [--target <TRIPLE>]                       and stage it into images/<role>/rootfs/init\n                                                 (planner-harness.md §14.4)\n  \
              images build-all                           — pack staged rootfs into signed cpio.gz\n                 [--role <ROLE>] [--install-dir <P>]       initramfs and lay out under\n                 [--signing-key <PATH>]                    <install_dir>/images/raxis-<role>-<kver>.{{img,manifest.toml}}\n                                                 (planner-harness.md §14.4 + e2e-live-test-gap.md)\n  \
              linux-microvm bundle                       — one-shot Firecracker bundle:\n                 [--install-dir <PATH>] [--arch <ARCH>]      stage reference vmlinux + every\n                 [--kernel-from-file <PATH>]                 canonical role's signed initramfs\n                 [--kernel-url <URL>] [--kernel-sha256 <HEX>]   under <install_dir>/\n                 [--target <TRIPLE>] [--signing-key <PATH>]    (isolation-linux-microvm.md §9)\n                 [--role <ROLE>] [--skip-kernel] [--skip-stage] [--force]\n  \

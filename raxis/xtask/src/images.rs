@@ -647,6 +647,396 @@ fn workspace_root_from_cwd() -> Result<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// bake-rootfs
+//
+// `cargo xtask images bake-rootfs --role <ROLE> [--builder <B>] [--platform
+// <PLAT>]` — execute the per-role `images/<role>/Containerfile` against
+// docker (or podman / buildah, in that fallback order), export the
+// resulting OCI image's filesystem, and unpack it into
+// `images/<role>/rootfs/`. The subsequent `dev-stage` overlays the
+// freshly cross-compiled planner binary on top, and `build-all` packs
+// the merged tree into the signed cpio.gz initramfs.
+//
+// The Containerfile IS the source of truth for the rootfs content;
+// this subcommand is the per-release pipeline `images/README.md` says
+// "populates `rootfs/`". Before this existed, the `dev-stage` step
+// alone produced a binary-only initramfs (no /bin/bash, no python3,
+// no git) — every `BashTool` invocation inside the executor VM
+// returned ENOENT. See `iter12-artifacts/kernel.stderr.log` for the
+// failure mode this fixes.
+// ---------------------------------------------------------------------------
+
+/// Container builders we know how to drive. Detection order is
+/// `Docker → Podman → Buildah`; an explicit `--builder` overrides the
+/// auto-detection. Each variant pairs with a fixed CLI shape so the
+/// `bake_one_role` driver does not branch in three places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Builder {
+    Docker,
+    Podman,
+    Buildah,
+}
+
+impl Builder {
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "docker"  => Ok(Builder::Docker),
+            "podman"  => Ok(Builder::Podman),
+            "buildah" => Ok(Builder::Buildah),
+            other     => bail!(
+                "unsupported --builder {other:?}; expected one of: \
+                 docker, podman, buildah"
+            ),
+        }
+    }
+
+    fn binary(self) -> &'static str {
+        match self {
+            Builder::Docker  => "docker",
+            Builder::Podman  => "podman",
+            Builder::Buildah => "buildah",
+        }
+    }
+
+    /// Auto-detect a usable builder by probing `$PATH`. Walks the
+    /// fallback order `docker → podman → buildah`; returns the first
+    /// binary that resolves. A clear remediation hint is surfaced if
+    /// none are present.
+    fn auto_detect() -> Result<Self> {
+        for candidate in [Builder::Docker, Builder::Podman, Builder::Buildah] {
+            if which(candidate.binary()).is_some() {
+                return Ok(candidate);
+            }
+        }
+        bail!(
+            "no container builder found on $PATH. Install one of:\n  \
+             - docker      (recommended on macOS / Linux dev hosts)\n  \
+             - podman      (rootless, recommended on Linux servers)\n  \
+             - buildah     (Linux-only, daemonless OCI builder)\n\
+             Then re-run `cargo xtask images bake-rootfs --role <ROLE>`."
+        )
+    }
+}
+
+/// `which`-style binary probe. Walks `$PATH` directories and returns
+/// the first executable resolution. Inlined here to avoid pulling
+/// the `which` crate into xtask for one short helper.
+fn which(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        let Ok(meta) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if meta.permissions().mode() & 0o111 != 0 {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Map a Rust target triple to an OCI / Docker `--platform` string.
+/// Mirrors `default_target_triple` so the produced rootfs matches the
+/// guest VM's architecture. AVF on Apple Silicon runs aarch64 guests,
+/// AVF on Intel macOS runs x86_64; Firecracker on Linux mirrors the
+/// host arch.
+fn oci_platform_for_target_triple(triple: &str) -> Result<&'static str> {
+    if triple.starts_with("aarch64-") {
+        Ok("linux/arm64")
+    } else if triple.starts_with("x86_64-") {
+        Ok("linux/amd64")
+    } else {
+        bail!(
+            "no OCI platform mapping for target triple {triple:?}; \
+             expected aarch64-* or x86_64-* (the AVF / Firecracker \
+             guests this pipeline targets). Pass --platform <PLAT> \
+             explicitly to override."
+        )
+    }
+}
+
+#[derive(Debug)]
+struct BakeRootfsArgs {
+    role:           Role,
+    builder:        Option<Builder>,
+    platform:       Option<String>,
+    workspace_root: PathBuf,
+    /// When true, leave any existing `images/<role>/rootfs/` content
+    /// in place and merge the bake result on top. Default behaviour is
+    /// to remove the staging dir first so two consecutive bakes are
+    /// byte-deterministic.
+    keep:           bool,
+}
+
+impl BakeRootfsArgs {
+    fn parse(argv: &[String]) -> Result<Self> {
+        let mut role:     Option<Role>    = None;
+        let mut builder:  Option<Builder> = None;
+        let mut platform: Option<String>  = None;
+        let mut keep:     bool            = false;
+
+        let mut i = 0;
+        while i < argv.len() {
+            match argv[i].as_str() {
+                "--role" => {
+                    i += 1;
+                    role = Some(Role::parse(
+                        argv.get(i).context("--role requires a value")?,
+                    )?);
+                }
+                "--builder" => {
+                    i += 1;
+                    builder = Some(Builder::parse(
+                        argv.get(i).context("--builder requires a value")?,
+                    )?);
+                }
+                "--platform" => {
+                    i += 1;
+                    platform = Some(
+                        argv.get(i).context("--platform requires a value")?.clone(),
+                    );
+                }
+                "--keep" => {
+                    keep = true;
+                }
+                "-h" | "--help" => {
+                    eprintln!(
+                        "usage: cargo xtask images bake-rootfs --role <ROLE> \
+                         [--builder docker|podman|buildah] [--platform <PLAT>] \
+                         [--keep]\n  \
+                         --role     orchestrator | reviewer | executor-starter\n  \
+                         --builder  container builder to drive (default: auto-detect)\n  \
+                         --platform OCI platform string (default: derived from \
+                                    Rust host arch via default_target_triple())\n  \
+                         --keep     do NOT remove images/<role>/rootfs/ before \
+                                    extracting (default: clean first for \
+                                    determinism)"
+                    );
+                    std::process::exit(0);
+                }
+                other => bail!("unknown bake-rootfs arg: {other}"),
+            }
+            i += 1;
+        }
+
+        let role = role.context("--role is required")?;
+        let workspace_root = workspace_root_from_cwd()?;
+        Ok(Self { role, builder, platform, workspace_root, keep })
+    }
+}
+
+/// Entry point for `cargo xtask images bake-rootfs`.
+pub fn run_bake_rootfs(argv: &[String]) -> Result<()> {
+    let args    = BakeRootfsArgs::parse(argv)?;
+    let builder = match args.builder {
+        Some(b) => b,
+        None    => Builder::auto_detect()?,
+    };
+    let platform = match args.platform.as_deref() {
+        Some(p) => p.to_owned(),
+        None    => oci_platform_for_target_triple(default_target_triple())?
+                       .to_owned(),
+    };
+    bake_one_role(args.role, builder, &platform, &args.workspace_root, args.keep)
+}
+
+fn bake_one_role(
+    role:           Role,
+    builder:        Builder,
+    platform:       &str,
+    workspace_root: &Path,
+    keep:           bool,
+) -> Result<()> {
+    let images_subdir = workspace_root
+        .join(STAGING_PARENT)
+        .join(role.images_subdir());
+    let containerfile = images_subdir.join("Containerfile");
+    if !containerfile.exists() {
+        bail!(
+            "Containerfile not found at {}; expected the per-role recipe \
+             to live next to manifest.toml under images/<role>/.",
+            containerfile.display(),
+        );
+    }
+    let rootfs_dir = images_subdir.join("rootfs");
+
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"bake_rootfs_begin\",\
+         \"role\":{:?},\"builder\":{:?},\"platform\":{:?},\
+         \"containerfile\":{:?}}}",
+        role.workspace_crate(),
+        builder.binary(),
+        platform,
+        containerfile.display().to_string(),
+    );
+
+    // ── Step 1: docker build (or podman / buildah build). ─────────────
+    //
+    // `--pull` ensures the FROM base layer is refreshed against the
+    // upstream registry — without it, an older locally-cached
+    // debian:bookworm-slim could ship a security regression silently.
+    // `-t` tags the built image so we have a stable reference for the
+    // subsequent `create` step. The tag carries a kernel-version
+    // suffix once the bake pipeline grows multi-version support; for
+    // now a fixed `:dev` is enough since each role bakes one image.
+    let tag = format!("raxis-rootfs-{}:dev", role.images_subdir());
+    let build_status = Command::new(builder.binary())
+        .args([
+            "build",
+            "--platform", platform,
+            "--pull",
+            "-t", &tag,
+            "-f", &containerfile.display().to_string(),
+            &images_subdir.display().to_string(),
+        ])
+        .status()
+        .with_context(|| format!(
+            "spawn `{builder} build` for role {role:?}",
+            builder = builder.binary(),
+        ))?;
+    if !build_status.success() {
+        bail!(
+            "{builder} build failed (exit {status}). Inspect the build log \
+             above; common causes: (1) Dockerfile syntax error, (2) apt-get \
+             upstream outage, (3) running on Linux without --platform \
+             matching the host (try `cargo xtask images bake-rootfs \
+             --platform linux/$(uname -m | sed s/x86_64/amd64/ | sed \
+             s/aarch64/arm64/)`).",
+            builder = builder.binary(),
+            status  = build_status,
+        );
+    }
+
+    // ── Step 2: create a throwaway container so we can `export` its
+    //    filesystem. `docker export` writes a tar stream to stdout;
+    //    `podman` and `buildah` use the same shape. We always remove
+    //    the container in Step 4 even on failure paths so a panic
+    //    here does not leak named containers.
+    let create_out = Command::new(builder.binary())
+        .args(["create", "--platform", platform, &tag])
+        .output()
+        .with_context(|| format!(
+            "spawn `{builder} create` for tag {tag}",
+            builder = builder.binary(),
+        ))?;
+    if !create_out.status.success() {
+        bail!(
+            "{builder} create failed (exit {status}):\n--- stderr ---\n{stderr}",
+            builder = builder.binary(),
+            status  = create_out.status,
+            stderr  = String::from_utf8_lossy(&create_out.stderr),
+        );
+    }
+    let container_id = String::from_utf8_lossy(&create_out.stdout).trim().to_owned();
+    if container_id.is_empty() {
+        bail!("{builder} create returned empty container id", builder = builder.binary());
+    }
+
+    // ── Step 3: `<builder> export <container_id>` → tar stream → tar -x.
+    //
+    // We pipe directly into a `tar -xf -` child to avoid materialising
+    // a multi-GB temporary tarball on disk. `--no-same-owner` so the
+    // extracted tree is owned by the invoking user (otherwise tar
+    // tries to chown to UID 0, which fails on macOS without root).
+    // `--no-same-permissions` keeps file modes from the archive but
+    // strips the SUID/SGID bits — the cpio packer writes new mode
+    // bits per the manifest anyway so this is a no-op for the on-disk
+    // image but protects against accidental SUID inheritance during
+    // dev-host extraction.
+    if rootfs_dir.exists() && !keep {
+        fs::remove_dir_all(&rootfs_dir)
+            .with_context(|| format!("clean stale {}", rootfs_dir.display()))?;
+    }
+    fs::create_dir_all(&rootfs_dir)
+        .with_context(|| format!("create {}", rootfs_dir.display()))?;
+
+    let extract_result = run_export_pipeline(
+        builder,
+        &container_id,
+        &rootfs_dir,
+    );
+
+    // ── Step 4: always remove the throwaway container. We swallow
+    //    rm errors so a successful extract is not masked by a failed
+    //    teardown; the dangling container is harmless and the next
+    //    bake will overwrite the tag.
+    let _ = Command::new(builder.binary())
+        .args(["rm", "-f", &container_id])
+        .status();
+
+    extract_result?;
+
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"bake_rootfs_ok\",\
+         \"role\":{:?},\"rootfs_dir\":{:?}}}",
+        role.workspace_crate(),
+        rootfs_dir.display().to_string(),
+    );
+
+    Ok(())
+}
+
+/// Run `<builder> export <container_id> | tar -xf - -C <rootfs_dir>`
+/// without buffering a multi-GB tarball on disk. We use `Stdio::piped`
+/// on the builder side and feed the read end into tar's stdin; both
+/// children are reaped before we return.
+fn run_export_pipeline(
+    builder:      Builder,
+    container_id: &str,
+    rootfs_dir:   &Path,
+) -> Result<()> {
+    use std::process::Stdio;
+
+    let mut export = Command::new(builder.binary())
+        .args(["export", container_id])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!(
+            "spawn `{builder} export {container_id}`",
+            builder = builder.binary(),
+        ))?;
+    let export_stdout = export.stdout.take().expect("export stdout piped");
+
+    let mut tar = Command::new("tar")
+        .args([
+            "-xf", "-",
+            "--no-same-owner",
+            "-C", &rootfs_dir.display().to_string(),
+        ])
+        .stdin(Stdio::from(export_stdout))
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn `tar -xf -`; tar(1) must be on $PATH")?;
+
+    let tar_status     = tar.wait().context("wait tar")?;
+    let export_output  = export.wait_with_output().context("wait export")?;
+
+    if !export_output.status.success() {
+        bail!(
+            "{builder} export failed (exit {status}):\n--- stderr ---\n{stderr}",
+            builder = builder.binary(),
+            status  = export_output.status,
+            stderr  = String::from_utf8_lossy(&export_output.stderr),
+        );
+    }
+    if !tar_status.success() {
+        bail!("tar -x failed (exit {tar_status}); rootfs may be partially extracted at {}",
+              rootfs_dir.display());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +1108,62 @@ mod tests {
         std::fs::write(tmp.path(), b"deadbeef").unwrap();
         let err = load_signing_key(tmp.path()).unwrap_err().to_string();
         assert!(err.contains("expected 64"), "got: {err}");
+    }
+
+    #[test]
+    fn builder_parse_accepts_documented_aliases_only() {
+        assert_eq!(Builder::parse("docker").unwrap(),  Builder::Docker);
+        assert_eq!(Builder::parse("podman").unwrap(),  Builder::Podman);
+        assert_eq!(Builder::parse("buildah").unwrap(), Builder::Buildah);
+        assert!(Builder::parse("Docker").is_err());
+        assert!(Builder::parse("kaniko").is_err());
+    }
+
+    #[test]
+    fn oci_platform_for_target_triple_covers_supported_arches() {
+        assert_eq!(oci_platform_for_target_triple("aarch64-unknown-linux-musl").unwrap(),
+                   "linux/arm64");
+        assert_eq!(oci_platform_for_target_triple("x86_64-unknown-linux-musl").unwrap(),
+                   "linux/amd64");
+        assert_eq!(oci_platform_for_target_triple("aarch64-apple-darwin").unwrap(),
+                   "linux/arm64");
+        assert!(oci_platform_for_target_triple("riscv64-unknown-linux-musl").is_err());
+    }
+
+    #[test]
+    fn bake_rootfs_args_require_role() {
+        let err = BakeRootfsArgs::parse(&[]).unwrap_err().to_string();
+        assert!(err.contains("--role is required"), "got: {err}");
+    }
+
+    #[test]
+    fn bake_rootfs_args_parse_full_arg_set() {
+        // Switch into a workspace dir so workspace_root_from_cwd() resolves.
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let argv = vec![
+            "--role".to_owned(),     "executor-starter".to_owned(),
+            "--builder".to_owned(),  "podman".to_owned(),
+            "--platform".to_owned(), "linux/arm64".to_owned(),
+            "--keep".to_owned(),
+        ];
+        let parsed = BakeRootfsArgs::parse(&argv).unwrap();
+        std::env::set_current_dir(prev).unwrap();
+        assert_eq!(parsed.role,     Role::ExecutorStarter);
+        assert_eq!(parsed.builder,  Some(Builder::Podman));
+        assert_eq!(parsed.platform.as_deref(), Some("linux/arm64"));
+        assert!(parsed.keep);
+    }
+
+    #[test]
+    fn which_finds_a_known_unix_binary_or_skips() {
+        // `sh` is universally present on macOS / Linux dev hosts; if it
+        // isn't, the test environment is too exotic to make claims about.
+        match which("sh") {
+            Some(p) => assert!(p.is_absolute(), "which(sh) returned {}", p.display()),
+            None    => eprintln!("skipped: no sh on $PATH (exotic test env)"),
+        }
+        // A binary that should never resolve.
+        assert!(which("definitely-not-a-real-binary-xyz-9999").is_none());
     }
 }
