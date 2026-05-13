@@ -490,6 +490,27 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
     let pk_bytes = signing.verifying_key().to_bytes();
     let policy = policy_with_operator(pk_bytes, vec![]);
 
+    // Seed the kernel store with the session row the SSE handler
+    // pre-checks via `get_session` (the dashboard returns a
+    // structured 404 for unknown session ids — see
+    // `dashboard-hardening.md §1.6`).
+    {
+        let conn = store.lock().await;
+        let sessions = raxis_store::Table::Sessions.as_str();
+        conn.execute(
+            &format!(
+                "INSERT INTO {sessions} \
+                 (session_id, role_id, session_token, lineage_id, \
+                  fetch_quota, created_at, expires_at, revoked) \
+                 VALUES \
+                 ('sess-stream-test', 'planner', 'tok-stream', 'lin', \
+                  0, 100, 9999999999, 0)"
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
     // Build the capture once and share it between the data
     // layer (subscribed by the dashboard) and the test
     // (publisher role).
