@@ -167,13 +167,13 @@ invariant audit. Rationale:
 
 ---
 
-## L-2. `executor-starter` Containerfile assumed `linux/amd64`-only and shipped no `ca-certificates`
+## L-2. `executor-starter` Containerfile assumed `linux/amd64`-only, shipped no `ca-certificates`, and omitted the C toolchain its own header comment promised
 
-* **Class:** P0 — fixed in iter-13 (`<this commit>`); recorded for
-  audit completeness so a future Containerfile rewrite does not
-  regress the same three patterns simultaneously.
+* **Class:** P0 — fixed in iter-13 / iter-14; recorded for audit
+  completeness so a future Containerfile rewrite does not regress
+  the same four patterns simultaneously.
 * **Production file:** `raxis/images/executor-starter/Containerfile`
-  (lines 37–55, 57–60, 97–98, 101–107 pre-fix).
+  (lines 37–55, 57–60, 97–98, 101–107, 124–126 pre-fix).
 
 ### Defect
 
@@ -188,7 +188,7 @@ https://deb.nodesource.com/setup_20.x | bash - && apt-get install
 ... nodejs ..." did not complete successfully: exit code: 100
 ```
 
-Three independent issues compounded into a single "bake fails on
+Four independent issues compounded into a single "bake fails on
 arm64 host" symptom:
 
 1. **No `ca-certificates`** — the first apt-get layer installed
@@ -212,6 +212,18 @@ arm64 host" symptom:
    for the GitHub CLI repo and `apt-get install gh` errors with
    `Unable to locate package gh`.
 
+4. **Missing `build-essential` (no C toolchain) despite the file's
+   own header comment promising one** — lines 22-23 of the original
+   Containerfile claimed: *"Build toolchain: make, gcc, g++, clang,
+   ld, ar"*, but the apt-get list only included `make`. Stage 9
+   (`cargo install ripgrep fd-find`) then failed with
+   `error: linker cc not found` on the very first build script
+   because no C compiler was actually installed. The Python
+   `pip3 install` stage masked this latent gap because every pinned
+   wheel (`psycopg2-binary`, `pymongo`, `redis`, `PyMySQL`,
+   `pymssql`) ships pre-built wheels for Debian arm64; no native
+   compile was triggered until cargo got involved.
+
 ### Why it WAS latent
 
 * The pipeline had only ever been exercised on Linux x86_64 CI
@@ -225,19 +237,29 @@ arm64 host" symptom:
   image, but the base layer (`debian:bookworm-slim`) ships *no*
   ca-certificates by default, so the latency window was tiny.
 
-### Fix (landed in this iter-13 commit)
+### Fix (landed across iter-13 / iter-14 commits)
 
-Single-commit Containerfile patch:
+Two-commit Containerfile patch (one per surfaced symptom):
 
-* Add `ca-certificates` to the first `apt-get install` layer so
-  every subsequent `curl https://…` has a CA bundle.
-* Wrap the Go tarball fetch in `GOARCH="$(dpkg --print-architecture)"`
-  and interpolate `linux-${GOARCH}` so the URL resolves to
-  `linux-amd64.tar.gz` on amd64 builders and `linux-arm64.tar.gz`
-  on arm64 builders.
-* Wrap the GitHub CLI apt source `arch=` value in
-  `GH_ARCH="$(dpkg --print-architecture)"` so the source line reads
-  `arch=amd64` on amd64 builders and `arch=arm64` on arm64 builders.
+* iter-13 commit:
+    * Add `ca-certificates` to the first `apt-get install` layer so
+      every subsequent `curl https://…` has a CA bundle.
+    * Wrap the Go tarball fetch in
+      `GOARCH="$(dpkg --print-architecture)"` and interpolate
+      `linux-${GOARCH}` so the URL resolves to `linux-amd64.tar.gz`
+      on amd64 builders and `linux-arm64.tar.gz` on arm64 builders.
+    * Wrap the GitHub CLI apt source `arch=` value in
+      `GH_ARCH="$(dpkg --print-architecture)"` so the source line
+      reads `arch=amd64` on amd64 builders and `arch=arm64` on
+      arm64 builders.
+* iter-14 commit:
+    * Add `build-essential` to the first `apt-get install` layer.
+      `build-essential` is the canonical Debian metapackage that
+      pulls in `gcc`, `g++`, `libc6-dev`, `make`, and `dpkg-dev`,
+      matching the file's own stated "Build toolchain: make, gcc,
+      g++, clang, ld, ar" intent and unblocking
+      `cargo install ripgrep fd-find` (and any future
+      `cargo install` of crates with native build scripts).
 
 `dpkg --print-architecture` is the canonical Debian tooling for
 build-platform detection and aligns with the apt-source `arch=`
@@ -246,12 +268,13 @@ identifier *and* the upstream Go release filename convention.
 ### Why this is recorded as L-2 even though it is fixed
 
 The cleanup-sweep auditor needs a single ledger row covering the
-"Containerfile fails on arm64 / no system CA bundle" failure family
-so a future Containerfile rewrite (e.g. a pivot to
-`debian:trixie-slim` or a buildah-based pipeline) is forced to
-re-prove all three properties together. Without this row a partial
-rewrite that only tested on x86_64 would silently re-introduce
-issues 2 + 3.
+"Containerfile fails on arm64 / no system CA bundle / no C
+toolchain" failure family so a future Containerfile rewrite (e.g.
+a pivot to `debian:trixie-slim` or a buildah-based pipeline) is
+forced to re-prove all four properties together. Without this row
+a partial rewrite that only tested on x86_64 would silently
+re-introduce issues 2 + 3 + 4 (issue 1 surfaces on the very first
+HTTPS fetch on any arch and is hardest to silently miss).
 
 ### Owners
 
