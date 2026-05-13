@@ -9,6 +9,16 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { auditBadgeClasses } from "@/lib/audit-tone";
 import { fmtRelative } from "@/lib/format";
+import {
+  decrementUnreadCount,
+  markListAllRead,
+  markListRowRead,
+  NOTIFICATIONS_LIST_KEY,
+  NOTIFICATIONS_PREFIX_KEY,
+  rollbackNotificationCaches,
+  snapshotNotificationCaches,
+  zeroUnreadCount,
+} from "@/lib/notification-cache";
 import { notificationDisplaySummary } from "@/lib/notification-summary";
 
 export function NotificationsPage() {
@@ -19,7 +29,14 @@ export function NotificationsPage() {
   const [unreadOnly, setUnreadOnly] = useState(false);
 
   const list = useQuery({
-    queryKey: ["notifications", { unreadOnly, initiativeId }],
+    // The list cache lives under a `"list"` discriminator under
+    // the shared `["notifications"]` prefix. Keeps the optimistic
+    // `setQueriesData` writes in `markRead` / `markAll` from
+    // accidentally trying to mutate the sibling
+    // `["notifications", "unread-count"]` slice (different
+    // payload shape). Coarse `["notifications"]` invalidation
+    // still matches both branches.
+    queryKey: [...NOTIFICATIONS_LIST_KEY, { unreadOnly, initiativeId }],
     queryFn: ({ signal }) =>
       dashboardApi.notifications.list(
         {
@@ -32,19 +49,69 @@ export function NotificationsPage() {
     refetchInterval: 5_000,
   });
 
+  // Mark a single notification as read with an optimistic write
+  // against both cache slices that derive notification state:
+  //   * `["notifications", "list", …]`  — the page list
+  //   * `["notifications", "unread-count"]` — the sidebar badge
+  //
+  // Reconciliation runs INSIDE `mutationFn` (not `onSettled`)
+  // because the row-click handler navigates to the linked
+  // initiative / task on the same tick as `mutate()`, which
+  // unmounts this component mid-mutation. TanStack Query's
+  // `useMutation` deliberately suppresses `onSuccess` /
+  // `onError` / `onSettled` callbacks for unmounted observers —
+  // so an `onSettled`-based invalidation would silently no-op
+  // for every row click, which is the bug operators were
+  // reporting (the badge count stayed stale until the next
+  // sidebar 10 s refetch tick). The invalidate call from inside
+  // the awaited mutation body always runs to completion against
+  // the global `QueryClient`, regardless of mount state.
   const markRead = useMutation({
-    mutationFn: (id: string) => dashboardApi.notifications.markRead(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["notifications"] });
-      qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    mutationFn: async (id: string) => {
+      const result = await dashboardApi.notifications.markRead(id);
+      void qc.invalidateQueries({ queryKey: NOTIFICATIONS_PREFIX_KEY });
+      return result;
+    },
+    onMutate: async (id: string) => {
+      // Cancel any in-flight notification refetches so they
+      // don't race with the optimistic write and snap the cache
+      // back to the pre-mark state.
+      await qc.cancelQueries({ queryKey: NOTIFICATIONS_PREFIX_KEY });
+      const snap = snapshotNotificationCaches(qc);
+      const updatedRows = markListRowRead(qc, id);
+      // Decrement by the same number of slices that flipped a
+      // row, capped at 1 — the badge counts UNIQUE unread rows,
+      // not per-slice flips. (`updatedRows > 0` means at least
+      // one cached slice transitioned, so the underlying row
+      // was previously unread, so the badge count should drop
+      // by exactly 1.)
+      decrementUnreadCount(qc, updatedRows > 0 ? 1 : 0);
+      return snap;
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx) rollbackNotificationCaches(qc, ctx);
     },
   });
 
+  // Mark every unread notification as read. Same optimistic +
+  // in-mutationFn-reconciliation pattern as `markRead`, except
+  // the badge optimistically zeros out and every cached list
+  // slice flips its unread rows.
   const markAll = useMutation({
-    mutationFn: () => dashboardApi.notifications.markAllRead(),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["notifications"] });
-      qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    mutationFn: async () => {
+      const result = await dashboardApi.notifications.markAllRead();
+      void qc.invalidateQueries({ queryKey: NOTIFICATIONS_PREFIX_KEY });
+      return result;
+    },
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: NOTIFICATIONS_PREFIX_KEY });
+      const snap = snapshotNotificationCaches(qc);
+      markListAllRead(qc);
+      zeroUnreadCount(qc);
+      return snap;
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx) rollbackNotificationCaches(qc, ctx);
     },
   });
 
