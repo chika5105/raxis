@@ -2742,6 +2742,65 @@ the executor scripts depend on.
 (host half), `raxis/tproxy/src/loopback_forwarder.rs`
 (in-guest half).
 
+### INV-EXEC-TOOL-REGISTRY-01 — Every credential-proxied service has a structured executor tool
+
+**Statement.** The executor tool registry
+(`raxis_planner_core::build_executor_registry` /
+`build_executor_registry_with_sleep` /
+`build_executor_registry_full`) MUST expose a structured tool for
+every credential-proxied service that the `raxis-planner-core`
+binary links a client for. Specifically:
+
+| Tool name        | Env var      | Driver crate     |
+| ---------------- | ------------ | ---------------- |
+| `postgres_query` | `DATABASE_URL` | `tokio-postgres` |
+| `mongo_query`    | `MONGO_URL`    | `mongodb`        |
+| `redis_query`    | `REDIS_URL`    | `redis`          |
+| `smtp_send`      | `SMTP_URL`    | `lettre`         |
+
+Each tool MUST dial the loopback URL literally from the named env
+var, MUST NOT accept a host / port argument, and MUST surface
+structured `{error_class, message}` errors with classes drawn from
+`{ProxyUnreachable, AuthFailed, QuerySyntax, QueryRuntime,
+ResultTooLarge, Timeout, MissingEnv}` (mirroring
+`ToolErrorClass`). `bash` is NOT relied upon in the executor
+rootfs (planner-binary-only by design); the executor registry's
+`bash` registration is an actionable-error stub
+(`ExecutorBashStub`) that returns a structured
+`BashUnavailable` error pointing the LLM at the structured tools
+above.
+
+**Justification.** Pairs with INV-CRED-PROXY-VM-REACHABILITY-01:
+that invariant guarantees the proxies are *reachable* from inside
+the executor VM; this one guarantees the agent has a usable
+*surface* to reach them through. Without a structured tool for
+each credential-proxied service the LLM has no choice but to
+attempt `bash psql` / `bash mongosh` / `bash redis-cli` /
+`bash sendmail`, none of which work in the planner-binary-only
+rootfs — leading to a `bash: ENOENT` retry loop that burns the
+crash budget. The role-asymmetric construction (
+INV-PLANNER-HARNESS-04) keeps these tools out of the reviewer +
+orchestrator registries: only the executor's session-spawn path
+stamps the env vars, and only the executor needs them.
+
+**Scenario.** Operator declares a Postgres credential proxy in
+the plan. The kernel session-spawn path stamps
+`DATABASE_URL=postgres://raxis@127.0.0.1:54321/` into the VM env.
+The executor LLM, prompted to read a table, sees
+`postgres_query` in its registered-tools list, formulates a
+`{query: "SELECT * FROM users LIMIT 10"}` call, the tool dials
+`127.0.0.1:54321`, the host proxy splices the connection to the
+real upstream with credential substitution, and rows return.
+Before this invariant: the tool wasn't registered, the LLM tried
+`bash` with `psql -c ...`, got `ENOENT`, retried, looped, and the
+session was killed by the crash-retry budget.
+
+**Canonical home.** `v2/credential-proxy.md §14.4`,
+`raxis/crates/planner-core/src/tools_postgres.rs`,
+`raxis/crates/planner-core/src/tools_mongo.rs`,
+`raxis/crates/planner-core/src/tools_redis.rs`,
+`raxis/crates/planner-core/src/tools_smtp.rs`.
+
 ---
 
 ## §11.9 — Dashboard surface (INV-DASHBOARD-* / INV-AUDIT-DASHBOARD-* / INV-AUDIT-OPERATOR-* / INV-NOTIF-SCOPE-*)

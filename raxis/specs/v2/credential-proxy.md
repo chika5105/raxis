@@ -3064,6 +3064,95 @@ the agent's session. Pooling (V3) will reset session state at
 connection-return time; for V2 the per-agent-connection upstream
 isolates this from any other consumer.
 
+### 14.4a — Executor structured-tool surface (INV-EXEC-TOOL-REGISTRY-01)
+
+The credential proxies are reachable from inside the executor VM
+via the substrate-loopback chain (`INV-CRED-PROXY-VM-REACHABILITY-01`),
+but reachability alone is not enough — the executor's LLM also
+needs a *structured tool surface* to talk to each upstream.
+`bash` is **not** available in the canonical executor rootfs (the
+`raxis-planner-core` binary is the only executable in the image),
+so the agent cannot fall back to `psql` / `mongosh` / `redis-cli` /
+`sendmail` shell invocations. The executor tool registry
+(`raxis_planner_core::build_executor_registry`) therefore exposes
+one structured tool per credential-proxied service:
+
+| Tool name        | Env var read   | Driver           | Operations |
+| ---------------- | -------------- | ---------------- | ---------- |
+| `postgres_query` | `DATABASE_URL` | `tokio-postgres` | Arbitrary SQL with positional `$N` params; SELECT returns `{rows, row_count, command_tag, truncated}`, non-SELECT returns `{rows_affected, command_tag}`. |
+| `mongo_query`    | `MONGO_URL`    | `mongodb`        | `find` / `insert_one` / `insert_many` / `update_one` / `update_many` / `delete_one` / `delete_many` / `count` / `aggregate`. Filters / updates / documents are passed as JSON objects, transcoded to BSON inside the tool. |
+| `redis_query`    | `REDIS_URL`    | `redis`          | Any Redis command verb + positional `args`. Response is coerced to a JSON-friendly `{value, kind}` envelope. |
+| `smtp_send`      | `SMTP_URL`     | `lettre`         | One email per call. Supports `from` / `to` / `cc` / `bcc` / `subject` / `body_text` / optional `body_html` / optional `attachments`. Returns `{message_id, accepted_recipients}`. |
+
+**Wire contract — common across all four tools.**
+
+1. **URL ingress.** Each tool reads its named env var *literally*.
+   The kernel session-spawn path
+   (`raxis_session_spawn::loopback_env`) is the sole source of
+   truth for these values. Tools MUST NOT accept a host or port
+   argument, MUST NOT read `~/.pgpass` / `PGHOST` / `MONGO_HOST` /
+   etc., and MUST NOT honour any alternative discovery channel.
+   Missing or empty env var → `error_class: MissingEnv`.
+
+2. **Transport.** Plaintext on loopback. The host-side credential
+   proxy handles upstream TLS / STARTTLS / mTLS per §14.3. The
+   in-VM client links **no TLS feature** on its driver where the
+   driver allows it (postgres: `NoTls`; redis: no TLS feature;
+   lettre: `builder_dangerous`). `mongodb` is the lone exception
+   because its 3.x crate requires *some* TLS feature even when
+   every URI dialled is plaintext loopback; we link `rustls-tls`
+   to satisfy the crate-feature gate and never present a `tls=...`
+   URI.
+
+3. **Error shape.** Structured JSON
+   `{error_class, message}` with `error_class` drawn from the
+   canonical `ToolErrorClass` enum:
+   `ProxyUnreachable` (could not open a TCP connection) /
+   `AuthFailed` (protocol-level auth rejection from the proxy) /
+   `QuerySyntax` (parse-time rejection or malformed argument) /
+   `QueryRuntime` (server-side semantic error) /
+   `ResultTooLarge` (`postgres_query` / `mongo_query` only —
+   capped at `RAXIS_TOOL_POSTGRES_MAX_ROWS` /
+   `RAXIS_TOOL_MONGO_MAX_DOCS`, default 1000) /
+   `Timeout` (per-call wall-clock budget fired) /
+   `MissingEnv` (the named env var is unset or empty).
+
+4. **Caps.** Default per-call timeouts:
+   `postgres_query` 30s, `mongo_query` 30s, `redis_query` 10s,
+   `smtp_send` 30s. Each is overridable per-call via
+   `timeout_secs` (range `[1, 600]`). Row / document caps default
+   to 1000 and surface a `truncated: true` flag (or the
+   `ResultTooLarge` error class) when the upstream exceeds the
+   cap.
+
+5. **Audit.** Each tool emits a `ToolAuditEvent`
+   (`raxis_planner_core::tool_audit::ToolAuditEvent`) carrying
+   `tool`, `sha256(canonical_envelope)`, `duration_ms`, and the
+   outcome shape. Parameter values, recipient names, body bytes,
+   and credential bytes NEVER appear in the planner-side audit —
+   the host-side proxy emits the canonical `DatabaseQueryExecuted`
+   / `RedisCommandExecuted` / `SmtpMessageRelayed` event (with the
+   same `sql_sha256` / command hash / body hash) when the wire
+   frame reaches it; the two events pair on inspection for
+   forensic cross-correlation.
+
+**Bash availability.** `build_executor_registry` registers the
+name `bash` so any operator or model that expects the name to
+exist still finds it, but the registered impl is
+`ExecutorBashStub` — a structured-error stub that returns
+`{error_class: "BashUnavailable", message: "..."}` pointing the
+LLM at the structured tools above. The real `BashTool` impl is
+kept for host-side / out-of-VM contexts; it is intentionally
+unused in the executor registry.
+
+**Reviewer + orchestrator registries.** These four tools are
+deliberately **absent** from
+`build_reviewer_registry` / `build_orchestrator_registry`. Only
+the executor's session-spawn path stamps the env vars, and only
+the executor has a legitimate need to mutate / read credential-
+proxied upstreams. The role-asymmetric construction is pinned in
+`INV-PLANNER-HARNESS-04`.
+
 ### 14.5 — New audit events
 
 This section adds three new `AuditEventKind` variants. All three are
