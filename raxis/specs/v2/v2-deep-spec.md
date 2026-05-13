@@ -320,6 +320,71 @@ Pin: `kernel/src/initiatives/task_transitions.rs` (cascade for the Failed /
 Aborted / Cancelled edges) + `kernel/src/handlers/intent.rs::
 commit_task_completion` (cascade for the Completed edge).
 
+**Orchestrator-continuation re-spawn architecture (V2.5 hardening —
+`3e3605e` + `d7ca482` + `aafd4f2`).** The DAG advances by chaining
+orchestrator sessions: each orchestrator turn emits zero or more
+`ActivateSubTask` / `RetrySubTask` / `CompleteTask` / `SubmitReview` /
+`ReportFailure` intents, then the session exits. Re-spawning the next
+orchestrator session is a load-bearing kernel concern with **two
+mutually exclusive paths**:
+
+1. **EarlyResponse-dispatched re-spawn.** When Phase A returns
+   `EarlyResponse(resp)` for a worker terminal intent (`CompleteTask`,
+   `SubmitReview`, `ReportFailure`), `handlers/intent.rs` (lines ~378–409,
+   `respawn_kinds = matches!(intent, …)` gate) fires
+   `respawn_orchestrator_for_initiative` immediately. This is the
+   self-perpetuating chain that drives the happy DAG. `RetrySubTask` is
+   intentionally **excluded** from `respawn_kinds`: it short-circuits
+   Phase A (`return handle_retry_sub_task(...)`) so the EarlyResponse
+   never fires.
+
+2. **Post-exit-hook re-spawn.** `session_spawn_orchestrator::
+   spawn_planner_dispatcher`'s tokio-spawn block runs the post-exit
+   hook after the `planner_session_revoked_on_exit` emit. The hook:
+   * skips if the just-exited session was not an Orchestrator;
+   * skips if the initiative has no `PendingActivation` row
+     (`!pending_exists` ⇒ DAG is settling or fully running);
+   * **skips if any worker is in flight** (`active_exists` ⇒ that
+     worker's terminal intent will fire path (1) instead — the
+     storm-guard);
+   * otherwise calls `respawn_orchestrator_for_initiative` and emits
+     `orchestrator_post_exit_respawn_trigger` for forensic distinction
+     from path (1).
+
+   This is the only path that can re-spawn the orchestrator after a
+   `RetrySubTask` turn, because `RetrySubTask`'s own handler
+   (`handlers/intent.rs::handle_retry_sub_task`) explicitly defers
+   re-spawn here (see the §"Step 6 — orchestrator continuation re-spawn
+   is NOT fired here" doc-comment in that function).
+
+The storm-guard's `pending_exists && !active_exists` predicate is
+load-bearing: without `!active_exists` the hook re-fires on every
+orchestrator exit while a worker is still in flight, and the respawned
+orchestrator's KSB shows the Active worker, so the LLM either correctly
+skips it (no progress, hook re-fires) or hallucinates an
+`ActivateSubTask` against the already-Active task (kernel rejects
+`FailPolicyViolation`, hook re-fires) — the classic respawn-storm
+pattern observed in `.tmpj1zlnZ` before `aafd4f2` landed.
+
+**Retry-handler watchdog (`3e3605e`).** `handle_retry_sub_task`'s
+substrate teardown calls `SessionSpawnService::terminate_session`, whose
+internal `Session::shutdown(grace)` is **synchronous** on AVF and can
+hang indefinitely when the planner process inside the guest has already
+exited cleanly but the host-side vsock bridge is in a half-dead state.
+The retry-handler wraps the teardown in `tokio::spawn` +
+`tokio::time::timeout` with a watchdog deadline of `grace + 8s`: the
+SQL transaction (the actual state-of-record change) commits before the
+detached teardown runs, the retry-handler worker thread returns
+immediately, and the `intent_response` is logged so the orchestrator
+observes the new `PendingActivation` row. Worst-case worker leak is
+bounded by `max_crash_retries + max_review_rejections` per task — well
+within the default tokio worker pool capacity.
+
+Pins: `kernel/src/handlers/intent.rs` (EarlyResponse `respawn_kinds`
+gate + `handle_retry_sub_task` watchdog wrapper), `kernel/src/
+session_spawn_orchestrator.rs` (post-exit hook + storm-guard preflight +
+`respawn_orchestrator_for_initiative` itself).
+
 ---
 
 ### Step 6: `session_agent_type` and `can_delegate` as Orthogonal Fields
