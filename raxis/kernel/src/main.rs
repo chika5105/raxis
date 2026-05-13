@@ -1308,6 +1308,7 @@ async fn main() {
                         started_at,
                         stream_capture,
                         advancer,
+                        Arc::clone(&audit),
                     )
                     .await
                     {

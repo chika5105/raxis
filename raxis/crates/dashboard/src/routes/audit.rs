@@ -10,10 +10,11 @@
 
 use axum::extract::{Query, State};
 use axum::Json;
+use raxis_audit_tools::AuditEventKind;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
-use crate::data::{AuditEntryView, ChainStatusView};
+use crate::data::{operator_outcome, AuditEntryView, ChainStatusView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -84,6 +85,13 @@ pub struct ChainStatusResponse {
 /// audit-chain integrity verdict to the operator UI per
 /// `INV-AUDIT-DASHBOARD-01`. The verdict comes from the kernel's
 /// own `verify_chain_from` walker (no FE re-implementation).
+///
+/// Audit discipline: implicit (cache-hit) reads are NOT audited
+/// — they would flood the chain with one row per page mount.
+/// The explicit `?reverify=true` path IS audited via
+/// `OperatorAuditChainReverified` per `INV-AUDIT-OPERATOR-ACTION-01`,
+/// since it deliberately pins a kernel worker thread on a full
+/// chain walk.
 pub async fn chain_status<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -92,9 +100,61 @@ pub async fn chain_status<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    let (fresh, status) = state.data.audit_chain_status(q.reverify)?;
+    if let Err(e) = require_read(&op) {
+        if q.reverify {
+            emit_reverify_audit(
+                &*state.data,
+                &op,
+                "unknown",
+                0,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+        }
+        return Err(e);
+    }
+    let (fresh, status) = match state.data.audit_chain_status(q.reverify) {
+        Ok(v) => v,
+        Err(err) => {
+            if q.reverify {
+                emit_reverify_audit(
+                    &*state.data,
+                    &op,
+                    "unknown",
+                    0,
+                    operator_outcome::outcome_from_api_error(&err),
+                );
+            }
+            return Err(err);
+        }
+    };
+    if q.reverify {
+        state
+            .data
+            .emit_operator_audit(AuditEventKind::OperatorAuditChainReverified {
+                operator_fingerprint: op.fingerprint.clone(),
+                verdict:              status.status.clone(),
+                last_verified_seq:    status.last_verified_seq,
+                outcome:              operator_outcome::ACCEPTED.into(),
+            })?;
+    }
     Ok(Json(ChainStatusResponse { fresh, status }))
+}
+
+fn emit_reverify_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    verdict: &str,
+    last_verified_seq: u64,
+    outcome: &'static str,
+) where
+    D: crate::data::DashboardData + ?Sized,
+{
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorAuditChainReverified {
+        operator_fingerprint: op.fingerprint.clone(),
+        verdict:              verdict.to_owned(),
+        last_verified_seq,
+        outcome:              outcome.into(),
+    });
 }
 
 fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {

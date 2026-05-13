@@ -2667,6 +2667,162 @@ pub enum AuditEventKind {
         ///     audit log (chain corruption — extreme case).
         reason: String,
     },
+
+    // ─────────────────────────────────────────────────────────────────
+    // Operator dashboard actions (INV-AUDIT-OPERATOR-ACTION-01)
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // Append-only block: every operator-initiated dashboard action —
+    // mutating OR privileged-read — emits a structured `Operator*`
+    // event before returning success, and emits the same event with
+    // a non-`Accepted` `outcome` on validation / permission /
+    // internal-error rejections. The operator identity is the
+    // JWT-derived fingerprint (`fp-<8 lowercase hex>`); other fields
+    // narrate WHICH resource the operator touched.
+    //
+    // `outcome` is a stable-wire enum: one of
+    //   * `"Accepted"`            — the action ran to completion;
+    //   * `"RejectedValidation"`  — schema / path-safety / similar
+    //                                mechanical-validation failure;
+    //   * `"RejectedPermission"`  — auth ok, but role / policy
+    //                                permission check failed;
+    //   * `"InternalError"`       — server-side failure after the
+    //                                operator's request was validated
+    //                                (audit-emitted with `log_only`
+    //                                operator-facing text).
+    //
+    // These are SINGLE-CLASS events per `audit-paired-writes.md §4`
+    // — there's no paired SQLite mutation; the audit row IS the
+    // record of the operator-side intent.
+
+    /// Operator marked a single notification as read via
+    /// `PATCH /api/notifications/:id/read`. Audited even when no
+    /// approve/deny was taken — passive operator interactions are
+    /// part of the same accountability chain (`INV-AUDIT-OPERATOR-ACTION-01`).
+    OperatorNotificationMarkedRead {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Notification id the operator targeted.
+        notification_id:      String,
+        /// `true` if the row was previously unread and the kernel
+        /// flipped it to read. `false` if it was already read or
+        /// does not exist; the action still audits.
+        updated:              bool,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator triggered a bulk mark-all-read via
+    /// `POST /api/notifications/mark-all-read`. Audited once per
+    /// call with the count of flipped rows (zero on a no-op).
+    OperatorNotificationsMarkedAllRead {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Number of rows flipped from unread → read.
+        count:                u64,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened a worktree detail surface — a privileged
+    /// read of the kernel's git-worktree pool. Mirror events fire
+    /// on the directory-listing endpoints (tree / log / status)
+    /// that share the same path-safety surface.
+    OperatorWorktreeAccessed {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Operator-supplied worktree slug from the URL path.
+        worktree_id:          String,
+        /// `"detail"` / `"tree"` / `"log"` / `"status"` — narrow
+        /// stable-wire surface name; lets dashboards distinguish
+        /// "looked at metadata" from "browsed the tree".
+        surface:              String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator rendered a worktree diff (`GET /api/git/worktrees/:id/diff`).
+    /// Diffs leak file contents at scale, so the read is audited
+    /// even though no kernel state changed.
+    OperatorDiffViewed {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Operator-supplied worktree slug.
+        worktree_id:          String,
+        /// Diff base ref / sha (`HEAD` if absent).
+        base_ref:             Option<String>,
+        /// Diff head ref / sha (`HEAD` if absent).
+        head_ref:             Option<String>,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator fetched a file's raw contents from a worktree
+    /// (`GET /api/git/worktrees/:id/file?path=...`). Path-safety
+    /// validation MUST run before this event fires; a rejected
+    /// request audits with `outcome = "RejectedValidation"` and
+    /// the relative path stripped (validation failures only
+    /// record the operator-supplied path AFTER our canonicaliser
+    /// rejects it, so leaking the rejected path is no worse than
+    /// the operator-supplied query string).
+    OperatorFileContentFetched {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Operator-supplied worktree slug.
+        worktree_id:          String,
+        /// Relative path under the worktree root the operator
+        /// requested. On `RejectedValidation` this is the
+        /// rejected raw input; on `Accepted` this is the
+        /// canonicalised relative path.
+        path:                 String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator triggered an audit-chain re-verify via
+    /// `GET /api/audit/chain-status?reverify=true`. Audited even
+    /// though the underlying walker is a pure read — the action
+    /// pins a worker thread on a chain walk, so the audit chain
+    /// also records who asked for it. Implicit (cache-hit) reads
+    /// are NOT audited; only the explicit re-verify path is.
+    OperatorAuditChainReverified {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Verdict the walker returned (`"ok"` / `"broken"`).
+        verdict:              String,
+        /// Highest seq the walker observed end-to-end.
+        last_verified_seq:    u64,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator opened a session detail / notification detail
+    /// surface that returns a single per-resource view
+    /// (`GET /api/notifications/:id`, dashboard's session-detail
+    /// endpoint, etc.). Recorded so a `[notification, viewer]`
+    /// audit trail exists even when the operator never marks
+    /// read or escalates.
+    OperatorNotificationViewed {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Notification id the operator opened.
+        notification_id:      String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
+
+    /// Operator queried the subsystem-health snapshot via
+    /// `GET /api/health/subsystems`. The endpoint is a privileged
+    /// read of every kernel subsystem's last-known health
+    /// verdict; auditing surfaces "who polled the kernel for
+    /// dashboard health and when" without leaking the verdict
+    /// itself (which is in the response, not the audit row).
+    OperatorHealthQueried {
+        /// JWT-derived operator fingerprint.
+        operator_fingerprint: String,
+        /// Stable-wire outcome string.
+        outcome:              String,
+    },
 }
 
 impl AuditEventKind {
@@ -2784,6 +2940,20 @@ impl AuditEventKind {
             Self::GitConsistencyRepaired { .. } => "GitConsistencyRepaired",
             Self::GitConsistencyVerified { .. } => "GitConsistencyVerified",
             Self::GitStateInconsistent { .. } => "GitStateInconsistent",
+            // INV-AUDIT-OPERATOR-ACTION-01: every operator-initiated
+            // dashboard action emits a structured `Operator*` audit
+            // event before returning success. Failure paths audit too
+            // with the rejection class on the `outcome` field.
+            Self::OperatorNotificationMarkedRead { .. } => "OperatorNotificationMarkedRead",
+            Self::OperatorNotificationsMarkedAllRead { .. } => {
+                "OperatorNotificationsMarkedAllRead"
+            }
+            Self::OperatorWorktreeAccessed { .. } => "OperatorWorktreeAccessed",
+            Self::OperatorDiffViewed { .. } => "OperatorDiffViewed",
+            Self::OperatorFileContentFetched { .. } => "OperatorFileContentFetched",
+            Self::OperatorAuditChainReverified { .. } => "OperatorAuditChainReverified",
+            Self::OperatorNotificationViewed { .. } => "OperatorNotificationViewed",
+            Self::OperatorHealthQueried { .. } => "OperatorHealthQueried",
         }
     }
 }

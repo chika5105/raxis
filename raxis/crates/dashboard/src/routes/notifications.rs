@@ -7,10 +7,11 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use raxis_audit_tools::AuditEventKind;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
-use crate::data::NotificationView;
+use crate::data::{operator_outcome, NotificationView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -112,18 +113,79 @@ pub async fn mark_read<D>(
 where
     D: crate::data::DashboardData,
 {
+    // Permission gate first — `RejectedPermission` outcome
+    // audits below if we fall through this branch.
     if !op.has_role(DashboardRole::Read) {
+        emit_mark_read_audit(
+            &*state.data,
+            &op,
+            &notification_id,
+            false,
+            operator_outcome::REJECTED_PERMISSION,
+        );
         return Err(ApiError::Forbidden { required: "read".into() });
     }
     let data = std::sync::Arc::clone(&state.data);
-    let updated = tokio::task::spawn_blocking(move || {
-        data.mark_notification_read(&notification_id)
+    let notif_for_mutate = notification_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        data.mark_notification_read(&notif_for_mutate)
     })
     .await
     .map_err(|e| ApiError::Internal {
         log_only: format!("mark_notification_read join error: {e}"),
-    })??;
+    });
+    let updated = match result.and_then(|r| r) {
+        Ok(u) => u,
+        Err(err) => {
+            // INV-AUDIT-OPERATOR-ACTION-01: failures audit too,
+            // with the rejection class on the `outcome` field
+            // so dashboards can distinguish "operator clicked,
+            // server panicked" from "operator clicked, row
+            // didn't exist".
+            emit_mark_read_audit(
+                &*state.data,
+                &op,
+                &notification_id,
+                false,
+                operator_outcome::outcome_from_api_error(&err),
+            );
+            return Err(err);
+        }
+    };
+    // Best-effort: an audit-sink failure must not roll back a
+    // successful kernel-side mutation, but the invariant still
+    // requires we surface the failure to the operator as an
+    // InternalError so the action is not silently dropped.
+    state
+        .data
+        .emit_operator_audit(AuditEventKind::OperatorNotificationMarkedRead {
+            operator_fingerprint: op.fingerprint.clone(),
+            notification_id:      notification_id.clone(),
+            updated,
+            outcome:              operator_outcome::ACCEPTED.into(),
+        })?;
     Ok(Json(MarkReadResponse { updated }))
+}
+
+/// Emit a single `OperatorNotificationMarkedRead` audit row
+/// with the supplied outcome. Used by both the success and
+/// failure branches in `mark_read` so the audit chain records
+/// every operator click — accepted or rejected.
+fn emit_mark_read_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    notification_id: &str,
+    updated: bool,
+    outcome: &'static str,
+) where
+    D: crate::data::DashboardData + ?Sized,
+{
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorNotificationMarkedRead {
+        operator_fingerprint: op.fingerprint.clone(),
+        notification_id:      notification_id.to_owned(),
+        updated,
+        outcome:              outcome.into(),
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -152,17 +214,57 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
+        emit_mark_all_read_audit(
+            &*state.data,
+            &op,
+            0,
+            operator_outcome::REJECTED_PERMISSION,
+        );
         return Err(ApiError::Forbidden { required: "read".into() });
     }
     let data = std::sync::Arc::clone(&state.data);
-    let count = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         data.mark_all_notifications_read()
     })
     .await
     .map_err(|e| ApiError::Internal {
         log_only: format!("mark_all_notifications_read join error: {e}"),
-    })??;
+    });
+    let count = match result.and_then(|r| r) {
+        Ok(c) => c,
+        Err(err) => {
+            emit_mark_all_read_audit(
+                &*state.data,
+                &op,
+                0,
+                operator_outcome::outcome_from_api_error(&err),
+            );
+            return Err(err);
+        }
+    };
+    state
+        .data
+        .emit_operator_audit(AuditEventKind::OperatorNotificationsMarkedAllRead {
+            operator_fingerprint: op.fingerprint.clone(),
+            count,
+            outcome: operator_outcome::ACCEPTED.into(),
+        })?;
     Ok(Json(MarkAllReadResponse { count }))
+}
+
+fn emit_mark_all_read_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    count: u64,
+    outcome: &'static str,
+) where
+    D: crate::data::DashboardData + ?Sized,
+{
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorNotificationsMarkedAllRead {
+        operator_fingerprint: op.fingerprint.clone(),
+        count,
+        outcome: outcome.into(),
+    });
 }
 
 #[cfg(test)]

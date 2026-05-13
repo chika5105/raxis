@@ -32,12 +32,13 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use raxis_audit_tools::AuditEventKind;
 use serde::Deserialize;
 
 use crate::auth::DashboardRole;
 use crate::data::{
-    WorktreeDetail, WorktreeDiff, WorktreeFile, WorktreeListEntry,
-    WorktreeLogEntry, WorktreeTree,
+    operator_outcome, WorktreeDetail, WorktreeDiff, WorktreeFile,
+    WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
@@ -66,9 +67,9 @@ pub async fn detail<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    let name = validate_name(&name)?;
-    Ok(Json(state.data.get_worktree(name)?))
+    audited_worktree_access(&*state.data, &op, &name, "detail", |validated| {
+        state.data.get_worktree(validated).map(Json)
+    })
 }
 
 /// Query string for `GET /api/git/worktrees/:name/log`.
@@ -91,10 +92,10 @@ pub async fn log<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    let name = validate_name(&name)?;
     let limit = q.limit.clamp(1, 200);
-    Ok(Json(state.data.worktree_log(name, limit)?))
+    audited_worktree_access(&*state.data, &op, &name, "log", |validated| {
+        state.data.worktree_log(validated, limit).map(Json)
+    })
 }
 
 /// `GET /api/git/worktrees/:name/diff` — diff between the
@@ -107,9 +108,9 @@ pub async fn diff_default<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    let name = validate_name(&name)?;
-    Ok(Json(state.data.worktree_diff_default(name)?))
+    audited_diff(&*state.data, &op, &name, None, None, |validated| {
+        state.data.worktree_diff_default(validated).map(Json)
+    })
 }
 
 /// `GET /api/git/worktrees/:name/diff/:range` — diff between
@@ -122,10 +123,72 @@ pub async fn diff_range<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    let name = validate_name(&name)?;
-    let (from, to) = parse_range(&range)?;
-    Ok(Json(state.data.worktree_diff_range(name, &from, &to)?))
+    // Permission first so we don't audit `from`/`to` we never
+    // parsed. `from`/`to` are added once validation succeeds.
+    if let Err(e) = require_read(&op) {
+        emit_diff_audit(
+            &*state.data,
+            &op,
+            &name,
+            None,
+            None,
+            operator_outcome::outcome_from_api_error(&e),
+        );
+        return Err(e);
+    }
+    let validated_name = match validate_name(&name) {
+        Ok(n) => n.to_owned(),
+        Err(e) => {
+            emit_diff_audit(
+                &*state.data,
+                &op,
+                &name,
+                None,
+                None,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            return Err(e);
+        }
+    };
+    let (from, to) = match parse_range(&range) {
+        Ok(p) => p,
+        Err(e) => {
+            emit_diff_audit(
+                &*state.data,
+                &op,
+                &validated_name,
+                None,
+                None,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            return Err(e);
+        }
+    };
+    match state.data.worktree_diff_range(&validated_name, &from, &to) {
+        Ok(d) => {
+            state
+                .data
+                .emit_operator_audit(AuditEventKind::OperatorDiffViewed {
+                    operator_fingerprint: op.fingerprint.clone(),
+                    worktree_id:          validated_name,
+                    base_ref:             Some(from),
+                    head_ref:             Some(to),
+                    outcome:              operator_outcome::ACCEPTED.into(),
+                })?;
+            Ok(Json(d))
+        }
+        Err(err) => {
+            emit_diff_audit(
+                &*state.data,
+                &op,
+                &validated_name,
+                Some(&from),
+                Some(&to),
+                operator_outcome::outcome_from_api_error(&err),
+            );
+            Err(err)
+        }
+    }
 }
 
 /// Query string for the new tree + file endpoints.
@@ -157,13 +220,68 @@ pub async fn tree<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    let name = validate_name(&name)?;
+    if let Err(e) = require_read(&op) {
+        emit_worktree_access_audit(
+            &*state.data,
+            &op,
+            &name,
+            "tree",
+            operator_outcome::outcome_from_api_error(&e),
+        );
+        return Err(e);
+    }
+    let validated = match validate_name(&name) {
+        Ok(n) => n.to_owned(),
+        Err(e) => {
+            emit_worktree_access_audit(
+                &*state.data,
+                &op,
+                &name,
+                "tree",
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            return Err(e);
+        }
+    };
     let sub_path = match q.path.as_deref() {
-        Some(p) if !p.is_empty() => Some(validate_relative_path(p)?),
+        Some(p) if !p.is_empty() => match validate_relative_path(p) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                emit_worktree_access_audit(
+                    &*state.data,
+                    &op,
+                    &validated,
+                    "tree",
+                    operator_outcome::outcome_from_api_error(&e),
+                );
+                return Err(e);
+            }
+        },
         _ => None,
     };
-    Ok(Json(state.data.worktree_tree(name, sub_path)?))
+    match state.data.worktree_tree(&validated, sub_path) {
+        Ok(t) => {
+            state
+                .data
+                .emit_operator_audit(AuditEventKind::OperatorWorktreeAccessed {
+                    operator_fingerprint: op.fingerprint.clone(),
+                    worktree_id:          validated,
+                    surface:              "tree".into(),
+                    outcome:              operator_outcome::ACCEPTED.into(),
+                })?;
+            Ok(Json(t))
+        }
+        Err(e) => {
+            emit_worktree_access_audit(
+                &*state.data,
+                &op,
+                &validated,
+                "tree",
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            Err(e)
+        }
+    }
 }
 
 /// `GET /api/git/worktrees/:name/file?path=…` — read one
@@ -177,16 +295,267 @@ pub async fn file<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    let name = validate_name(&name)?;
+    let raw_path = q.path.clone().unwrap_or_default();
+    if let Err(e) = require_read(&op) {
+        emit_file_audit(
+            &*state.data,
+            &op,
+            &name,
+            &raw_path,
+            operator_outcome::outcome_from_api_error(&e),
+        );
+        return Err(e);
+    }
+    let validated_name = match validate_name(&name) {
+        Ok(n) => n.to_owned(),
+        Err(e) => {
+            emit_file_audit(
+                &*state.data,
+                &op,
+                &name,
+                &raw_path,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            return Err(e);
+        }
+    };
     let raw = q.path.as_deref().unwrap_or("");
     if raw.is_empty() {
-        return Err(ApiError::BadRequest {
+        let err = ApiError::BadRequest {
             detail: "path query parameter is required".into(),
-        });
+        };
+        emit_file_audit(
+            &*state.data,
+            &op,
+            &validated_name,
+            "",
+            operator_outcome::outcome_from_api_error(&err),
+        );
+        return Err(err);
     }
-    let file_path = validate_relative_path(raw)?;
-    Ok(Json(state.data.worktree_file(name, file_path)?))
+    let file_path = match validate_relative_path(raw) {
+        Ok(p) => p.to_owned(),
+        Err(e) => {
+            emit_file_audit(
+                &*state.data,
+                &op,
+                &validated_name,
+                raw,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            return Err(e);
+        }
+    };
+    match state.data.worktree_file(&validated_name, &file_path) {
+        Ok(f) => {
+            state
+                .data
+                .emit_operator_audit(AuditEventKind::OperatorFileContentFetched {
+                    operator_fingerprint: op.fingerprint.clone(),
+                    worktree_id:          validated_name,
+                    path:                 file_path,
+                    outcome:              operator_outcome::ACCEPTED.into(),
+                })?;
+            Ok(Json(f))
+        }
+        Err(e) => {
+            emit_file_audit(
+                &*state.data,
+                &op,
+                &validated_name,
+                &file_path,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            Err(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Operator-audit helpers (INV-AUDIT-OPERATOR-ACTION-01)
+// ---------------------------------------------------------------------------
+
+/// Wraps a privileged worktree-access handler that does the
+/// usual `require_read → validate_name → data-layer call`
+/// pattern: emits `OperatorWorktreeAccessed` on the success
+/// path (`outcome = "Accepted"`) and on each failure branch
+/// with the rejection class set from the underlying `ApiError`.
+///
+/// The inner closure runs only when both `require_read` and
+/// `validate_name` succeed, and it receives the canonicalised
+/// `&str` slug. Audit emission failures bubble up as
+/// `InternalError` (the success path) so the operator surface
+/// never silently drops an audit row.
+fn audited_worktree_access<D, R, F>(
+    data: &D,
+    op: &AuthorizedOperator,
+    raw_name: &str,
+    surface: &'static str,
+    f: F,
+) -> ApiResult<R>
+where
+    D: crate::data::DashboardData + ?Sized,
+    F: FnOnce(&str) -> ApiResult<R>,
+{
+    if let Err(e) = require_read(op) {
+        emit_worktree_access_audit(
+            data,
+            op,
+            raw_name,
+            surface,
+            operator_outcome::outcome_from_api_error(&e),
+        );
+        return Err(e);
+    }
+    let validated = match validate_name(raw_name) {
+        Ok(n) => n,
+        Err(e) => {
+            emit_worktree_access_audit(
+                data,
+                op,
+                raw_name,
+                surface,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            return Err(e);
+        }
+    };
+    match f(validated) {
+        Ok(out) => {
+            data.emit_operator_audit(AuditEventKind::OperatorWorktreeAccessed {
+                operator_fingerprint: op.fingerprint.clone(),
+                worktree_id:          validated.to_owned(),
+                surface:              surface.to_owned(),
+                outcome:              operator_outcome::ACCEPTED.into(),
+            })?;
+            Ok(out)
+        }
+        Err(e) => {
+            emit_worktree_access_audit(
+                data,
+                op,
+                validated,
+                surface,
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            Err(e)
+        }
+    }
+}
+
+fn audited_diff<D, R, F>(
+    data: &D,
+    op: &AuthorizedOperator,
+    raw_name: &str,
+    base_ref: Option<String>,
+    head_ref: Option<String>,
+    f: F,
+) -> ApiResult<R>
+where
+    D: crate::data::DashboardData + ?Sized,
+    F: FnOnce(&str) -> ApiResult<R>,
+{
+    if let Err(e) = require_read(op) {
+        emit_diff_audit(
+            data,
+            op,
+            raw_name,
+            base_ref.as_deref(),
+            head_ref.as_deref(),
+            operator_outcome::outcome_from_api_error(&e),
+        );
+        return Err(e);
+    }
+    let validated = match validate_name(raw_name) {
+        Ok(n) => n,
+        Err(e) => {
+            emit_diff_audit(
+                data,
+                op,
+                raw_name,
+                base_ref.as_deref(),
+                head_ref.as_deref(),
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            return Err(e);
+        }
+    };
+    match f(validated) {
+        Ok(out) => {
+            data.emit_operator_audit(AuditEventKind::OperatorDiffViewed {
+                operator_fingerprint: op.fingerprint.clone(),
+                worktree_id:          validated.to_owned(),
+                base_ref:             base_ref.clone(),
+                head_ref:             head_ref.clone(),
+                outcome:              operator_outcome::ACCEPTED.into(),
+            })?;
+            Ok(out)
+        }
+        Err(e) => {
+            emit_diff_audit(
+                data,
+                op,
+                validated,
+                base_ref.as_deref(),
+                head_ref.as_deref(),
+                operator_outcome::outcome_from_api_error(&e),
+            );
+            Err(e)
+        }
+    }
+}
+
+fn emit_worktree_access_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    worktree_id: &str,
+    surface: &str,
+    outcome: &'static str,
+) where
+    D: crate::data::DashboardData + ?Sized,
+{
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorWorktreeAccessed {
+        operator_fingerprint: op.fingerprint.clone(),
+        worktree_id:          worktree_id.to_owned(),
+        surface:              surface.to_owned(),
+        outcome:              outcome.into(),
+    });
+}
+
+fn emit_diff_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    worktree_id: &str,
+    base_ref: Option<&str>,
+    head_ref: Option<&str>,
+    outcome: &'static str,
+) where
+    D: crate::data::DashboardData + ?Sized,
+{
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorDiffViewed {
+        operator_fingerprint: op.fingerprint.clone(),
+        worktree_id:          worktree_id.to_owned(),
+        base_ref:             base_ref.map(|s| s.to_owned()),
+        head_ref:             head_ref.map(|s| s.to_owned()),
+        outcome:              outcome.into(),
+    });
+}
+
+fn emit_file_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    worktree_id: &str,
+    path: &str,
+    outcome: &'static str,
+) where
+    D: crate::data::DashboardData + ?Sized,
+{
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorFileContentFetched {
+        operator_fingerprint: op.fingerprint.clone(),
+        worktree_id:          worktree_id.to_owned(),
+        path:                 path.to_owned(),
+        outcome:              outcome.into(),
+    });
 }
 
 // ---------------------------------------------------------------------------

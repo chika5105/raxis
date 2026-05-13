@@ -749,6 +749,32 @@ pub trait DashboardData: Send + Sync + 'static {
         toml_bytes: &[u8],
         signature_bytes: &[u8],
     ) -> Result<PolicyAdvancement, ApiError>;
+
+    /// Emit a single `Operator*` audit event for an operator-
+    /// initiated dashboard action (mutating OR privileged-read).
+    /// Implements `INV-AUDIT-OPERATOR-ACTION-01`.
+    ///
+    /// Handlers MUST call this AFTER mechanical validation (auth,
+    /// permission, schema, path-safety) and BEFORE returning. The
+    /// `outcome` field on the event tells dashboards whether the
+    /// action succeeded (`Accepted`) or which rejection class it
+    /// fell into. The data layer is responsible for appending the
+    /// event to the kernel's audit chain — the dashboard never
+    /// touches the chain bytes directly.
+    ///
+    /// Failure mode: a non-`Ok` return MUST be a hard error. We
+    /// do NOT silently drop operator-audit events — the
+    /// `INV-AUDIT-OPERATOR-ACTION-01` invariant is a "before
+    /// returning success" contract, so a failing emit forces
+    /// the handler into the `InternalError` branch.
+    ///
+    /// `InMemoryDashboardData` records emissions on an internal
+    /// vector so tests can assert handlers actually fired the
+    /// expected event.
+    fn emit_operator_audit(
+        &self,
+        event: raxis_audit_tools::AuditEventKind,
+    ) -> Result<(), ApiError>;
 }
 
 /// Output of [`DashboardData::lookup_operator_roles`].
@@ -787,6 +813,11 @@ struct InMemoryInner {
     /// then push events onto it; the trait routes
     /// `stream_subscribe` / `stream_tail` to the matching source.
     streams: HashMap<String, StreamFixture>,
+    /// Capture of every `Operator*` audit event the handler
+    /// layer routed through `emit_operator_audit`. Lets tests
+    /// assert `INV-AUDIT-OPERATOR-ACTION-01` is honoured by
+    /// every operator-initiated route — read or mutate.
+    recorded_operator_audits: Vec<raxis_audit_tools::AuditEventKind>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -896,6 +927,17 @@ impl InMemoryDashboardData {
     pub fn push_worktree(self: &Arc<Self>, fix: WorktreeFixture) -> &Arc<Self> {
         self.inner.write().worktrees.push(fix);
         self
+    }
+
+    /// Snapshot of every `Operator*` audit event the dashboard
+    /// has routed through `emit_operator_audit` since boot. Used
+    /// by integration tests that assert
+    /// `INV-AUDIT-OPERATOR-ACTION-01` — every operator-initiated
+    /// route emits an audit row with the right outcome.
+    pub fn recorded_operator_audits(
+        self: &Arc<Self>,
+    ) -> Vec<raxis_audit_tools::AuditEventKind> {
+        self.inner.read().recorded_operator_audits.clone()
     }
 
     /// Install a live broadcast source for `session_id`. Future
@@ -1321,6 +1363,57 @@ impl DashboardData for InMemoryDashboardData {
             n_delegations_marked_stale: 0,
             advanced_at: 0,
         })
+    }
+
+    fn emit_operator_audit(
+        &self,
+        event: raxis_audit_tools::AuditEventKind,
+    ) -> Result<(), ApiError> {
+        // The in-memory fixture has no audit chain; we just
+        // capture the event so tests can assert handlers fire
+        // the expected operator-action records.
+        let mut g = self.inner.write();
+        g.recorded_operator_audits.push(event);
+        Ok(())
+    }
+}
+
+/// Stable-wire `outcome` discriminants for `Operator*` audit
+/// events per `INV-AUDIT-OPERATOR-ACTION-01`. Each is a single
+/// JSON string the dashboard surfaces verbatim — extension here
+/// is append-only.
+pub mod operator_outcome {
+    /// Action ran to completion.
+    pub const ACCEPTED: &str = "Accepted";
+    /// Schema / path-safety / similar mechanical-validation failure.
+    pub const REJECTED_VALIDATION: &str = "RejectedValidation";
+    /// Auth OK, but role / policy permission check failed.
+    pub const REJECTED_PERMISSION: &str = "RejectedPermission";
+    /// Server-side failure after the request was validated.
+    pub const INTERNAL_ERROR: &str = "InternalError";
+
+    /// Map an `ApiError` into the appropriate stable-wire outcome
+    /// string. The mapping is deliberately conservative — `NotFound`
+    /// counts as a validation failure (operator referenced a
+    /// resource that does not exist), `Forbidden` as permission,
+    /// `Internal` / `BadRequest` (other) as internal-error /
+    /// validation respectively.
+    pub fn outcome_from_api_error(err: &super::ApiError) -> &'static str {
+        use super::ApiError::*;
+        match err {
+            MissingAuth
+            | InvalidJwt
+            | JwtRevoked
+            | ChallengeExpired
+            | SignatureInvalid
+            | UnknownOperator
+            | CertRejected { .. } => REJECTED_PERMISSION,
+            Forbidden { .. } => REJECTED_PERMISSION,
+            NotFound { .. } => REJECTED_VALIDATION,
+            BadRequest { .. } => REJECTED_VALIDATION,
+            PolicyInvalid { .. } => REJECTED_VALIDATION,
+            Internal { .. } => INTERNAL_ERROR,
+        }
     }
 }
 

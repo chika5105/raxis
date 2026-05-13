@@ -237,6 +237,13 @@ pub struct KernelDashboardData {
     /// `audit_chain_status` to rate-limit chain re-walks per
     /// `INV-AUDIT-DASHBOARD-01`.
     chain_status_cache: parking_lot::Mutex<Option<ChainStatusView>>,
+    /// Audit sink the kernel binary wires to the production
+    /// chain. The dashboard pushes every `Operator*` event
+    /// through this sink for `INV-AUDIT-OPERATOR-ACTION-01`.
+    /// `None` when the host did not wire one (tests, read-only
+    /// fixtures); attempts to emit return a hard error so the
+    /// invariant is not silently violated.
+    audit_sink: Option<Arc<dyn raxis_audit_tools::AuditSink>>,
 }
 
 impl KernelDashboardData {
@@ -271,6 +278,7 @@ impl KernelDashboardData {
             stream_capture,
             policy_advancer: None,
             chain_status_cache: parking_lot::Mutex::new(None),
+            audit_sink: None,
         })
     }
 
@@ -296,7 +304,24 @@ impl KernelDashboardData {
             stream_capture,
             policy_advancer: None,
             chain_status_cache: parking_lot::Mutex::new(None),
+            audit_sink: None,
         }
+    }
+
+    /// Wire the kernel's audit sink onto the data layer so
+    /// dashboard handlers can route `Operator*` events through
+    /// `INV-AUDIT-OPERATOR-ACTION-01`. The sink is the SAME
+    /// `Arc<dyn AuditSink>` the kernel main loop uses for every
+    /// other audit emit, so chain order / sequence are preserved.
+    ///
+    /// Builder-style: returns `Self` so the kernel main can
+    /// chain the call onto a `KernelDashboardData::with_capture(...)`.
+    pub fn with_audit_sink(
+        mut self,
+        sink: Arc<dyn raxis_audit_tools::AuditSink>,
+    ) -> Self {
+        self.audit_sink = Some(sink);
+        self
     }
 
     /// Wire a [`PolicyAdvancer`] callback. The kernel main loop
@@ -1305,6 +1330,80 @@ impl DashboardData for KernelDashboardData {
             }
         }
     }
+
+    fn emit_operator_audit(
+        &self,
+        event: raxis_audit_tools::AuditEventKind,
+    ) -> Result<(), ApiError> {
+        // INV-AUDIT-OPERATOR-ACTION-01: route every operator-
+        // initiated dashboard action through the kernel audit sink
+        // before the handler returns. The sink is the SAME
+        // `Arc<dyn AuditSink>` the rest of the kernel uses, so
+        // chain order / sequence are preserved.
+        //
+        // No-sink path: an audit emit attempt with no wired sink
+        // is a hard error rather than a silent drop, because
+        // dropping operator-audit events would silently violate
+        // the invariant. Production always wires a sink; the
+        // narrow path here only fires in test fixtures that
+        // construct `KernelDashboardData` directly without
+        // calling `with_audit_sink`.
+        let sink = self.audit_sink.as_ref().ok_or(ApiError::Internal {
+            log_only: "operator audit emit: no audit sink wired".into(),
+        })?;
+        // Surface the `session_id`/`task_id`/`initiative_id`
+        // correlation fields on a best-effort basis from the
+        // event payload — `Operator*` events do not strictly
+        // require them, but when present they let the chain
+        // walker associate the audit row with an existing
+        // session/task surface in the dashboard.
+        let (session_id, task_id, initiative_id) =
+            correlation_fields_for_operator_event(&event);
+        sink.emit(
+            event,
+            session_id.as_deref(),
+            task_id.as_deref(),
+            initiative_id.as_deref(),
+        )
+        .map(|_| ())
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("operator audit emit: {e}"),
+        })
+    }
+}
+
+/// Pulls best-effort `(session_id, task_id, initiative_id)`
+/// correlation fields out of a freshly-built `Operator*` audit
+/// event so the chain row carries the existing dashboard
+/// surface links when the event payload happens to know them.
+///
+/// The `Operator*` event family lives entirely on the dashboard
+/// surface and does not require correlation fields, so missing
+/// links are not an error — they just mean the resulting audit
+/// row has those columns NULL.
+fn correlation_fields_for_operator_event(
+    event: &raxis_audit_tools::AuditEventKind,
+) -> (Option<String>, Option<String>, Option<String>) {
+    use raxis_audit_tools::AuditEventKind as K;
+    match event {
+        K::OperatorWorktreeAccessed { worktree_id, .. } => {
+            // Worktree slugs frequently encode `initiative-N` or
+            // similar; we surface the raw slug only on the
+            // `worktree_id` payload — not as the audit row's
+            // `initiative_id` correlation column, since the
+            // mapping is not 1:1.
+            let _ = worktree_id;
+            (None, None, None)
+        }
+        K::OperatorDiffViewed { .. }
+        | K::OperatorFileContentFetched { .. }
+        | K::OperatorNotificationMarkedRead { .. }
+        | K::OperatorNotificationsMarkedAllRead { .. }
+        | K::OperatorAuditChainReverified { .. }
+        | K::OperatorNotificationViewed { .. }
+        | K::OperatorHealthQueried { .. } => (None, None, None),
+        _ => (None, None, None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1750,6 +1849,7 @@ pub async fn start_dashboard_with_advancer(
     booted_at: u64,
     stream_capture: Arc<SessionStreamCapture>,
     advancer: Arc<dyn PolicyAdvancer>,
+    audit_sink: Arc<dyn raxis_audit_tools::AuditSink>,
 ) -> Result<ServerHandle, String> {
     let data = Arc::new(
         KernelDashboardData::with_capture(
@@ -1760,7 +1860,8 @@ pub async fn start_dashboard_with_advancer(
             booted_at,
             stream_capture,
         )
-        .with_advancer(advancer),
+        .with_advancer(advancer)
+        .with_audit_sink(audit_sink),
     );
     let server = DashboardServer::bind(cfg, data)
         .await
