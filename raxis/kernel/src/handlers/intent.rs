@@ -5244,6 +5244,27 @@ async fn handle_retry_sub_task(
                 decision.review_reject_count,
             );
         }
+
+        // iter44 perf-metrics — `INV-OBS-RESPAWN-KIND-LABEL-01`.
+        // Reviewer-disagreement-driven retries credit the work as
+        // `respawn_kind=reviewer_rejection` so dashboards can
+        // attribute the respawn churn to substantive reviewer
+        // disagreement rather than VM crashes or
+        // orchestrator-no-progress deadlocks. The matching
+        // continuation respawn fires asynchronously when the
+        // orchestrator session exits (post-exit hook in
+        // `session_spawn_orchestrator.rs`); that follow-up
+        // increment carries `respawn_kind=orchestrator_no_progress`
+        // and is the operator-visible "and now the orchestrator
+        // had to be restarted to drive the new activation" event.
+        // The two together capture the full causal chain.
+        crate::observability::record_isolation_respawn_attempted(
+            ctx.observability.as_ref(),
+            "kernel_post_exit",
+            "executor",
+            crate::observability::RESPAWN_KIND_REVIEWER_REJECTION,
+            1,
+        );
     }
 
     eprintln!(

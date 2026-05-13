@@ -141,7 +141,7 @@ key that is not on the list drops the entire metric and bumps
 | `raxis.isolation.spawn.guest_init.duration`    | Histogram (ms) | `backend`, `image_kind`, `outcome` |
 | `raxis.isolation.spawn.vsock_handshake.duration` | Histogram (ms) | `backend`, `image_kind`, `outcome` |
 | `raxis.isolation.spawn.total`                  | Counter        | `backend`, `image_kind`, `outcome`, `failure_class?` |
-| `raxis.isolation.respawn_attempted.total`      | Counter        | `backend`, `image_kind`, `attempt` |
+| `raxis.isolation.respawn_attempted.total`      | Counter        | `backend`, `image_kind`, `attempt`, `respawn_kind` |
 | `raxis.isolation.failed_final.total`           | Counter        | `backend`, `image_kind`, `failure_class` |
 | `raxis.isolation.scale.event.total`            | Counter        | `direction`, `reason` |
 | `raxis.isolation.scale.deferred.total`         | Counter        | `reason` |

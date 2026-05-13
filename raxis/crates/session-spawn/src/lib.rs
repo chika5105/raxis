@@ -371,20 +371,31 @@ impl SessionSpawnService {
         self
     }
 
-    /// Borrow the (optional) observability hub. Crate-private so the
-    /// internal `perf_telemetry` module can short-circuit when
-    /// observability is disabled.
-    pub(crate) fn observability_hub(
+    /// Borrow the (optional) observability hub. Public so the kernel
+    /// crate's elastic-scaling + post-exit-respawn dispatch sites
+    /// (`session_spawn_orchestrator.rs`) can record respawn-kind
+    /// labelled `IsolationRespawnAttemptedTotal` increments alongside
+    /// the matching audit emission. Returns `None` when the live-e2e
+    /// fixtures / unit tests construct the service without injecting
+    /// a hub via [`Self::with_observability`].
+    pub fn observability_hub(
         &self,
     ) -> Option<&Arc<raxis_observability::ObservabilityHub>> {
         self.observability.as_ref()
     }
 
     /// Backend identifier the perf-telemetry helpers stamp into the
-    /// `backend` attribute. Crate-private; goes through the trait
-    /// rather than being read from a stored copy so the value cannot
-    /// drift from what the substrate advertises.
-    pub(crate) fn backend_id(&self) -> &'static str {
+    /// `backend` attribute. Goes through the trait rather than being
+    /// read from a stored copy so the value cannot drift from what the
+    /// substrate advertises.
+    ///
+    /// Exposed `pub` so kernel-side bridges (e.g.
+    /// `kernel::session_spawn_orchestrator::spawn_with_transient_retry`)
+    /// can stamp the same backend label onto the iter44
+    /// `IsolationRespawnAttemptedTotal{respawn_kind="vm_crash"}`
+    /// emission as `record_successful_spawn` writes for the matching
+    /// successful-spawn perf row.
+    pub fn backend_id(&self) -> &'static str {
         self.isolation.backend_id()
     }
 

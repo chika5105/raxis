@@ -86,7 +86,8 @@
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
-| **Total** | | **104** |
+| Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01 | 1 |
+| **Total** | | **105** |
 
 ---
 
@@ -5535,6 +5536,63 @@ that far) likewise bounces.
 **Canonical home.** `v2/self-healing-supervisor.md` §10;
 `v2/dashboard-hardening.md` §7 (persistent JWT secret
 addendum).
+
+---
+
+## §11.13 — Observability metric coverage (INV-OBS-*)
+
+iter44 perf-metrics expansion. Each invariant pairs a closed-set
+or coverage statement with a deterministic unit-test witness so the
+"what does a working live-e2e iter44 run look like in Grafana?"
+reference can be programmatically asserted instead of eyeballed.
+
+Canonical home: `v3/otel-observability.md §8` (metric catalog) +
+`v3/observability-prometheus.md §3` (Prometheus naming).
+
+### INV-OBS-RESPAWN-KIND-LABEL-01 — `IsolationRespawnAttemptedTotal` carries a closed `respawn_kind` label
+
+**Statement.** Every emission of
+`raxis.isolation.respawn_attempted.total` (the OTel-canonical name
+of `MetricName::IsolationRespawnAttemptedTotal`) MUST carry a
+non-empty `respawn_kind` label whose value is drawn from the closed
+set `{ "vm_crash", "orchestrator_no_progress", "reviewer_rejection",
+"unknown" }`. Adding a new value is a spec change to
+`v3/otel-observability.md §8` AND a code change to
+`kernel/src/observability.rs::RESPAWN_KIND_CLOSED_SET`.
+
+**Justification.** The pre-iter44 metric counted every respawn under
+one bucket, which made the operator dashboard unable to distinguish
+"healthy retry on a transient VM spawn failure" (a sub-second
+self-healing event) from "the orchestrator session keeps exiting
+without making DAG progress" (a logical-deadlock pathology that
+needs human attention). iter42's root-cause investigation needed
+this disambiguation and had to reconstruct it after the fact from
+audit-chain joins. With the closed lexicon, the dashboard panel
+"Respawn rate by kind" (`grafana/dashboards/10-isolation.json`,
+`id=32`) renders the three kinds as distinct stacked time-series;
+zero work for the operator.
+
+**Scenario.** Reviewer-disagreement causes the executor to be
+respawned twice in quick succession. The audit chain shows
+`ExecutorRespawnFromReviewRejection` (round 1) and
+`ExecutorRespawnFromReviewRejection` (round 2). Without this
+invariant, the dashboard shows `respawn_attempted_total` jumping by
++2 with no explanation; the operator opens the audit log to see why.
+With this invariant, the dashboard's "Respawn rate by kind" panel
+shows a +2 spike on the `reviewer_rejection` series, the operator
+recognises it as the agent-disagreement code path, and moves on.
+
+**Witness.** Two unit tests in
+`kernel/src/observability.rs::respawn_kind_tests`:
+* `every_closed_set_value_is_emitted_with_known_label` — drives
+  `record_isolation_respawn_attempted` once per constant in
+  `RESPAWN_KIND_CLOSED_SET`, asserts each metric carries the
+  matching label.
+* `closed_set_matches_spec_table` — pins the four constants
+  enumerated in this invariant.
+
+**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+row for `IsolationRespawnAttemptedTotal`).
 
 ---
 

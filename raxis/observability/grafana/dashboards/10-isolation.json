@@ -124,6 +124,18 @@
         { "expr": "sum by (backend, failure_class) (rate(raxis_isolation_failed_final_total[5m]))", "legendFormat": "{{backend}} {{failure_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Respawn rate by kind (vm_crash / orchestrator_no_progress / reviewer_rejection)",
+      "description": "Disambiguates healthy retry from logical-deadlock churn. iter44 / INV-OBS-RESPAWN-KIND-LABEL-01.",
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 8 },
+      "targets": [
+        { "expr": "sum by (respawn_kind) (rate(raxis_isolation_respawn_attempted_total[1m]))", "legendFormat": "{{respawn_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 25 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     }
   ]
 }

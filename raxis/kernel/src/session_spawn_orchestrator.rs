@@ -1674,6 +1674,17 @@ pub fn spawn_planner_dispatcher(
                     "{{\"level\":\"info\",\"event\":\"orchestrator_post_exit_respawn_trigger\",\
                      \"session_id\":\"{session_id}\",\"initiative_id\":\"{initiative_id}\"}}",
                 );
+                // iter44 — pair the structured trigger log with a metric
+                // increment labelled `respawn_kind=orchestrator_no_progress`
+                // so the dashboard taxonomy disambiguates this from
+                // VM-crash transient retries.
+                crate::observability::record_isolation_respawn_attempted(
+                    ctx.observability.as_ref(),
+                    "kernel_post_exit",
+                    "orchestrator",
+                    crate::observability::RESPAWN_KIND_ORCHESTRATOR_NO_PROGRESS,
+                    1,
+                );
                 respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
             }
             Ok(Some(PostExitAction::WorkerFailureRespawn {
@@ -1685,6 +1696,19 @@ pub fn spawn_planner_dispatcher(
                     "{{\"level\":\"info\",\"event\":\"worker_post_exit_respawn_trigger\",\
                      \"session_id\":\"{session_id}\",\"initiative_id\":\"{initiative_id}\",\
                      \"task_id\":\"{task_id}\",\"role\":\"{role}\"}}",
+                );
+                // iter44 — Mode-B premature-exit failure synthesis
+                // also drives an orchestrator continuation respawn
+                // (`respawn_orchestrator_for_initiative` below); count
+                // it under the same `orchestrator_no_progress` lexeme
+                // because from the dashboard's perspective it is the
+                // same "the DAG would deadlock without us" pathology.
+                crate::observability::record_isolation_respawn_attempted(
+                    ctx.observability.as_ref(),
+                    "kernel_post_exit",
+                    "orchestrator",
+                    crate::observability::RESPAWN_KIND_ORCHESTRATOR_NO_PROGRESS,
+                    1,
                 );
                 respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
             }
@@ -2660,6 +2684,28 @@ async fn spawn_with_transient_retry(
                         sid = proto.session_id,
                         attempt = next_attempt,
                         err = e,
+                    );
+                }
+
+                // iter44 perf-metrics — `INV-OBS-RESPAWN-KIND-LABEL-01`.
+                // Pair the audit emission with a labelled metric increment
+                // so the `10-isolation` dashboard can split healthy
+                // transient-retry churn from logical-deadlock respawns.
+                // Backend + image_kind mirror the existing perf-telemetry
+                // shape so dashboards can join on either label.
+                if let Some(hub) = service.observability_hub() {
+                    let image_kind_str = match proto.image.kind {
+                        raxis_isolation::ImageKind::RootfsErofs         => "rootfs_erofs",
+                        raxis_isolation::ImageKind::RootfsInitramfsCpio => "rootfs_initramfs_cpio",
+                        raxis_isolation::ImageKind::EnclaveSigStruct    => "enclave_sigstruct",
+                        raxis_isolation::ImageKind::WasmModule          => "wasm_module",
+                    };
+                    crate::observability::record_isolation_respawn_attempted(
+                        hub.as_ref(),
+                        service.backend_id(),
+                        image_kind_str,
+                        crate::observability::RESPAWN_KIND_VM_CRASH,
+                        next_attempt as i64,
                     );
                 }
 

@@ -777,3 +777,179 @@ pub fn record_credential_proxy_substitution(
     let labels = redact::attrs([("service", service)]);
     hub.record_counter(MetricName::CredentialProxySubstitutionTotal, labels, 1.0);
 }
+
+// ---------------------------------------------------------------------------
+// iter44 perf-metrics — `INV-OBS-RESPAWN-KIND-LABEL-01`.
+//
+// The kernel has three structurally distinct respawn paths and the
+// `00-overview` operator needs to disambiguate "healthy retry on a VM
+// crash" from "logical-deadlock churn (orchestrator-no-progress)" from
+// "reviewer disagreement reset (review-rejection)" at a glance.
+// `IsolationRespawnAttemptedTotal` carries one extra label —
+// `respawn_kind` — drawn from a closed set:
+//
+//   * `vm_crash`               — transient VM spawn failure was retried
+//                                via `spawn_with_transient_retry` (the
+//                                pre-existing elastic-scaling path).
+//   * `orchestrator_no_progress` — the kernel observed the post-exit
+//                                hook (Mode A: orchestrator session
+//                                ended with PendingActivation rows
+//                                left over; Mode B: worker session
+//                                ended without a terminal intent) and
+//                                respawned the orchestrator to drive
+//                                the DAG forward.
+//   * `reviewer_rejection`      — `RetrySubTask` admitted via the
+//                                `Completed`-with-`review_reject_count > 0`
+//                                branch (`agent-disagreement.md §3.6`);
+//                                the orchestrator continuation respawn
+//                                that follows is attributable to
+//                                reviewer disagreement, NOT to a VM
+//                                crash.
+//   * `unknown`                 — fallback for paths whose taxonomy
+//                                hasn't been mapped yet; should be
+//                                vanishingly rare on the dashboard.
+//
+// Spec parity: `specs/v3/otel-observability.md §8` row for
+// `IsolationRespawnAttemptedTotal` plus the V3 Prometheus contract in
+// `specs/v3/observability-prometheus.md §3.1`.
+// ---------------------------------------------------------------------------
+
+/// Allowed `respawn_kind` label values. Production emit sites MUST
+/// pick exactly one of these strings; the unit-test witness for
+/// `INV-OBS-RESPAWN-KIND-LABEL-01` re-asserts the closed set.
+pub const RESPAWN_KIND_VM_CRASH:               &str = "vm_crash";
+/// Orchestrator post-exit respawn (Mode A or Mode B).
+pub const RESPAWN_KIND_ORCHESTRATOR_NO_PROGRESS: &str = "orchestrator_no_progress";
+/// Reviewer-disagreement-driven `RetrySubTask` continuation respawn.
+pub const RESPAWN_KIND_REVIEWER_REJECTION:     &str = "reviewer_rejection";
+/// Fallback for code paths whose respawn taxonomy hasn't been mapped.
+pub const RESPAWN_KIND_UNKNOWN:                &str = "unknown";
+
+/// Closed set of every `respawn_kind` value the kernel may emit.
+/// The dashboard taxonomy at `grafana/dashboards/10-isolation.json`
+/// expects exactly this set; the witness test uses this slice to
+/// assert no emit site smuggled in a free-form label value.
+pub const RESPAWN_KIND_CLOSED_SET: &[&str] = &[
+    RESPAWN_KIND_VM_CRASH,
+    RESPAWN_KIND_ORCHESTRATOR_NO_PROGRESS,
+    RESPAWN_KIND_REVIEWER_REJECTION,
+    RESPAWN_KIND_UNKNOWN,
+];
+
+/// `raxis.isolation.respawn_attempted.total` — counter, one bump per
+/// respawn the kernel schedules. `respawn_kind` MUST be drawn from
+/// [`RESPAWN_KIND_CLOSED_SET`]; the redactor caps the value at 32
+/// bytes anyway but the closed lexicon is the load-bearing
+/// guarantee per `INV-OBS-RESPAWN-KIND-LABEL-01`.
+///
+/// `backend` mirrors the `IsolationSpawn*` family's `backend` label
+/// so dashboards can correlate respawn rates against per-backend
+/// cold-boot histograms. `attempt` (1-indexed) lets the
+/// dashboard distinguish "first retry" from "third retry" inside
+/// the elastic-scaling transient-retry loop; emit sites that have
+/// no natural attempt counter (orchestrator post-exit / reviewer-
+/// rejection respawns) pass `1`.
+pub fn record_isolation_respawn_attempted(
+    hub:          &ObservabilityHub,
+    backend:      &str,
+    image_kind:   &str,
+    respawn_kind: &str,
+    attempt:      i64,
+) {
+    if !hub.enabled() { return; }
+    let mut labels = redact::attrs([
+        ("backend",      backend),
+        ("image_kind",   image_kind),
+        ("respawn_kind", respawn_kind),
+    ]);
+    labels.insert(
+        "attempt".to_owned(),
+        raxis_observability::AttrValue::I64(attempt),
+    );
+    hub.record_counter(MetricName::IsolationRespawnAttemptedTotal, labels, 1.0);
+}
+
+#[cfg(test)]
+mod respawn_kind_tests {
+    use super::*;
+    use raxis_observability::{
+        exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
+        ObservabilityExporter, ObservabilityHub,
+    };
+    use std::sync::Arc;
+
+    fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled:     true,
+            sample_rate: 1.0,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
+        (hub, exp)
+    }
+
+    /// `INV-OBS-RESPAWN-KIND-LABEL-01` witness: every
+    /// `record_isolation_respawn_attempted` emission MUST carry a
+    /// `respawn_kind` label whose value is in the closed set
+    /// [`RESPAWN_KIND_CLOSED_SET`]. This exercises every constant
+    /// the production sites use.
+    #[test]
+    fn every_closed_set_value_is_emitted_with_known_label() {
+        for kind in RESPAWN_KIND_CLOSED_SET {
+            let (hub, exp) = enabled_hub();
+            record_isolation_respawn_attempted(
+                hub.as_ref(),
+                "subprocess",
+                "executor",
+                kind,
+                1,
+            );
+            hub.flush();
+            let metrics = exp.metrics();
+            assert_eq!(
+                metrics.len(), 1,
+                "expected exactly one metric for kind={kind}",
+            );
+            let m = &metrics[0];
+            assert_eq!(m.name, MetricName::IsolationRespawnAttemptedTotal);
+            // Counter shape: Sum { value: 1.0 }.
+            assert!(matches!(m.datapoint, DataPoint::Sum { value } if (value - 1.0).abs() < 1e-9));
+            let v = m.labels.get("respawn_kind").expect("respawn_kind present");
+            match v {
+                AttrValue::Str(s) => {
+                    assert_eq!(s, kind, "respawn_kind label round-trips verbatim");
+                    assert!(
+                        RESPAWN_KIND_CLOSED_SET.contains(&s.as_str()),
+                        "respawn_kind {s:?} not in closed set",
+                    );
+                }
+                other => panic!("respawn_kind must be a string, got {other:?}"),
+            }
+        }
+    }
+
+    /// Defence-in-depth: the closed set MUST contain exactly the four
+    /// constants the spec §8 table enumerates. Adding a fifth without
+    /// a spec change would let an emit site smuggle a new lexeme onto
+    /// the dashboard.
+    #[test]
+    fn closed_set_matches_spec_table() {
+        let expected = [
+            "vm_crash",
+            "orchestrator_no_progress",
+            "reviewer_rejection",
+            "unknown",
+        ];
+        assert_eq!(RESPAWN_KIND_CLOSED_SET.len(), expected.len());
+        for &e in &expected {
+            assert!(
+                RESPAWN_KIND_CLOSED_SET.contains(&e),
+                "spec lexeme {e:?} missing from closed set",
+            );
+        }
+    }
+}

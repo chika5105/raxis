@@ -139,6 +139,11 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     //  no PII flows through these keys (they describe code-paths, not data).
     ("chokepoint",        AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
     ("provider_kind",     AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    // iter44 / `INV-OBS-RESPAWN-KIND-LABEL-01`: disambiguates
+    // `IsolationRespawnAttemptedTotal` between vm_crash transient
+    // retries, orchestrator no-progress respawns, and reviewer
+    // rejection respawns. Closed lexicon — no PII.
+    ("respawn_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
 ];
 
 /// Explicit denylist. Defense-in-depth: even if a key accidentally
