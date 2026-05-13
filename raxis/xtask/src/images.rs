@@ -165,12 +165,21 @@ struct DevStageArgs {
     target:         String,
     workspace_root: PathBuf,
     cargo:          String,
+    /// When true, skip the post-stage stub-detection guard. Default
+    /// `false`: dev-stage refuses to claim success when the role's
+    /// staging tree is missing OS tooling that the canonical
+    /// Containerfile promises (e.g. `bin/bash` for executor-starter).
+    /// Set this only when intentionally building a binary-only
+    /// debug image (e.g. while iterating on planner-core without
+    /// re-running the docker bake).
+    allow_stub:     bool,
 }
 
 impl DevStageArgs {
     fn parse(argv: &[String]) -> Result<Self> {
         let mut role:   Option<Role>     = None;
         let mut target: Option<String>   = None;
+        let mut allow_stub:    bool      = false;
 
         let mut i = 0;
         while i < argv.len() {
@@ -185,11 +194,21 @@ impl DevStageArgs {
                     i += 1;
                     target = Some(argv.get(i).context("--target requires a triple")?.clone());
                 }
+                "--allow-stub" => {
+                    allow_stub = true;
+                }
                 "-h" | "--help" => {
                     eprintln!(
-                        "usage: cargo xtask images dev-stage --role <ROLE> [--target <TRIPLE>]\n  \
-                         --role     orchestrator | reviewer | executor-starter\n  \
-                         --target   default: {default}\n",
+                        "usage: cargo xtask images dev-stage --role <ROLE> \
+                         [--target <TRIPLE>] [--allow-stub]\n  \
+                         --role        orchestrator | reviewer | executor-starter\n  \
+                         --target      default: {default}\n  \
+                         --allow-stub  skip the post-stage stub-detection guard \
+                                       (refuses success when the role's staging \
+                                       tree lacks Containerfile-promised tooling \
+                                       like bin/bash on executor-starter; pass \
+                                       this only when intentionally building a \
+                                       binary-only debug image)\n",
                         default = default_target_triple(),
                     );
                     std::process::exit(0);
@@ -204,8 +223,82 @@ impl DevStageArgs {
         let workspace_root = workspace_root_from_cwd()?;
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
 
-        Ok(Self { role, target, workspace_root, cargo })
+        Ok(Self { role, target, workspace_root, cargo, allow_stub })
     }
+}
+
+/// Per-role inventory of OS-level binaries the canonical Containerfile
+/// promises. If `dev-stage` runs without a prior `bake-rootfs`, the
+/// staging tree contains only the planner binary and these files are
+/// missing — the symptom is the iter-12 `BashTool: ENOENT` storm.
+///
+/// The list is **role-required** (not nice-to-have): every entry maps
+/// to a planner-tool spawn or runtime requirement that would ENOENT
+/// at the first invocation if absent.
+///
+/// * `bin/bash`              — `BashTool` spawn (`tokio::process::
+///                             Command::new("bash")`).
+/// * `usr/bin/python3`       — required by the executor's
+///                             "LLM writes a `psycopg2` script and
+///                             pipes it through `bash -c 'python3 -c
+///                             "..."'`" canonical pattern. Without
+///                             python the credential-proxy round-trip
+///                             tests can never run.
+/// * `usr/bin/git`           — `GitCommitTool` spawn.
+///
+/// Orchestrator and Reviewer are intentionally binary-only today
+/// (`INV-PLANNER-HARNESS-02 — minimalism`); their `required_binaries`
+/// list is empty so the guard always passes for those roles.
+fn required_os_binaries(role: Role) -> &'static [&'static str] {
+    match role {
+        Role::ExecutorStarter => &[
+            "bin/bash",
+            "usr/bin/python3",
+            "usr/bin/git",
+        ],
+        Role::Orchestrator | Role::Reviewer => &[],
+    }
+}
+
+fn assert_no_stub_after_stage(
+    role:         Role,
+    staging_root: &Path,
+) -> Result<()> {
+    let required = required_os_binaries(role);
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|rel| {
+            let p = staging_root.join(rel);
+            // Treat both regular files AND symlinks-to-files as
+            // satisfied; OS rootfs trees use both shapes
+            // (`/usr/bin/python3 -> python3.11`).
+            !p.exists() && p.symlink_metadata().is_err()
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "dev-stage refuses to declare success: the {role:?} staging tree at \n  \
+         {staging}\n\
+         is a stub — missing {n} Containerfile-promised binar{plural}:\n{lines}\n\
+         \n\
+         Run the bake first:\n  \
+         cargo xtask images bake-rootfs --role {role_arg}\n\
+         then re-run dev-stage. Pass --allow-stub to dev-stage if you are \
+         intentionally building a binary-only debug image (NOT for live-e2e).",
+        role     = role.workspace_crate(),
+        staging  = staging_root.display(),
+        n        = missing.len(),
+        plural   = if missing.len() == 1 { "y" } else { "ies" },
+        role_arg = role.images_subdir(),
+        lines    = missing
+                       .iter()
+                       .map(|m| format!("  - {m}"))
+                       .collect::<Vec<_>>()
+                       .join("\n"),
+    )
 }
 
 /// Entry point for `cargo xtask images dev-stage`.
@@ -333,12 +426,35 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
     })?;
     let dest = canonical_abs;
 
+    // Stub guard — assert the staging tree contains the role's
+    // canonical Containerfile-promised binaries before declaring
+    // success. Skipped when --allow-stub is set or when the role's
+    // required-binary list is empty (orch / reviewer today). Without
+    // this guard, a missing `bake-rootfs` invocation surfaces as the
+    // iter-12 `BashTool: ENOENT` storm at runtime instead of an
+    // immediate, actionable build-time failure.
+    if !args.allow_stub {
+        if let Err(e) = assert_no_stub_after_stage(args.role, &staging_root) {
+            // Emit the structured event BEFORE returning so audit-grep
+            // and CI logs both record the stub detection.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"dev_stage_stub_detected\",\
+                 \"role\":{:?},\"staging_root\":{:?}}}",
+                args.role.workspace_crate(),
+                staging_root.display().to_string(),
+            );
+            return Err(e);
+        }
+    }
+
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"dev_stage_ok\",\
-         \"role\":{:?},\"binary\":{:?},\"staged_at\":{:?}}}",
+         \"role\":{:?},\"binary\":{:?},\"staged_at\":{:?},\
+         \"stub_guard\":{:?}}}",
         args.role.workspace_crate(),
         built.display().to_string(),
         dest.display().to_string(),
+        if args.allow_stub { "skipped" } else { "passed" },
     );
 
     Ok(())
@@ -1153,6 +1269,74 @@ mod tests {
         assert_eq!(parsed.builder,  Some(Builder::Podman));
         assert_eq!(parsed.platform.as_deref(), Some("linux/arm64"));
         assert!(parsed.keep);
+    }
+
+    #[test]
+    fn stub_guard_passes_when_role_has_no_required_binaries() {
+        // Orchestrator + Reviewer ship binary-only today
+        // (INV-PLANNER-HARNESS-02 minimalism), so the guard is a
+        // no-op. This pins that contract: a future change that adds
+        // entries to `required_os_binaries(Role::Reviewer)` MUST
+        // also amend the spec.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(assert_no_stub_after_stage(Role::Orchestrator, tmp.path()).is_ok());
+        assert!(assert_no_stub_after_stage(Role::Reviewer,     tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn stub_guard_rejects_executor_starter_with_empty_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = assert_no_stub_after_stage(Role::ExecutorStarter, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bin/bash"),         "remediation must name bash:    {err}");
+        assert!(err.contains("usr/bin/python3"),  "remediation must name python3: {err}");
+        assert!(err.contains("usr/bin/git"),      "remediation must name git:     {err}");
+        assert!(err.contains("bake-rootfs"),      "remediation must point at bake: {err}");
+        assert!(err.contains("--allow-stub"),     "remediation must mention escape hatch: {err}");
+    }
+
+    #[test]
+    fn stub_guard_passes_for_executor_starter_when_required_binaries_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        for rel in required_os_binaries(Role::ExecutorStarter) {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
+        }
+        assert!(assert_no_stub_after_stage(Role::ExecutorStarter, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn stub_guard_passes_for_executor_starter_when_required_binaries_are_symlinks() {
+        // Real Linux rootfs trees use symlinks heavily
+        // (`/usr/bin/python3 -> python3.11`). Pin that the guard
+        // accepts symlinks even when the target does not resolve.
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        for rel in required_os_binaries(Role::ExecutorStarter) {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            symlink("/dev/null", &p).unwrap();
+        }
+        assert!(assert_no_stub_after_stage(Role::ExecutorStarter, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn dev_stage_args_default_allow_stub_is_false() {
+        let argv = vec!["--role".to_owned(), "orchestrator".to_owned()];
+        let args = DevStageArgs::parse(&argv).expect("parse");
+        assert!(!args.allow_stub);
+    }
+
+    #[test]
+    fn dev_stage_args_allow_stub_flag_parses() {
+        let argv = vec![
+            "--role".to_owned(),     "executor-starter".to_owned(),
+            "--allow-stub".to_owned(),
+        ];
+        let args = DevStageArgs::parse(&argv).expect("parse");
+        assert!(args.allow_stub);
     }
 
     #[test]
