@@ -77,8 +77,8 @@ use std::time::SystemTime;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_canonical_images::{
-    manifest_path_for_image, read_verified_image_format, verify_canonical_image_via_manifest,
-    CanonicalImageError, CanonicalImageKind,
+    manifest_path_for_image, read_unverified_image_format_hint, read_verified_image_format,
+    verify_canonical_image_via_manifest, CanonicalImageError, CanonicalImageKind,
 };
 use raxis_image_manifest::ImageFormat;
 use raxis_isolation::ImageKind;
@@ -365,24 +365,44 @@ pub fn image_format_to_image_kind(f: ImageFormat) -> ImageKind {
 /// returns the manifest-signed [`ImageFormat`] mapped via
 /// [`image_format_to_image_kind`].
 ///
-/// **Graceful-degradation path.** Falls back to
-/// [`ImageKind::RootfsErofs`] (the production canonical default) and
-/// returns `Ok(_, _, false)` (the third tuple element is "format
-/// known-to-be-trusted-from-manifest") in two scenarios:
+/// **Graceful-degradation path.** Two scenarios trigger an
+/// `is_trusted = false` return; both let the substrate's own
+/// `spawn`-time defence-in-depth verifier surface the actual tamper
+/// case at activation if the bytes truly disagree with the signed
+/// manifest.
 ///
-/// * The sibling `<role>.manifest.toml` does not exist on disk
-///   (early-deployment / dev-host case before the build pipeline has
-///   run `cargo xtask images build-all`).
-/// * Manifest verification fails for any reason — most commonly the
-///   trust anchor is the all-zero placeholder
+/// * **Manifest missing** — the sibling `<role>.manifest.toml` does
+///   not exist on disk (early-deployment / dev-host case before the
+///   build pipeline has run `cargo xtask images build-all`). With
+///   no metadata to read, we fall back to
+///   [`ImageKind::RootfsErofs`] (the production canonical default
+///   per `planner-harness.md §14.4`).
+/// * **Manifest verify failed** — most commonly the trust anchor is
+///   the all-zero placeholder
 ///   ([`raxis_canonical_images::CanonicalImageError::SigningKeyFpNotPopulated`])
-///   on a kernel built without `RAXIS_KERNEL_SIGNING_KEY_HEX`.
+///   on a kernel built without `RAXIS_KERNEL_SIGNING_KEY_HEX`. The
+///   manifest exists and parses, just isn't cryptographically
+///   trusted. We read the manifest's `image_format` field as an
+///   **unverified hint** via [`read_unverified_image_format_hint`]
+///   and dispatch on it. This keeps AVF + Firecracker from
+///   misclassifying a `RootfsInitramfsCpio` blob as a virtio-blk
+///   EROFS device (which AVF rejects with
+///   `Invalid disk image. The disk image format is not recognized.`,
+///   bricking every spawn on a dev-built / V2-cutover kernel). If
+///   the hint itself fails to parse, we fall back to
+///   [`ImageKind::RootfsErofs`] as a last-resort default.
 ///
-/// Both fallback cases log a structured warning at this seam (so
-/// `raxis doctor` and the dashboard surface the un-signed boot in the
-/// run record) and let the substrate's own `spawn`-time defence-in-
-/// depth verifier surface the actual tamper case at activation if
-/// the bytes truly disagree with the signed manifest.
+/// **Why the unverified hint is safe.** `image_format` is dispatch
+/// metadata, not a privilege grant. The cryptographic gate against
+/// a tampered or adversarial image is the manifest's
+/// `image_artefact_sha256`, which the substrate re-verifies at
+/// spawn time. A manifest that lies about `image_format` only
+/// causes a spawn-time mount failure — no guest code runs. See
+/// [`read_unverified_image_format_hint`] for the full rationale.
+///
+/// All fallback paths log a structured warning at this seam so
+/// `raxis doctor` and the dashboard can render the un-signed boot
+/// in the run record.
 ///
 /// Returns the `image_path` unchanged from the input — callers wire
 /// it through to `VerifiedImage::body = ImageBody::Path(image_path)`.
@@ -440,19 +460,34 @@ pub fn resolve_image_kind_for_role(
         match read_verified_image_format(image_path, &manifest_path, canonical_kind, kernel_version) {
             Ok(fmt) => (image_format_to_image_kind(fmt), true),
             Err(e) => {
+                // Verification failed — consult the manifest's
+                // declared `image_format` as an unverified hint so
+                // the substrate dispatch (AVF virtio-blk vs.
+                // initramfs cpio.gz) matches the bytes on disk even
+                // when the trust anchor is the all-zero placeholder.
+                // See `resolve_image_kind_for_role` doc comment for
+                // the trust-model rationale (image_format is
+                // dispatch metadata, not a privilege grant).
+                let (hint_kind, hint_source) =
+                    match read_unverified_image_format_hint(&manifest_path) {
+                        Ok(fmt) => (image_format_to_image_kind(fmt), "manifest_image_format_field"),
+                        Err(_)  => (ImageKind::RootfsErofs,           "rootfs_erofs_default"),
+                    };
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"canonical_image_kind_fallback\",\
                      \"reason\":\"manifest_verify_failed\",\"image\":\"{}\",\
-                     \"manifest\":\"{}\",\"fallback_kind\":\"RootfsErofs\",\
-                     \"error\":{:?}}}",
+                     \"manifest\":\"{}\",\"fallback_kind\":\"{:?}\",\
+                     \"fallback_source\":\"{}\",\"error\":{:?}}}",
                     image_path.display(),
                     manifest_path.display(),
+                    hint_kind,
+                    hint_source,
                     e.to_string(),
                 );
                 // Same fallback-not-cached rationale as above: we
                 // want the next spawn to re-stat once the operator
                 // remediates the manifest.
-                return (ImageKind::RootfsErofs, false);
+                return (hint_kind, false);
             }
         };
 
@@ -809,5 +844,147 @@ mod tests {
             !kinds.contains(&"SecurityViolationDetected"),
             "trust-anchor-unpopulated must NOT emit SecurityViolationDetected: {kinds:?}",
         );
+    }
+
+    /// Regression: when the kernel's signing-key trust anchor is the
+    /// all-zero placeholder, the manifest verification short-circuits
+    /// with `SigningKeyFpNotPopulated` and the kernel cannot trust
+    /// the manifest's signature. The dispatch fallback must still
+    /// honour the manifest's declared `image_format` field so AVF /
+    /// Firecracker mount the bytes the right way (virtio-blk EROFS
+    /// vs. initramfs cpio.gz).
+    ///
+    /// Prior behavior hardcoded `RootfsErofs`, which caused AVF to
+    /// reject every `RootfsInitramfsCpio` image with
+    /// `Invalid disk image. The disk image format is not recognized.`
+    /// — bricking every spawn on a dev/V2-cutover kernel that ships
+    /// the initramfs shape (the live-e2e workflow's default).
+    ///
+    /// **Test only meaningful in the all-zero placeholder build.** A
+    /// developer build that injects a real signing key via
+    /// `RAXIS_KERNEL_SIGNING_KEY_HEX` would take a different branch
+    /// (the populated-anchor verifier) and would either accept the
+    /// signature (if it matched) or reject the manifest entirely
+    /// (if it didn't); either case is covered structurally by other
+    /// tests. Skip in that case rather than asserting a posture the
+    /// build cannot reach.
+    #[test]
+    fn unpopulated_anchor_fallback_honours_manifest_image_format_hint() {
+        if raxis_canonical_images::EXPECTED_KERNEL_SIGNING_KEY_BYTES
+            != [0u8; raxis_canonical_images::DIGEST_LEN]
+        {
+            eprintln!(
+                "skip: kernel signing-key trust anchor is populated; \
+                 this test only exercises the all-zero placeholder branch"
+            );
+            return;
+        }
+
+        let tmp    = tempfile::tempdir().unwrap();
+        let images = tmp.path().join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        let img_path = images.join("raxis-orchestrator-core-0.0.0-test.img");
+        std::fs::write(&img_path, b"placeholder-orchestrator-bytes").unwrap();
+
+        // Hand-built v3 manifest claiming `image_format =
+        // "RootfsInitramfsCpio"`. The signature / digests / bundle_hash
+        // are intentionally junk: in this build the trust anchor is
+        // unpopulated, so `read_verified_image_format` short-circuits
+        // before they are ever consulted, and the unverified-hint path
+        // only needs the file to parse as a `SCHEMA_VERSION = 3`
+        // `ImageManifest` to extract the format field.
+        let manifest_toml = r#"
+schema_version = 3
+role = "Orchestrator"
+kernel_version = "0.0.0-test"
+bundle_hash = "0000000000000000000000000000000000000000000000000000000000000000"
+image_artefact_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+image_format = "RootfsInitramfsCpio"
+signing_key_fp = "0000000000000000000000000000000000000000000000000000000000000000"
+signature = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+[build_env]
+source_date_epoch = 1700000000
+erofs_version = "1.7.1"
+tar_version = "1.34"
+zstd_version = "1.5.5"
+
+[[files]]
+path = "init"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+mode = 493
+"#;
+        std::fs::write(
+            images.join("raxis-orchestrator-core-0.0.0-test.manifest.toml"),
+            manifest_toml,
+        )
+        .unwrap();
+
+        let (kind, is_trusted) = resolve_image_kind_for_role(
+            &img_path,
+            CanonicalImageKind::Orchestrator,
+            "0.0.0-test",
+        );
+        assert_eq!(
+            kind,
+            ImageKind::RootfsInitramfsCpio,
+            "unverified-hint dispatch must honour manifest.image_format \
+             rather than hardcoding RootfsErofs (would brick AVF spawn \
+             of every initramfs.cpio.gz image)",
+        );
+        assert!(
+            !is_trusted,
+            "the un-trusted hint path must report is_trusted=false \
+             so callers can gate noisier warnings on the un-signed \
+             posture",
+        );
+    }
+
+    /// Companion to `unpopulated_anchor_fallback_honours_manifest_image_format_hint`:
+    /// when the manifest is structurally unparseable (corrupt /
+    /// truncated / wrong schema), the unverified-hint path also
+    /// fails and the dispatch falls back to the documented
+    /// production canonical default (`RootfsErofs`). Pins the
+    /// last-resort behaviour so a partial-write race or operator
+    /// hand-edit cannot silently degrade to an undefined dispatch.
+    #[test]
+    fn unpopulated_anchor_fallback_defaults_to_erofs_when_manifest_unparseable() {
+        if raxis_canonical_images::EXPECTED_KERNEL_SIGNING_KEY_BYTES
+            != [0u8; raxis_canonical_images::DIGEST_LEN]
+        {
+            eprintln!(
+                "skip: kernel signing-key trust anchor is populated; \
+                 this test only exercises the all-zero placeholder branch"
+            );
+            return;
+        }
+
+        let tmp    = tempfile::tempdir().unwrap();
+        let images = tmp.path().join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        let img_path = images.join("raxis-reviewer-core-0.0.0-test.img");
+        std::fs::write(&img_path, b"placeholder-reviewer-bytes").unwrap();
+        // schema_version = 2 trips `SchemaVersionMismatch` in
+        // `ImageManifest::from_toml`, so the unverified-hint path
+        // returns `Err` and the seam falls through to RootfsErofs.
+        std::fs::write(
+            images.join("raxis-reviewer-core-0.0.0-test.manifest.toml"),
+            "schema_version = 2\n",
+        )
+        .unwrap();
+
+        let (kind, is_trusted) = resolve_image_kind_for_role(
+            &img_path,
+            CanonicalImageKind::Reviewer,
+            "0.0.0-test",
+        );
+        assert_eq!(
+            kind,
+            ImageKind::RootfsErofs,
+            "unparseable manifest must fall back to the production \
+             canonical default (RootfsErofs) rather than guessing",
+        );
+        assert!(!is_trusted);
     }
 }

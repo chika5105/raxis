@@ -575,6 +575,57 @@ pub fn read_verified_image_format_with_key(
     Ok(manifest.image_format)
 }
 
+/// **Unverified format hint** — load the manifest TOML, parse it,
+/// and return its `image_format` field **without** running the
+/// signature / role / kernel-version / blob-digest checks.
+///
+/// Sole intended caller: the kernel's
+/// `kernel/src/canonical_images_preflight.rs::resolve_image_kind_for_role`
+/// graceful-degradation branch, taken when
+/// [`read_verified_image_format`] returns an error that the V2
+/// trust model classifies as "no boot failure" (most commonly
+/// [`CanonicalImageError::SigningKeyFpNotPopulated`] on a kernel
+/// build that has not yet committed its signing-key trust anchor).
+///
+/// **Why this exists.** The substrate (AVF, Firecracker) needs to
+/// know whether to attach the .img as a virtio-blk EROFS device or
+/// hand it to the boot loader as an initramfs cpio.gz. Hardcoding
+/// `RootfsErofs` as the fallback (the previous behavior) bricks
+/// every spawn on a dev/V2-cutover kernel that ships
+/// `RootfsInitramfsCpio` images: AVF rejects the cpio.gz with
+/// `Invalid disk image. The disk image format is not recognized.`
+/// before any productive work can happen. Reading the manifest's
+/// declared format keeps the substrate dispatch correct on those
+/// kernels without requiring the trust anchor to be populated.
+///
+/// **Why returning the unverified field is safe.** `image_format`
+/// is dispatch metadata, not a privilege grant. The cryptographic
+/// gate that protects the substrate against a tampered or
+/// adversarial image is the manifest's
+/// [`ImageManifest::image_artefact_sha256`], which the substrate
+/// re-verifies at every spawn (`session_spawn_orchestrator.rs`
+/// → `IsolationBackend::launch` → `verify_canonical_image_via_manifest`).
+/// A manifest that lies about `image_format` produces a spawn-time
+/// mount failure — the adversarial blob still cannot execute,
+/// because the format mismatch fails the substrate's mount step
+/// before any guest code runs. The trust model is unchanged; only
+/// the dispatch-hint surface tolerates the unsigned manifest.
+///
+/// Returns the manifest-claimed `ImageFormat` on a successful
+/// parse, or one of [`CanonicalImageError::ManifestIo`] /
+/// [`CanonicalImageError::Manifest`] when the file is missing or
+/// not a valid `SCHEMA_VERSION = 3` manifest. The caller is
+/// expected to treat any `Err` as "fall back to the documented
+/// production canonical default" ([`raxis_image_manifest::ImageFormat::RootfsErofs`])
+/// and surface a structured warning so `raxis doctor` and the
+/// dashboard can render the un-trusted boot posture.
+pub fn read_unverified_image_format_hint(
+    manifest_path: &Path,
+) -> Result<raxis_image_manifest::ImageFormat, CanonicalImageError> {
+    let manifest = load_manifest(manifest_path)?;
+    Ok(manifest.image_format)
+}
+
 fn load_manifest(manifest_path: &Path) -> Result<ImageManifest, CanonicalImageError> {
     let s = std::fs::read_to_string(manifest_path).map_err(|e| {
         CanonicalImageError::ManifestIo {
