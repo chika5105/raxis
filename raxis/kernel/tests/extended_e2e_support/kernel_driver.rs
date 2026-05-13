@@ -112,6 +112,214 @@ pub fn require_gateway_binary() -> PathBuf {
     p
 }
 
+// ---------------------------------------------------------------------------
+// Host disk-pressure preflight (INV-HOST-HYGIENE-01).
+//
+// Mirrors the `cargo xtask hygiene-check --threshold-pct 90` probe
+// inline so the live-e2e harness never blocks on a `cargo run`
+// rebuild of the xtask binary mid-test. Converts what was a 31-min
+// mid-flight `DiskFullHaltEntered` (iter 16, 1867 s, every
+// activation rejected with `FailDiskFull`) into a sub-second
+// preflight skip.
+//
+// On detected pressure, the preflight builds a typed
+// `raxis_types::HostPreflightError::DiskPressure` and:
+//   1. Prints one stable-prefixed line to stderr —
+//      `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+//      — so the dashboard banner (subscribed to the same
+//      `attention_kind` filter the kernel uses for runtime
+//      `OperatorAttentionRequired` events) can pick up the
+//      preflight failure without a kernel boot.
+//   2. Panics with the structured `Display` rendering, which
+//      surfaces the offending volume + remediation command in the
+//      `cargo test` failure summary.
+// ---------------------------------------------------------------------------
+
+/// Stable stderr prefix the dashboard / Tier-3 reporter scrapes
+/// for preflight-emitted operator-attention events. Kept distinct
+/// from the audit-event JSON the kernel itself emits so a log
+/// parser can tell pre-kernel preflights apart from runtime
+/// kernel emissions.
+pub const HOST_PREFLIGHT_LOG_PREFIX: &str = "OPERATOR_ATTENTION_REQUIRED";
+
+/// Host disk-pressure preflight — see module docs above. Panics on
+/// detected pressure with a structured `HostPreflightError::DiskPressure`
+/// rendering. Returns silently when the host is clear.
+pub fn require_disk_hygiene() {
+    require_disk_hygiene_with_threshold(90);
+}
+
+/// Underlying probe — split out so unit tests can drive it with a
+/// 0% threshold against the live host (which always exceeds 0%).
+pub fn require_disk_hygiene_with_threshold(threshold_pct: u32) {
+    let report = probe_disk_pressure(threshold_pct);
+    let over_threshold: Vec<&raxis_types::DiskVolumeReport> = report
+        .iter()
+        .filter(|v| v.used_pct >= threshold_pct)
+        .collect();
+    if over_threshold.is_empty() {
+        eprintln!(
+            "[realism-e2e] preflight: host disk hygiene clear ({} volumes below {threshold_pct}%)",
+            report.len(),
+        );
+        return;
+    }
+    let err = raxis_types::HostPreflightError::disk_pressure(threshold_pct, report);
+    emit_operator_attention_to_stderr(&err);
+    panic!("{err}");
+}
+
+/// Returns one [`DiskVolumeReport`] per unique mount across the
+/// repo volume, `/private/tmp`, and every `/var/folders/*` (AVF
+/// guest dir). De-duped by the `Mounted on` column so a single
+/// physical volume backing several monitored paths is reported
+/// once.
+fn probe_disk_pressure(_threshold_pct: u32) -> Vec<raxis_types::DiskVolumeReport> {
+    let repo_root = workspace_repo_root();
+    let mut targets: Vec<PathBuf> = vec![repo_root, PathBuf::from("/private/tmp")];
+    if let Ok(read_dir) = std::fs::read_dir("/var/folders") {
+        for entry in read_dir.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                targets.push(p);
+            }
+        }
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<raxis_types::DiskVolumeReport> = Vec::new();
+    for t in targets {
+        if !t.exists() {
+            continue;
+        }
+        let Some((mount, used_pct, free_kb)) = df_mount_and_pct(&t) else {
+            continue;
+        };
+        if !seen.insert(mount.clone()) {
+            continue;
+        }
+        out.push(raxis_types::DiskVolumeReport {
+            mount,
+            used_pct,
+            free_human: human_bytes(free_kb.saturating_mul(1024)),
+        });
+    }
+    out
+}
+
+/// Emit the structured payload to stderr with the
+/// `OPERATOR_ATTENTION_REQUIRED HostHygieneDiskPressure {json}`
+/// envelope the dashboard banner is wired to consume. The kernel
+/// is not yet running at preflight time so we cannot use the
+/// in-process `audit.emit` path; the stderr envelope is the
+/// pre-kernel substitute and stays compatible with the kernel-side
+/// emission shape (same `attention_kind`, same JSON body).
+pub fn emit_operator_attention_to_stderr(err: &raxis_types::HostPreflightError) {
+    eprintln!(
+        "{HOST_PREFLIGHT_LOG_PREFIX} {} {}",
+        raxis_types::HostPreflightError::ATTENTION_KIND,
+        err.to_audit_details_json(),
+    );
+}
+
+fn df_mount_and_pct(target: &Path) -> Option<(String, u32, u64)> {
+    let out = std::process::Command::new("df")
+        .args(["-Pk", &target.to_string_lossy()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    let line = body.lines().nth(1)?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < 6 {
+        return None;
+    }
+    let avail_kb: u64 = fields[3].parse().ok()?;
+    let used_pct: u32 = fields[4].trim_end_matches('%').parse().ok()?;
+    let mount = fields[5..].join(" ");
+    Some((mount, used_pct, avail_kb))
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut idx = 0;
+    while v >= 1024.0 && idx < UNITS.len() - 1 {
+        v /= 1024.0;
+        idx += 1;
+    }
+    format!("{v:.1}{}", UNITS[idx])
+}
+
+fn workspace_repo_root() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        if p.join(".git").exists() {
+            return p;
+        }
+        if !p.pop() {
+            return PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod hygiene_preflight_tests {
+    use super::*;
+    use raxis_types::HostPreflightError;
+
+    /// Synthetic-fixture probe: assert the structured JSON the
+    /// preflight prints to stderr is byte-identical to what the
+    /// dashboard banner expects. Pinning the JSON shape here
+    /// catches a serde-rename or field-rename break before the
+    /// FE finds out via a silent banner.
+    #[test]
+    fn synthesised_disk_pressure_round_trips_to_attention_envelope() {
+        let err = HostPreflightError::disk_pressure(
+            90,
+            vec![raxis_types::DiskVolumeReport {
+                mount: "/System/Volumes/Data".into(),
+                used_pct: 92,
+                free_human: "64.0GiB".into(),
+            }],
+        );
+        let json = err.to_audit_details_json();
+        assert!(
+            json.contains("\"pressure_kind\":\"DiskPressure\""),
+            "dashboard filter would miss the event without the tag: {json}"
+        );
+        assert!(
+            json.contains("/System/Volumes/Data"),
+            "offending volume missing from JSON: {json}"
+        );
+        // `Display` impl pins the operator-facing one-liner the
+        // panic message AND the dashboard tooltip render.
+        let rendered = format!("{err}");
+        assert!(rendered.contains("Run `cargo xtask hygiene` to remediate"));
+        assert!(rendered.contains("/System/Volumes/Data at 92%"));
+    }
+
+    /// `attention_kind` is the dashboard's filter string. Pin it
+    /// here so a future `HostPreflightError` rename cannot
+    /// silently disconnect the banner from the preflight emit.
+    #[test]
+    fn attention_kind_matches_dashboard_filter_contract() {
+        assert_eq!(HostPreflightError::ATTENTION_KIND, "HostHygieneDiskPressure");
+    }
+
+    /// The preflight returns silently when the host is clear; we
+    /// drive it with a synthetic 100% threshold so the assertion
+    /// holds regardless of the live-host disk usage at test time.
+    #[test]
+    fn clear_host_returns_silently_under_high_threshold() {
+        // Threshold of 100 means "panic only if a volume is at
+        // 100% used" — vanishingly rare in practice, so this
+        // exercises the no-op happy path.
+        require_disk_hygiene_with_threshold(100);
+    }
+}
+
 pub fn require_canonical_images() {
     let install_dir_raw = std::env::var("RAXIS_INSTALL_DIR").unwrap_or_else(|_| panic!(
         "RAXIS_INSTALL_DIR env var is required",

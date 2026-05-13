@@ -83,12 +83,12 @@ use extended_e2e_support::{
         enable_gateway_in_policy, locate_executor_worktree_via_chain,
         locate_session_id_for_task, poll_for_dual_lifecycle_completion,
         realistic_lifecycle_deadline, require_anthropic_dev_key,
-        require_canonical_images, require_gateway_binary, require_gcp_adc,
-        require_tcp_reachable, seed_realistic_main_repository,
-        spawn_kernel_normal, spawn_otel_pusher_or_warn, walk_chain_or_panic,
-        write_credentials, write_provider_credentials, OperatorIpc,
-        LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
-        SHUTDOWN_DEADLINE,
+        require_canonical_images, require_disk_hygiene,
+        require_gateway_binary, require_gcp_adc, require_tcp_reachable,
+        seed_realistic_main_repository, spawn_kernel_normal,
+        spawn_otel_pusher_or_warn, walk_chain_or_panic, write_credentials,
+        write_provider_credentials, OperatorIpc, LIVE_E2E_GATE,
+        READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
     },
     multi_initiative::{
         sibling_plan_toml, MultiInitiativeIsolationWitness,
@@ -163,6 +163,15 @@ fn realistic_session_lifecycle() {
     let _build_lock = acquire_test_lock();
 
     // ── Preflight ─────────────────────────────────────────────
+    //
+    // Host disk-pressure preflight (INV-HOST-HYGIENE-01) FIRST —
+    // every other preflight (and the docker bring-up below) does
+    // work on disk; failing fast here turns a 31-min mid-flight
+    // `DiskFullHaltEntered` into a sub-second skip with a
+    // structured `OperatorAttentionRequired{HostHygieneDiskPressure}`
+    // payload the dashboard banner consumes. Mirrors `cargo xtask
+    // hygiene-check --threshold-pct 90`.
+    require_disk_hygiene();
     //
     // Bring up the docker-compose backing stack BEFORE any other
     // preflight or seed step. Auto-bring-up is the operator-
