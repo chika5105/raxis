@@ -2742,6 +2742,93 @@ the executor scripts depend on.
 (host half), `raxis/tproxy/src/loopback_forwarder.rs`
 (in-guest half).
 
+### INV-CRED-PROXY-VM-REACHABILITY-02 — Every supported isolation backend implements the host loopback bridge fail-closed
+
+The host loopback bridge MUST be implemented for every isolation
+backend that ships in raxis (Apple-VZ on macOS workstations,
+Firecracker on Linux production). Backends without a bridge MUST
+fail-closed at session-spawn time when a non-empty `LoopbackPlan`
+is requested, with a clear typed error from
+`Session::register_loopback_listener` identifying the missing
+capability. The substrate's `register_loopback_listener`
+implementation is the contractual boundary: any in-tree backend
+that does not implement it inherits the `Session` trait's default
+which returns `IsolationError::BackendInternal("...register_
+loopback_listener is not supported by this substrate...")`, and
+the `session-spawn` composer turns that error into a teardown of
+the partially built session (VM, admission listener, credential
+proxies all reaped before the error is surfaced to the caller).
+
+**Mechanical enforcement.**
+`raxis-session-spawn::spawn_session` builds the `LoopbackPlan`
+from `cred_handles.started_summaries()` (one entry per credential
+proxy), stamps `RAXIS_VSOCK_LOOPBACK_PLAN` into the VM env block,
+then iterates the plan and calls
+`Session::register_loopback_listener(vsock_port,
+host_loopback_port)` for every entry — fail-closed: any error
+from any backend triggers `session.shutdown()` plus
+`cred_handles.shutdown()` before the spawn returns. The
+two in-tree backends BOTH implement the trait method (no default
+inheritance):
+
+* **Apple-VZ** (`raxis/crates/isolation-apple-vz/src/
+  vsock_loopback_bridge.rs`) registers a `VZVirtioSocketListener`
+  on the VM's `VZVirtioSocketDevice` whose delegate dups the
+  accepted vsock fd and splices it to host
+  `127.0.0.1:<host_loopback_port>`.
+* **Firecracker** (`raxis/crates/isolation-firecracker/src/
+  vsock_loopback_bridge.rs` + `lib.rs::
+  Session::register_loopback_listener`) pre-binds a Unix-domain-
+  socket listener at `<uds_path>_<vsock_port>` — the path
+  Firecracker's vsock multiplexer routes reverse-direction
+  `(VMADDR_CID_HOST, vsock_port)` guest-side dials onto — and
+  runs a tokio accept loop that drives
+  `tokio::io::copy_bidirectional` between each accepted UDS
+  stream and a fresh
+  `TcpStream::connect("127.0.0.1:<host_loopback_port>")`.
+
+The in-guest half is symmetric across both backends: PID 1's
+`mount_pid1_essentials` brings `lo` up via `bring_up_loopback`
+(`raxis/crates/planner-core/src/guest_init.rs`), and the
+`planner-executor` driver activates the forwarder at boot
+(`raxis/crates/planner-executor/src/main.rs::
+activate_vsock_loopback_forwarder` → `raxis_tproxy::
+loopback_forwarder::spawn_forwarder`). The forwarder reads the
+stamped `RAXIS_VSOCK_LOOPBACK_PLAN`, binds the guest-side
+`127.0.0.1:<port>` listeners declared by the plan, and splices
+each accepted TCP connection to `(VMADDR_CID_HOST, vsock_port)`
+against the per-VM vsock device.
+
+**Justification.** `-01` says the substrate MUST provide
+transparent reachability. `-02` is the no-quiet-omission corollary:
+adding a new in-tree isolation backend without wiring the bridge
+would silently break credential reachability the first time a
+task with credentials runs against that backend. By making the
+default `Session::register_loopback_listener` return
+`BackendInternal` and by making the composer fail-closed on any
+non-`Ok` result, the type system forces every backend author to
+either implement the bridge or be visibly absent from production
+roll-out. There is no path where a session boots with credentials
+declared but no working loopback bridge — the kernel either has a
+working bridge for the chosen backend or it tears the session
+down before the agent's first tool invocation.
+
+**Canonical home.** `v2/credential-proxy.md §12a.4`,
+`raxis/crates/isolation/src/lib.rs` (default `Session::
+register_loopback_listener` returning `BackendInternal`),
+`raxis/crates/session-spawn/src/lib.rs` (composer fail-closed
+loop + `RAXIS_VSOCK_LOOPBACK_PLAN` env stamp),
+`raxis/crates/isolation-apple-vz/src/vsock_loopback_bridge.rs`
+(AVF impl), `raxis/crates/isolation-firecracker/src/
+vsock_loopback_bridge.rs` + `raxis/crates/isolation-firecracker/
+src/lib.rs` (Firecracker impl),
+`raxis/crates/planner-core/src/guest_init.rs::bring_up_loopback`
+(in-guest `lo` bring-up at PID 1),
+`raxis/crates/planner-executor/src/main.rs::
+activate_vsock_loopback_forwarder` and
+`raxis/tproxy/src/loopback_forwarder.rs` (in-guest forwarder
+activation).
+
 ---
 
 ## §11.9 — Dashboard surface (INV-DASHBOARD-* / INV-AUDIT-DASHBOARD-* / INV-AUDIT-OPERATOR-* / INV-NOTIF-SCOPE-*)
