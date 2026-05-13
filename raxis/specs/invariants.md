@@ -66,7 +66,7 @@
 | Escalation — V1 | INV-ESC-01..06 | 6 |
 | Kernel store — V1 | INV-STORE-01..03 | 3 |
 | Policy epochs — V1 | INV-POLICY-01 | 1 |
-| Scheduler — V1 | INV-SCHED-01 | 1 |
+| Scheduler — V1 | INV-SCHED-01, INV-SCHED-02 | 2 |
 | VCS path enforcement — V1 | INV-TASK-PATH-01, INV-TASK-PATH-02 | 2 |
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
@@ -1035,6 +1035,56 @@ where calls go, not a property of every individual handler.
 needs to insert a new task. The reviewer notices the new call
 to `admit` from `handlers/intent.rs`, flags the spec violation,
 and the PR is rejected before merge.
+
+---
+
+### INV-SCHED-02 — `release_budget` is called on every terminal-state transition
+
+**Statement.** Every code path that transitions a task into a
+terminal state (`Completed` / `Failed` / `Aborted` / `Cancelled`)
+MUST call `scheduler::budget::release_budget_in_tx` (or the
+standalone `release_budget` for crash-recovery sweeps) inside the
+SAME `Connection::transaction()` borrow that performs the FSM
+flip. The exhaustive v2 list:
+
+* `handlers/intent::commit_task_completion`
+  (`Running → Completed` via `IntentKind::CompleteTask`),
+* `handlers/intent::handle_report_failure`
+  (`Admitted | Running → Failed` via `IntentKind::ReportFailure`),
+* `initiatives::lifecycle::abort_task`
+  (operator-driven `* → Aborted` for a single task),
+* `initiatives::lifecycle::abort_initiative`
+  (operator-driven bulk `* → Cancelled` for every non-terminal
+  task on the initiative).
+
+**Justification.** Lane bookkeeping (`lane_budget_reservations`)
+caps the total `estimated_cost` reserved across all live tasks on
+a lane (`v1/kernel-store.md` §2.5.1.1 Pattern A). The
+`reserve_budget_in_tx` write at intent admission charges the cap;
+without a paired `release_budget_in_tx` at terminal transition the
+cap is charged monotonically. After enough sub-task completions on
+a workspace lane, the IntegrationMerge synthetic coordinator-task
+admitted by `auto_spawn_orchestrator_session_in_tx` cannot reserve
+its merge-cost slice, every IntegrationMerge intent is rejected
+with `FAIL_BUDGET_EXCEEDED`, and the orchestrator dies after
+`planner_session_revoked_on_exit` without respawning — a hard
+hang detectable only by the harness-side deadline. The "in the
+same tx" qualifier preserves INV-STORE-02: a crash mid-handler
+must leave either both writes durable (task is terminal AND its
+reservation is freed) or both rolled back (task is pre-terminal
+AND its reservation is still charged).
+
+**Scenario.** Iter 38 of `realistic_session_lifecycle`
+(`/private/tmp/raxis-fix-loop-respawn2-33043/raxis`, 2026-05-13).
+Eight sub-tasks completed cleanly (8 × `TaskCompleted`,
+0 × `release_budget`) on the workspace lane; the orchestrator
+respawned for the IntegrationMerge step; the
+`reserve_budget_in_tx` call on the synthetic coordinator-task
+returned `BudgetExceeded`; the intent handler rejected with
+`FailBudgetExceeded`; the orchestrator exited; no respawn fired;
+the harness polled silently for 10+ minutes until killed.
+Post-fix every TaskCompleted decrements the lane charge so the
+coordinator task's reservation fits.
 
 ---
 

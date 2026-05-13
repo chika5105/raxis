@@ -1703,6 +1703,37 @@ fn handle_report_failure(
             Some(justification.as_str()),
             TransitionActor::Kernel,
         ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+
+        // Release the lane budget reservation in the same tx as the
+        // Running → Failed flip — same INV-STORE-02 contract as the
+        // Completed path (see `commit_task_completion`'s release-budget
+        // block for the full rationale). Reading `lane_id` from
+        // `tasks` inside the tx avoids racing against a concurrent
+        // `Failed → Admitted` retry that might re-arm the
+        // reservation; the SELECT and the DELETE serialise under
+        // the single-writer SQLite transaction.
+        let lane_id_for_release: Option<String> = tx.query_row(
+            &format!("SELECT lane_id FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![req.task_id.as_str()],
+            |r| r.get(0),
+        ).ok();
+        if let Some(lane_id) = lane_id_for_release.as_deref() {
+            if let Err(e) = crate::scheduler::budget::release_budget_in_tx(
+                &tx,
+                lane_id,
+                req.task_id.as_str(),
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"ReleaseBudgetFailed\",\
+                     \"task_id\":\"{}\",\"lane_id\":\"{}\",\
+                     \"reason\":\"{e}\",\"path\":\"report_failure\"}}",
+                    req.task_id.as_str(),
+                    lane_id,
+                );
+                return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
+            }
+        }
+
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
     }
@@ -2106,6 +2137,7 @@ fn handle_complete_task(
     let head_sha_for_eval = req.head_sha.as_ref().map(|s| s.as_str().to_owned());
     commit_task_completion(
         req.task_id.as_str(),
+        &task.lane_id,
         &export_paths,
         head_sha_for_eval.as_deref(),
         store,
@@ -5010,6 +5042,7 @@ async fn handle_retry_sub_task(
 /// no-op, matching the spec's "ignore" rule).
 fn commit_task_completion(
     task_id:        &str,
+    lane_id:        &str,
     export_paths:   &[String],
     evaluation_sha: Option<&str>,
     store:          &Store,
@@ -5146,6 +5179,54 @@ fn commit_task_completion(
              \"task_id\":\"{task_id}\",\"activation_state\":\"Completed\",\
              \"rows\":{activation_rows}}}",
         );
+    }
+
+    // 4. Release the lane budget reservation.
+    //
+    // **Why here, in the same tx as the Running → Completed flip.**
+    // `kernel-store.md` §2.5.1 makes this the canonical lane-bookkeeping
+    // contract: every terminal-state handler MUST call `release_budget`
+    // before `reconcile_actual_cost`, and the reservation row MUST be
+    // gone "before the lane ceiling is updated [for] the next task's
+    // check_budget" (§ "release_budget" in the
+    // `lane_budget_reservations` doc-block). Folding the DELETE into
+    // the same SQLite transaction as the state flip preserves the
+    // INV-STORE-02 atomicity contract: a crash mid-handler is binary
+    // (the task is terminal AND its reservation is freed, or the task
+    // is pre-terminal AND its reservation is still charged).
+    //
+    // **Impact of the prior gap.** Until this commit landed, the
+    // kernel never invoked `release_budget` from any code path;
+    // `lane_budget_reservations` rows accumulated monotonically. On
+    // multi-task initiatives every task's `compute_admission_cost`
+    // contribution stayed reserved on the workspace lane forever,
+    // and the `IntegrationMerge` synthetic coordinator-task —
+    // admitted by `auto_spawn_orchestrator_session_in_tx` against
+    // the same workspace_lane — could not reserve budget once the
+    // sub-task tail had saturated the lane ceiling. Symptom in the
+    // realistic e2e was a 100% `FailBudgetExceeded` rejection on
+    // every `IntegrationMerge` after ~8 sub-task completions, with
+    // the orchestrator dying after `planner_session_revoked_on_exit`
+    // and never respawning — a hard hang detectable only by the
+    // harness-side deadline.
+    //
+    // The DELETE is `WHERE lane_id=? AND task_id=?`; the call is
+    // idempotent (rows == 0 → already released, e.g. an Admitted
+    // task that never reached `reserve_budget_in_tx`). A `>1`-row
+    // delete trips `SchedulerError::CorruptReservationState`
+    // (schema invariant violation; PK `(lane_id, task_id)` should
+    // make this unreachable) and surfaces as `Err(())` at this
+    // callsite, rolling back the entire commit. We accept that
+    // strictness because the alternative — silently swallowing a
+    // schema-invariant violation — would mask the very accounting
+    // bug release_budget exists to prevent.
+    if let Err(e) = crate::scheduler::budget::release_budget_in_tx(&tx, lane_id, task_id) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"ReleaseBudgetFailed\",\
+             \"task_id\":\"{task_id}\",\"lane_id\":\"{lane_id}\",\
+             \"reason\":\"{e}\"}}",
+        );
+        return Err(());
     }
 
     tx.commit().map_err(|_| ())
@@ -5630,7 +5711,7 @@ mod tests {
     fn report_failure_from_completed_is_rejected() {
         let store = Store::open_in_memory().unwrap();
         seed_running_task(&store, "t-completed");
-        commit_task_completion("t-completed", &[], None, &store).unwrap();
+        commit_task_completion("t-completed", "default", &[], None, &store).unwrap();
         let policy = default_test_policy();
 
         assert_eq!(
@@ -6193,7 +6274,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         seed_running_task(&store, "t1");
 
-        commit_task_completion("t1", &[], None, &store).unwrap();
+        commit_task_completion("t1", "default", &[], None, &store).unwrap();
 
         assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
         assert_eq!(count_export_snapshots(&store, "t1"), 0,
@@ -6210,7 +6291,7 @@ mod tests {
             "src/sub/c.rs".to_owned(),
         ];
 
-        commit_task_completion("t1", &exports, None, &store).unwrap();
+        commit_task_completion("t1", "default", &exports, None, &store).unwrap();
 
         assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
         assert_eq!(count_export_snapshots(&store, "t1"), 3);
@@ -6247,7 +6328,7 @@ mod tests {
             "src/a.rs".to_owned(),  // duplicate inside the call
         ];
 
-        commit_task_completion("t1", &exports, None, &store).unwrap();
+        commit_task_completion("t1", "default", &exports, None, &store).unwrap();
         assert_eq!(count_export_snapshots(&store, "t1"), 1,
             "PK (task_id, path) collapses duplicates to one row");
     }
@@ -6261,7 +6342,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         seed_task(&store, "t1");  // seeds in `Admitted` state
 
-        let result = commit_task_completion("t1", &[], None, &store);
+        let result = commit_task_completion("t1", "default", &[], None, &store);
         assert!(result.is_err(),
             "commit_task_completion must reject non-Running tasks");
         assert_eq!(task_state_of(&store, "t1"), TaskState::Admitted.as_sql_str(),
@@ -6314,7 +6395,7 @@ mod tests {
             /*crash*/ 0,
         );
 
-        commit_task_completion("t-complete-cascade", &[], None, &store).unwrap();
+        commit_task_completion("t-complete-cascade", "default", &[], None, &store).unwrap();
 
         assert_eq!(
             task_state_of(&store, "t-complete-cascade"),
@@ -6347,7 +6428,7 @@ mod tests {
         );
         let exports = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
 
-        commit_task_completion("t-atomic", &exports, None, &store).unwrap();
+        commit_task_completion("t-atomic", "default", &exports, None, &store).unwrap();
 
         assert_eq!(
             task_state_of(&store, "t-atomic"),
@@ -6379,14 +6460,14 @@ mod tests {
             &store, "t-replay", /*crash*/ 0,
         );
 
-        commit_task_completion("t-replay", &[], None, &store).unwrap();
+        commit_task_completion("t-replay", "default", &[], None, &store).unwrap();
         let (_, first_term) = read_activation_terminal(&store, &activation_id);
         assert!(first_term.is_some());
 
         // Second call on a Completed task: the `state = 'Running'`
         // guard rejects (0 rows updated → Err), so the cascade never
         // runs. The activation row's terminated_at must be preserved.
-        let result = commit_task_completion("t-replay", &[], None, &store);
+        let result = commit_task_completion("t-replay", "default", &[], None, &store);
         assert!(result.is_err(),
             "second commit_task_completion on a Completed task must reject");
         let (state, second_term) =
@@ -6428,7 +6509,7 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        commit_task_completion("t-pending", &[], None, &store).unwrap();
+        commit_task_completion("t-pending", "default", &[], None, &store).unwrap();
 
         let (state, terminated_at) =
             read_activation_terminal(&store, &pending_id);

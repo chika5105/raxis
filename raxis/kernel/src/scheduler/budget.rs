@@ -150,8 +150,57 @@ pub fn current_budget(lane_id: &str, store: &Store) -> Result<LaneBudgetSnapshot
 /// Deletes from `lane_budget_reservations`. Safe to call multiple times
 /// (idempotent on 0 rows). Returns `SchedulerError::CorruptReservationState`
 /// if >1 row was deleted (schema invariant violation).
+///
+/// **Standalone variant** — opens its own mutex acquisition. The
+/// canonical write path is [`release_budget_in_tx`], which composes
+/// the DELETE into the same transaction as the terminal-state flip
+/// (`Running → Completed` / `Running → Failed` / `Aborted` / etc.) so
+/// that "task is terminal" and "lane reservation is freed" are
+/// observable atomically. Use this standalone variant only from
+/// recovery / sweep paths that need to release a reservation outside
+/// the FSM-transition tx (e.g. `recovery::reconcile_tasks` for tasks
+/// the kernel restart finds already terminal in the store but with a
+/// stale reservation row — the row's existence after a clean shutdown
+/// would be a §2.5.1 invariant violation, but during crash-recovery
+/// we accept that gap and reconcile here).
 pub fn release_budget(lane_id: &str, task_id: &str, store: &Store) -> Result<(), SchedulerError> {
     let conn = store.lock_sync();
+    release_budget_in_tx(&conn, lane_id, task_id)
+}
+
+/// Release the budget reservation for a task — transaction variant.
+///
+/// Composes the `DELETE FROM lane_budget_reservations` into the same
+/// SQLite transaction as the terminal-state flip on
+/// `tasks.state` (`Running → Completed` for `CompleteTask`,
+/// `Running → Failed` for `ReportFailure`, `Admitted → Aborted` /
+/// `Running → Aborted` for operator-driven aborts). This is the
+/// kernel-store.md §2.5.1 invariant for lane bookkeeping:
+///
+/// > Every terminal-state handler MUST call `release_budget` before
+/// > `reconcile_actual_cost`. … Reordering these calls would violate
+/// > the "reservation already released" invariant checked by
+/// > `rows_affected()`.
+///
+/// **Why in-tx, not standalone.** If the state flip and the
+/// reservation release commit independently, a crash between them
+/// leaves the lane over-committed forever (the recovery sweep would
+/// see a terminal task and skip it; the reservation row stays).
+/// Folding both into one tx makes the failure mode binary: either the
+/// task is terminal AND its reservation is gone, or the task is
+/// pre-terminal AND its reservation is still charged.
+///
+/// Same `rows_affected()` semantics as [`release_budget`]:
+/// `0` → idempotent (already released, e.g. a continuation intent
+/// that double-committed before the post-fix tx-fold landed); `1` →
+/// released; `>1` → `SchedulerError::CorruptReservationState`
+/// (schema invariant violation — the `(lane_id, task_id)` PK should
+/// make this unreachable, but we surface it for forensic value).
+pub fn release_budget_in_tx(
+    conn:    &rusqlite::Connection,
+    lane_id: &str,
+    task_id: &str,
+) -> Result<(), SchedulerError> {
     let rows = conn.execute(
         &format!(
             "DELETE FROM {LANE_BUDGET_RESERVATIONS} WHERE lane_id=?1 AND task_id=?2"

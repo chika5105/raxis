@@ -1782,6 +1782,26 @@ pub fn abort_initiative(
 
     let tx = conn.transaction()?;
 
+    // Snapshot the about-to-be-cancelled tasks' (lane_id, task_id)
+    // pairs BEFORE the bulk UPDATE — once the rows flip to Cancelled
+    // the post-UPDATE snapshot would still have the same lane_id,
+    // but reading first matches the order the spec describes
+    // (terminal-state handler MUST call release_budget; the
+    // "cancelled" transition IS the terminal-state handler for
+    // operator-driven aborts) and keeps the `WHERE state NOT IN
+    // (terminal)` filter on the snapshot consistent with the bulk
+    // UPDATE's WHERE clause.
+    let pairs_to_release: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT lane_id, task_id FROM {TASKS}
+              WHERE initiative_id=?1 AND state NOT IN ({terminal_not_in})"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![initiative_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.filter_map(Result::ok).collect()
+    };
+
     tx.execute(
         &format!(
             "UPDATE {TASKS} SET state='{cancel_state}', transitioned_at=?1
@@ -1789,6 +1809,24 @@ pub fn abort_initiative(
         ),
         rusqlite::params![now, initiative_id],
     )?;
+
+    // Release the lane reservation for every task we just cancelled —
+    // same INV-STORE-02 contract as `commit_task_completion`'s
+    // release-budget block. Without this, an aborted initiative
+    // leaves its tasks' reservations charged on the workspace lane
+    // forever, blocking every subsequent initiative on that lane
+    // from reserving budget for an `IntegrationMerge` (or any
+    // sub-task that pushes the cumulative reservation over the
+    // ceiling). Idempotent on rows == 0 (a Cancelled-pre-tx task
+    // that had not yet reserved is safely a no-op).
+    for (lane_id, task_id) in &pairs_to_release {
+        crate::scheduler::budget::release_budget_in_tx(&tx, lane_id, task_id)
+            .map_err(|e| LifecycleError::PlanInvalid {
+                reason: format!(
+                    "release_budget_in_tx for cancelled task {task_id} on lane {lane_id} failed: {e}"
+                ),
+            })?;
+    }
 
     tx.execute(
         &format!(
@@ -1816,13 +1854,16 @@ pub fn abort_task(
     aborted_by: &str,
     store: &Store,
 ) -> Result<(), LifecycleError> {
-    let conn = store.lock_sync();
+    let mut conn = store.lock_sync();
     let now  = unix_now_secs();
 
-    let state: String = conn.query_row(
-        &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
+    // Read state + lane_id together — we need lane_id for the
+    // post-flip `release_budget_in_tx`, and folding both reads
+    // into the same SELECT means one round trip instead of two.
+    let (state, lane_id): (String, String) = conn.query_row(
+        &format!("SELECT state, lane_id FROM {TASKS} WHERE task_id=?1"),
         rusqlite::params![task_id],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     ).map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
             task_id: task_id.to_owned(),
@@ -1836,12 +1877,26 @@ pub fn abort_task(
         return Err(LifecycleError::TaskNotAbortable { current_state: state });
     }
 
-    conn.execute(
+    // Transactional fold: state-flip + budget-release commit
+    // together — same INV-STORE-02 contract as
+    // `commit_task_completion` / `handle_report_failure` (a crash
+    // mid-handler must leave either both writes durable or both
+    // rolled back, never the half-state where the task is Aborted
+    // but its lane reservation is still charged).
+    let tx = conn.transaction()?;
+    tx.execute(
         &format!(
             "UPDATE {TASKS} SET state=?1, transitioned_at=?2 WHERE task_id=?3"
         ),
         rusqlite::params![TaskState::Aborted.as_sql_str(), now, task_id],
     )?;
+    crate::scheduler::budget::release_budget_in_tx(&tx, &lane_id, task_id)
+        .map_err(|e| LifecycleError::PlanInvalid {
+            reason: format!(
+                "release_budget_in_tx for aborted task {task_id} on lane {lane_id} failed: {e}"
+            ),
+        })?;
+    tx.commit()?;
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"TaskAborted\",\
