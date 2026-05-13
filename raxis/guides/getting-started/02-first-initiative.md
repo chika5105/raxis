@@ -315,6 +315,59 @@ the same run from the operator UI.
 
 ---
 
+## How the LLM learns what's installed
+
+The Executor LLM runs inside an airgapped VM with **no outbound
+network** — `pip install`, `npm install`, `cargo install`, and
+`go get` will all fail (the credential proxies only proxy DB /
+SMTP traffic, not package mirrors). So how does the LLM know
+what's already baked into the image so it can write a script
+that just imports what it needs?
+
+Two coherent surfaces, both backed by the same in-VM probe
+(`crates/planner-core/src/vm_capabilities.rs`):
+
+1. **System-prompt hint.** At session start the planner
+   driver injects a `## VM Environment` block into the LLM's
+   system prompt: image role + digest, language toolchain
+   versions (Python 3.11 / Node 20 / Rust / Go), the curated
+   set of pre-installed Python DB clients
+   (`psycopg2-binary`, `pymongo`, `redis`, `PyMySQL`,
+   `pymssql`), the binary CLI surface (`bash`, `git`, `gh`,
+   `jq`, `ripgrep`, `fd`, `make`, `gcc`, …), the
+   credential-proxy env-var **names**
+   (`DATABASE_URL`, `MONGO_URL`, `REDIS_URL`, `SMTP_URL`),
+   the workdir path + git HEAD, and a one-line warning that
+   egress is gated.
+2. **`vm_capabilities` LLM tool.** Registered in every role
+   registry. The LLM can call it on any subsequent turn for a
+   finer query — e.g. "is `numpy` available?" returns a JSON
+   manifest with the exact installed version (or `null`),
+   importability, and site-packages path.
+
+Both surfaces read from the same per-process cache, so the
+hint and the tool's output are byte-coherent for a given
+`(image digest, session env)` pair (which is what makes the
+LLM provider's prompt cache hit across turns). Kernel-private
+env vars (session token, vsock loopback plan, sidecar HMAC
+secrets, anything matching `*SECRET*` / `*API_KEY*` /
+`*_TOKEN`) are redacted automatically — the LLM only sees the
+variables it can safely use.
+
+The mechanism is **image-agnostic** by construction: it
+introspects the actual VM (PATH walk + `--version` probes +
+`dist-info` reads + filtered `std::env::vars()` +
+`git rev-parse HEAD`), so it works identically for the
+canonical `raxis-executor-starter` image (this guide) and for
+operator-pinned BYO images
+([`recipes/ops/17-bring-your-own-image.md`](../recipes/ops/17-bring-your-own-image.md)).
+The full schema and redaction rules live in
+[`specs/v2/canonical-images.md §6`](../../specs/v2/canonical-images.md);
+the invariant that pins the contract is `INV-EXEC-DISCOVERY-01`
+([`specs/invariants.md §10`](../../specs/invariants.md)).
+
+---
+
 ## Cross-references
 
 - [`scenarios/01-hello-world/`](../scenarios/01-hello-world/) — the

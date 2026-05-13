@@ -2015,6 +2015,47 @@ listed above. A digest mismatch surfaces as
 admitted plan currently uses this image; a hard error if any in-flight
 session was activated under the now-mismatched image).
 
+**Pre-installed Python DB clients (canonical-only).** The starter
+image bakes in the small set of Python DB clients that the
+canonical credential proxies (`DATABASE_URL` / `MONGO_URL` /
+`REDIS_URL` / `SMTP_URL`) target, so the LLM never needs to
+`pip install` (which would fail the egress gate): `psycopg2-binary`
+(Postgres), `pymongo` (MongoDB), `redis` (Redis), `PyMySQL`
+(MySQL/MariaDB), `pymssql` (SQL Server), plus stdlib `smtplib`
+for SMTP. Operators pinning a BYO image are NOT bound to this
+list — the in-VM discovery surface (next paragraph) is what
+the LLM consults.
+
+**LLM discovery of pre-installed surface (`INV-EXEC-DISCOVERY-01`).**
+Because the LLM cannot trial-and-error `pip install` /
+`npm install` (no egress; `INV-VM-EGRESS-01`), every Executor /
+Reviewer / Orchestrator session receives a **capability
+manifest** at session start describing the binaries, language
+runtimes, pre-installed packages, credential-proxy env vars,
+and workdir state of its specific VM. The manifest is surfaced
+through TWO coherent channels backed by the SAME in-guest probe
+(`crates/planner-core/src/vm_capabilities.rs`):
+
+1. A `## VM Environment` block prepended to the role NNSP
+   before the KSB delimiter block, so the LLM's first turn
+   knows what is pre-installed.
+2. The `vm_capabilities` LLM tool (registered in every role
+   registry) for finer queries (e.g. "is `numpy` available?").
+
+Both surfaces read from a per-process
+`OnceLock<Arc<CapabilityManifest>>`, so for a given `(image
+digest, session env)` pair the manifest is byte-deterministic
+(prompt-cacheable). Kernel-private env vars
+(`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`, sidecar
+HMAC secrets, anything matching `*SECRET*` / `*PASSWORD*` /
+`*API_KEY*` / `*_TOKEN`) are redacted; credential-proxy URLs
+(`DATABASE_URL` / `MONGO_URL` / `REDIS_URL` / `SMTP_URL`)
+surface intentionally so the LLM can write scripts that use
+the proxies. The discovery surface is **image-agnostic** —
+identical mechanism for the canonical starter image and for
+operator-pinned BYO images per `INV-OPERATOR-CUSTOM-IMAGE-01`.
+Full schema and redaction rules: `canonical-images.md §6`.
+
 ### 10.7 Canonical Verifier Symbol-Index Image Manifest
 
 > **This image IS structural**, in contrast to the Executor starter

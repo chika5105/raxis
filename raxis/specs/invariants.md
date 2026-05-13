@@ -32,6 +32,7 @@
 > consolidates V1 invariants in full and is being incrementally
 > expanded to include V2 invariants. Mirrored so far:
 > `INV-CONVERGENCE-*` (§9), `INV-PLANNER-HARNESS-01..06` (§10),
+> `INV-EXEC-DISCOVERY-01` (§10.4a),
 > `INV-VERIFIER-*` (§11), `INV-ENV-01` (§11.5),
 > `INV-AUDIT-PAIRED-01..07` (§11.6). V2 invariants in their canonical
 > homes that have NOT yet been mirrored here include:
@@ -69,10 +70,11 @@
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
 | Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
+| Executor / role-session capability discovery — V2 | INV-EXEC-DISCOVERY-01 | 1 |
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| **Total** | | **71** |
+| **Total** | | **72** |
 
 ---
 
@@ -1696,6 +1698,179 @@ controls are in `policy.toml [orchestrator]`. See
 `planner-harness.md §4.8`."
 
 **Canonical home.** `v2/planner-harness.md` §4.8.
+
+---
+
+## §10.4a — Role-session VM capability discovery (INV-EXEC-DISCOVERY-*)
+
+The Executor / Reviewer / Orchestrator LLM runs inside an airgapped
+VM whose contents — pre-installed binaries, language runtimes,
+package versions, credential-proxy URLs, workdir state — are
+opaque to the model. The model cannot do trial-and-error
+`pip install` / `npm install` / `cargo install` / `go get` because
+egress is gated by the kernel's allowlist (per
+`v2/vm-network-isolation.md`) and the credential proxies only
+proxy DB / cloud traffic, not package mirrors. The capability-
+discovery surface is the model's only legitimate way to learn
+what's already baked in. It SHOULD short-circuit a wasted turn
+on every session whose first action would otherwise have been a
+blind `import` / `require` / `use` of a package that isn't there.
+
+### INV-EXEC-DISCOVERY-01 — Every role session receives a capability manifest at session start
+
+**Statement.** Every Executor, Reviewer, and Orchestrator session
+MUST receive a VM-capability manifest at session start, surfaced
+through BOTH:
+
+1. A **system-prompt capability hint** — a short
+   `## VM Environment` section appended to the role's NNSP before
+   the KSB block, summarising the language runtimes (Python, Node,
+   Rust, Go), the curated DB-client / CLI-tool subsets, the
+   credential-proxy env-var **names** (NOT values), and the workdir
+   snapshot (path + git head). The hint MUST also carry the
+   "no outbound network — `pip install` / `npm install` /
+   `cargo install` / `go get` will fail" reminder.
+2. A **`vm_capabilities` LLM tool** — registered in the role
+   registry alongside the standard tool surface, returning a
+   structured JSON manifest filterable by `categories` (any subset
+   of `binaries`, `python`, `node`, `rust`, `go`, `env`,
+   `filesystem`) and `filter` (substring binary name, specific
+   `python_package` / `node_package` import-test, specific
+   `env_var`). The structured tool is the recourse for finer
+   queries the system-prompt hint cannot economically enumerate
+   (e.g., "is `numpy` available?", "is `socat` on PATH?").
+
+The manifest MUST be derived from **in-guest introspection** —
+the planner-core probe runs inside the VM (reading
+`std::env::vars()`, walking `PATH`, parsing `*.dist-info/METADATA`,
+shelling out to `rustc --version` / `go version` / `npm list -g`)
+— NOT from a kernel-side static catalog. This guarantees the
+manifest is faithful to the bytes actually booted, including
+operator-published BYO images (per
+`INV-OPERATOR-CUSTOM-IMAGE-01`) whose contents the kernel has no
+prior knowledge of.
+
+The manifest MUST exclude **kernel-private env vars**: the
+`RAXIS_VSOCK_LOOPBACK_PLAN` payload, the kernel-stamped session
+token (`RAXIS_PLANNER_SESSION_TOKEN`), the inline / sidecar task
+prompt (`RAXIS_PLANNER_TASK_PROMPT*`), the inline KSB
+(`RAXIS_PLANNER_KSB`), and any `*_TOKEN` / `*_SECRET` /
+`*_PASSWORD` / `*_API_KEY` pattern match. Kernel-private vars
+that legitimately stamp connection coordinates (the credential-
+proxy `DATABASE_URL` / `MONGO_URL` / `REDIS_URL` / `SMTP_URL`
+family) are surfaced verbatim because they are the model's only
+legitimate handle on the proxy fleet.
+
+The manifest MUST be **deterministic** for a given (image
+digest, session env) pair: the same image booted with the same
+proxy stamping MUST produce a byte-identical manifest. This is
+load-bearing for prompt-cache stability — the system-prompt
+capability hint is rendered from the same cached manifest, so
+two sessions on the same image hit the same prompt prefix and
+benefit from provider-side prompt caching. Determinism is
+achieved by sorting every collection (binaries, package names,
+env-var names) into `BTreeMap` / `BTreeSet` ordering and by
+filtering `std::env::vars()` through the same allowlist /
+redaction logic on every probe.
+
+The manifest MUST be **cached per-process**: the planner-executor
+is one-shot per session, so a process-wide `OnceLock` is the
+correct cache scope. The system-prompt hint and the
+`vm_capabilities` tool MUST read from the same cache so their
+outputs are byte-coherent — a model that sees `pymongo 4.10.1`
+in the hint and then calls `vm_capabilities { python_package:
+"pymongo" }` MUST get the same version back.
+
+**Justification.** Without this invariant, the model has no
+in-band way to learn what the VM contains. The two failure
+modes the invariant eliminates are: (a) the model writes a
+script importing a missing module (`import numpy`), the script
+fails at runtime, the model wastes a turn diagnosing a
+missing-package error and then proposes `pip install numpy`
+which also fails because egress is gated; (b) the model proposes
+`pip install pymongo` BEFORE attempting the import, the install
+silently fails (no egress) or gets blocked by tproxy, and the
+model again wastes a turn. Both failure modes burn token
+budget against `INV-PLANNER-HARNESS-01`'s ceiling on the wrong
+problem. The capability hint pre-empts both: the model sees
+`pymongo 4.10.1` in the system prompt and writes `import
+pymongo` directly. The structured tool covers the long tail of
+queries the curated hint omits.
+
+The "in-guest, not kernel-side" constraint is what makes the
+mechanism image-agnostic. A kernel-side static catalog would
+need to be re-shipped every time `policy.toml [[vm_images]]`
+admits a new BYO image — an unacceptable coupling between the
+kernel binary and operator artifacts. In-guest introspection
+shifts the cost to the per-session probe (sub-second on warm
+VM) and removes the coupling entirely.
+
+The kernel-private redaction is a defence-in-depth boundary on
+top of the kernel-stamped env-var allowlist: even if a future
+kernel revision accidentally stamps a sensitive var into the
+guest env (a one-line bug in the executor-spawn code), the
+manifest probe MUST NOT re-export it to the LLM transcript or
+the system prompt.
+
+The determinism + per-process caching constraints are what make
+the mechanism **prompt-cache-safe**. Without determinism, two
+sessions on the same image would produce different system-prompt
+prefixes, defeating provider-side prompt caching and re-billing
+the operator for the manifest tokens on every session. Without
+per-process caching, every `vm_capabilities` invocation would
+re-walk `PATH` and re-parse `*.dist-info/METADATA`, breaking
+the sub-second budget in §3 above.
+
+**Scenario.** An Executor session boots on the canonical
+`raxis-executor-starter` image. The planner-core driver, in
+`run_role_session_with_connected_transport`, calls
+`vm_capabilities::cached_capabilities()` to populate the
+process-wide `OnceLock` and renders
+`vm_capabilities::build_capability_hint` into the role NNSP
+before folding the KSB. The model's first turn sees a
+`## VM Environment` block listing `Python 3.11.2 (site:
+/usr/lib/python3.11/dist-packages)`, `Node 20.18.0`, `Rust
+1.78.0`, `Go 1.22.0`, the curated DB-client subset
+(`psycopg2-binary 2.9.10, pymongo 4.10.1, redis 5.2.1, PyMySQL
+1.1.1, pymssql 2.3.2`), the curated CLI subset (`bash, git, gh,
+jq, ripgrep, fd, curl, wget, make, gcc`), the credential-proxy
+env-var names (`DATABASE_URL, MONGO_URL, REDIS_URL, SMTP_URL`),
+the workdir (`/workspace/repo` + git head), and the egress
+warning. The model, instead of guessing, writes a Python script
+that does `import pymongo` and uses `os.environ["MONGO_URL"]`
+on the first turn — no wasted turn diagnosing a missing
+package, no wasted turn on a blocked `pip install`. Later, the
+model wonders whether `numpy` is available; it calls
+`vm_capabilities { categories: ["python"], filter: {
+python_package: "numpy" } }` and gets back `{ name: "numpy",
+version: null, importable: false }` instantly.
+
+A negative scenario: the kernel stamps
+`RAXIS_VSOCK_LOOPBACK_PLAN` into the guest env (it must, for
+the loopback-transport plumbing). The capability probe sees
+the var in `std::env::vars()`, recognises it via
+`is_kernel_private_env`, and emits `RAXIS_VSOCK_LOOPBACK_PLAN:
+"<redacted>"` in the manifest's `env` map — never the
+base64 payload itself. The system-prompt hint's "Credential-
+proxy env vars" line lists the `DATABASE_URL` / `MONGO_URL`
+/ `REDIS_URL` / `SMTP_URL` names but never
+`RAXIS_VSOCK_LOOPBACK_PLAN`. A model that asks
+`vm_capabilities { categories: ["env"], filter: { env_var:
+"RAXIS_VSOCK_LOOPBACK_PLAN" } }` gets back `"<redacted>"` for
+the value (presence is acknowledged so the model knows the
+var is set; the value never reaches the transcript).
+
+**Canonical home.** `v2/canonical-images.md` §"VM capability
+discovery" and `v2/planner-harness.md §10.6` (probe site +
+cache scope + redaction allowlist + system-prompt hint
+formatter). Implementation: `raxis/crates/planner-core/src/`
+modules `vm_capabilities.rs` (probes + cache + manifest
+projection + hint formatter) and `tools_vm_capabilities.rs`
+(LLM-callable tool wrapper). Wired into all three role
+registries by `tools::build_executor_registry`,
+`build_reviewer_registry`, and `build_orchestrator_registry`
+(plus the `_with_sleep` variants) so every role session
+satisfies the "tool availability" leg of the invariant.
 
 ---
 

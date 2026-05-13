@@ -425,7 +425,188 @@ For copy-pasteable end-to-end recipes, see:
 
 ---
 
-## §6 — Open questions / future work
+## §6 — In-VM capability discovery (`vm_capabilities`)
+
+This section anchors `INV-EXEC-DISCOVERY-01`
+(`invariants.md §10`).
+
+### §6.1 — Why this exists
+
+The Executor LLM runs inside an airgapped VM. Egress is gated by
+the kernel's allowlist (`INV-VM-EGRESS-01`); the credential
+proxies (`DATABASE_URL`, `MONGO_URL`, `REDIS_URL`, `SMTP_URL`)
+proxy DB / SMTP traffic only — they do NOT proxy package
+mirrors. So `pip install`, `npm install`, `cargo install`, and
+`go get` will all fail. If the LLM doesn't know what is
+**already baked in** to the image, it will either (a) write a
+script importing a missing module and fail at runtime, or (b)
+try to install the package and waste a turn on a tproxy block.
+
+This applies BOTH to the canonical `raxis-executor-starter`
+image (where the kernel team controls what is pre-installed,
+per `planner-harness.md §10.6`) AND to operator-published BYO
+images (where the operator's `Containerfile` controls what is
+pre-installed, per `INV-OPERATOR-CUSTOM-IMAGE-01`). The LLM
+needs an **image-agnostic** way to discover what its specific
+VM has.
+
+### §6.2 — Two coherent surfaces, one in-guest probe
+
+`INV-EXEC-DISCOVERY-01` mandates **two surfaces**, both backed
+by the **same** in-guest introspection probe
+(`crates/planner-core/src/vm_capabilities.rs`):
+
+1. **System-prompt capability hint.** At session start, the
+   planner driver
+   (`crates/planner-core/src/driver.rs::run_role_session_with_connected_transport`)
+   calls `cached_capabilities()` once per process, renders the
+   manifest into a `## VM Environment` paragraph via
+   `build_capability_hint()`, and folds it into the role NNSP
+   before the KSB delimiter block. The LLM sees this on its
+   first turn — no tool call required.
+2. **`vm_capabilities` LLM tool.** Registered in every role
+   registry (executor, reviewer, orchestrator — see
+   `crates/planner-core/src/tools.rs::build_*_registry`); the
+   LLM can call it on any subsequent turn for a finer query
+   (e.g. "is `numpy` available?", "what's the workdir's git
+   HEAD?").
+
+Both surfaces read from the **same** memoized
+`OnceLock<Arc<CapabilityManifest>>`. For a given `(image
+digest, session env)` pair the manifest is byte-deterministic,
+which is what makes prompt caching across turns correct.
+
+### §6.3 — Manifest schema
+
+The probe returns a `CapabilityManifest` (defined in
+`vm_capabilities.rs`):
+
+```jsonc
+{
+  "image_role": "executor" | "reviewer" | "orchestrator" | "byo",
+  "image_digest": "sha256:..." | null,
+  "binaries": [
+    { "name": "bash",    "path": "/bin/bash",    "version": "5.2.15" },
+    { "name": "python3", "path": "/usr/bin/python3", "version": "3.11.2" },
+    { "name": "node",    "path": "/usr/bin/node",    "version": "20.18.0" },
+    // ... curated allowlist: bash, sh, git, gh, jq, ripgrep, fd,
+    //     curl, wget, make, gcc, g++, python3, node, npm, rustc,
+    //     cargo, go, sqlite3, psql, mongosh, redis-cli, mysql, ...
+  ],
+  "python":   { "interpreter": "...", "version": "...",
+                "site_packages": "...",
+                "packages": [ { "name": "...", "version": "...",
+                               "importable": true }, ... ] }
+              | null,
+  "node":     { "interpreter": "...", "version": "...",
+                "global_packages": [ { "name": "...", "version": "..." } ] }
+              | null,
+  "rust":     { "rustc": "1.x.x", "cargo": "1.x.x" } | null,
+  "go":       { "go": "1.22.0" }                      | null,
+  "env":      { "DATABASE_URL": "postgres://...",
+                "MONGO_URL":    "mongodb://...",
+                "REDIS_URL":    "redis://...",
+                "SMTP_URL":     "smtp://..." },
+  "filesystem": {
+    "workdir":                   "/workspace/repo",
+    "workdir_languages_detected": ["rust", "python"],
+    "git_initialized":           true,
+    "head_commit":               "<sha>" | null
+  }
+}
+```
+
+### §6.4 — Tool input schema
+
+```jsonc
+{
+  "type": "object",
+  "properties": {
+    "categories": {
+      "type": "array",
+      "items": {
+        "enum": ["binaries", "python", "node", "rust", "go",
+                 "env", "filesystem", "all"]
+      }
+    },
+    "filter": {
+      "type": "object",
+      "properties": {
+        "binary_name":    { "type": "string" },
+        "python_package": { "type": "string" },
+        "node_package":   { "type": "string" },
+        "env_var":        { "type": "string" }
+      }
+    }
+  }
+}
+```
+
+`categories` defaults to `["all"]`; an empty `filter` returns
+the unprojected sections.
+
+### §6.5 — Redaction (kernel-private env vars)
+
+The `env` section MUST exclude **kernel-private** variables.
+The exact predicate is `vm_capabilities::is_kernel_private_env`
+and covers:
+
+* The named set: `RAXIS_VSOCK_LOOPBACK_PLAN`,
+  `RAXIS_SESSION_TOKEN`, `RAXIS_PLANNER_KSB`,
+  `RAXIS_PLANNER_KSB_PATH`, `RAXIS_PLANNER_TASK_PROMPT`,
+  `RAXIS_PLANNER_TASK_PROMPT_PATH`,
+  `RAXIS_PLANNER_SIDECAR_HMAC_SECRET`,
+  `RAXIS_PLANNER_SIDECAR_PROVIDER_ID`,
+  `RAXIS_PLANNER_SIDECAR_ENDPOINT`.
+* Heuristic patterns (case-insensitive): `*SECRET*`,
+  `*PASSWORD*`, `*PASSWD*`, `*API_KEY*`, `*APIKEY*`,
+  `*PRIVATE_KEY*`, `*_TOKEN`.
+
+Credential-proxy URLs (`DATABASE_URL`, `MONGO_URL`,
+`REDIS_URL`, `SMTP_URL`) and harmless `RAXIS_*` plumbing surface
+intentionally so the LLM can write scripts that connect through
+the proxies. The kernel-stamped loopback-plan base64 / sidecar
+HMAC secret never surface.
+
+### §6.6 — Performance & cost
+
+The probe is sub-second on a warm VM:
+
+* PATH walk + `--version` for the curated binary allowlist
+  (~20 binaries) — cap each subprocess at 250 ms.
+* Direct `dist-info` reads under each Python `site-packages`
+  dir (NO `pip list` subprocess — pip startup is >100 ms).
+* `npm list -g --json --depth=0` — capped at 500 ms.
+* `git rev-parse HEAD` — capped at 100 ms.
+* No recursive filesystem walks (`workdir_languages_detected`
+  uses depth=1 globs only).
+
+The probe runs **once** per process; subsequent
+`cached_capabilities()` calls are O(1) Arc clones.
+
+### §6.7 — Image-agnosticism
+
+The probe is **image-agnostic** by construction: it reads the
+process's actual PATH / Python interpreter / Node interpreter /
+filesystem state. It does NOT consult a kernel-side static
+catalog. This is normative, not just descriptive: a kernel-side
+catalog would drift the moment an operator pins a BYO image
+with a different package set, breaking BYO compatibility per
+`INV-OPERATOR-CUSTOM-IMAGE-01`.
+
+### §6.8 — Compatibility with the BashTool architecture
+
+The `vm_capabilities` tool is **compatible** with — and
+complementary to — the "LLM writes scripts and runs them via
+`BashTool`" architecture. It tells the LLM **what scripts to
+write**; it does NOT execute on the LLM's behalf. It does
+NOT reintroduce the reverted narrow per-DB tools
+(`postgres_query` / `mongo_query` / `redis_query` /
+`smtp_send` — reverted at `12afc38`).
+
+---
+
+## §7 — Open questions / future work
 
 * **V3 registry-pull resolver.** The current `PrePopulatedResolver`
   requires the operator to stage the rootfs on every host

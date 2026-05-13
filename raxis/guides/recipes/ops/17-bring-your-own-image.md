@@ -349,6 +349,58 @@ silently propagate into a signed bundle.
 
 ---
 
+## How the LLM learns what's installed in your image
+
+A BYO image's whole purpose is to ship a non-default toolchain, but
+the agent LLM that boots into the VM has **no out-of-band knowledge
+of your `Containerfile`**. With the egress gate held closed (no
+`pip install` / `npm install` reach a package mirror), a model that
+guesses wrong about what's present silently wastes a turn.
+
+RAXIS solves this with `INV-EXEC-DISCOVERY-01`
+([`invariants.md §10.4a`](../../../specs/invariants.md)) — an
+**in-guest capability probe** the planner runs at session start.
+The probe walks PATH, parses each Python `site-packages`'s
+`*.dist-info/METADATA` files, calls `npm list -g`, runs
+`rustc --version` / `go version`, and snapshots the workdir + git
+HEAD. It surfaces results through two coherent channels backed by
+the same per-process `OnceLock` cache:
+
+1. A `## VM Environment` block prepended to the LLM's first turn
+   (so the model knows up-front it has, e.g., Python 3.12.7 and
+   Node 22.11.0 baked in by your `Containerfile`).
+2. A `vm_capabilities` LLM tool registered in the executor /
+   reviewer / orchestrator registries. The LLM calls it for finer
+   queries the curated hint omits — e.g.,
+   `vm_capabilities { categories: ["python"], filter:
+   { python_package: "numpy" } }` returns `{ name: "numpy",
+   version: "1.26.4", importable: true }` if you baked numpy in,
+   or `{ ..., importable: false }` if you didn't.
+
+The probe is **image-agnostic** by construction: nothing in the
+kernel knows what your `Containerfile` installed. The probe reads
+the actual filesystem of the booted VM, so a BYO image and the
+canonical `raxis-executor-starter` go through **identical**
+discovery plumbing. Kernel-private env vars
+(`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`, sidecar HMAC
+secrets, anything matching `*SECRET*` / `*PASSWORD*` /
+`*API_KEY*` / `*_TOKEN`) are redacted from both surfaces;
+credential-proxy URLs (`DATABASE_URL` / `MONGO_URL` /
+`REDIS_URL` / `SMTP_URL`) surface verbatim so the LLM can
+construct connection scripts.
+
+Practical implication for BYO authors: you don't need to hand-roll
+a system-prompt addendum describing what your image carries. Bake
+your toolchain via the `Containerfile`, sign-and-publish per the
+recipe above, and the in-guest probe will tell the LLM what it has
+on every session.
+
+Full schema, redaction allowlist, performance budget, and
+BYO-image semantics: [`specs/v2/canonical-images.md
+§6`](../../../specs/v2/canonical-images.md).
+
+---
+
 ## Reference
 
 | Symbol / surface                                                 | Purpose                                                         |
@@ -389,4 +441,4 @@ silently propagate into a signed bundle.
   and reference the alias from a `[[verifiers]]` block. The
   current `VmImageResolved` audit-event surface is Executor-only;
   Verifier-side emission is on the roadmap (see
-  `canonical-images.md §6`).
+  `canonical-images.md §7`).
