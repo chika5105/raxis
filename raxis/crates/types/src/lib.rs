@@ -14,6 +14,7 @@ pub mod clock;
 pub mod error;
 pub mod escalation;
 pub mod fsm;
+pub mod host_preflight;
 pub mod id;
 pub mod initiative_event;
 pub mod intent;
@@ -32,6 +33,7 @@ pub mod witness;
 pub use capability::{CapabilityClass, DelegationStatus};
 pub use clock::{unix_now_secs, Clock, RealClock};
 pub use error::{OperatorErrorCode, PlannerErrorCode};
+pub use host_preflight::{DiskVolumeReport, HostPreflightError};
 pub use escalation::{
     EscalationClass, EscalationRejectionReason, EscalationRequest, EscalationResponse,
     EscalationStatus, RequestedEscalationScope,
