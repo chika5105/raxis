@@ -66,14 +66,31 @@ pub struct StreamQuery {
 fn default_tail() -> usize { 100 }
 
 /// `GET /api/sessions/:id/stream`. Server-Sent Events stream of
-/// the session's captured model output.
+/// the session's captured model output AND of any kernel audit
+/// event whose `session_id` matches the request path (the
+/// audit→stream bridge is owned by `raxis-dashboard-kernel`'s
+/// `StreamingAuditSink` decorator; see
+/// `INV-DASHBOARD-STREAM-PRODUCER-01`).
 ///
-/// Wire shape: each event is `event: <kind>\ndata: <json>\n\n`
-/// with `id: <at_ms>\n` so the browser's EventSource auto-
-/// reconnect carries the last seen id back via the
-/// `Last-Event-ID` request header.
+/// Wire shape: every data frame carries the **full envelope** as
+/// the SSE `data:` field —
+/// `{"at_ms": <u64>, "kind": <string>, "payload": <any>}` — and
+/// emits as the default `message` event so the browser's
+/// `EventSource.onmessage` handler picks every frame up without
+/// per-kind `addEventListener` calls. The `id:` field still
+/// carries `at_ms` so the browser's auto-reconnect path round-
+/// trips through `Last-Event-ID`. The wire used to set
+/// `event: <kind>` and put only the payload in `data:`; that
+/// silently dropped any frame whose `kind` the FE hadn't pre-
+/// registered (the audit-bridge fanout would have made that
+/// list unmaintainable). `INV-DASHBOARD-STREAM-ENVELOPE-01`
+/// pins the new wire so future bridge producers (gateway
+/// tokens, planner tool calls) don't reintroduce the per-kind
+/// listener requirement.
 ///
-/// Special control frames:
+/// Special control frames keep their typed `event:` names so
+/// the FE can branch on protocol semantics rather than parsing
+/// JSON:
 ///   * `event: tail-complete` — the replay tail has been
 ///     drained; live frames begin next.
 ///   * `event: lagged\ndata: <count>\n\n` — slow subscriber
@@ -203,11 +220,12 @@ fn build_sse_stream(
     shutdown: Arc<ShutdownSignal>,
 ) -> impl Stream<Item = Result<Event, Infallible>> + Send + 'static {
     let tail_iter = tail.into_iter().map(|e| {
-        let payload = serde_json::to_string(&e.payload).unwrap_or_else(|_| "null".into());
-        Ok(Event::default()
-            .event(e.kind)
-            .data(payload)
-            .id(e.at_ms.to_string()))
+        // `Event::default()` (no `.event(...)` call) emits a
+        // default `message`-type SSE frame so EventSource's
+        // `onmessage` handler picks every event up uniformly
+        // (see `INV-DASHBOARD-STREAM-ENVELOPE-01`).
+        let data = envelope_json(&e);
+        Ok(Event::default().data(data).id(e.at_ms.to_string()))
     });
     let tail_marker = stream::once(async {
         // Emit a non-empty `data` so the SSE frame fully flushes
@@ -242,11 +260,9 @@ fn build_sse_stream(
                         }
                         msg = sub.recv() => match msg {
                             Ok(Some(e)) => {
-                                let payload = serde_json::to_string(&e.payload)
-                                    .unwrap_or_else(|_| "null".into());
+                                let data = envelope_json(&e);
                                 let evt = Event::default()
-                                    .event(e.kind)
-                                    .data(payload)
+                                    .data(data)
                                     .id(e.at_ms.to_string());
                                 Some((Ok(evt), (sub, false, shutdown)))
                             }
@@ -274,6 +290,19 @@ fn build_sse_stream(
             })),
         };
     stream::iter(tail_iter).chain(tail_marker).chain(live_stream)
+}
+
+/// Render one [`StreamEvent`] as the wire envelope the FE
+/// expects on the `data:` field — `{at_ms, kind, payload}`.
+/// Serialisation failures collapse to `"null"` so a single
+/// malformed payload never poisons the whole stream.
+fn envelope_json(e: &StreamEvent) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "at_ms":   e.at_ms,
+        "kind":    e.kind,
+        "payload": e.payload,
+    }))
+    .unwrap_or_else(|_| "null".into())
 }
 
 fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {

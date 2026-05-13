@@ -65,8 +65,10 @@ use raxis_store::Store;
 
 mod git;
 pub mod stream_capture;
+pub mod streaming_audit;
 
 pub use stream_capture::{CaptureConfig, SessionStreamCapture};
+pub use streaming_audit::StreamingAuditSink;
 
 // ---------------------------------------------------------------------------
 // PolicyAdvancer — kernel-side write callback for the dashboard

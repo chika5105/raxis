@@ -310,7 +310,43 @@ async fn main() {
     // counters). Owned by an `Arc` so both the audit sink decorator
     // and the IPC context point at the same registry.
     let sidecar_registry = Arc::new(notifications::SidecarRegistry::new());
-    let audit: Arc<dyn AuditSink> = Arc::new(
+
+    // V2 `v2_extended_gaps.md §4.3` — allocate the dashboard's
+    // session-stream capture EARLY so the audit sink can be
+    // wrapped in `StreamingAuditSink` and every session-scoped
+    // emit becomes a live SSE frame on the matching session's
+    // stream. Without this bridge, the SSE endpoint subscribes
+    // to an empty broadcast channel and the dashboard's session-
+    // detail view sits forever on "Waiting for stream events…".
+    //
+    // Construction failure (read-only data dir / EROFS / ENOSPC)
+    // logs and yields `None` — the audit sink is then wired
+    // unwrapped and the dashboard SSE surface returns 404 on
+    // subscribe, but every other kernel surface stays up.
+    let dashboard_stream_capture: Option<Arc<raxis_dashboard_kernel::SessionStreamCapture>> =
+        match raxis_dashboard_kernel::SessionStreamCapture::new(
+            &data_dir,
+            raxis_dashboard_kernel::CaptureConfig::default(),
+        ) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"DashboardStreamCaptureInitFailed\",\
+                     \"reason\":\"{e}\"}}"
+                );
+                None
+            }
+        };
+
+    // Chain the streaming-audit bridge on top of the notifying
+    // decorator so:
+    //   1. every audit emit reaches the JSONL writer first
+    //      (FileAuditSink, innermost) — durability;
+    //   2. then fans into the notification dispatcher
+    //      (NotifyingAuditSink) — inbox + sidecars;
+    //   3. then mirrors per-session events onto the dashboard
+    //      capture (StreamingAuditSink, outermost) — live SSE.
+    let notifying_audit: Arc<dyn AuditSink> = Arc::new(
         notifications::NotifyingAuditSink::new(
             Arc::clone(&inner_audit),
             Arc::clone(&policy),
@@ -319,6 +355,13 @@ async fn main() {
         .with_sidecar_registry(Arc::clone(&sidecar_registry))
         .with_store(Arc::clone(&store)),
     );
+    let audit: Arc<dyn AuditSink> = match dashboard_stream_capture.as_ref() {
+        Some(cap) => Arc::new(raxis_dashboard_kernel::StreamingAuditSink::new(
+            Arc::clone(&notifying_audit),
+            Arc::clone(cap),
+        )),
+        None => notifying_audit,
+    };
 
     // Step 8: Emit the canonical KernelStarted record. This is the very
     // first event in this kernel-process lifetime; with the v1 reset
@@ -1237,21 +1280,24 @@ async fn main() {
                     Some(Arc::clone(&artifact_store)),
                     policy_path.clone(),
                 ));
-            // Reuse the data layer's stream capture for the
-            // gateway bridge by allocating it here so both
-            // surfaces (file ring + broadcast channel) point
-            // at the same `<data_dir>/streams/` directory.
-            //
-            // Hardening: the previous version `expect`-ed on the
-            // streams-directory init, taking the kernel down on
-            // a read-only data dir / EROFS / ENOSPC. Surface the
-            // failure as a structured warning and skip the
-            // dashboard instead — the kernel's other surfaces
-            // (operator UDS, audit chain) keep working.
-            match raxis_dashboard_kernel::SessionStreamCapture::new(
-                &data_dir,
-                raxis_dashboard_kernel::CaptureConfig::default(),
-            ) {
+            // Reuse the SAME `SessionStreamCapture` instance
+            // that the audit-sink `StreamingAuditSink` bridge
+            // was wrapped around earlier (so audit→SSE mirror
+            // and the dashboard data layer share one
+            // `<data_dir>/streams/` directory + one broadcast
+            // channel per session). If early allocation
+            // failed (logged at boot) we attempt one more init
+            // here so the dashboard still has a usable capture
+            // — at worst, audit→SSE mirroring stays disabled
+            // and the operator only sees the persistent tail.
+            let stream_capture_attempt = match dashboard_stream_capture.as_ref() {
+                Some(c) => Ok(Arc::clone(c)),
+                None => raxis_dashboard_kernel::SessionStreamCapture::new(
+                    &data_dir,
+                    raxis_dashboard_kernel::CaptureConfig::default(),
+                ),
+            };
+            match stream_capture_attempt {
                 Ok(stream_capture) => {
                     match raxis_dashboard_kernel::start_dashboard_with_advancer(
                         cfg.clone(),

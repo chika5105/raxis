@@ -33,21 +33,29 @@ const CONTROL_KINDS = new Set<string>([
   "lagged",
   "closed",
   "keep-alive",
+  "kernel-shutdown",
 ]);
 
 /// Live SSE viewer for `/api/sessions/:id/stream`.
 ///
-/// Wire contract (see `raxis/crates/dashboard/src/routes/
-/// sessions.rs::build_sse_stream` and §4.3 of
-/// `v2_extended_gaps.md`):
+/// Wire contract — `INV-DASHBOARD-STREAM-ENVELOPE-01` (also
+/// documented in `raxis/crates/dashboard/src/routes/sessions.rs`
+/// and §4.3 of `v2_extended_gaps.md`):
 ///
-///   * Each frame uses `event: <kind>` to discriminate.
-///   * `data:` carries the payload JSON only (not the whole
-///     envelope). The `kind` lives in the SSE event type; the
-///     `at_ms` (unix milliseconds) lives in the SSE `id` field.
-///   * Control frames `tail-complete`, `lagged`, `closed`, and
-///     `keep-alive` carry no JSON payload — we treat them as
-///     status transitions, not stream rows.
+///   * **Data frames** are emitted as default-`message` SSE
+///     events with the **full envelope** in the `data:` field:
+///     `{at_ms, kind, payload}`. The `id:` field duplicates
+///     `at_ms` so the browser's auto-reconnect `Last-Event-ID`
+///     round-trip works. The renderer reads via `onmessage`
+///     once, regardless of how many distinct `kind`s the kernel
+///     publishes (the audit→stream bridge fans ~80 audit event
+///     kinds onto the per-session stream — pre-registering each
+///     via `addEventListener` would have silently dropped any
+///     new kind the FE didn't know about).
+///   * **Control frames** keep typed `event:` names so we can
+///     branch on protocol semantics rather than JSON:
+///     `tail-complete`, `lagged`, `closed`, `kernel-shutdown`,
+///     `keep-alive`. None of them are rendered as stream rows.
 ///
 /// The plain `EventSource` API does not allow custom headers, so
 /// we attach the JWT via `?token=…`. The dashboard backend
@@ -112,27 +120,8 @@ export function SessionStream({
 
     flushTimer = window.setInterval(flush, flushIntervalMs);
 
-    const pushPayloadEvent = (kind: string, e: MessageEvent) => {
-      // The backend stamps `id: <at_ms>` on every data frame.
-      // Fall back to wall-clock if the server omits it.
-      const atMs =
-        e.lastEventId && /^\d+$/.test(e.lastEventId)
-          ? Number(e.lastEventId)
-          : Date.now();
-      let payload: unknown;
-      if (e.data === "" || e.data == null) {
-        payload = null;
-      } else {
-        try {
-          payload = JSON.parse(e.data);
-        } catch {
-          // Backend ships malformed JSON only in pathological
-          // cases; surface the raw text so the operator can
-          // still see something.
-          payload = { _raw: e.data };
-        }
-      }
-      pending.current.push({ at_ms: atMs, kind, payload });
+    const pushEnvelope = (envelope: StreamEventEnvelope) => {
+      pending.current.push(envelope);
     };
 
     es.onopen = () => {
@@ -141,32 +130,60 @@ export function SessionStream({
       }
     };
 
-    // Known payload-bearing kinds we recognize from the planner
-    // capture vocabulary. Each `addEventListener("<kind>", …)`
-    // dispatches on the SSE `event: <kind>` discriminator, so
-    // each frame fires exactly one of these listeners.
-    //
-    // We deliberately do NOT also assign `es.onmessage`: that
-    // would double-deliver default-named (`event: message`)
-    // frames — `onmessage` fires AND the matching
-    // `addEventListener("message", …)` fires, so the operator
-    // would see every default frame twice in the stream pane.
-    const PAYLOAD_KINDS = [
-      "token",
-      "model_chunk",
-      "tool_call",
-      "tool_result",
-      "terminal",
-      "complete",
-      "error",
-      "message",
-    ];
-    for (const k of PAYLOAD_KINDS) {
-      es.addEventListener(k, (e: MessageEvent) => pushPayloadEvent(k, e));
-    }
+    // Data frames arrive as default-`message` SSE events with
+    // the full envelope (`{at_ms, kind, payload}`) packed into
+    // the `data:` field per `INV-DASHBOARD-STREAM-ENVELOPE-01`.
+    // The single `onmessage` handler catches every frame
+    // regardless of the kernel-side `kind` — pre-registering
+    // per-kind listeners is brittle when the audit-bridge fans
+    // ~80 audit kinds onto the wire.
+    es.onmessage = (e: MessageEvent) => {
+      // The backend stamps `id: <at_ms>` on every data frame as
+      // a defence-in-depth source for `at_ms` (also duplicated
+      // inside the envelope). Fall back to wall-clock only when
+      // both are absent, which never happens in practice.
+      const fallbackMs =
+        e.lastEventId && /^\d+$/.test(e.lastEventId)
+          ? Number(e.lastEventId)
+          : Date.now();
+      if (e.data === "" || e.data == null) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(e.data);
+      } catch {
+        pushEnvelope({
+          at_ms: fallbackMs,
+          kind: "unknown",
+          payload: { _raw: e.data },
+        });
+        return;
+      }
+      // Canonical wire shape — full envelope.
+      if (
+        parsed != null &&
+        typeof parsed === "object" &&
+        "kind" in (parsed as Record<string, unknown>)
+      ) {
+        const env = parsed as StreamEventEnvelope;
+        if (!Number.isFinite(env.at_ms) || env.at_ms <= 0) {
+          env.at_ms = fallbackMs;
+        }
+        pushEnvelope(env);
+        return;
+      }
+      // Defensive fallback: a kernel version that still emits
+      // the old payload-only wire would land here. We synthesize
+      // an envelope so the surface still renders rather than
+      // dropping the frame on the floor.
+      pushEnvelope({
+        at_ms: fallbackMs,
+        kind: e.type === "message" ? "unknown" : e.type,
+        payload: parsed,
+      });
+    };
 
-    // Control frames — never carry a payload that should appear
-    // in the event list, but they update the status pill.
+    // Control frames — never carry a renderable payload, but
+    // they drive the status pill / lag counter.
     es.addEventListener("tail-complete", () => {
       if (!stopped) setStatus("live");
     });
@@ -180,6 +197,14 @@ export function SessionStream({
       if (!stopped) {
         setStatus("ended");
       }
+    });
+    es.addEventListener("kernel-shutdown", () => {
+      // Kernel orderly shutdown — stop reconnecting so the
+      // browser doesn't keep hammering a listener that is
+      // actively draining.
+      stopped = true;
+      setStatus("ended");
+      es.close();
     });
     // keep-alive is intentionally ignored — its only job is to
     // keep idle connections from being culled by intermediaries.

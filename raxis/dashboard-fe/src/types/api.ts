@@ -285,39 +285,48 @@ export interface WorktreeFile {
 
 // Server-Sent Event payload from /api/sessions/:id/stream.
 //
-// Wire shape (per raxis/crates/dashboard/src/routes/sessions.rs
-// and raxis-dashboard's `StreamEvent`):
+// Wire contract — `INV-DASHBOARD-STREAM-ENVELOPE-01` (see
+// `raxis/specs/invariants.md`):
 //
-//   event: <kind>      ← SSE event name, also stamped into `kind`
-//   id:    <at_ms>     ← unix milliseconds (lastEventId on the
-//                        browser side)
-//   data:  <payload>   ← the `payload` field's JSON ONLY, NOT
-//                        the full envelope
+//   data: {"at_ms": <u64>, "kind": <string>, "payload": <any>}
+//   id:   <at_ms>     ← duplicated so EventSource's auto-reconnect
+//                       resume via `Last-Event-ID` works.
 //
-// Control frames (no `payload`, emitted by the backend SSE
-// handler in `routes::sessions::stream::build_sse_stream`):
+// Data frames DO NOT set a custom `event:` field; they reach the
+// browser as default-`message` SSE events so `EventSource.onmessage`
+// picks every frame up uniformly regardless of how many kinds the
+// kernel publishes. The previous wire (`event: <kind>` + payload-
+// only `data:`) forced the FE to enumerate every kind via
+// `addEventListener` and silently dropped any kind it had not pre-
+// registered — fatal when the audit→stream bridge fans ~80 audit
+// event kinds onto the per-session stream.
 //
-//   * `event: tail-complete` — backend has finished replaying
-//     the file-ring tail; live frames begin next.
-//   * `event: lagged`        — slow subscriber dropped `data`
+// Control frames keep their typed `event:` names so the FE can
+// branch on protocol semantics rather than parsing JSON:
+//
+//   * `event: tail-complete`     — backend finished the file-ring
+//     replay; live frames begin next.
+//   * `event: lagged`            — slow subscriber dropped `data`
 //     events (the data line carries the lag count).
-//   * `event: closed`        — publisher dropped the broadcast
+//   * `event: closed`            — publisher dropped the broadcast
 //     (session terminated or no live source attached).
-//   * `event: keep-alive`    — axum's SSE keep-alive heartbeat
+//   * `event: kernel-shutdown`   — kernel orderly shutdown; the FE
+//     suppresses EventSource auto-reconnect on this frame.
+//   * `event: keep-alive`        — axum's SSE keep-alive heartbeat
 //     emitted every 15 s; ignored by the renderer.
-//
-// The renderer constructs an in-browser `StreamEventEnvelope`
-// from those three SSE fields (kind / at_ms / payload). It does
-// NOT expect the backend to pack the whole envelope into `data:`.
 export interface StreamEventEnvelope {
-  /// Unix milliseconds timestamp from the SSE `id:` field.
+  /// Unix milliseconds timestamp from the wire `at_ms` (also
+  /// duplicated as the SSE `id:` field).
   at_ms: number;
-  /// Event kind (`token` / `tool_call` / `tool_result` /
-  /// `terminal` / `model_chunk` / `error` / `lagged` / `closed`
-  /// / `tail-complete` / ...). The wire is open — new kinds may
-  /// appear without a frontend release.
+  /// Event kind. For audit-bridge frames this is the audit
+  /// `event_kind` PascalCase string (`IntentAccepted`, …); for
+  /// future gateway frames this'll be `model_chunk` / `tool_call`
+  /// / `tool_result` / `terminal` / `heartbeat`. The wire is
+  /// open — new kinds may appear without a frontend release.
   kind: string;
   /// Free-form structured payload parsed from the SSE `data:`
-  /// line. Shape depends on `kind`.
+  /// envelope. Audit-bridge frames carry `{seq, event_id,
+  /// initiative_id, task_id, payload}` so operators can deep-link
+  /// to the audit-chain row.
   payload: unknown;
 }

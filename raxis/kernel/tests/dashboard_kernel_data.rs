@@ -639,11 +639,17 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
         }
     });
 
+    // Per `INV-DASHBOARD-STREAM-ENVELOPE-01` data frames now
+    // ship as default-`message` SSE events with the full
+    // envelope packed into the `data:` field — so the
+    // `event: tool_call` line the old wire emitted no longer
+    // exists. Scan for the kind discriminant inside the JSON
+    // envelope instead.
     let live = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         async {
             while let Ok(Some(line)) = lines.next_line().await {
-                if line.starts_with("event: tool_call") {
+                if line.starts_with("data:") && line.contains("\"kind\":\"tool_call\"") {
                     return Ok::<String, std::io::Error>(line);
                 }
             }
@@ -653,7 +659,14 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
     .await
     .expect("did not see live tool_call event in 10s")
     .expect("live read");
-    assert_eq!(live, "event: tool_call");
+    assert!(
+        live.contains("\"kind\":\"tool_call\""),
+        "expected tool_call envelope on the wire; got `{live}`"
+    );
+    assert!(
+        live.contains("\"at_ms\":"),
+        "expected at_ms in the envelope; got `{live}`"
+    );
 
     pusher.abort();
     // Drop the SSE reader first so the server-side handler
