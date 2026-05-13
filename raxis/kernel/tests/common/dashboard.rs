@@ -29,6 +29,18 @@
 //! test must still pass on a headless CI runner without a built
 //! `dashboard-fe/dist`, without `open(1)`, and (for the realistic
 //! scenario) without the live-e2e gates set.
+//!
+//! ## Auto-build of the React bundle
+//!
+//! [`locate_dashboard_dist`] runs `npm run build` on demand if
+//! `dashboard-fe/dist/index.html` is missing. Without the bundle
+//! the kernel's dashboard server returns HTTP 404 for `/`,
+//! `/login`, and every SPA route — silently breaking operator-side
+//! review during a live-e2e run. CI lanes that pre-build the
+//! bundle (or genuinely want JSON-only) can opt out via
+//! `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1`. Build failure is tolerated
+//! (falls back to JSON-only) so the live-e2e fix loop can still
+//! iterate on non-UI failure modes when the FE is broken.
 
 #![allow(dead_code)]
 
@@ -58,17 +70,101 @@ pub fn configured_dashboard_port() -> u16 {
         .unwrap_or(DASHBOARD_DEFAULT_PORT)
 }
 
-/// Absolute path to the React production bundle, if it has been
-/// built. The kernel's `[dashboard].static_dir` field consumes
-/// this; absent ⇒ JSON-API-only dashboard (still useful for
-/// programmatic poking, just no UI). The CARGO_MANIFEST_DIR
+/// Absolute path to the React production bundle, building it on
+/// demand if missing. The kernel's `[dashboard].static_dir` field
+/// consumes this; without a real `dist/index.html` the dashboard
+/// server returns HTTP 404 for `/`, `/login`, and every SPA route,
+/// which silently breaks operator-side review during a live-e2e
+/// run (the JSON API still works, but no UI). The CARGO_MANIFEST_DIR
 /// anchor is the `kernel/` crate root, so `..` walks to `raxis/`.
+///
+/// Auto-build policy: if `dashboard-fe/dist/index.html` is absent,
+/// run `npm run build` from `dashboard-fe/`. This is opt-out via
+/// `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` for CI lanes that pre-build
+/// the bundle as a separate step. Build failure surfaces a clear
+/// remediation message and falls back to JSON-only mode (rather
+/// than panicking the entire test) so the live-e2e fix loop can
+/// still iterate on non-UI failure modes when the FE is broken.
 pub fn locate_dashboard_dist() -> Option<PathBuf> {
     let raxis_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.to_path_buf();
-    let dist = raxis_root.join("dashboard-fe").join("dist");
+    let fe_root = raxis_root.join("dashboard-fe");
+    let dist = fe_root.join("dist");
+
+    if dist.join("index.html").is_file() {
+        return Some(dist);
+    }
+
+    if std::env::var("RAXIS_E2E_SKIP_DASHBOARD_BUILD")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "[dashboard-bundle] dashboard-fe/dist not present and \
+             RAXIS_E2E_SKIP_DASHBOARD_BUILD=1 — dashboard will serve \
+             JSON API only (no UI)."
+        );
+        return None;
+    }
+
+    if !fe_root.join("package.json").is_file() {
+        eprintln!(
+            "[dashboard-bundle] dashboard-fe/package.json missing at {}; \
+             cannot auto-build the React bundle. Dashboard will serve \
+             JSON API only (no UI).",
+            fe_root.display()
+        );
+        return None;
+    }
+
+    eprintln!(
+        "[dashboard-bundle] dashboard-fe/dist/index.html missing — \
+         running `npm run build` in {} (opt out via \
+         RAXIS_E2E_SKIP_DASHBOARD_BUILD=1)",
+        fe_root.display()
+    );
+    let build_started = std::time::Instant::now();
+    let status = std::process::Command::new("npm")
+        .arg("run")
+        .arg("build")
+        .current_dir(&fe_root)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!(
+                "[dashboard-bundle] npm run build OK in {:.1}s",
+                build_started.elapsed().as_secs_f32()
+            );
+        }
+        Ok(s) => {
+            eprintln!(
+                "[dashboard-bundle] npm run build exited with {s:?}; \
+                 dashboard will serve JSON API only (no UI). Re-run \
+                 `cd raxis/dashboard-fe && npm install && npm run build` \
+                 manually to diagnose."
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!(
+                "[dashboard-bundle] failed to spawn `npm run build`: \
+                 {e}. Dashboard will serve JSON API only (no UI). \
+                 Install Node + npm or set RAXIS_E2E_SKIP_DASHBOARD_BUILD=1 \
+                 to silence this."
+            );
+            return None;
+        }
+    }
+
     if dist.join("index.html").is_file() {
         Some(dist)
     } else {
+        eprintln!(
+            "[dashboard-bundle] post-build sanity check failed: {} not \
+             present after `npm run build`. Falling back to JSON-only.",
+            dist.join("index.html").display()
+        );
         None
     }
 }
