@@ -198,10 +198,22 @@ fn realistic_session_lifecycle() {
     // Tier-3 reporter: created BEFORE the kernel spawn so an early
     // failure still emits the artifact block on Drop. `mark_success()`
     // at the bottom of the happy path enables the workdir-keep
-    // policy's success cleanup branch.
+    // policy's success cleanup branch. `.with_observability_urls()`
+    // wires the same Grafana / Prometheus / OTel URL block the
+    // `cargo xtask observability urls` command renders, so an
+    // operator scanning the post-run stderr capture finds both the
+    // artifact paths AND the metric dashboards in one block.
     let mut tier3 = Tier3Reporter::new(
         "realism-e2e", &install_dir, &data_dir,
-    );
+    )
+    .with_observability_urls();
+
+    // Print the observability URL block at startup too so the
+    // operator can paste a Grafana URL into their browser the
+    // moment the test starts emitting OTLP, rather than waiting
+    // for Drop. Cheap (≤ four 250ms TCP probes); the helper
+    // never panics and never fails the test.
+    common::tier3_artifacts::print_observability_urls_inline("realism-e2e");
 
     // Seed every in-scope service BEFORE the executor wakes up. The
     // round-trip task runs at the END of the plan dependency graph

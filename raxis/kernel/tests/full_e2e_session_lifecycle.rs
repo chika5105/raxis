@@ -295,7 +295,15 @@ fn full_session_lifecycle() {
     // block surfaces the same URL.
     let mut tier3 = Tier3Reporter::new(
         "e2e", &install_dir, kernel.data_dir(),
-    );
+    )
+    .with_observability_urls();
+
+    // Print the same Grafana/Prometheus URL block at startup that
+    // the Tier-3 reporter will emit again at end-of-run, so an
+    // operator watching the kernel come up can open the dashboards
+    // immediately rather than waiting for the test to finish.
+    // Cheap (≤ four 250ms TCP probes); the helper never panics.
+    common::tier3_artifacts::print_observability_urls_inline("e2e");
 
     // ── (visual-debug) — open the operator dashboard with an
     //    autologin URL so the developer can watch the lifecycle in

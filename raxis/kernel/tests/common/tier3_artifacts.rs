@@ -36,8 +36,31 @@
 
 #![allow(dead_code)]
 
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+// ── Observability URL constants (mirror compose) ─────────────────
+//
+// These mirror `live-e2e/docker-compose.e2e.yml` exactly. The
+// `observability_urls_match_compose_file` test below scans the
+// compose file at compile time and asserts the constants stay in
+// lock-step; any future port rebind in the compose file fails the
+// kernel-test build before it lands on `main`.
+//
+// We deliberately do NOT pull these from the `xtask::observability`
+// module — the kernel test crate does not depend on `xtask` and
+// adding a dep just to share a port number would be wildly out
+// of proportion. Drift is caught by the compose-file scan test.
+
+const OBS_GRAFANA_PORT:        u16 = 3000;
+const OBS_PROMETHEUS_PORT:     u16 = 9090;
+const OBS_OTLP_HTTP_PORT:      u16 = 4318;
+const OBS_OTEL_ZPAGES_PORT:    u16 = 13133;
+const OBS_GRAFANA_ADMIN_USER:  &str = "admin";
+const OBS_GRAFANA_ADMIN_PASS:  &str = "raxis-e2e";
+const OBS_OVERVIEW_DASHBOARD:  &str = "raxis-00-overview";
 
 /// One named merged worktree to surface in the artifact block.
 /// Multiple are admissible because the realism scenario merges N
@@ -60,6 +83,7 @@ pub struct Tier3Reporter {
     audit_dir: PathBuf,
     merged_worktrees: Vec<MergedWorktree>,
     dashboard_url: Option<String>,
+    surface_observability_urls: bool,
     succeeded: bool,
     fired: bool,
 }
@@ -85,9 +109,29 @@ impl Tier3Reporter {
             audit_dir,
             merged_worktrees: Vec::new(),
             dashboard_url: None,
+            surface_observability_urls: false,
             succeeded: false,
             fired: false,
         }
+    }
+
+    /// Opt the reporter into emitting the Prometheus + Grafana
+    /// + OTel-collector URL block as part of the end-of-run
+    /// artifact dump. The block surfaces ALL the URLs whether
+    /// the stack is up or not (so an operator who forgot to bring
+    /// it up sees the runnable `cargo xtask observability up`
+    /// command in the same place); reachability is annotated
+    /// per-line with a TCP probe.
+    ///
+    /// Pinned to a builder rather than a constructor flag so the
+    /// existing call sites (
+    /// `extended_e2e_realistic_scenario.rs`,
+    /// `full_e2e_session_lifecycle.rs`,
+    /// `tier3_artifacts::tests`) opt in surgically without churning
+    /// the `Tier3Reporter::new` signature.
+    pub fn with_observability_urls(mut self) -> Self {
+        self.surface_observability_urls = true;
+        self
     }
 
     /// Override the kernel log path. Useful for `full_e2e_session_
@@ -196,6 +240,9 @@ impl Tier3Reporter {
                 label = self.test_label
             );
         }
+        if self.surface_observability_urls {
+            emit_observability_block(self.test_label);
+        }
         eprintln!(
             "[{label}] (set RAXIS_E2E_OPEN_REPO=1 to open the worktree(s) in the default editor)",
             label = self.test_label
@@ -243,6 +290,101 @@ impl Drop for Tier3Reporter {
     }
 }
 
+// ── Observability URL block ─────────────────────────────────────
+//
+// Same surface the `cargo xtask observability up/urls` command
+// renders, threaded into the Tier-3 reporter so an operator
+// scanning a `cargo test ... extended_e2e_realistic_scenario`
+// stderr capture sees the dashboard URLs in the same place they
+// see the kernel-log path. Per-line `(up)` / `(down)` is
+// emitted via a 250ms TCP-connect probe so an operator who
+// forgot to bring up the obs stack still sees the URL block
+// (and the suggested fix) without the lines pretending to be
+// reachable.
+
+/// Emit the same observability URL block the
+/// `cargo xtask observability urls` command produces, prefixed
+/// with the harness label so a `grep '^\[<label>\]'` on the test
+/// stderr capture surfaces every artifact line in one pass.
+///
+/// Public so it can be called once at harness *startup* (immediately
+/// after the kernel daemon is ready) and again at end-of-run via
+/// the [`Tier3Reporter`] Drop. Both calls are cheap (≤ 4 × 250 ms
+/// TCP probes, no HTTP); the function never panics and never
+/// fails the test.
+pub fn print_observability_urls_inline(label: &str) {
+    emit_observability_block(label);
+}
+
+fn emit_observability_block(label: &str) {
+    let bar = "──────────────";
+    eprintln!("[{label}] {bar} observability surface {bar}");
+    eprintln!(
+        "[{label}] Grafana       : http://127.0.0.1:{port}/   \
+         (admin/{user}, anonymous Viewer OK) {state}",
+        port  = OBS_GRAFANA_PORT,
+        user  = OBS_GRAFANA_ADMIN_PASS, // password in the labelled slot, NOT a typo:
+        // `admin/{pass}` matches the README phrasing.
+        state = probe_state("127.0.0.1", OBS_GRAFANA_PORT),
+    );
+    eprintln!(
+        "[{label}] Grafana home  : http://127.0.0.1:{port}/d/{uid}",
+        port = OBS_GRAFANA_PORT,
+        uid  = OBS_OVERVIEW_DASHBOARD,
+    );
+    eprintln!(
+        "[{label}] Prometheus    : http://127.0.0.1:{port}/         {state}",
+        port  = OBS_PROMETHEUS_PORT,
+        state = probe_state("127.0.0.1", OBS_PROMETHEUS_PORT),
+    );
+    eprintln!(
+        "[{label}] Prom targets  : http://127.0.0.1:{port}/targets",
+        port = OBS_PROMETHEUS_PORT,
+    );
+    eprintln!(
+        "[{label}] OTLP/HTTP     : http://127.0.0.1:{port}        \
+         (kernel [observability] push target) {state}",
+        port  = OBS_OTLP_HTTP_PORT,
+        state = probe_state("127.0.0.1", OBS_OTLP_HTTP_PORT),
+    );
+    eprintln!(
+        "[{label}] OTel zPages   : http://127.0.0.1:{port}/       {state}",
+        port  = OBS_OTEL_ZPAGES_PORT,
+        state = probe_state("127.0.0.1", OBS_OTEL_ZPAGES_PORT),
+    );
+    // Mention the admin user in a separate line — keeping the
+    // password on the surface above keeps the operator from
+    // having to scroll for it, but the user name belongs here
+    // for completeness.
+    eprintln!(
+        "[{label}] grafana login : user={user} password={pass}",
+        user = OBS_GRAFANA_ADMIN_USER,
+        pass = OBS_GRAFANA_ADMIN_PASS,
+    );
+    eprintln!(
+        "[{label}] (run `cargo xtask observability up` if any line above shows `(down)`)"
+    );
+}
+
+/// Returns either `(up)` or `(down)` based on a 250ms TCP-connect
+/// probe. Never panics; an unparseable address resolves to `(down)`.
+fn probe_state(host: &str, port: u16) -> &'static str {
+    if probe_tcp(host, port) {
+        "(up)"
+    } else {
+        "(down — bring up via `cargo xtask observability up`)"
+    }
+}
+
+fn probe_tcp(host: &str, port: u16) -> bool {
+    let addr_str = format!("{host}:{port}");
+    let addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+}
+
 /// Best-effort spawn of an OS-appropriate URL opener pointed at a
 /// filesystem path. NEVER fails the test — a missing binary just
 /// logs a one-liner.
@@ -282,6 +424,62 @@ fn open_path_best_effort(path: &Path, label: &'static str, worktree_label: &str)
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// Pin the OBS_* port + credential constants in lock-step with
+    /// `live-e2e/docker-compose.e2e.yml`. Catches a future port
+    /// rebind in the compose file before it ships — without this
+    /// the Tier-3 reporter would silently print stale URLs.
+    #[test]
+    fn observability_urls_match_compose_file() {
+        let workspace = std::env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let compose_path = workspace
+            .parent()
+            .expect("kernel crate has parent")
+            .join("live-e2e/docker-compose.e2e.yml");
+        let compose = std::fs::read_to_string(&compose_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", compose_path.display()));
+        // Compose binds host ports as `127.0.0.1:<host>:<container>`
+        // for every service. Asserting the host port appears once
+        // is enough to catch a rebind without coupling to the
+        // exact YAML key ordering.
+        for (name, port) in [
+            ("grafana",        OBS_GRAFANA_PORT),
+            ("prometheus",     OBS_PROMETHEUS_PORT),
+            ("otlp-http",      OBS_OTLP_HTTP_PORT),
+            ("otel-zpages",    OBS_OTEL_ZPAGES_PORT),
+        ] {
+            let bind = format!("127.0.0.1:{port}:");
+            assert!(
+                compose.contains(&bind),
+                "compose file at {} must bind {name} on host port {port} \
+                 (looked for {bind:?})",
+                compose_path.display(),
+            );
+        }
+        // Grafana admin password lives at
+        // `GF_SECURITY_ADMIN_PASSWORD: <pass>` in the compose env.
+        assert!(
+            compose.contains(&format!(
+                "GF_SECURITY_ADMIN_PASSWORD: {OBS_GRAFANA_ADMIN_PASS}"
+            )),
+            "compose file must pin GF_SECURITY_ADMIN_PASSWORD: {OBS_GRAFANA_ADMIN_PASS} \
+             to keep the Tier-3 reporter URL block honest",
+        );
+    }
+
+    /// The opt-in builder flips the bit; the reporter still emits
+    /// cleanly on Drop and on an explicit re-fire.
+    #[test]
+    fn reporter_with_observability_urls_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = Tier3Reporter::new("smoke", tmp.path(), tmp.path().join("data"))
+            .with_observability_urls();
+        r.mark_success();
+        r.emit_block();
+        assert!(r.fired);
+    }
 
     /// Per-process stderr captures aren't trivial across crates;
     /// the assertions here pin the Drop-fires-once semantics and
