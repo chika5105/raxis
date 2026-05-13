@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_egress_admission::{
-    run_admission_loop, AdmissionDecision, AdmissionService, AdmissionVerdict, EgressAllowlist,
-    PolicyAdmissionService,
+    run_admission_loop, run_admission_loop_with_stall_tracker, AdmissionDecision, AdmissionService,
+    AdmissionVerdict, EgressAllowlist, EgressStallTracker, PolicyAdmissionService,
 };
 use raxis_test_support::FakeAuditSink;
 use raxis_tproxy_protocol::{
@@ -244,4 +244,180 @@ async fn admission_loop_pipelines_three_decisions_in_order() {
     }
 
     assert_eq!(audit.events().len(), 3);
+}
+
+// ─── V2 reviewer-egress-defaults-decision.md §7 ─────────────────────────
+//
+// Stall-tracker round-trip: verifies that
+// `run_admission_loop_with_stall_tracker` emits exactly one
+// `SessionEgressStallDetected { source: "tproxy" }` after the
+// configured threshold of `TransparentProxyDenied` events lands
+// for the same `(host, port, reason)` bucket.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_denials_to_same_host_emit_one_session_egress_stall_detected() {
+    let (kernel_side, mut proxy_side) = tokio::net::UnixStream::pair().unwrap();
+    let (kr, kw) = kernel_side.into_split();
+
+    // Allowlist that admits nothing the test will dial — every
+    // request returns `HostNotInAllowlist`.
+    let service = Arc::new(PolicyAdmissionService::new(EgressAllowlist {
+        patterns: vec!["*.allowed.example".into()],
+        ..Default::default()
+    }));
+    let audit: Arc<FakeAuditSink> = Arc::new(FakeAuditSink::new());
+    let audit_dyn: Arc<dyn AuditSink> = audit.clone();
+    let session_id = "sess-stall-1".to_owned();
+    let session_for_loop = session_id.clone();
+
+    // Threshold = 3 inside a 30 s window — the spec defaults.
+    let tracker = Arc::new(EgressStallTracker::with_defaults());
+
+    let loop_handle = tokio::spawn(async move {
+        run_admission_loop_with_stall_tracker(
+            kr, kw, service, audit_dyn, session_for_loop, Some(tracker),
+        ).await
+    });
+
+    // Fire 3 identical denials for the same (host, port).
+    for cid in 1u64..=3 {
+        let req = ProxyAdmissionRequest {
+            connection_id:     cid,
+            original_dst_ip:   "9.9.9.9".into(),
+            original_dst_port: 443,
+            host_or_sni:       Some("api.anthropic.com".into()),
+            protocol:          AdmissionProtocol::Https,
+        };
+        proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+        // Drain the response so the writer's flush ordering is
+        // deterministic and we don't race the audit emit.
+        let mut len_buf = [0u8; 4];
+        proxy_side.read_exact(&mut len_buf).await.unwrap();
+        let body_len = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; body_len];
+        proxy_side.read_exact(&mut body).await.unwrap();
+    }
+    drop(proxy_side);
+    let _ = loop_handle.await.unwrap().unwrap();
+
+    let events = audit.events();
+    let denials: Vec<_> = events.iter().filter(|e|
+        matches!(e.kind, AuditEventKind::TransparentProxyDenied { .. })
+    ).collect();
+    assert_eq!(denials.len(), 3, "every denial MUST emit one TransparentProxyDenied");
+
+    let stalls: Vec<_> = events.iter().filter_map(|e| match &e.kind {
+        AuditEventKind::SessionEgressStallDetected {
+            session_id: sid, host_or_sni, original_dst_port, reason,
+            block_count_in_window, window_seconds, source,
+        } => Some((sid.clone(), host_or_sni.clone(), *original_dst_port,
+                   reason.clone(), *block_count_in_window, *window_seconds,
+                   source.clone())),
+        _ => None,
+    }).collect();
+    assert_eq!(stalls.len(), 1,
+        "exactly one SessionEgressStallDetected MUST be emitted at threshold");
+    let (sid, host, port, reason, count, window, source) = &stalls[0];
+    assert_eq!(sid,                &session_id);
+    assert_eq!(host.as_deref(),    Some("api.anthropic.com"));
+    assert_eq!(*port,              443);
+    assert_eq!(reason,             "host_not_in_allowlist");
+    assert_eq!(*count,             3);
+    assert_eq!(*window,            30);
+    assert_eq!(source,             "tproxy");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_denials_below_threshold_do_not_emit_stall_event() {
+    let (kernel_side, mut proxy_side) = tokio::net::UnixStream::pair().unwrap();
+    let (kr, kw) = kernel_side.into_split();
+
+    let service = Arc::new(PolicyAdmissionService::new(EgressAllowlist {
+        patterns: vec!["*.allowed.example".into()],
+        ..Default::default()
+    }));
+    let audit: Arc<FakeAuditSink> = Arc::new(FakeAuditSink::new());
+    let audit_dyn: Arc<dyn AuditSink> = audit.clone();
+    let session_id = "sess-stall-below".to_owned();
+    let session_for_loop = session_id.clone();
+    let tracker = Arc::new(EgressStallTracker::with_defaults());
+
+    let loop_handle = tokio::spawn(async move {
+        run_admission_loop_with_stall_tracker(
+            kr, kw, service, audit_dyn, session_for_loop, Some(tracker),
+        ).await
+    });
+
+    for cid in 1u64..=2 {
+        let req = ProxyAdmissionRequest {
+            connection_id:     cid,
+            original_dst_ip:   "9.9.9.9".into(),
+            original_dst_port: 443,
+            host_or_sni:       Some("evil.example".into()),
+            protocol:          AdmissionProtocol::Https,
+        };
+        proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+        let mut len_buf = [0u8; 4];
+        proxy_side.read_exact(&mut len_buf).await.unwrap();
+        let body_len = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; body_len];
+        proxy_side.read_exact(&mut body).await.unwrap();
+    }
+    drop(proxy_side);
+    let _ = loop_handle.await.unwrap().unwrap();
+
+    let events = audit.events();
+    let stalls: Vec<_> = events.iter().filter(|e|
+        matches!(e.kind, AuditEventKind::SessionEgressStallDetected { .. })
+    ).collect();
+    assert!(stalls.is_empty(),
+        "below-threshold denials MUST NOT emit a stall event; got {stalls:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admit_verdicts_do_not_feed_the_stall_tracker() {
+    let (kernel_side, mut proxy_side) = tokio::net::UnixStream::pair().unwrap();
+    let (kr, kw) = kernel_side.into_split();
+
+    let service = Arc::new(PolicyAdmissionService::new(EgressAllowlist {
+        patterns: vec!["*.anthropic.com".into()],
+        ..Default::default()
+    }));
+    let audit: Arc<FakeAuditSink> = Arc::new(FakeAuditSink::new());
+    let audit_dyn: Arc<dyn AuditSink> = audit.clone();
+    let session_for_loop = "sess-admit".to_owned();
+    let tracker = Arc::new(EgressStallTracker::with_defaults());
+
+    let loop_handle = tokio::spawn(async move {
+        run_admission_loop_with_stall_tracker(
+            kr, kw, service, audit_dyn, session_for_loop, Some(tracker),
+        ).await
+    });
+
+    // Five identical admits — would trip a threshold-3 tracker if
+    // admits were fed in. They are not.
+    for cid in 1u64..=5 {
+        let req = ProxyAdmissionRequest {
+            connection_id:     cid,
+            original_dst_ip:   "1.2.3.4".into(),
+            original_dst_port: 443,
+            host_or_sni:       Some("api.anthropic.com".into()),
+            protocol:          AdmissionProtocol::Https,
+        };
+        proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+        let mut len_buf = [0u8; 4];
+        proxy_side.read_exact(&mut len_buf).await.unwrap();
+        let body_len = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; body_len];
+        proxy_side.read_exact(&mut body).await.unwrap();
+    }
+    drop(proxy_side);
+    let _ = loop_handle.await.unwrap().unwrap();
+
+    let events = audit.events();
+    let stalls: Vec<_> = events.iter().filter(|e|
+        matches!(e.kind, AuditEventKind::SessionEgressStallDetected { .. })
+    ).collect();
+    assert!(stalls.is_empty(),
+        "admits MUST NOT trip the stall tracker; got {stalls:?}");
 }

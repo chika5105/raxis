@@ -92,7 +92,9 @@ use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credential_proxy_manager::{
     CredentialProxyManager, ManagerError, SessionProxyHandles, ShutdownReport,
 };
-use raxis_egress_admission::{run_admission_loop, AdmissionService};
+use raxis_egress_admission::{
+    run_admission_loop_with_stall_tracker, AdmissionService, EgressStallTracker,
+};
 use raxis_isolation::{
     Backend as IsolationBackend, ExitStatus, IsolationError, Session as IsolationSession,
     VerifiedImage, VmSpec, WorkspaceMount,
@@ -294,6 +296,15 @@ pub struct SessionSpawnService {
     /// `kernel/src/observability_boot.rs` and
     /// `kernel/src/main.rs`).
     observability: Option<Arc<raxis_observability::ObservabilityHub>>,
+    /// V2 reviewer-egress-defaults-decision.md §7. One tracker
+    /// shared across every per-session admission loop so a stall
+    /// in any session emits one `SessionEgressStallDetected`
+    /// event tagged `source = "tproxy"`. Optional so existing
+    /// tests / smoke binaries that build the service without a
+    /// tracker keep working; the kernel boot wires this via
+    /// `with_egress_stall_tracker` before the orchestrator-spawn
+    /// service is constructed (see `kernel/src/main.rs`).
+    egress_stall_tracker: Option<Arc<EgressStallTracker>>,
     /// Per-session live state. Populated by `spawn_session`,
     /// drained by `terminate_session`. Synchronously serialised
     /// because every critical section is map-mutation only — the
@@ -328,6 +339,7 @@ impl SessionSpawnService {
             proxies,
             audit,
             observability: None,
+            egress_stall_tracker: None,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -341,6 +353,21 @@ impl SessionSpawnService {
         hub: Arc<raxis_observability::ObservabilityHub>,
     ) -> Self {
         self.observability = Some(hub);
+        self
+    }
+
+    /// V2 reviewer-egress-defaults-decision.md §7. Inject the
+    /// kernel-wide [`EgressStallTracker`] so per-session
+    /// admission loops emit `SessionEgressStallDetected` audit
+    /// events on repeated `TransparentProxyDenied` for the same
+    /// destination. Builder-shaped so existing 3-arg `new`
+    /// callers (smoke binaries, unit tests) stay
+    /// source-compatible and silently skip stall detection.
+    pub fn with_egress_stall_tracker(
+        mut self,
+        tracker: Arc<EgressStallTracker>,
+    ) -> Self {
+        self.egress_stall_tracker = Some(tracker);
         self
     }
 
@@ -610,6 +637,12 @@ impl SessionSpawnService {
         let admission_service: Arc<dyn AdmissionService> = Arc::from(req.admission_service);
         let audit_for_loop    = Arc::clone(&self.audit);
         let session_id_for_loop = session_id.clone();
+        // V2 reviewer-egress-defaults-decision.md §7. Clone the
+        // (optional) shared tracker handle into the per-loop task
+        // so deny verdicts feed into the sliding-window detector
+        // and a stalled session emits one
+        // `SessionEgressStallDetected { source: "tproxy" }`.
+        let stall_tracker_for_loop = self.egress_stall_tracker.clone();
         let admission_task = tokio::spawn(async move {
             loop {
                 let (sock, peer) = match admission_listener.accept().await {
@@ -632,9 +665,15 @@ impl SessionSpawnService {
                 let svc = Arc::clone(&admission_service);
                 let audit_for_inner = Arc::clone(&audit_for_loop);
                 let sid_for_inner   = session_id_for_loop.clone();
+                let stall_for_inner = stall_tracker_for_loop.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = run_admission_loop(
-                        read, write, svc, audit_for_inner, sid_for_inner.clone(),
+                    if let Err(e) = run_admission_loop_with_stall_tracker(
+                        read,
+                        write,
+                        svc,
+                        audit_for_inner,
+                        sid_for_inner.clone(),
+                        stall_for_inner,
                     ).await {
                         tracing::warn!(
                             session_id = %sid_for_inner,
@@ -777,6 +816,16 @@ impl SessionSpawnService {
             .credential_proxy_handles
             .shutdown()
             .map_err(SpawnError::CredentialProxy)?;
+
+        // ── Step 5: V2 reviewer-egress-defaults-decision.md §7
+        //           — drop any per-session buckets the egress
+        //           stall tracker accumulated. Cheap (one
+        //           HashMap retain) and prevents long-lived
+        //           kernels from holding stale per-session
+        //           state forever.
+        if let Some(tracker) = self.egress_stall_tracker.as_ref() {
+            tracker.forget_session(session_id);
+        }
 
         Ok(TerminationReport {
             session_id: session_id.to_owned(),

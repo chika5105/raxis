@@ -437,6 +437,28 @@ pub struct HandlerContext {
     /// inactive activation — the fast-path read is a single
     /// `RwLock::read` of an empty `Option`, which costs ~nothing.
     pub breakglass: Arc<crate::breakglass::BreakglassState>,
+
+    /// V2 reviewer-egress-defaults-decision.md §7 — kernel-wide
+    /// sliding-window egress-stall tracker.
+    ///
+    /// Shared across both egress chokepoints:
+    ///   - `raxis-egress-admission::run_admission_loop` (Tier-1
+    ///     transparent-proxy admission), wired through
+    ///     `SessionSpawnService::with_egress_stall_tracker`.
+    ///   - `crate::handlers::planner_fetch::handle` (kernel-mediated
+    ///     `PlannerFetchRequest` `DomainNotAllowed` rejections).
+    ///
+    /// Each chokepoint feeds the tracker on every denial and emits
+    /// one `SessionEgressStallDetected` audit event per
+    /// (session, destination) bucket per sliding window. The
+    /// `source` field on the event tags which chokepoint observed
+    /// the stall.
+    ///
+    /// **Why `Arc`**: the tracker is shared concurrently across
+    /// every per-session admission task and every planner_fetch
+    /// dispatch; cloning the `Arc` is cheap and the inner
+    /// `Mutex<HashMap>` already serialises mutations.
+    pub egress_stall_tracker: Arc<raxis_egress_admission::EgressStallTracker>,
 }
 
 impl HandlerContext {
@@ -480,11 +502,28 @@ impl HandlerContext {
             Arc::clone(&credentials),
             Arc::clone(&audit),
         ));
-        let session_spawn = Arc::new(SessionSpawnService::new(
-            Arc::clone(&isolation),
-            Arc::clone(&proxy_manager),
-            Arc::clone(&audit),
-        ));
+        // V2 reviewer-egress-defaults-decision.md §7 — kernel-wide
+        // shared `EgressStallTracker`. The same `Arc` is wired
+        // into both the Tier-1 admission loop (via
+        // `SessionSpawnService::with_egress_stall_tracker`) and
+        // the kernel-mediated `planner_fetch` handler (via
+        // `HandlerContext::egress_stall_tracker`) so a stall
+        // observed at either chokepoint shares the same sliding-
+        // window state. Production boot (`main.rs`) keeps this
+        // default; tests that need a deterministic clock
+        // construct their own tracker and call
+        // `with_egress_stall_tracker`.
+        let egress_stall_tracker = Arc::new(
+            raxis_egress_admission::EgressStallTracker::with_defaults(),
+        );
+        let session_spawn = Arc::new(
+            SessionSpawnService::new(
+                Arc::clone(&isolation),
+                Arc::clone(&proxy_manager),
+                Arc::clone(&audit),
+            )
+            .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker)),
+        );
         // Default `image_resolver` is the offline-friendly
         // `PrePopulatedResolver` rooted at `<data_dir>/oci-cache/`.
         // Production overrides this in main.rs via
@@ -555,6 +594,11 @@ impl HandlerContext {
             // `with_breakglass`. Tests that don't exercise
             // breakglass keep the default.
             breakglass: Arc::new(crate::breakglass::BreakglassState::disabled()),
+            // V2 reviewer-egress-defaults-decision.md §7 — same
+            // shared tracker the in-VM admission loop is wired
+            // against. See the `egress_stall_tracker` binding
+            // earlier in this constructor.
+            egress_stall_tracker,
         }
     }
 
@@ -583,12 +627,17 @@ impl HandlerContext {
         // between the HandlerContext and the inner SessionSpawnService.
         let hub_for_spawn = hub.clone();
         self.observability = hub;
+        // V2 reviewer-egress-defaults-decision.md §7: preserve the
+        // shared `EgressStallTracker` across the rebuild so the
+        // Tier-1 admission-loop chokepoint keeps emitting
+        // `SessionEgressStallDetected` after a hub install.
         let new_spawn = SessionSpawnService::new(
             self.isolation.clone(),
             self.proxy_manager.clone(),
             self.audit.clone(),
         )
-        .with_observability(hub_for_spawn);
+        .with_observability(hub_for_spawn)
+        .with_egress_stall_tracker(Arc::clone(&self.egress_stall_tracker));
         self.session_spawn = Arc::new(new_spawn);
         self
     }
@@ -600,6 +649,28 @@ impl HandlerContext {
     /// break-glass code path inject a fixture-built state.
     pub fn with_breakglass(mut self, state: Arc<crate::breakglass::BreakglassState>) -> Self {
         self.breakglass = state;
+        self
+    }
+
+    /// V2 reviewer-egress-defaults-decision.md §7 — replace the
+    /// auto-allocated [`raxis_egress_admission::EgressStallTracker`]
+    /// (e.g. tests want a synthetic clock for deterministic timing).
+    /// Also rebuilds the inner `SessionSpawnService` so the new
+    /// tracker is the one wired into the Tier-1 admission loop —
+    /// keeping the two chokepoints in lock-step is the whole point.
+    pub fn with_egress_stall_tracker(
+        mut self,
+        tracker: Arc<raxis_egress_admission::EgressStallTracker>,
+    ) -> Self {
+        self.egress_stall_tracker = Arc::clone(&tracker);
+        self.session_spawn = Arc::new(
+            SessionSpawnService::new(
+                Arc::clone(&self.isolation),
+                Arc::clone(&self.proxy_manager),
+                Arc::clone(&self.audit),
+            )
+            .with_egress_stall_tracker(tracker),
+        );
         self
     }
 
@@ -666,11 +737,19 @@ impl HandlerContext {
         // too. The composer holds no per-session state at
         // construction time, so a swap is safe outside an active
         // spawn.
-        self.session_spawn = Arc::new(SessionSpawnService::new(
-            Arc::clone(&self.isolation),
-            Arc::clone(&self.proxy_manager),
-            Arc::clone(&self.audit),
-        ));
+        //
+        // V2 reviewer-egress-defaults-decision.md §7: re-inject
+        // the shared `EgressStallTracker` so the Tier-1 admission
+        // loop keeps emitting `SessionEgressStallDetected` after
+        // a credential-backend swap.
+        self.session_spawn = Arc::new(
+            SessionSpawnService::new(
+                Arc::clone(&self.isolation),
+                Arc::clone(&self.proxy_manager),
+                Arc::clone(&self.audit),
+            )
+            .with_egress_stall_tracker(Arc::clone(&self.egress_stall_tracker)),
+        );
         self
     }
 }

@@ -55,6 +55,8 @@
 
 use std::sync::Arc;
 
+use raxis_audit_tools::AuditEventKind;
+use raxis_egress_admission::StallSignal;
 use raxis_ipc::message::FetchKind;
 use raxis_types::{
     PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse, SessionAgentType,
@@ -192,6 +194,13 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     let gateway_token = ctx.gateway.expected_token().await.unwrap_or_default();
     let session_uuid  = Uuid::parse_str(&session.session_id).ok();
 
+    // V2 reviewer-egress-defaults-decision.md §7 — capture the
+    // URL pre-call so we can extract the host/port for stall
+    // detection on a `DomainNotAllowed` failure path. Cloning the
+    // string keeps the gateway call's signature unchanged (it
+    // takes ownership of `req.url`).
+    let url_for_stall_detection = req.url.clone();
+
     let result = ctx
         .gateway
         .fetch(
@@ -234,17 +243,117 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
             latency_ms,
             errors::NETWORK_ERROR,
         ),
-        Err(GatewayCallError::GatewayError(msg)) => failure_response(
-            request_id,
-            latency_ms,
-            &msg,
-        ),
+        Err(GatewayCallError::GatewayError(msg)) => {
+            // V2 reviewer-egress-defaults-decision.md §7: feed
+            // `DomainNotAllowed` denials into the kernel-wide
+            // `EgressStallTracker`. Surfaces the silent-spin
+            // failure mode where a kernel-mediated inference
+            // call is repeatedly rejected by the gateway URL
+            // allowlist without the operator noticing.
+            //
+            // Match on the EXACT wire string the gateway emits
+            // (`DispatchError::DomainNotAllowed.as_wire_string()
+            // = "DomainNotAllowed"`). Other gateway errors
+            // (`InvalidToken`, `TimeoutExceeded`, `NetworkError`,
+            // `PolicyReloadFailed`) are real failures but not
+            // egress-policy stalls; they get their own
+            // diagnostics and would noise up the stall signal.
+            if msg == "DomainNotAllowed" {
+                feed_stall_tracker_for_domain_not_allowed(
+                    ctx,
+                    &session.session_id,
+                    &url_for_stall_detection,
+                );
+            }
+            failure_response(request_id, latency_ms, &msg)
+        }
         Err(GatewayCallError::UnexpectedReply) => failure_response(
             request_id,
             latency_ms,
             errors::NETWORK_ERROR,
         ),
     }
+}
+
+/// V2 reviewer-egress-defaults-decision.md §7: feed one
+/// `DomainNotAllowed` rejection from the kernel-mediated path
+/// into the kernel-wide `EgressStallTracker`. When the bucket
+/// trips the threshold, emits one
+/// `SessionEgressStallDetected { source: "kernel_mediated_fetch" }`
+/// audit event.
+///
+/// Best-effort: a malformed URL skips stall detection (the
+/// gateway's own error response is the authoritative signal in
+/// that case), and an audit-emit failure is logged but never
+/// propagated up — the underlying gateway error is what the
+/// planner sees.
+fn feed_stall_tracker_for_domain_not_allowed(
+    ctx:        &Arc<HandlerContext>,
+    session_id: &str,
+    url:        &str,
+) {
+    let (host, port) = match extract_host_port(url) {
+        Some(pair) => pair,
+        None => return,
+    };
+    let signal = ctx.egress_stall_tracker.record_denial(
+        session_id,
+        Some(&host),
+        port,
+        "host_not_in_allowlist",
+    );
+    if let StallSignal::Detected(emit) = signal {
+        if let Err(e) = ctx.audit.emit(
+            AuditEventKind::SessionEgressStallDetected {
+                session_id:            emit.session_id,
+                host_or_sni:           emit.host_or_sni,
+                original_dst_port:     emit.original_dst_port,
+                reason:                emit.reason,
+                block_count_in_window: emit.block_count_in_window,
+                window_seconds:        emit.window_seconds,
+                source:                "kernel_mediated_fetch".to_owned(),
+            },
+            Some(session_id),
+            None,
+            None,
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"SessionEgressStallDetected\",\
+                 \"audit_emit_failed\":\"{e}\",\"session_id\":\"{}\",\
+                 \"source\":\"kernel_mediated_fetch\"}}",
+                session_id,
+            );
+        }
+    }
+}
+
+/// Extract `(host, port)` from a URL string. Defaults to `443`
+/// for `https`, `80` for `http`, otherwise drops to `0`. Returns
+/// `None` if the URL is unparseable as a `url::Url`. Lifted
+/// inline rather than pulling a heavy URL parser dependency —
+/// the function only powers stall-bucket keying so a coarse
+/// extraction is sufficient.
+fn extract_host_port(url: &str) -> Option<(String, u16)> {
+    let after_scheme = url.split_once("://")?;
+    let scheme = after_scheme.0;
+    let rest   = after_scheme.1;
+    let host_with_path = rest.split('/').next()?;
+    let (host, port_str) = match host_with_path.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None         => (host_with_path, None),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port_str.and_then(|p| p.parse::<u16>().ok()) {
+        Some(p) => p,
+        None    => match scheme {
+            "https" => 443,
+            "http"  => 80,
+            _       => 0,
+        },
+    };
+    Some((host.to_owned(), port))
 }
 
 fn map_fetch_kind(k: PlannerFetchKind) -> FetchKind {
@@ -307,6 +416,48 @@ mod tests {
     fn fetch_kind_mapping_is_one_to_one() {
         assert_eq!(map_fetch_kind(PlannerFetchKind::Inference), FetchKind::Inference);
         assert_eq!(map_fetch_kind(PlannerFetchKind::DataFetch), FetchKind::DataFetch);
+    }
+
+    // ─── V2 reviewer-egress-defaults-decision.md §7 ─────────────
+
+    #[test]
+    fn extract_host_port_https_default_443() {
+        assert_eq!(
+            extract_host_port("https://api.anthropic.com/v1/messages"),
+            Some(("api.anthropic.com".to_owned(), 443)),
+        );
+    }
+
+    #[test]
+    fn extract_host_port_http_default_80() {
+        assert_eq!(
+            extract_host_port("http://internal.example/path"),
+            Some(("internal.example".to_owned(), 80)),
+        );
+    }
+
+    #[test]
+    fn extract_host_port_explicit_port_overrides_scheme_default() {
+        assert_eq!(
+            extract_host_port("https://api.example:8443/x"),
+            Some(("api.example".to_owned(), 8443)),
+        );
+    }
+
+    #[test]
+    fn extract_host_port_unknown_scheme_falls_back_to_zero() {
+        assert_eq!(
+            extract_host_port("ws://wss.example/realtime"),
+            Some(("wss.example".to_owned(), 0)),
+        );
+    }
+
+    #[test]
+    fn extract_host_port_returns_none_for_malformed_url() {
+        // No scheme separator → bucket-less; we drop the request.
+        assert_eq!(extract_host_port("not-a-url"), None);
+        // Empty host segment after `://` → drop too.
+        assert_eq!(extract_host_port("https:///path"), None);
     }
 
     /// Regression guard: `Duration::as_millis() -> u128 as u32` wraps

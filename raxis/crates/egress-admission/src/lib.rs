@@ -33,6 +33,13 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod stall_tracker;
+
+pub use stall_tracker::{
+    Clock, EgressStallTracker, StallEmission, StallSignal, SystemClock,
+    DEFAULT_THRESHOLD, DEFAULT_WINDOW,
+};
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -294,12 +301,47 @@ pub enum LoopError {
 /// Returns when the reader returns EOF or any frame fails to
 /// decode. The kernel's session-teardown path is responsible for
 /// closing the underlying transport — this function does not.
+///
+/// Tier-1 backwards-compat shim — equivalent to
+/// [`run_admission_loop_with_stall_tracker`] with `stall_tracker
+/// = None`. Existing callers keep their signature; new callers
+/// (the kernel admission supervisor) use the
+/// `_with_stall_tracker` variant to opt into V2
+/// `SessionEgressStallDetected` emission.
 pub async fn run_admission_loop<R, W, S>(
+    reader: R,
+    writer: W,
+    service: Arc<S>,
+    audit: Arc<dyn AuditSink>,
+    session_id: String,
+) -> Result<(), LoopError>
+where
+    R: AsyncReadExt + Unpin + Send,
+    W: AsyncWriteExt + Unpin + Send,
+    S: AdmissionService + ?Sized,
+{
+    run_admission_loop_with_stall_tracker(
+        reader, writer, service, audit, session_id, None,
+    ).await
+}
+
+/// V2 reviewer-egress-defaults-decision.md §7 — admission loop
+/// extended with optional `EgressStallTracker` integration. When
+/// `stall_tracker` is `Some`, every `Deny` verdict is also fed
+/// through the tracker; if the bucket trips the configured
+/// threshold inside the configured window, the loop emits ONE
+/// extra `SessionEgressStallDetected` audit event tagged
+/// `source = "tproxy"`. Stall emit failures are logged but do
+/// not unwind the admission decision (the decision was already
+/// sent to the agent and the underlying `TransparentProxyDenied`
+/// is the authoritative record).
+pub async fn run_admission_loop_with_stall_tracker<R, W, S>(
     mut reader: R,
     mut writer: W,
     service: Arc<S>,
     audit: Arc<dyn AuditSink>,
     session_id: String,
+    stall_tracker: Option<Arc<EgressStallTracker>>,
 ) -> Result<(), LoopError>
 where
     R: AsyncReadExt + Unpin + Send,
@@ -353,6 +395,43 @@ where
             },
         };
         audit.emit(audit_kind, Some(&session_id), None, None)?;
+
+        // V2 reviewer-egress-defaults-decision.md §7 — feed the
+        // denial through the stall tracker, if one is wired.
+        // Failure to emit the stall event is logged but DOES NOT
+        // unwind the admission decision (the
+        // `TransparentProxyDenied` above is the authoritative
+        // record; the stall event is a supplemental
+        // observability signal).
+        if let (Some(tracker), AdmissionVerdict::Deny(reason)) = (&stall_tracker, &decision.verdict) {
+            if let StallSignal::Detected(emit) = tracker.record_denial(
+                &session_id,
+                req.host_or_sni.as_deref(),
+                req.original_dst_port,
+                reason.as_str(),
+            ) {
+                if let Err(e) = audit.emit(
+                    AuditEventKind::SessionEgressStallDetected {
+                        session_id:            emit.session_id,
+                        host_or_sni:           emit.host_or_sni,
+                        original_dst_port:     emit.original_dst_port,
+                        reason:                emit.reason,
+                        block_count_in_window: emit.block_count_in_window,
+                        window_seconds:        emit.window_seconds,
+                        source:                "tproxy".to_owned(),
+                    },
+                    Some(&session_id),
+                    None,
+                    None,
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"SessionEgressStallDetected\",\
+                         \"audit_emit_failed\":\"{e}\",\"session_id\":\"{}\"}}",
+                        session_id,
+                    );
+                }
+            }
+        }
     }
 }
 

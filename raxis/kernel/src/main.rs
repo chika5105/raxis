@@ -982,6 +982,26 @@ async fn main() {
     let observability_hub: Arc<raxis_observability::ObservabilityHub> =
         observability_boot::build_obs_hub(&policy, &data_dir, kernel_version);
 
+    // V2 reviewer-egress-defaults-decision.md §7 — hoisted shared
+    // `EgressStallTracker`. The same `Arc` is wired into:
+    //
+    //   1. the orchestrator-spawn `SessionSpawnService` (built
+    //      below) so its admission-loop chokepoint emits
+    //      `SessionEgressStallDetected { source: "tproxy" }`;
+    //   2. the `HandlerContext` (via `with_egress_stall_tracker`)
+    //      so the executor/reviewer-spawn `SessionSpawnService`
+    //      AND the kernel-mediated `planner_fetch` handler share
+    //      the same sliding-window state.
+    //
+    // Without this hoist each spawn path would auto-allocate its
+    // own tracker and the per-session bucket counts would
+    // segregate by chokepoint — a stall observed across both
+    // chokepoints would emit twice (once per tracker) and the
+    // first-bucket-trip would understate the actual denial
+    // velocity.
+    let egress_stall_tracker: Arc<raxis_egress_admission::EgressStallTracker> =
+        Arc::new(raxis_egress_admission::EgressStallTracker::with_defaults());
+
     let ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -1020,7 +1040,13 @@ async fn main() {
                 )
                 // V3 perf-telemetry: stamp the four-tier VM cold-boot
                 // histograms from the very first spawn.
-                .with_observability(Arc::clone(&observability_hub)),
+                .with_observability(Arc::clone(&observability_hub))
+                // V2 reviewer-egress-defaults-decision.md §7 —
+                // share the kernel-wide tracker so every per-
+                // session admission loop emits
+                // `SessionEgressStallDetected` against one
+                // shared sliding-window state.
+                .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker)),
             );
             // V2 `elastic-vm-scaling.md §4.4` — fresh scale-down
             // tracker for the orchestrator-spawn context. The
@@ -1122,6 +1148,12 @@ async fn main() {
     // from the very first spawn. Here we just install it onto the
     // HandlerContext so every handler sees the same Arc.
     let ctx_inner = ctx_inner.with_observability(Arc::clone(&observability_hub));
+    // V2 reviewer-egress-defaults-decision.md §7 — install the
+    // kernel-wide shared `EgressStallTracker` so the executor /
+    // reviewer-spawn admission-loop chokepoint AND the kernel-
+    // mediated `planner_fetch` handler share one sliding-window
+    // state with the orchestrator-spawn service wired above.
+    let ctx_inner = ctx_inner.with_egress_stall_tracker(Arc::clone(&egress_stall_tracker));
 
     // Step 8.6: Boot-time break-glass state (v1 Tier 4,
     // kernel-core.md §2.3 src/breakglass.rs). Opens the
