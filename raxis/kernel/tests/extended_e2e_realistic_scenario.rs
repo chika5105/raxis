@@ -96,9 +96,9 @@ use extended_e2e_support::{
     path_allowlist::PathAllowlistPositiveWitness,
     plan_realistic::{
         realistic_plan_toml, SEED_SCENARIO_ID, TASK_ALLOWLIST_POSITIVE,
-        TASK_LINT_DEFECT, TASK_MATERIALIZE,
-        TASK_SERVICE_ROUND_TRIP, TASK_TRANSPARENT_PROXY_REALSCRIPTS,
-        TASK_XFILE_REFACTOR,
+        TASK_CREDENTIAL_SUBSTITUTION_CANARY, TASK_LINT_DEFECT,
+        TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
+        TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
     seeds::{MONGO_HOST_PORT, PG_HOST_PORT},
@@ -111,6 +111,9 @@ use extended_e2e_support::{
     transparent_proxy_evidence::{
         self as tp_evidence,
         TransparentProxyExpectations, WRAPPER_SUMMARY_PATH,
+    },
+    credential_substitution_evidence::{
+        self as cred_sub_evidence, REAL_PG_PASSWORD,
     },
     witnesses::{
         EnforcementWitness, NoSecurityViolationWitness,
@@ -428,6 +431,33 @@ fn realistic_session_lifecycle() {
     );
     eprintln!("[realism-e2e] transparent-proxy round-trip witnesses satisfied");
 
+    // ── Credential-substitution canary ───────────────────────
+    // Mechanical witness for INV-SECRET-05 (`specs/v2/secrets-
+    // model.md §2.5`): the executor was handed operator-staged
+    // FAKE credentials via a bait `.env`; the proxy must
+    // substitute the real credentials at the loopback boundary.
+    // The witness asserts the real credential canary
+    // (`raxis_test_pass`) does NOT appear anywhere in the
+    // executor's worktree post-run.
+    let cred_sub_workdir = locate_executor_worktree(
+        kernel.data_dir(),
+        &initiative_primary,
+        TASK_CREDENTIAL_SUBSTITUTION_CANARY,
+    );
+    let cred_sub_scope = WitnessScope::new(
+        initiative_primary.clone(),
+        TASK_CREDENTIAL_SUBSTITUTION_CANARY.to_owned(),
+    );
+    if let Err(e) = cred_sub_evidence::assert_credential_substitution_round_trip(
+        &chain,
+        &cred_sub_workdir,
+        REAL_PG_PASSWORD,
+        &cred_sub_scope,
+    ) {
+        panic!("[realism-e2e] credential-substitution-canary failed: {e}");
+    }
+    eprintln!("[realism-e2e] credential-substitution-canary witness satisfied");
+
     tier3.add_worktree(
         format!("primary-xfile ({})", &initiative_primary),
         &primary_workdir,
@@ -497,6 +527,32 @@ fn wiring_smoke_test() {
     };
 
     eprintln!("[realism-e2e] wiring smoke test: constructing each realism witness");
+
+    // CredentialSubstitutionCanary: bait-`.env` + synthetic chain
+    // satisfying the witness — exercises every assertion arm
+    // (bait present, substituted event present, no bypass, output
+    // file present, no real-canary leak) on the positive path.
+    let cred_sub_tmp = tempfile::tempdir().unwrap();
+    cred_sub_evidence::write_worktree_fixture_for_smoke(cred_sub_tmp.path())
+        .unwrap();
+    let cs_initiative = uuid::Uuid::now_v7().to_string();
+    let cs_task = TASK_CREDENTIAL_SUBSTITUTION_CANARY.to_owned();
+    let cs_session = "smoke-cs-clean".to_owned();
+    let cs_chain = cred_sub_evidence::synthetic_substitution_chain(
+        &cs_initiative, &cs_task, &cs_session,
+    );
+    let cs_scope = WitnessScope::new(cs_initiative, cs_task)
+        .with_session(cs_session);
+    cred_sub_evidence::assert_credential_substitution_round_trip(
+        &cs_chain,
+        cred_sub_tmp.path(),
+        REAL_PG_PASSWORD,
+        &cs_scope,
+    )
+    .expect("smoke: cred-sub witness on clean fixture must satisfy");
+    eprintln!(
+        "[realism-e2e] smoke: CredentialSubstitutionCanary witness constructed and satisfied"
+    );
 
     // PathAllowlistPositive: tempdir + seeded file.
     let tmp = tempfile::tempdir().unwrap();
@@ -809,6 +865,16 @@ fn materialise_realistic_seed(
         status.success(),
         "materialize_seed.sh exited non-zero: {status:?}",
     );
+
+    // Stage the bait `.env` containing the FAKE-credential canaries
+    // for the downstream credential-substitution-canary task. The
+    // file propagates through the lane head to every successor task
+    // via git, which is exactly where the cred-sub task's executor
+    // expects to find it. See `credential_substitution_evidence`
+    // module docs / `specs/v2/secrets-model.md §2.5`.
+    cred_sub_evidence::stage_fake_creds_env(&workdir).unwrap_or_else(|e| {
+        panic!("stage bait `.env` for credential-substitution canary: {e}");
+    });
 
     eprintln!("[realism-e2e] seed materialised into {}", workdir.display());
 }

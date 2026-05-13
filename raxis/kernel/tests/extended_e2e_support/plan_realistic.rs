@@ -68,6 +68,20 @@ pub const TASK_ALLOWLIST_POSITIVE: &str =
 pub const TASK_SERVICE_ROUND_TRIP: &str =
     super::service_evidence::TASK_SERVICE_ROUND_TRIP;
 
+/// Credential-substitution-canary executor task id.
+///
+/// The structural test of the proxy substitution discipline (see
+/// `specs/v2/secrets-model.md §2.5` / `INV-SECRET-05`). The
+/// executor is handed FAKE-credential canaries via a `.env` file
+/// staged into its worktree by the test driver, and instructed to
+/// authenticate against Postgres using them. The proxy substitutes
+/// the real credentials at the loopback boundary; the witness in
+/// [`super::credential_substitution_evidence`] mechanically
+/// verifies the agent's worktree contains zero bytes of the real
+/// credential material post-run.
+pub const TASK_CREDENTIAL_SUBSTITUTION_CANARY: &str =
+    super::credential_substitution_evidence::TASK_CREDENTIAL_SUBSTITUTION_CANARY;
+
 /// Transparent-proxy real-scripts executor task id (P3-10).
 ///
 /// Companion to `service-round-trip`: the executor is handed a
@@ -158,6 +172,15 @@ pub const TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD: &str = include_str!(
     "../../../live-e2e/seed/prompts/transparent_proxy_real_scripts.md"
 );
 
+/// Credential-substitution-canary prompt. Operator-realistic — the
+/// agent is told the staged `.env` carries production credentials,
+/// and is instructed to use them via `$DATABASE_URL`. The proxy
+/// substitutes the real credentials transparently; the witness
+/// verifies the structural property mechanically.
+pub const CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD: &str = include_str!(
+    "../../../live-e2e/seed/prompts/credential_substitution_canary.md"
+);
+
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
 // ---------------------------------------------------------------------------
@@ -173,6 +196,7 @@ pub fn realistic_plan_toml() -> String {
     let allowlist       = ALLOWLIST_POSITIVE_PROMPT_MD;
     let service_rt      = SERVICE_ROUND_TRIP_PROMPT_MD;
     let transparent_rt  = TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD;
+    let cred_sub        = CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
     s.push_str("\n\n");
@@ -204,6 +228,11 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(transparent_rt);
     s.push_str("\n\"\"\"\n");
     s.push_str(REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS);
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_HEAD);
+    s.push_str(cred_sub);
+    s.push_str("\n\"\"\"\n");
+    s.push_str(REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS);
     s
 }
 
@@ -380,6 +409,35 @@ const REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS: &str = r#"
   proxy_type = "smtp"
   mount_as   = "SMTP_URL""#;
 
+/// Credential-substitution-canary executor task block. Runs last in
+/// the dependency graph, predecessors include the upstream
+/// transparent-proxy task so the seeded `service_evidence` table is
+/// fully populated by the time this task wakes up. The test driver
+/// stages a bait `.env` file into this task's worktree before the
+/// executor's first IntentAccepted{CommitDelta} lands; the prompt
+/// instructs the executor to authenticate using those fake creds
+/// against `$DATABASE_URL`.
+///
+/// `path_allowlist` admits exactly the substituted-creds output
+/// file. The credential mount is the same `test-pg-dev` postgres
+/// credential the upstream tasks use — what the test exercises is
+/// the proxy's substitution discipline, not a fresh credential.
+const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_HEAD: &str = r#"# -- Credential-substitution canary Executor --------------
+[[tasks]]
+task_id            = "credential-substitution-canary"
+name               = "Authenticate via operator-staged FAKE .env creds; proxy substitutes real creds upstream"
+session_agent_type = "Executor"
+predecessors       = ["service-round-trip"]
+path_allowlist     = ["out/services/postgres-fake-creds.txt"]
+description = """
+"#;
+
+const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
+  [[tasks.credentials]]
+  name       = "test-pg-dev"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL""#;
+
 // ---------------------------------------------------------------------------
 // Tests — sanity-check the TOML decodes and pins the task list.
 // ---------------------------------------------------------------------------
@@ -410,6 +468,7 @@ mod tests {
             TASK_ALLOWLIST_POSITIVE,
             TASK_SERVICE_ROUND_TRIP,
             TASK_TRANSPARENT_PROXY_REALSCRIPTS,
+            TASK_CREDENTIAL_SUBSTITUTION_CANARY,
         ] {
             assert!(
                 ids.contains(&needle),
