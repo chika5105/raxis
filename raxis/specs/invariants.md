@@ -62,6 +62,7 @@
 |---|---|---|
 | Top-level (must-pass) — V1 | INV-01, INV-02A, INV-02B, INV-03, INV-04, INV-05, INV-06, INV-07, INV-08 | 9 |
 | Initiative & task FSM — V1 | INV-INIT-01..11 | 11 |
+| Post-ceiling cascade & respawn — V2 | INV-FSM-POST-CEILING-RESPAWN-01 | 1 |
 | Escalation — V1 | INV-ESC-01..06 | 6 |
 | Kernel store — V1 | INV-STORE-01..03 | 3 |
 | Policy epochs — V1 | INV-POLICY-01 | 1 |
@@ -76,7 +77,7 @@
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01 | 1 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
-| **Total** | | **74** |
+| **Total** | | **75** |
 
 ---
 
@@ -636,6 +637,122 @@ is in the recovery-op allowlist, so the rotation succeeds even in
 grace. She re-signs the policy and advances the epoch. The
 `OperatorCertInstalled.previous_fingerprint` event records the
 rotation.
+
+---
+
+### INV-FSM-POST-CEILING-RESPAWN-01 — Post-ceiling cascade closes activation rows and triggers orchestrator respawn
+
+**Statement.** When an Executor session reports
+`IntentKind::ReportFailure` (or `CompleteTask` with a terminal
+failure outcome) for its bound `task_id`, the kernel — inside a
+**single SQLite transaction** — atomically performs all of the
+following:
+
+1.  Increments `subtask_activations.crash_retry_count` for the
+    `Active` row matching `(task_id, executor_session_id)`
+    (`bump_executor_crash_retry_count_in_tx`, commit `6237618`).
+2.  Drives the parent `tasks.state` through `transition_task_in_tx`
+    to `Failed` (or its terminal equivalent for `CompleteTask`).
+3.  Cascades the row above by setting
+    `subtask_activations.activation_state = 'Failed'` and stamping
+    `terminated_at = unix_now_secs()` for every `Active` row whose
+    `task_id` matches the failed task. This is the schema-required
+    closure (`activation_state IN ('Completed','Failed') ⇒
+    terminated_at IS NOT NULL`, migration 5) and the c986e6d fix
+    that prevents `RetrySubTask` from being silently rejected
+    against a stale `Active` row.
+4.  After the transaction commits, the intent dispatcher's
+    EarlyResponse hook (commit `d7ca482`) plus the per-session
+    post-exit hook in `session_spawn_orchestrator` evaluates the
+    parent initiative and, if the failure satisfies the
+    storm-guard preflight (commit `aafd4f2`), triggers a respawn
+    of the bound orchestrator session. The respawn outcome is
+    logged to stderr as exactly one of
+    `orchestrator_respawn_ok`, `orchestrator_respawn_skipped`, or
+    `orchestrator_respawn_failed` — never silence.
+
+The whole sequence is bounded: from the moment `ReportFailure` is
+accepted, the kernel reaches a stable post-ceiling state (active
+row closed, primary orchestrator either respawned or
+storm-guarded) within **5 seconds** under no-VM/no-LLM test
+conditions. No kernel-owned thread parks for >100 ms during this
+window (the parking_lot deadlock watcher under
+`runtime-deadlock-detection`, see `concurrency-and-locking.md`
+INV-LOCK-07, panics within ~2 s if a cycle forms).
+
+**Justification.** Iter15 / iter16 of the live-e2e
+`realistic_session_lifecycle` reproduced a ~30-minute deadlock in
+which an executor crash-ceiling left the activation row `Active`
+forever, the orchestrator's subsequent `RetrySubTask` was rejected
+as "InvalidRequest" (precondition: prior row must be `Failed`),
+and `RetrySubTask` is not in the kernel's `respawn_kinds`
+allowlist — so no orchestrator respawn fired and the DAG silently
+stalled until the live-e2e harness wall-clock timed out. The
+fixes landed across four commits (`6237618`, `c986e6d`,
+`d7ca482`, `aafd4f2`); without an executable witness for the
+combined behaviour, any future refactor of
+`transition_task_in_tx`, `bump_executor_crash_retry_count_in_tx`,
+or the EarlyResponse / post-exit respawn hooks could regress one
+piece of the chain and re-introduce the deadlock — observable
+only after the next 30-minute live-e2e iteration. This invariant
+pins the chain as a single transactional contract and witnesses
+it under <60 s.
+
+**Scenario.** Two initiatives share a lane: `it-primary` (one
+task, currently `Admitted`, orchestrator session running) and
+`it-sibling` (one task `Running`, executor session bound, an
+`Active` `subtask_activations` row with `crash_retry_count = 2`,
+one short of the default ceiling). The sibling executor sends
+`ReportFailure` for its task. Inside one transaction the kernel
+bumps `crash_retry_count` to `3`, transitions
+`tasks.task-sibling` to `Failed`, and updates
+`subtask_activations.act-sibling` to
+`activation_state='Failed', terminated_at=<now>`. After commit,
+the EarlyResponse hook evaluates `respawn_kinds` against
+`ReportFailure`, decides the sibling's parent orchestrator is
+eligible for a respawn check (or skip-with-reason), and emits one
+of `orchestrator_respawn_ok` / `orchestrator_respawn_skipped` /
+`orchestrator_respawn_failed`. The `IntentResponse` returned to
+the executor echoes the new `TaskState::Failed`. Total kernel
+wall-time from `ReportFailure` reception to all three log lines
+visible: ≤ 5 s.
+
+**Witness.**
+`raxis/kernel/tests/post_ceiling_orchestrator_respawn.rs::post_ceiling_deadlock_respawn`.
+The test boots the real kernel binary via
+`common::kernel_harness`, seeds the post-ceiling state directly
+in `kernel.db` via `rusqlite` (no IPC ceremony required for the
+sibling-already-near-ceiling precondition), opens a planner
+session as the bound Executor, sends `ReportFailure`, and
+asserts:
+
+*   The `IntentResponse` carries the post-commit
+    `TaskState::Failed` and `IntentOutcome::Accepted` and echoes
+    the request `sequence`.
+*   Post-commit `kernel.db` shows
+    `tasks.task-sibling.state = 'Failed'`,
+    `subtask_activations.act-sibling.activation_state = 'Failed'`,
+    `terminated_at IS NOT NULL`,
+    `crash_retry_count = 3`. (Direct read-back is the
+    structural witness for the c986e6d cascade, which is a SQL
+    `UPDATE` with no log line of its own.)
+*   Kernel stderr contains one
+    `event":"TaskTransitioned","task_id":"task-sibling","from":"Running","to":"Failed"`
+    line and one of `orchestrator_respawn_ok` /
+    `orchestrator_respawn_skipped` / `orchestrator_respawn_failed`.
+*   Kernel stderr does NOT contain `event":"deadlock_detected"`
+    (cross-witness for INV-LOCK-07: the watcher would fire within
+    ~2 s if any of the cascade SQL or the EarlyResponse hook took
+    a parking_lot lock that another thread held).
+
+The test is wrapped in `tokio::time::timeout(Duration::from_secs(60))`
+as a hard wall — if the kernel hangs anywhere along the chain,
+the test fails fast (current wall-clock: ~1.5 s).
+
+**Canonical home.** `v2/concurrency-and-locking.md` §7a
+(INV-LOCK-07, the deadlock watcher that bounds detection
+latency); `v1/kernel-store.md` §2 (INV-STORE-02, multi-table
+atomicity that ties the four mutations into one transaction).
 
 ---
 
