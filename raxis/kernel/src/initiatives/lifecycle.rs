@@ -6604,6 +6604,23 @@ target_ref = "refs/heads/raxis/feature"
         ).unwrap()
     }
 
+    /// Count plan task rows (i.e. excluding the V2.5 synthetic
+    /// "coordinator task" whose `task_id == initiative_id`). Lets
+    /// assertions over `plan.[[tasks]]` admission stay independent of
+    /// the `auto_spawn_orchestrator_session_in_tx` IntegrationMerge
+    /// plumbing.
+    fn count_plan_tasks_for_initiative(store: &Store, init_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {TASKS} \
+                 WHERE initiative_id = ?1 AND task_id != ?1"
+            ),
+            rusqlite::params![init_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
     /// Count edges that mention any task in the given initiative.
     fn count_edges_for_initiative(store: &Store, init_id: &str) -> i64 {
         const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
@@ -6668,7 +6685,15 @@ target_ref = "refs/heads/raxis/feature"
         );
 
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
-        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 2);
+        // V2.5 §IntegrationMerge plumbing — `auto_spawn_orchestrator_session_in_tx`
+        // admits a synthetic "coordinator task" row whose `task_id == initiative_id`
+        // alongside the two plan tasks (t1, t2). The total `tasks` row count for
+        // this initiative is therefore `plan_tasks + 1 coordinator`.
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 3);
+        assert_eq!(
+            count_plan_tasks_for_initiative(&store, &init_id), 2,
+            "two plan tasks (t1, t2) should be admitted, excluding the V2.5 coordinator",
+        );
         assert_eq!(
             count_edges_for_initiative(&store, &init_id), 1,
             "one DAG edge (t1 → t2) should be inserted alongside the task rows",
@@ -6711,6 +6736,12 @@ target_ref = "refs/heads/raxis/feature"
         // We assert the propagation persisted to the `tasks` table —
         // that's where `scheduler::lane::get_lane_status_in_tx` reads it
         // when computing the budget snapshot for new intent admission.
+        //
+        // V2.5 — `auto_spawn_orchestrator_session_in_tx` admits a
+        // synthetic coordinator task row alongside the plan tasks; it
+        // ALSO carries the workspace lane (passed via the
+        // `workspace_lane` argument), so the propagation invariant
+        // applies to all `2 plan + 1 coordinator = 3` rows.
         let conn = store.lock_sync();
         let lanes: Vec<String> = conn.prepare(
             &format!("SELECT lane_id FROM {TASKS} WHERE initiative_id = ?1"),
@@ -6719,9 +6750,10 @@ target_ref = "refs/heads/raxis/feature"
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes.len(), 3);
         assert!(lanes.iter().all(|l| l == "default"),
-            "every task row must carry the workspace-root lane_id; got {lanes:?}");
+            "every task row (plan + coordinator) must carry the workspace-root \
+             lane_id; got {lanes:?}");
     }
 
     // ── V2 §Step 6 / INV-PLANNER-HARNESS-06 — Orchestrator auto-spawn ───
@@ -7130,9 +7162,16 @@ target_ref = "refs/heads/raxis/feature"
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(lanes.len(), 3);
+        // V2.5 — `auto_spawn_orchestrator_session_in_tx` admits a
+        // synthetic coordinator task row alongside the three plan tasks
+        // (t1, t2, t3); it ALSO carries the workspace lane verbatim
+        // (passed via the `workspace_lane` argument), so the
+        // propagation invariant applies to all `3 plan + 1 coordinator = 4`
+        // rows.
+        assert_eq!(lanes.len(), 4);
         assert!(lanes.iter().all(|l| l == "feature-work"),
-            "every task row must carry the workspace-root lane_id verbatim; got {lanes:?}");
+            "every task row (plan + coordinator) must carry the workspace-root \
+             lane_id verbatim; got {lanes:?}");
     }
 
     #[test]
@@ -7318,7 +7357,17 @@ target_ref = "refs/heads/raxis/feature"
         assert!(second.is_err(), "second approve must fail (not Draft)");
 
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
-        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 1);
+        // V2.5 — `auto_spawn_orchestrator_session_in_tx` admits a synthetic
+        // coordinator task row alongside the single plan task ("only"),
+        // bringing the total `tasks` row count to `plan_tasks + 1 = 2`.
+        // The second approve_plan call rolls back and leaves the first
+        // call's rows untouched.
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 2);
+        assert_eq!(
+            count_plan_tasks_for_initiative(&store, &init_id), 1,
+            "one plan task should be admitted from the first call, excluding \
+             the V2.5 coordinator",
+        );
 
         // Exactly ONE PlanApproved emitted, despite two attempts. The
         // second (failed) call must NOT add an audit row.
