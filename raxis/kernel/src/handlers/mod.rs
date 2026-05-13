@@ -15,3 +15,13 @@ pub mod intent;
 pub mod integration_merge_attribution;
 pub mod planner_fetch;
 pub mod witness;
+
+// Path A3 universal-airgap admission + DNS resolution handlers.
+// Compiled in only when the `runtime-airgap-a3` feature is enabled
+// (specs/v2/airgap-architecture.md §6). Default-off builds drop
+// these modules entirely so the legacy NIC-based egress path is
+// bit-identical to the V2 baseline.
+#[cfg(feature = "runtime-airgap-a3")]
+pub mod dns_resolve;
+#[cfg(feature = "runtime-airgap-a3")]
+pub mod tproxy_admit;

@@ -28,9 +28,18 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod a3;
 pub mod loopback_forwarder;
 pub mod peek;
 pub mod shuttle;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+// Path A3 in-guest DNS stub forwarder (UDP+TCP :53 → kernel
+// vsock). Linux-only at runtime because the production stub binds
+// `127.0.0.1:53` inside the guest namespace and the kernel
+// admission channel is `AF_VSOCK`. Tests for the pure-DNS-protocol
+// codec live in `a3::dns_stub::tests` and run cross-platform.
+#[cfg(target_os = "linux")]
+pub mod dns_stub;

@@ -371,6 +371,14 @@ fn variant_name(msg: &IpcMessage) -> &'static str {
         IpcMessage::WitnessAck { .. }             => "WitnessAck",
         IpcMessage::OperatorRequest(_)            => "OperatorRequest",
         IpcMessage::OperatorResponse(_)           => "OperatorResponse",
+        // Path A3 — these never flow through the planner socket
+        // (they're per-session vsock-only) but the exhaustive match
+        // keeps `INV-IPC-EXHAUSTIVE` honest. The names match
+        // `kernel::ipc::server::ipc_message_variant_name`.
+        IpcMessage::TproxyAdmissionRequest(_)         => "TproxyAdmissionRequest",
+        IpcMessage::KernelTproxyAdmissionResponse(_)  => "KernelTproxyAdmissionResponse",
+        IpcMessage::DnsResolveRequest(_)              => "DnsResolveRequest",
+        IpcMessage::KernelDnsResolveResponse(_)       => "KernelDnsResolveResponse",
     }
 }
 

@@ -32,10 +32,20 @@ path = "src/main.rs"
 [dependencies]
 raxis-tproxy-protocol  = { workspace = true }
 raxis-vsock-loopback   = { workspace = true }
+# Path A3 — the new admission flow uses the kernel-wide `IpcMessage`
+# envelope (bincode length-prefixed frames) rather than the bespoke
+# `raxis-tproxy-protocol` framing, so a single per-session vsock
+# channel can multiplex the admission decision, the DNS resolver,
+# and any future kernel-mediated guest service. The legacy
+# `KernelChannel::Tcp` dev path still uses `raxis-tproxy-protocol`
+# verbatim for back-compat.
+raxis-ipc              = { workspace = true }
+raxis-types            = { workspace = true }
 
 tokio       = { workspace = true }
 serde       = { workspace = true }
 thiserror   = { workspace = true }
+uuid        = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux-only — `nix` for `getsockopt(SO_ORIGINAL_DST)` and AF_VSOCK

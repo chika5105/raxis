@@ -4041,13 +4041,16 @@ dependencies = [
  "nix 0.27.1",
  "raxis-audit-tools",
  "raxis-egress-admission",
+ "raxis-ipc",
  "raxis-test-support",
  "raxis-tproxy-protocol",
+ "raxis-types",
  "raxis-vsock-loopback",
  "serde",
  "thiserror 1.0.69",
  "tokio",
  "tokio-vsock",
+ "uuid",
 ]
 
 [[package]]

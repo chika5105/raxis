@@ -52,20 +52,52 @@ fn next_connection_id() -> u64 {
 
 /// Pluggable transport for the kernel admission channel. In
 /// production this is `KernelChannel::Vsock` (AF_VSOCK
-/// CID/port-pair); during dev bring-up and integration tests
-/// it's `KernelChannel::Tcp` so the same protocol code runs over
-/// loopback.
+/// CID/port-pair) — see
+/// `specs/v2/airgap-architecture.md §3`; during dev bring-up and
+/// integration tests it's `KernelChannel::Tcp` so the same
+/// protocol code runs over loopback.
 #[derive(Debug, Clone)]
 pub enum KernelChannel {
     /// Connect to the kernel via a TCP socket — for development
-    /// bring-up on hosts without an `AF_VSOCK` device.
+    /// bring-up on hosts without an `AF_VSOCK` device. Speaks the
+    /// legacy `raxis-tproxy-protocol` bincode framing.
     Tcp(SocketAddr),
+    /// Path A3 production transport — `AF_VSOCK` to
+    /// `(VMADDR_CID_HOST, admission_port)` for admission, plus
+    /// `tunnel_port` for the post-admit byte tunnel. Speaks the
+    /// kernel-wide `IpcMessage` envelope (length-prefixed bincode)
+    /// — see [`crate::a3`]. The dual-port shape (admission +
+    /// tunnel) keeps the byte path framed-free so
+    /// `tokio::io::copy_bidirectional` can splice the agent socket
+    /// to the kernel-side upstream TCP without an extra parser.
+    Vsock {
+        /// CID of the kernel-side listener. Always
+        /// `VMADDR_CID_HOST` (2) in the production substrate; the
+        /// field is exposed so unit tests on host machines can
+        /// point the listener at a different CID.
+        host_cid:       u32,
+        /// Port the kernel binds for `IpcMessage`-framed
+        /// admission requests.
+        admission_port: u32,
+        /// Port the kernel binds for the byte-tunnel handshake +
+        /// raw shuttle stream.
+        tunnel_port:    u32,
+    },
 }
 
 impl KernelChannel {
     async fn open(&self) -> io::Result<TcpStream> {
         match self {
             KernelChannel::Tcp(addr) => TcpStream::connect(addr).await,
+            // The Vsock arm of the legacy `open` path is
+            // intentionally unreachable: the A3 admission flow
+            // runs through `accept_loop_a3` (see below), which
+            // opens vsock streams directly via `tokio_vsock`. The
+            // legacy `handle_one_connection` is TCP-only.
+            KernelChannel::Vsock { .. } => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "KernelChannel::Vsock must be driven via `accept_loop_a3`, not the legacy TCP path",
+            )),
         }
     }
 }
@@ -176,6 +208,174 @@ pub async fn accept_loop(
 pub async fn bind_default_listener() -> io::Result<TcpListener> {
     let bind_addr: SocketAddr = "0.0.0.0:3129".parse().expect("static parse");
     TcpListener::bind(bind_addr).await
+}
+
+// ---------------------------------------------------------------------------
+// Path A3 accept loop — vsock admission + vsock tunnel.
+//
+// Normative reference: `specs/v2/airgap-architecture.md §3`.
+//
+// Architectural differences vs `accept_loop` above:
+//   * Two vsock connections per accepted agent flow (admission +
+//     byte tunnel) instead of one mixed loopback-TCP connection.
+//   * Wire shape is `IpcMessage` (length-prefixed bincode) for the
+//     admission round-trip, fixed 48-byte handshake then raw bytes
+//     for the tunnel.
+//   * The kernel — not the guest — opens the upstream TCP; the
+//     guest just shuttles bytes between the agent socket and the
+//     kernel-tunnel vsock stream.
+// ---------------------------------------------------------------------------
+
+/// Accept loop for the A3 universal-airgap path. Same listener
+/// shape as [`accept_loop`] but routes each accepted flow through
+/// the A3 admission protocol over vsock.
+///
+/// The `session_token` comes from the spawned-guest environment
+/// (`RAXIS_SESSION_TOKEN`); the kernel stamps it at session-spawn
+/// time and the in-VM init script forwards it to the tproxy
+/// process. Without a token A3 cannot authenticate to the kernel
+/// and the loop refuses to start.
+pub async fn accept_loop_a3(
+    listener:       TcpListener,
+    host_cid:       u32,
+    admission_port: u32,
+    tunnel_port:    u32,
+    session_token:  String,
+) -> Result<(), AcceptLoopError> {
+    eprintln!(
+        "raxis-tproxy(A3): listening 0.0.0.0:3129; kernel admission \
+         vsock=cid:{host_cid}/port:{admission_port}, tunnel \
+         vsock=cid:{host_cid}/port:{tunnel_port}",
+    );
+    loop {
+        let (agent, _peer) = listener.accept().await?;
+        let token  = session_token.clone();
+        tokio::spawn(async move {
+            let _ = handle_one_a3_connection(
+                agent,
+                host_cid,
+                admission_port,
+                tunnel_port,
+                token,
+            )
+            .await;
+        });
+    }
+}
+
+/// Errors raised by [`handle_one_a3_connection`]. Surfaced for
+/// the operator-stderr log line; the loop itself converts them
+/// to a TCP RST on the agent side per the A3 spec.
+#[derive(Debug, Error)]
+pub enum A3ConnectionError {
+    /// Transport-level failure (vsock dial / agent socket I/O /
+    /// `SO_ORIGINAL_DST`).
+    #[error("transport: {0}")]
+    Io(#[from] io::Error),
+
+    /// Admission-level protocol failure (frame error, kernel
+    /// returned the wrong variant, request_id mismatch).
+    #[error("admission protocol: {0}")]
+    Admission(#[from] crate::a3::A3AdmissionError),
+
+    /// Kernel returned an explicit Deny — the agent socket is
+    /// already shut by the time this is returned.
+    #[error("kernel denied admission: {reason}")]
+    Denied {
+        /// Stable short reason string from
+        /// [`raxis_types::TproxyAdmissionResponse::Deny`].
+        reason: String,
+    },
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_one_a3_connection(
+    mut agent:      TcpStream,
+    host_cid:       u32,
+    admission_port: u32,
+    tunnel_port:    u32,
+    session_token:  String,
+) -> Result<(), A3ConnectionError> {
+    use raxis_types::TproxyProtocol;
+    use tokio_vsock::{VsockAddr, VsockStream};
+
+    let original_dst = original_dst_v4(&agent)?;
+    let peeked = match crate::peek::peek_https_client_hello_or_http_request(&mut agent).await {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = agent.shutdown().await;
+            return Ok(());
+        }
+    };
+    let protocol = match peeked.kind {
+        crate::peek::PeekKind::TlsClientHello => TproxyProtocol::Tls,
+        crate::peek::PeekKind::Http           => TproxyProtocol::Http,
+    };
+    let (sni, host_header) = match protocol {
+        TproxyProtocol::Tls  => (peeked.host_or_sni.clone(), None),
+        TproxyProtocol::Http => (None, peeked.host_or_sni.clone()),
+        TproxyProtocol::Tcp  => (None, None),
+    };
+
+    // Open the admission vsock channel.
+    let mut admission_vsock =
+        VsockStream::connect(VsockAddr::new(host_cid, admission_port)).await?;
+    let response = crate::a3::ask_admission(
+        &mut admission_vsock,
+        &session_token,
+        sni,
+        host_header,
+        original_dst,
+        protocol,
+    )
+    .await?;
+    // Once the response is in hand we don't need the admission
+    // vsock any longer; drop it so the kernel-side handler can
+    // recycle the connection slot.
+    drop(admission_vsock);
+
+    let (tunnel_id, tunnel_token) = match response {
+        raxis_types::TproxyAdmissionResponse::Admit {
+            tunnel_id,
+            tunnel_token,
+            ..
+        } => (tunnel_id, tunnel_token),
+        raxis_types::TproxyAdmissionResponse::Deny { reason, .. } => {
+            let _ = agent.shutdown().await;
+            return Err(A3ConnectionError::Denied { reason });
+        }
+    };
+
+    // Open the byte-tunnel vsock, send the handshake, splice.
+    let mut tunnel = VsockStream::connect(VsockAddr::new(host_cid, tunnel_port)).await?;
+    let handshake = crate::a3::encode_tunnel_handshake(tunnel_id, &tunnel_token);
+    tunnel.write_all(&handshake).await?;
+    // Replay the peeked prelude bytes into the kernel-side tunnel
+    // so the upstream sees the original TLS ClientHello / HTTP
+    // request preamble unchanged.
+    if !peeked.buffered.is_empty() {
+        tunnel.write_all(&peeked.buffered).await?;
+    }
+    let _ = tokio::io::copy_bidirectional(&mut agent, &mut tunnel).await;
+    Ok(())
+}
+
+// On non-Linux we never actually run accept_loop_a3 (the tproxy
+// binary aborts at the `main()` cfg guard), but we provide a stub
+// so the `pub async fn` signature compiles cross-platform for the
+// library docs build.
+#[cfg(not(target_os = "linux"))]
+async fn handle_one_a3_connection(
+    _agent:          TcpStream,
+    _host_cid:       u32,
+    _admission_port: u32,
+    _tunnel_port:    u32,
+    _session_token:  String,
+) -> Result<(), A3ConnectionError> {
+    Err(A3ConnectionError::Io(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Path A3 admission loop is Linux-only (uses AF_VSOCK + SO_ORIGINAL_DST)",
+    )))
 }
 
 // ---------------------------------------------------------------------------
