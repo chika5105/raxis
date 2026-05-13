@@ -2643,6 +2643,103 @@ Kernel boot-time admission:
 
 - `kernel/src/main.rs` calls `raxis_image_manifest::verify(&embedded_reviewer_manifest, &kernel_signing_pubkey)?` and `verify(&embedded_orchestrator_manifest, ...)?` immediately after `IsolationBackend::verify_isolation_guarantee` (boot-order step 6a per `extensibility-traits.md §9.1`). A signature failure aborts boot with `BootError::ImageManifestSignatureMismatch { role }`.
 
+### §14.4a Dev-host bake / stage / build pipeline (macOS-hermetic)
+
+The production EROFS pipeline (§14.4) requires `mkfs.erofs`, which is
+not available on macOS dev hosts (per `e2e-live-test-gap.md`). To
+unblock local AVF demos and the realistic-scenario live-e2e harness,
+`cargo xtask images` exposes a **three-step dev-host pipeline** that
+emits the same signed-manifest shape but with
+`image_format = RootfsInitramfsCpio` instead of `Erofs`. The kernel
+boot path verifies both shapes via the same
+`read_verified_image_format` helper, so dev-built images and
+prod-built images cannot be confused at boot.
+
+The three steps land separately so an operator can rebuild only the
+layer that changed:
+
+1. **`cargo xtask images bake-rootfs --role <ROLE> [--builder <B>]
+   [--platform <PLAT>] [--keep]`** (`4860c1b`).
+   Executes `images/<role>/Containerfile` against a container builder
+   (auto-detect order `docker → podman → buildah`; override with
+   `--builder`), exports the resulting OCI image's filesystem, and
+   unpacks it into `images/<role>/rootfs/`. The Containerfile IS the
+   source of truth for the rootfs content; this subcommand is what
+   `images/README.md` calls "populates `rootfs/`". Without this step,
+   the staging tree would contain only the cross-compiled planner
+   binary — every `BashTool` invocation inside the executor VM would
+   return ENOENT (iter-12's storm).
+
+2. **`cargo xtask images dev-stage --role <ROLE> [--target <TRIPLE>]
+   [--allow-stub]`** (`50537a5` fail-fast guard).
+   Cross-compiles `raxis-planner-<role>` for the guest target and
+   overlays it at `images/<role>-core/rootfs/init`. After the
+   cross-compile lands, the **stub-detection guard** walks a
+   per-role `required_os_binaries` allowlist and fails with a clear
+   remediation hint if any are missing:
+
+   | Role               | Required binaries                                  |
+   | ------------------ | -------------------------------------------------- |
+   | `ExecutorStarter`  | `bin/bash`, `usr/bin/python3`, `usr/bin/git`       |
+   | `Orchestrator`     | — (intentionally binary-only per `INV-PLANNER-HARNESS-02`) |
+   | `Reviewer`         | — (intentionally binary-only per `INV-PLANNER-HARNESS-02`) |
+
+   The guard treats both regular files and symlinks-to-files as
+   satisfied (real Linux rootfs trees use both:
+   `/usr/bin/python3 → python3.11`). The escape hatch
+   `--allow-stub` exists for intentional binary-only debug builds
+   (e.g., the post-`8a26540` AVF demo path) but is forbidden for
+   live-e2e runs because the iter-12 stub-rootfs regression is
+   exactly the failure mode the guard catches.
+
+3. **`cargo xtask images build-all [--role <ROLE>] [--install-dir
+   <PATH>]`**.
+   Walks `images/<role>-core/rootfs/`, packs it into cpio.gz via
+   `raxis-initramfs-builder`, and calls `raxis-image-builder` to
+   emit the signed manifest with `image_format =
+   RootfsInitramfsCpio`. Drops:
+   ```
+   $RAXIS_INSTALL_DIR/images/raxis-<role>-core-<kver>.img
+   $RAXIS_INSTALL_DIR/images/raxis-<role>-core-<kver>.manifest.toml
+   ```
+
+**Live-e2e auto-bake (`7fbd2e1`).** The `extended_e2e_*`
+realistic-scenario harnesses call `require_canonical_images()` before
+the kernel boots; if any required image is missing OR is detected as
+a stub via the cpio-walk preflight (next bullet), the harness
+automatically runs the three-step pipeline before proceeding. This
+removes the manual `cargo xtask images …` step from the live-e2e
+contributor workflow.
+
+**Per-role required-binary cpio-walk preflight (`680ea62`).** The
+live-e2e support code (`kernel/tests/extended_e2e_support/
+cpio_inspect.rs`) walks the resulting cpio.gz archive entries before
+the kernel mounts the image and asserts the same `required_os_binaries`
+list `dev-stage`'s fail-fast guard enforces. The preflight runs every
+time a live-e2e test calls `require_canonical_images`, so a stub
+rootfs that slipped past the dev-stage guard (e.g., via
+`--allow-stub`) is caught at test-harness layer rather than at
+ENOENT-storm time inside the booted VM. Mismatches surface a
+deterministic remediation hint pointing the developer at
+`cargo xtask images bake-rootfs --role <ROLE>`.
+
+**Why the dev-stage guard and the cpio-walk preflight are both
+load-bearing.** The dev-stage guard runs against the **staging tree**
+(post-bake, pre-cpio); the cpio-walk preflight runs against the
+**packed cpio.gz archive** (post-`build-all`). The two layers catch
+different regressions: dev-stage catches "the operator skipped
+`bake-rootfs`", and the cpio-walk catches "the operator ran
+`build-all` with a stale staging tree or `--allow-stub`". Both are
+fail-fast; neither is overridable from inside a live-e2e run.
+
+Normative pins: `raxis/xtask/src/images.rs` (the three subcommands),
+`raxis/kernel/tests/extended_e2e_support/cpio_inspect.rs` (per-role
+required-binary cpio walk), `raxis/kernel/tests/extended_e2e_support/
+kernel_driver.rs::require_canonical_images` (auto-bake call site),
+`raxis/images/executor-starter/Containerfile` (the source of truth
+for executor-starter rootfs content; cross-arch + ca-certificates +
+build-essential per L-2 in `known-latent-issues.md`).
+
 ### §14.5 Test fixtures and test-support helpers
 
 `crates/test-support/src/planner_harness/` (NEW module):
