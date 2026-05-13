@@ -149,7 +149,9 @@ pub fn notification_priority_for_kind_str(
         | "OperatorQuarantineSwept"
         | "InitiativeQuarantined"
         | "LineageQuarantined"
-        | "OperatorRevealedSystemCredential" => Some(Critical),
+        | "OperatorRevealedSystemCredential"
+        | "KernelDeadlockDetected"
+        | "KernelRestartHaltedCircuitOpen" => Some(Critical),
 
         // High
         "EscalationSubmitted"
@@ -176,7 +178,8 @@ pub fn notification_priority_for_kind_str(
         | "CircuitBreakerStateChanged"
         | "PlanRejected"
         | "InitiativeAborted"
-        | "OperatorRevealedCredential" => Some(High),
+        | "OperatorRevealedCredential"
+        | "KernelRestartInitiated" => Some(High),
 
         // Medium
         "KernelStarted"
@@ -190,6 +193,7 @@ pub fn notification_priority_for_kind_str(
         | "InitiativeStateChanged"
         | "IntegrationMergeCompleted"
         | "PushCompleted"
+        | "KernelRestartCompleted"
         | "EscalationApproved"
         | "EscalationDenied"
         | "EscalationConsumed"
@@ -270,6 +274,15 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // operator sees the event without being parked in front
         // of the dashboard.
         K::OperatorRevealedSystemCredential { .. } => Some(Critical),
+        // V2.5 self-healing-supervisor.md §3.4 — every detected
+        // deadlock is forensic-grade; engineers MUST look. The
+        // dump file referenced by `dump_path` carries the full
+        // parking_lot lock-graph + per-thread backtraces.
+        K::KernelDeadlockDetected { .. } => Some(Critical),
+        // V2.5 self-healing-supervisor.md §INV-SUPERVISOR-CIRCUIT-BREAKER-01
+        // — supervisor refused further restarts; manual
+        // intervention required (raxis-supervisor reset-circuit-breaker).
+        K::KernelRestartHaltedCircuitOpen { .. } => Some(Critical),
 
         // ── High: operator attention required, but not yet a P0 ──
         //
@@ -307,6 +320,11 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // credential reveals are High — visible to other operators
         // but a tier below the system-credential class above.
         K::OperatorRevealedCredential { .. } => Some(High),
+        // V2.5 self-healing-supervisor.md §3.4 — operator should
+        // know the kernel was just replaced, but it is not a P0
+        // unless paired with the `KernelRestartHaltedCircuitOpen`
+        // (Critical) above.
+        K::KernelRestartInitiated { .. } => Some(High),
 
         // ── Medium: lifecycle milestones operators want to see ──
         //
@@ -332,6 +350,11 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::InitiativeStateChanged { .. } => Some(Medium),
         K::IntegrationMergeCompleted { .. } => Some(Medium),
         K::PushCompleted { .. } => Some(Medium),
+        // V2.5 self-healing-supervisor.md §3.4 — steady-state
+        // observability after a successful auto-restart; not a
+        // page. Pairs 1:1 with the earlier `KernelRestartInitiated`
+        // (High) per `INV-SUPERVISOR-RESTART-AUDIT-01`.
+        K::KernelRestartCompleted { .. } => Some(Medium),
         K::EscalationApproved { .. } => Some(Medium),
         K::EscalationDenied { .. } => Some(Medium),
         K::EscalationConsumed { .. } => Some(Medium),

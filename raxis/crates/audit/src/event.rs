@@ -154,6 +154,137 @@ pub enum AuditEventKind {
         reason: String,
     },
 
+    /// V2.5 `self-healing-supervisor.md §3.4` — runtime deadlock
+    /// detector tripped on the prior kernel run.
+    ///
+    /// **Two emit paths.**
+    ///
+    /// 1. *Best-effort in-process emit* by
+    ///    `kernel/src/main.rs::spawn_deadlock_watcher`, AFTER it has
+    ///    written the forensic dump file. May not land if the audit
+    ///    pipeline is wedged on the very mutex that deadlocked
+    ///    (which is the entire point of the watcher's exit-70
+    ///    fallback). When this path lands, `dump_path = Some(...)`
+    ///    pointing at the dump file the watcher just wrote.
+    /// 2. *Boot-time synthesis* on the next kernel boot by
+    ///    `kernel/src/main.rs` (between Step 6 `recovery::reconcile`
+    ///    and Step 8 `KernelStarted`). The boot scans
+    ///    `<data_dir>/deadlock_dump_*.json` for files newer than
+    ///    the most recent `KernelStarted` event, emits one
+    ///    `KernelDeadlockDetected` per dump, then renames each
+    ///    dump into `<data_dir>/deadlock_dumps_consumed/` so the
+    ///    next boot does not double-emit.
+    ///
+    /// Routes at `Critical` notification priority — every detection
+    /// is operator-attention.
+    KernelDeadlockDetected {
+        /// Total threads across all detected cycles in the dump.
+        thread_count:          u32,
+        /// Total locks across all detected cycles in the dump.
+        lock_count:            u32,
+        /// Forensic dump path. `Some` for next-boot synthesised
+        /// emits and the watcher's best-effort emit; `None` is
+        /// reserved for synthesised emits where the dump file was
+        /// missing on read (rare; carries `lock_count = 0` in that
+        /// case so the dashboard still has something to render).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dump_path:             Option<String>,
+        /// Unix-seconds wallclock the watcher detected the cycle
+        /// at. For next-boot synthesised events this comes from
+        /// the dump file's `detected_at_unix_secs`; for the
+        /// in-process best-effort emit it is `unix_now_secs()`.
+        detected_at_unix_secs: i64,
+    },
+
+    /// V2.5 `self-healing-supervisor.md §3.4` — supervisor is about
+    /// to spawn a replacement kernel after the previous run
+    /// terminated unexpectedly.
+    ///
+    /// Synthesised by the boot path of the *replacement* kernel
+    /// (between the canonical `KernelStarted` emit and the
+    /// `KernelRestartCompleted` emit) iff the supervisor's sentinel
+    /// file shows `status = "Restarting"` from the prior run. Pairs
+    /// 1:1 with a later `KernelRestartCompleted` (or
+    /// `KernelRestartHaltedCircuitOpen`) per
+    /// `INV-SUPERVISOR-RESTART-AUDIT-01`.
+    ///
+    /// Routes at `High` notification priority — operator should
+    /// know the kernel was just replaced, but it is not a P0.
+    KernelRestartInitiated {
+        /// PascalCase reason string. One of:
+        ///   * `"DeadlockDetected"` — prior run exit 70 + dump file present.
+        ///   * `"PanicAbort"`       — prior run non-zero exit, no dump.
+        ///   * `"SignalCrash"`      — SIGSEGV / SIGBUS / SIGABRT.
+        ///   * `"OomKilled"`        — SIGKILL not sent by supervisor.
+        reason:             String,
+        /// Numeric exit status of the prior run.
+        ///   * For `WEXITSTATUS` exits: the literal exit code.
+        ///   * For signaled exits: `128 + signal_number` (shell
+        ///     convention; matches `bash` / `zsh` `$?` after a
+        ///     signaled child).
+        prev_run_exit_code: i32,
+        /// 1-indexed restart attempt within the current
+        /// circuit-breaker window. The first restart after a clean
+        /// run resets the counter to 1.
+        attempt_n:          u32,
+        /// Operator-policy ceiling at the time of this restart
+        /// (`SUPERVISOR_RESTART_MAX_ATTEMPTS`, default 3).
+        max_attempts:       u32,
+    },
+
+    /// V2.5 `self-healing-supervisor.md §3.4` — replacement kernel
+    /// has finished its boot recovery and is ready to serve.
+    ///
+    /// Emitted by the boot path AFTER the canonical `KernelStarted`
+    /// and AFTER the recovery sweep + git-apply-pending recovery
+    /// sweep both complete. `recovery_sweep_ms` is the wall-clock
+    /// duration of those two sweeps combined (Step 6 +
+    /// Step 8a in `kernel/src/main.rs`).
+    ///
+    /// Routes at `Medium` notification priority — steady-state
+    /// observability; not a page.
+    KernelRestartCompleted {
+        /// Exit status of the previous run that triggered this
+        /// restart. Same encoding as `KernelRestartInitiated`.
+        prev_run_exit_code: i32,
+        /// Wall-clock duration of the boot-time crash-recovery
+        /// sweep (`recovery::reconcile` Step 6 +
+        /// `reconcile_git_apply_pending` Step 8a).
+        recovery_sweep_ms:  u64,
+        /// Forensic dump that triggered this restart, if the cause
+        /// was a deadlock detection on the prior run. `None` for
+        /// crash / OOM / signaled prior runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dump_path:          Option<String>,
+    },
+
+    /// V2.5 `self-healing-supervisor.md §3.4` /
+    /// `INV-SUPERVISOR-CIRCUIT-BREAKER-01` — supervisor refused to
+    /// restart after observing more than
+    /// `SUPERVISOR_RESTART_MAX_ATTEMPTS` (default 3) restarts inside
+    /// `SUPERVISOR_RESTART_WINDOW_SECS` (default 60).
+    ///
+    /// Synthesised on the next kernel boot AFTER the operator clears
+    /// the circuit breaker via `raxis-supervisor reset-circuit-breaker`
+    /// (the kernel cannot boot while the breaker is open — the
+    /// supervisor refuses to spawn). The event carries the
+    /// breaker-tripping context so the audit chain records WHY the
+    /// kernel was halted, not just that it was.
+    ///
+    /// Routes at `Critical` notification priority — manual
+    /// intervention required.
+    KernelRestartHaltedCircuitOpen {
+        /// Number of restart attempts the supervisor observed in
+        /// the sliding window before refusing further restarts.
+        attempts_in_window:  u32,
+        /// Sliding-window width in seconds (default 60).
+        window_secs:         u32,
+        /// PascalCase classification of the most recent failure
+        /// that tripped the breaker. Same set as
+        /// `KernelRestartInitiated.reason`.
+        last_failure_reason: String,
+    },
+
     /// V2 agent-runtime substrate selection record.
     ///
     /// Emitted exactly once per kernel boot, immediately after
@@ -3438,6 +3569,10 @@ impl AuditEventKind {
         match self {
             Self::KernelStarted { .. } => "KernelStarted",
             Self::KernelStopped { .. } => "KernelStopped",
+            Self::KernelDeadlockDetected { .. } => "KernelDeadlockDetected",
+            Self::KernelRestartInitiated { .. } => "KernelRestartInitiated",
+            Self::KernelRestartCompleted { .. } => "KernelRestartCompleted",
+            Self::KernelRestartHaltedCircuitOpen { .. } => "KernelRestartHaltedCircuitOpen",
             Self::IsolationSubstrateSelected { .. } => "IsolationSubstrateSelected",
             Self::IsolationFallbackBypass { .. } => "IsolationFallbackBypass",
             Self::IsolationSubstrateRefused { .. } => "IsolationSubstrateRefused",

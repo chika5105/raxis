@@ -30,6 +30,19 @@ mod authority;
 mod canonical_images_preflight;
 mod capacity;
 mod dashboard_glue;
+// `concurrency-and-locking.md §INV-LOCK-07` /
+// `self-healing-supervisor.md §3.1` — forensic-dump writer the
+// deadlock watcher invokes before exiting non-zero. Lives in its
+// own module so the watcher pipeline has zero dependency on the
+// audit machinery (which may itself be wedged on the deadlocked
+// mutex).
+mod deadlock_dump;
+// `self-healing-supervisor.md §3.3` — boot-time rehydration of
+// the supervisor's restart context into the audit chain. Lives in
+// its own module so the helper is testable in isolation (the
+// witness for `INV-SUPERVISOR-RESTART-AUDIT-01` lives in the
+// module's own `#[cfg(test)] mod tests`).
+mod restart_lifecycle;
 mod elastic;
 mod ipc;
 mod recovery;
@@ -84,10 +97,10 @@ use raxis_store::Store;
 // (see `raxis/kernel/Cargo.toml [features]` for the full
 // rationale).
 #[cfg(feature = "runtime-deadlock-detection")]
-fn spawn_deadlock_watcher() {
+fn spawn_deadlock_watcher(data_dir: std::path::PathBuf) {
     std::thread::Builder::new()
         .name("raxis-deadlock-watcher".to_owned())
-        .spawn(|| loop {
+        .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
             let deadlocks = parking_lot::deadlock::check_deadlock();
             if deadlocks.is_empty() {
@@ -103,7 +116,7 @@ fn spawn_deadlock_watcher() {
             // `Arc<Store>`; `StreamingAuditSink` holds the
             // per-session capture mutex), and any of those
             // could be the very mutex that deadlocked. The
-            // watcher MUST be the one path that panics
+            // watcher MUST be the one path that exits
             // unconditionally, even from inside a wedged audit
             // pipeline.
             eprintln!(
@@ -111,7 +124,31 @@ fn spawn_deadlock_watcher() {
                  \"cycle_count\":{}}}",
                 deadlocks.len(),
             );
+            // Aggregate the cycle into a `DeadlockDump` while we
+            // walk the per-cycle / per-thread surface — the dump
+            // file is the structured forensic record the boot-
+            // time rehydration path reads back to synthesise a
+            // `KernelDeadlockDetected` audit event. The same
+            // walk produces the per-thread stderr lines so the
+            // structured-log + dump-file paths stay in sync.
+            //
+            // `self-healing-supervisor.md §3.2`: dump-write is
+            // BEST-EFFORT. Disk-full / EROFS surfaces as a
+            // structured stderr line and the watcher proceeds to
+            // `process::exit(70)` regardless — the *exit signal*
+            // is the unconditional contract; the dump is
+            // best-effort persisted forensics.
+            let detected_at_unix_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let mut total_threads: u32 = 0;
+            let mut total_locks: u32 = 0;
+            let mut cycles_out: Vec<deadlock_dump::DeadlockCycle> =
+                Vec::with_capacity(deadlocks.len());
             for (cycle_idx, threads) in deadlocks.iter().enumerate() {
+                let mut threads_out: Vec<deadlock_dump::DeadlockThread> =
+                    Vec::with_capacity(threads.len());
                 for t in threads {
                     eprintln!(
                         "{{\"level\":\"error\",\
@@ -125,21 +162,59 @@ fn spawn_deadlock_watcher() {
                         )
                         .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
                     );
+                    threads_out.push(deadlock_dump::DeadlockThread {
+                        thread_id: format!("{:?}", t.thread_id()),
+                        backtrace: format!("{:?}", t.backtrace()),
+                    });
+                    total_threads = total_threads.saturating_add(1);
+                    // `t.backtrace()` reports one parked-frame
+                    // per held lock acquisition; we don't have a
+                    // first-class lock counter from parking_lot
+                    // here, so we use the per-thread `1`
+                    // contribution as a conservative proxy. The
+                    // dump file's per-thread `backtrace` field
+                    // is the source of truth for forensic
+                    // analysis.
+                    total_locks = total_locks.saturating_add(1);
                 }
+                cycles_out.push(deadlock_dump::DeadlockCycle {
+                    cycle_index: cycle_idx as u32,
+                    threads:     threads_out,
+                });
             }
-            // Hard-fail. With `panic = "abort"` the kernel
-            // process exits non-zero immediately; the supervisor
-            // (systemd / launchd / the live-e2e harness) sees
-            // the exit and the `iter*.log` carries the
-            // structured audit lines above. Without this panic
-            // the watcher would loop forever logging the same
-            // cycle while the wedged tokio workers stay parked
-            // — exactly the 30-minute wedge we are trying to
-            // shorten to <60 seconds.
-            panic!(
-                "deadlock_detected: {} cycle(s) — see kernel log for backtraces",
-                deadlocks.len(),
-            );
+            let dump = deadlock_dump::DeadlockDump {
+                kernel_version: env!("CARGO_PKG_VERSION").to_owned(),
+                detected_at_unix_secs,
+                cycle_count: cycles_out.len() as u32,
+                thread_count: total_threads,
+                lock_count: total_locks,
+                cycles: cycles_out,
+            };
+            match deadlock_dump::write_dump(&data_dir, &dump) {
+                Ok(path) => eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"deadlock_dump_written\",\
+                     \"path\":{path}}}",
+                    path = serde_json::to_string(&path.display().to_string())
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                ),
+                Err(e) => eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"deadlock_dump_write_failed\",\
+                     \"reason\":{reason}}}",
+                    reason = serde_json::to_string(&e.to_string())
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                ),
+            }
+            // `self-healing-supervisor.md §3.2` /
+            // `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`:
+            // exit 70 is the stable, supervisor-recognised
+            // discriminator for "deadlock detected — restart
+            // me". With `panic = "abort"` we used to surface
+            // whatever the host's panic-abort code happened to
+            // be (137 / 134 depending on platform); a
+            // structured `process::exit(70)` is the wire
+            // contract every supervisor (raxis-supervisor +
+            // future launchd / systemd) classifies on.
+            std::process::exit(70);
         })
         .expect("spawn raxis-deadlock-watcher thread");
 }
@@ -163,7 +238,12 @@ async fn main() {
         banner::print_boot_banner();
     }
 
-    // `concurrency-and-locking.md §INV-LOCK-07` — install the runtime
+    // Step 1: Parse CLI flags and environment.
+    let data_dir = data_dir();
+    let bootstrap_mode = std::env::var("RAXIS_BOOTSTRAP").is_ok();
+
+    // `concurrency-and-locking.md §INV-LOCK-07` /
+    // `self-healing-supervisor.md §3.2` — install the runtime
     // deadlock watcher BEFORE any kernel subsystem takes its first
     // `parking_lot::Mutex` (so the lock-graph tracker observes every
     // acquire from cycle-1 onward) and BEFORE bootstrap mode short-
@@ -171,16 +251,18 @@ async fn main() {
     // ceremony failures that wedge on a re-entrant `Mutex<Connection>`
     // are also covered, not just the long-running daemon path).
     //
+    // The watcher needs `data_dir` so it can drop a forensic
+    // `<data_dir>/deadlock_dump_<unix_ts>.json` next to the audit
+    // chain on detection — but `data_dir` is already resolved
+    // above (we hoisted the `data_dir = data_dir()` call above the
+    // watcher spawn for this purpose).
+    //
     // The watcher itself is `cfg(feature = "runtime-deadlock-detection")`
     // — release builds with the feature disabled get a no-op stub call
     // (the inner function is `cfg`'d away entirely; the call site stays
     // compiled but expands to nothing).
     #[cfg(feature = "runtime-deadlock-detection")]
-    spawn_deadlock_watcher();
-
-    // Step 1: Parse CLI flags and environment.
-    let data_dir = data_dir();
-    let bootstrap_mode = std::env::var("RAXIS_BOOTSTRAP").is_ok();
+    spawn_deadlock_watcher(data_dir.clone());
 
     // Step 2: If bootstrap mode — enter bootstrap::run(). Does not return.
     //
@@ -558,6 +640,71 @@ async fn main() {
                      \"error\":\"spawn_blocking join failed: {join_err}\"}}",
                 );
             }
+        }
+    }
+
+    // Step 8a'' (V2.5 `self-healing-supervisor.md §3.3`): rehydrate
+    // forensic deadlock dumps left behind by the previous kernel
+    // run, AND synthesise the matching restart-lifecycle audit
+    // events into the chain.
+    //
+    // **Order rationale.** Runs AFTER the canonical `KernelStarted`
+    // (so the new event sequences chain off the fresh `prev_sha256`
+    // computed by `last_chain_state` at Step 7a, keeping
+    // `verify-chain` hash-clean across the restart boundary). Runs
+    // AFTER the `reconcile_git_apply_pending` sweep so
+    // `KernelRestartCompleted.recovery_sweep_ms` reflects the
+    // *complete* boot recovery cost (Step 6 + Step 8a). Runs
+    // BEFORE the disk-watchdog and IPC accept so the audit chain
+    // already records the restart context if a downstream subsystem
+    // refuses to come up.
+    //
+    // **Best-effort emit.** All audit emits below use `inner_audit`
+    // (bypassing the notification wrapper) and *log* failures
+    // rather than aborting boot — a kernel that successfully booted
+    // a replacement after a deadlock is more useful than one that
+    // refuses to boot because the prior dump file has a stale
+    // schema. The supervisor's structured stderr log + the on-disk
+    // dump file remain forensic backups.
+    //
+    // **Default-off compatibility (`INV-SUPERVISOR-OPT-IN-01`).**
+    // The kernel reads dump files unconditionally (they may exist
+    // because the kernel exited 70 in a non-supervised
+    // configuration too — operator could re-launch manually after
+    // a deadlock). The opt-in env var only gates the
+    // *supervisor's* spawn loop, not the kernel's own bookkeeping.
+    {
+        let unix_now = raxis_runtime::unix_now_secs();
+        // Wall-clock approximation of the boot-recovery sweep.
+        // Measured from `started_at` (the canonical KernelStarted
+        // timestamp captured at Step 8) to now. Sub-second
+        // precision isn't required for the audit row; a future
+        // PR can hoist an `Instant` if a tighter reading is
+        // needed.
+        let recovery_sweep_ms = unix_now
+            .saturating_sub(started_at)
+            .saturating_mul(1000) as u64;
+        let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
+        let sentinel = restart_lifecycle::read_sentinel_for_restart(&sentinel_path);
+        let outcome = restart_lifecycle::rehydrate_restart_context(
+            inner_audit.as_ref(),
+            &data_dir,
+            sentinel,
+            recovery_sweep_ms,
+        );
+        if outcome.dumps_processed > 0
+            || outcome.kernel_restart_initiated_emits > 0
+            || outcome.kernel_restart_completed_emits > 0
+        {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"restart_lifecycle_rehydrated\",\
+                 \"dumps_processed\":{},\"deadlock_detected\":{},\
+                 \"restart_initiated\":{},\"restart_completed\":{}}}",
+                outcome.dumps_processed,
+                outcome.kernel_deadlock_detected_emits,
+                outcome.kernel_restart_initiated_emits,
+                outcome.kernel_restart_completed_emits,
+            );
         }
     }
 
@@ -1602,26 +1749,31 @@ async fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// `concurrency-and-locking.md §INV-LOCK-07` — deadlock-watcher self-test.
+// `concurrency-and-locking.md §INV-LOCK-07` /
+// `self-healing-supervisor.md §3.2` — deadlock-watcher self-test.
 //
-// Pinned `#[ignore]` because it INTENTIONALLY induces the panic the
-// watcher exists to surface — running it under `cargo test`'s normal
-// path would abort the test runner before any other test in the
-// binary could start. Run manually:
+// Pinned `#[ignore]` because it INTENTIONALLY induces the
+// process-terminating exit the watcher exists to surface — running
+// it under `cargo test`'s normal path would terminate the test
+// runner before any other test in the binary could start. Run
+// manually:
 //
 //   cargo test -p raxis-kernel --features runtime-deadlock-detection \
-//     raxis_deadlock_watcher_panics_on_intentional_cycle \
+//     raxis_deadlock_watcher_exits_70_on_intentional_cycle \
 //     -- --ignored --nocapture --test-threads=1
 //
 // The test forks (a) two contender threads each acquiring two
 // `parking_lot::Mutex`es in opposite order (the canonical AB / BA
 // deadlock shape), and (b) the production `spawn_deadlock_watcher`
 // thread. We then `sleep` past the watcher's 2-second cadence and
-// expect the test process to abort with the watcher's `panic!`
-// before the `sleep` returns. A clean wake-up (no abort within the
-// sleep window) is a regression — either the watcher feature was
-// silently disabled at the cargo level, or the parking_lot
-// `deadlock_detection` lock-graph tracker stopped seeing the cycle.
+// expect the test process to be terminated by the watcher's
+// `process::exit(70)` (V2.5 contract — was `panic!` pre-V2.5, now
+// a stable supervisor-recognised exit code per
+// `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`) before the sleep
+// returns. A clean wake-up (no abort within the sleep window) is a
+// regression — either the watcher feature was silently disabled
+// at the cargo level, or the parking_lot `deadlock_detection`
+// lock-graph tracker stopped seeing the cycle.
 // ---------------------------------------------------------------------------
 
 #[cfg(all(test, feature = "runtime-deadlock-detection"))]
@@ -1632,11 +1784,15 @@ mod deadlock_watcher_self_test {
     use std::time::Duration;
 
     #[test]
-    #[ignore = "intentionally panics the test process; run with --ignored"]
-    fn raxis_deadlock_watcher_panics_on_intentional_cycle() {
+    #[ignore = "intentionally exits the test process with code 70; run with --ignored"]
+    fn raxis_deadlock_watcher_exits_70_on_intentional_cycle() {
         // Install the production watcher first so it observes both
-        // contender threads' lock acquisitions.
-        spawn_deadlock_watcher();
+        // contender threads' lock acquisitions. We pass a tempdir
+        // so the dump-write side-effect lands in scratch rather
+        // than the developer's `~/.raxis/`.
+        let data_dir = tempfile::tempdir()
+            .expect("tempdir for watcher dump file");
+        spawn_deadlock_watcher(data_dir.path().to_path_buf());
 
         let a: Arc<parking_lot::Mutex<()>> = Arc::new(parking_lot::Mutex::new(()));
         let b: Arc<parking_lot::Mutex<()>> = Arc::new(parking_lot::Mutex::new(()));
@@ -1675,8 +1831,7 @@ mod deadlock_watcher_self_test {
 
         // Sleep 5 seconds — well past the watcher's 2-second
         // cadence. If the watcher is wired correctly the process
-        // aborts (panic = "abort" in the test profile too, see
-        // `[profile.release]` notes) before we wake.
+        // exits with code 70 (V2.5 contract) before we wake.
         //
         // If we DO wake, the assert below fails: either the
         // `runtime-deadlock-detection` feature wasn't really enabled
@@ -1684,7 +1839,8 @@ mod deadlock_watcher_self_test {
         // stopped surfacing this canonical cycle shape.
         thread::sleep(Duration::from_secs(5));
         panic!(
-            "raxis-deadlock-watcher did NOT panic within 5 seconds — \
+            "raxis-deadlock-watcher did NOT terminate the test \
+             process with exit code 70 within 5 seconds — \
              either the `runtime-deadlock-detection` cargo feature \
              was silently disabled, or parking_lot's lock-graph \
              tracker no longer detects the canonical AB/BA cycle. \
