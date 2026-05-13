@@ -89,6 +89,7 @@ pub mod retry;
 pub mod sidecar_client;
 pub mod streaming;
 pub mod tools;
+pub mod tools_vm_capabilities;
 pub mod transport;
 pub mod vm_capabilities;
 
@@ -155,6 +156,13 @@ pub use tools::{
     build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,
     EditFileTool, GitCommitTool, GrepSearchTool, ReadFileTool, Tool, ToolContext, ToolError,
     ToolOutput, ToolRegistry,
+};
+pub use tools_vm_capabilities::VmCapabilitiesTool;
+pub use vm_capabilities::{
+    build_capability_hint, cached_capabilities, is_kernel_private_env, probe_capabilities,
+    project_manifest, BinaryEntry, CapabilityCategory, CapabilityFilter, CapabilityManifest,
+    FilesystemSnapshot, GoToolchain, ImageRole, NodePackage, NodeRuntime, PythonPackage,
+    PythonRuntime, RustToolchain,
 };
 pub use transport::{
     connect, KernelTransport, KernelTransportConfig, StreamTransport, TransportError,
