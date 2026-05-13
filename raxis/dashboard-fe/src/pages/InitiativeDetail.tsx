@@ -5,6 +5,7 @@ import clsx from "clsx";
 
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
+import { CredentialsView, useOperatorRoles } from "@/components/CredentialsView";
 import { DagGraph } from "@/components/DagGraph";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -61,6 +62,22 @@ export function InitiativeDetailPage() {
     else sp.set("plan", "open");
     setSearchParams(sp, { replace: true });
   };
+
+  // Credentials panel — same `?credentials=open` URL-driven
+  // pattern so an operator can deep-link into the masked
+  // listing for a given initiative. Default-collapsed both
+  // because credentials are a low-frequency surface AND
+  // because rendering the listing audits it
+  // (`OperatorListedCredentials`); we don't want every
+  // initiative-detail visit to bake a row.
+  const credentialsPanelOpen = searchParams.get("credentials") === "open";
+  const toggleCredentialsPanel = () => {
+    const sp = new URLSearchParams(searchParams);
+    if (credentialsPanelOpen) sp.delete("credentials");
+    else sp.set("credentials", "open");
+    setSearchParams(sp, { replace: true });
+  };
+  const operatorRoles = useOperatorRoles();
   const writeStatuses = (next: string[]) => {
     const sp = new URLSearchParams(searchParams);
     if (next.length === 0) sp.delete("status");
@@ -441,6 +458,41 @@ export function InitiativeDetailPage() {
         {planPanelOpen && (
           <div id="plan-toml-panel" className="border-t border-edge p-4">
             <InitiativePlanView initiativeId={init.initiative_id} />
+          </div>
+        )}
+      </section>
+
+      {/* Credentials — collapsible panel surfacing the
+       * declared credential files for this initiative. Spec:
+       * `INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01`. */}
+      <section className="card p-0 overflow-hidden">
+        <button
+          type="button"
+          onClick={toggleCredentialsPanel}
+          aria-expanded={credentialsPanelOpen}
+          aria-controls="credentials-panel"
+          data-testid="credentials-toggle"
+          className="w-full flex items-center justify-between px-4 py-3 hover:bg-panel-high transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <span aria-hidden className="text-ink-subtle">
+              {credentialsPanelOpen ? "▾" : "▸"}
+            </span>
+            <h2 className="text-sm font-semibold text-ink">Credentials</h2>
+            <span className="text-[11px] text-ink-subtle">
+              · {credentialsPanelOpen ? "Hide" : "Show"} declared credential files (default masked)
+            </span>
+          </div>
+          <span className="text-[11px] text-ink-subtle">
+            {credentialsPanelOpen ? "click to collapse" : "click to expand"}
+          </span>
+        </button>
+        {credentialsPanelOpen && (
+          <div id="credentials-panel" className="border-t border-edge p-4">
+            <CredentialsView
+              scope={{ kind: "initiative", initiativeId: init.initiative_id }}
+              operatorRoles={operatorRoles}
+            />
           </div>
         )}
       </section>

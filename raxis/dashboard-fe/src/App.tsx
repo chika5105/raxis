@@ -18,6 +18,7 @@ import { OverviewPage } from "@/pages/Overview";
 import { PolicyPage } from "@/pages/Policy";
 import { SessionDetailPage } from "@/pages/SessionDetail";
 import { SessionsPage } from "@/pages/Sessions";
+import { SystemCredentialsPage } from "@/pages/SystemCredentials";
 import { TaskDetailPage } from "@/pages/TaskDetail";
 import { WorktreeDetailPage } from "@/pages/WorktreeDetail";
 
@@ -75,6 +76,10 @@ export function App() {
                     <Route path="/git" element={<GitPage />} />
                     <Route path="/git/:name" element={<WorktreeDetailPage />} />
                     <Route path="/policy" element={<PolicyPage />} />
+                    <Route
+                      path="/system/credentials"
+                      element={<SystemCredentialsPage />}
+                    />
                     <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                 </Shell>

@@ -56,6 +56,16 @@ const NAV: NavSection[] = [
     label: "System",
     items: [
       { to: "/policy", label: "Policy", glyph: "P" },
+      // Admin-only — the kernel rejects non-admin GETs of the
+      // system-credentials surface (`INV-DASHBOARD-CREDENTIAL
+      // -REVEAL-ROLE-GATED-01`), so we hide the affordance for
+      // operators whose token cannot succeed.
+      {
+        to: "/system/credentials",
+        label: "Credentials",
+        glyph: "K",
+        rolesAny: ["admin"],
+      },
     ],
   },
 ];
@@ -312,6 +322,8 @@ const SEGMENT_LABELS: Record<string, string> = {
   audit: "Audit",
   git: "Git Worktrees",
   policy: "Policy",
+  system: "System",
+  credentials: "Credentials",
 };
 
 function Breadcrumb() {

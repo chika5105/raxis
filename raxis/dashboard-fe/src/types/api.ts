@@ -184,6 +184,79 @@ export interface InitiativePlanView {
   approved_at_unix: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// Credentials view — `INV-DASHBOARD-CREDENTIAL-*`.
+//
+// The dashboard surfaces every credential file the kernel knows
+// about (per-initiative + system-wide) in a default-MASKED view:
+// the listing endpoint carries metadata only — name, proxy type,
+// mount alias, format hint, byte size, SHA-256 prefix, on-disk
+// path. Plaintext is fetched on demand through the separate
+// `*/reveal` POST endpoint, which is admin-role-gated, audited
+// before response, and rate-limited per operator.
+//
+// Source of truth: `raxis_dashboard::data::CredentialMetadata`
+// and `raxis_dashboard::data::CredentialReveal`. These mirrors
+// MUST stay in sync — the wire shape has no `plaintext` field on
+// the listing endpoint by spec, and we MUST NOT add one here as
+// a defence-in-depth check against accidental drift.
+// ---------------------------------------------------------------------------
+
+/// One credential row returned by either the per-initiative
+/// (`GET /api/initiatives/:id/credentials`) or system-wide
+/// (`GET /api/system/credentials`) listing endpoint.
+///
+/// **NEVER** carries plaintext. The reveal endpoint
+/// (`POST .../reveal`) is the only sanctioned path that
+/// returns the bytes, and it returns them via the disjoint
+/// [`CredentialReveal`] shape.
+export interface CredentialMetadata {
+  name: string;
+  proxy_type: string;
+  mount_as?: string | null;
+  format_hint: string;
+  upstream_host_port?: string | null;
+  byte_size: number;
+  sha256_prefix?: string | null;
+  loaded_from_path?: string | null;
+  is_revealable: boolean;
+  /// Wire-stable role string the operator MUST hold to reveal
+  /// (`"admin"`). Consumed verbatim by the FE so the reveal
+  /// button is disabled — with the right tooltip — for
+  /// `read`-role operators.
+  reveal_required_role: string;
+}
+
+/// Wire shape returned by both listing endpoints. Wraps a
+/// `Vec<CredentialMetadata>` so future fields (pagination
+/// markers, total counts) can be added without breaking the
+/// FE.
+export interface CredentialListResponse {
+  credentials: CredentialMetadata[];
+}
+
+/// Successful reveal response. Carries:
+///
+///   * `plaintext` — UTF-8 string for `encoding == "utf8"`
+///     credentials, base64-encoded bytes for `encoding ==
+///     "base64"` (binary credentials).
+///   * `expires_at_unix` — wall-clock auto-hide deadline. The
+///     FE MUST honour this regardless of operator activity
+///     (`INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`). Per-initiative
+///     credentials get +30 s; system credentials (Anthropic,
+///     other provider keys) get +15 s.
+///   * `sha256_prefix` — first 8 lowercase hex chars of the
+///     SHA-256 of the bytes, surfaced in the reveal banner so
+///     the operator can sanity-check what they're looking at.
+export interface CredentialReveal {
+  name: string;
+  plaintext: string;
+  encoding: "utf8" | "base64";
+  byte_size: number;
+  expires_at_unix: number;
+  sha256_prefix: string;
+}
+
 export interface DagNode {
   task_id: string;
   title: string;

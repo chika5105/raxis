@@ -17,6 +17,8 @@ import type {
   AuditEntryView,
   ChainStatusResponse,
   ChallengeResponse,
+  CredentialListResponse,
+  CredentialReveal,
   DagView,
   EscalationView,
   HealthSnapshot,
@@ -234,6 +236,57 @@ export const dashboardApi = {
       apiFetch<InitiativePlanView>(
         `/api/initiatives/${encodeURIComponent(id)}/plan`,
         signal ? { signal } : {},
+      ),
+    /// `GET /api/initiatives/:id/credentials` — metadata-only
+    /// listing of every credential the initiative's plan
+    /// declares. NEVER carries plaintext (the wire shape has
+    /// no `plaintext` field; reveal goes through the disjoint
+    /// `revealCredential` POST below). Read-role suffices to
+    /// list; reveal additionally requires admin.
+    credentials: (
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<CredentialListResponse> =>
+      apiFetch<CredentialListResponse>(
+        `/api/initiatives/${encodeURIComponent(id)}/credentials`,
+        signal ? { signal } : {},
+      ),
+    /// `POST /api/initiatives/:id/credentials/:name/reveal` —
+    /// fetches the plaintext for one credential. Admin-role-
+    /// gated, audited before the response leaves the kernel
+    /// (`INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`), and
+    /// rate-limited per operator. Body is empty by spec
+    /// (the path carries the credential selector); the FE
+    /// MUST treat the response's `expires_at_unix` as the
+    /// hard auto-hide deadline.
+    revealCredential: (
+      id: string,
+      name: string,
+    ): Promise<CredentialReveal> =>
+      apiFetch<CredentialReveal>(
+        `/api/initiatives/${encodeURIComponent(id)}/credentials/${encodeURIComponent(name)}/reveal`,
+        { method: "POST" },
+      ),
+  },
+
+  /// System-wide credential viewer (admin-only — the listing
+  /// itself is gated so a `read` operator cannot enumerate
+  /// the providers the kernel is bound to). The Anthropic
+  /// API key surfaces here under
+  /// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`:
+  /// reveals emit a `Critical`-severity notification and
+  /// auto-hide on a 15-second deadline (vs the 30-second
+  /// per-initiative default).
+  systemCredentials: {
+    list: (signal?: AbortSignal): Promise<CredentialListResponse> =>
+      apiFetch<CredentialListResponse>(
+        `/api/system/credentials`,
+        signal ? { signal } : {},
+      ),
+    reveal: (name: string): Promise<CredentialReveal> =>
+      apiFetch<CredentialReveal>(
+        `/api/system/credentials/${encodeURIComponent(name)}/reveal`,
+        { method: "POST" },
       ),
   },
 
