@@ -416,7 +416,7 @@ For copy-pasteable end-to-end recipes, see:
 
 * `guides/recipes/ops/10-publish-executor-image.md` — declaring a
   `[[vm_images]]` entry and computing its digest.
-* `guides/recipes/ops/11-bring-your-own-image.md` — full BYO
+* `guides/recipes/ops/17-bring-your-own-image.md` — full BYO
   walkthrough (Containerfile authoring, `docker build`, digest
   computation, `oci-cache/` staging, policy declaration), with
   the BYO live-e2e test cited as a worked example.
