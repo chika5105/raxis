@@ -460,10 +460,26 @@ mod tests {
     /// `<data_dir>/repositories/main` with one commit on the
     /// requested branch. Mirrors the live-e2e harness's
     /// `bootstrap_source_repository` shape.
+    ///
+    /// **Portability.** `git init -b <branch>` requires git ≥ 2.28
+    /// (the flag was added in 2020). Some CI sandboxes / older
+    /// host installs still ship git 2.23-era binaries; on those
+    /// hosts `-b` errors with `unknown switch ‘b’` and the test
+    /// fixture aborts before the production gix path is even
+    /// reached. We use the version-agnostic two-step instead:
+    /// `git init -q` (lands HEAD on whatever the host defaults to,
+    /// commonly `master` on older git) followed by
+    /// `git symbolic-ref HEAD refs/heads/<branch>` to retarget HEAD.
+    /// This is safe pre-commit because the symbolic-ref is rewritten
+    /// before any object is bound to a branch.
     fn bootstrap_source(data_dir: &Path, branch: &str) -> String {
         let main_repo = data_dir.join("repositories").join("main");
         std::fs::create_dir_all(&main_repo).expect("mkdir main repo");
-        run_git(&main_repo, &["init", "-q", "-b", branch]);
+        run_git(&main_repo, &["init", "-q"]);
+        run_git(
+            &main_repo,
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+        );
         run_git(&main_repo, &["config", "user.email", "test@raxis.local"]);
         run_git(&main_repo, &["config", "user.name",  "raxis-test"]);
         std::fs::write(main_repo.join("README.md"), b"hello\n").unwrap();
