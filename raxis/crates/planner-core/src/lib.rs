@@ -90,6 +90,7 @@ pub mod sidecar_client;
 pub mod streaming;
 pub mod tool_audit;
 pub mod tools;
+pub mod tools_mongo;
 pub mod tools_postgres;
 pub mod transport;
 
