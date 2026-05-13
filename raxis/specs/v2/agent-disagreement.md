@@ -146,6 +146,31 @@ Sequence:
 
 If `on_max_rounds = "fail_task"`, step 6 instead transitions the task directly to `Failed`.
 
+### 3.6 Orchestrator NNSP responsibility (`INV-PLANNER-ORCH-RETRY-ON-REJECT-01`)
+
+The kernel mechanisms in §3.1–§3.5 enforce the *ceiling* on reviewer-rejection rounds, but the actual `RetrySubTask` intent that drives a fresh executor session must come from the Orchestrator agent in-band. The kernel does not auto-issue `RetrySubTask` on `AtLeastOneRejected` aggregator outcomes — the Orchestrator owns the DAG-driving decision and the Executor task remains in `Completed` state from the kernel FSM's perspective regardless of reviewer verdict (per `kernel-store.md §2.5.1` the executor's task-FSM is independent of downstream review verdicts; the verdict is captured in `subtask_activations.review_reject_count` and the cross-Reviewer aggregator's `ReviewAggregationCompleted` audit row).
+
+The Orchestrator's KSB (per `v2_extended_gaps.md §2.4`) renders all cross-Reviewer verdicts into the `reviewer_verdicts=` block (see `crates/ksb/src/lib.rs::render_ksb`). Each row has the shape `reviewer=<task_id> sha=<40-hex> approved=<bool> "<critique>"`. The Orchestrator NNSP — shipped at `crates/planner-core/src/driver.rs::render_system_prompt_for_role(Role::Orchestrator, …)` — MUST:
+
+1. Tell the model to scan the `reviewer_verdicts=` block before deciding the next terminal tool to call.
+2. If ANY row reads `approved=false`, the model MUST call `retry_subtask { subtask_task_id: "<executor_task_id>" }` on the executor whose review was rejected — NOT `integration_merge`. The executor's predecessor is the `reviewer=<task_id>` row's plan-declared predecessor (the Orchestrator can read the executor task id directly from the `dag=` block since reviewer-task ids in the realistic plan canonically embed the executor's task id, e.g., `review-lint-defect-A` reviews `lint-defect`). When the predecessor relationship is non-obvious, the model SHOULD inspect `plan.toml` via the `read_file` tool.
+3. ONLY proceed to `integration_merge` when every executor row is `complete` AND every reviewer row is `complete` AND no `reviewer_verdicts=` row reads `approved=false`. Submitting `integration_merge` with an outstanding rejection silently merges defective code despite the reviewer's objection — a paradigm-`R-6` (Fail-Closed Default) violation.
+4. Acknowledge that the kernel-side `max_rounds` ceiling (per §3.1) caps the retry loop. If a `retry_subtask` would breach the ceiling, the kernel rejects with `FAIL_MAX_REVIEW_ROUNDS_EXCEEDED` and §3.4 / §6 escalation routing fires. The Orchestrator therefore MUST NOT itself enforce a separate retry ceiling — the kernel is the single source of truth.
+
+#### Why this rule lives in the NNSP, not in kernel logic
+
+A natural alternative is "kernel auto-issues `RetrySubTask` on `AtLeastOneRejected`." That alternative is rejected for three reasons grounded in this spec:
+
+- **§1.1 — "It does not arbitrate disagreements."** Auto-retry would be a kernel-side judgment that the rejection is recoverable. The kernel cannot know that — only the agent sees the critique. An auto-retry of a structurally unrecoverable rejection (e.g., "the requested feature is incompatible with the codebase") wastes budget on a doomed loop until `max_rounds` fires; the Orchestrator's read of the critique is the only way to short-circuit.
+- **paradigm.md `R-12` — Out-of-Band Escalation.** Disagreement is a coordination failure to be resolved by an authorized principal. The Orchestrator IS that principal in the V2 hierarchical model; routing the decision through the agent layer is on-paradigm.
+- **`integration-merge.md §8` — IntegrationMerge predicate.** The merge predicate (kernel-side) does NOT include "no outstanding rejections" because the executor task is `Completed` regardless of verdict; adding the predicate would couple the merge handler to the cross-Reviewer aggregator and break the existing dispatch matrix. The cleaner factoring is to keep the merge handler simple and let the Orchestrator gate via the prompt.
+
+#### Witness coverage
+
+The realistic-scenario E2E test (`kernel/tests/extended_e2e_realistic_scenario.rs`) wires `ReviewerSubstantiveDisagreementWitness` (`kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs`) which fails the test if the Orchestrator does not respawn the `lint-defect` executor after the substantive `approved=false` verdict from `review-lint-defect-B`. A regression in the Orchestrator NNSP that drops this rule will surface as `saw_executor_respawn = false` + `saw_aggregation_pass = false` in the witness report — exactly the failure mode reproduced on iter41 (audit-chain rendered the aggregation row but the Orchestrator went straight to `integration_merge` because the prompt did not direct it to retry).
+
+The corresponding driver-side regression is pinned by `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule`.
+
 ---
 
 ## 4. Circular Revision Detection

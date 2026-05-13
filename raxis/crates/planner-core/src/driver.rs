@@ -1079,8 +1079,34 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               3. If a row's `state` is `failed` and you judge \
                                  a retry is warranted, call `retry_subtask { \
                                  subtask_task_id: \"<task_id>\" }` instead.\n\
+                              3a. SCAN the `reviewer_verdicts=` block. If ANY \
+                                 reviewer row reads `approved=false` (the \
+                                 reviewer's `reviewer=<task_id>` field always \
+                                 names a reviewer task; that reviewer's \
+                                 declared `predecessor` in `plan.toml` is the \
+                                 executor task it reviewed), you MUST call \
+                                 `retry_subtask { subtask_task_id: \
+                                 \"<executor_task_id>\" }` on that executor — \
+                                 NOT `integration_merge`. The rejection \
+                                 critique inside the quotes after \
+                                 `approved=false` describes the defect; \
+                                 retrying spawns a fresh executor session \
+                                 with that critique surfaced via push so \
+                                 the executor can revise. ONLY proceed to \
+                                 `integration_merge` after the executor's \
+                                 reviewers all read `approved=true`. The \
+                                 plan's `[plan.tasks.<exec>.review].\
+                                 max_rounds` ceiling (defaults from \
+                                 `[plan.defaults.review]`) caps the retry \
+                                 loop; if a retry would breach it, the \
+                                 kernel rejects the `retry_subtask` intent \
+                                 with `FAIL_MAX_REVIEW_ROUNDS_EXCEEDED` and \
+                                 you fall through to escalation per \
+                                 `agent-disagreement.md` §3.\n\
                               4. When EVERY executor row is `complete` AND \
-                                 every reviewer row is `complete`, call \
+                                 every reviewer row is `complete` AND no \
+                                 `reviewer_verdicts=` row reads \
+                                 `approved=false`, call \
                                  `integration_merge { base_sha, head_sha }` \
                                  to fast-forward the initiative's \
                                  `target_ref`. Source the SHAs as follows:\n\
@@ -1544,6 +1570,34 @@ mod tests {
         assert!(prompt.contains("initiative `init-A`"));
         assert!(prompt.contains("activate_subtask"));
         assert!(prompt.contains("integration_merge"));
+    }
+
+    /// The orchestrator NNSP MUST tell the model to call
+    /// `retry_subtask` (NOT `integration_merge`) whenever any
+    /// `reviewer_verdicts=` row reads `approved=false`. Without
+    /// this rule the model defaults to `integration_merge` once
+    /// every executor row reads `complete` regardless of verdict,
+    /// and reviewer-substantive disagreement loops never close.
+    /// Backed by `agent-disagreement.md` §3 (`max_review_rounds`)
+    /// + the `ReviewerSubstantiveDisagreementWitness` chain
+    /// expectation in `kernel/tests/extended_e2e_support/
+    /// reviewer_substantive_disagreement.rs`.
+    #[test]
+    fn render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule() {
+        let args = BootArgs {
+            initiative_id: "init-A".to_owned(),
+            task_id: None,
+        };
+        let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(prompt.contains("reviewer_verdicts="),
+            "orchestrator NNSP MUST cite the `reviewer_verdicts=` block by name");
+        assert!(prompt.contains("approved=false"),
+            "orchestrator NNSP MUST instruct the model on `approved=false` rows");
+        assert!(prompt.contains("retry_subtask"),
+            "orchestrator NNSP MUST direct `retry_subtask` on review rejection");
+        assert!(prompt.contains("max_rounds")
+                || prompt.contains("MAX_REVIEW_ROUNDS"),
+            "orchestrator NNSP MUST acknowledge the `max_rounds` ceiling");
     }
 
     #[test]

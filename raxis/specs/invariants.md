@@ -71,6 +71,7 @@
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
 | Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
+| Planner harness — orchestrator NNSP — V2 | INV-PLANNER-ORCH-RETRY-ON-REJECT-01 | 1 |
 | Executor / role-session capability discovery — V2 | INV-EXEC-DISCOVERY-01 | 1 |
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
@@ -1941,6 +1942,86 @@ controls are in `policy.toml [orchestrator]`. See
 `planner-harness.md §4.8`."
 
 **Canonical home.** `v2/planner-harness.md` §4.8.
+
+---
+
+### INV-PLANNER-ORCH-RETRY-ON-REJECT-01 — Orchestrator NNSP MUST direct `retry_subtask` on `approved=false`
+
+**Statement.** The Orchestrator's NNSP — rendered by
+`crates/planner-core/src/driver.rs::render_system_prompt_for_role(
+Role::Orchestrator, …)` and version-locked with the kernel binary
+per `INV-PLANNER-HARNESS-06` — MUST instruct the model to:
+
+1. Inspect the `reviewer_verdicts=` block of the rendered KSB
+   (`crates/ksb/src/lib.rs::render_ksb`) before deciding the next
+   terminal tool to call.
+2. Call `retry_subtask { subtask_task_id: "<executor_task_id>" }`
+   — NOT `integration_merge` — whenever any row of
+   `reviewer_verdicts=` reads `approved=false` against an
+   executor whose task row is `complete`.
+3. Defer to the kernel's `[plan.tasks.<exec>.review].max_rounds`
+   ceiling (per `agent-disagreement.md §3`) for the retry-loop
+   ceiling — the Orchestrator MUST NOT itself enforce a separate
+   ceiling.
+4. Only call `integration_merge` after every executor's
+   `reviewer_verdicts=` row reads `approved=true`.
+
+**Justification.** The kernel's cross-Reviewer aggregator
+(`kernel/src/handlers/intent.rs::handle_submit_review` post-commit
+loop) emits `ReviewAggregationCompleted { verdict:
+"AtLeastOneRejected" }` and best-effort enqueues
+`KernelPush::ReviewRejected` to the live Orchestrator session
+when the rejection is current. Critically, the executor task's
+own FSM stays at `Completed` regardless of the verdict (per
+`kernel-store.md §2.5.1` the executor's task FSM is independent
+of downstream review verdicts; the verdict is captured in
+`subtask_activations.review_reject_count` and the audit row, not
+the task `state`). The Orchestrator's `dag=` view therefore shows
+the executor row as `complete` even when reviewers rejected it,
+and the only Orchestrator-side signal for retry-vs-merge is the
+`reviewer_verdicts=` block. Without this NNSP rule, the
+Orchestrator defaults to `integration_merge` once every executor
+row is `complete` regardless of verdict, silently merging
+defective code despite the reviewer's objection — a
+paradigm-`R-6` (Fail-Closed Default) violation.
+
+The kernel-side alternatives (auto-issuing `RetrySubTask` on
+`AtLeastOneRejected`, or coupling the `IntegrationMerge`
+admission predicate to the cross-Reviewer aggregator) are
+rejected per `agent-disagreement.md §3.6`: the kernel cannot
+distinguish recoverable rejections from structurally
+unrecoverable ones, so the decision belongs to the Orchestrator
+agent reading the critique. This invariant is the NNSP-side
+contract that completes the retry loop.
+
+**Scenario (iter41 reproduction).** A two-reviewer Executor task
+`lint-defect` is followed by reviewers `review-lint-defect-A`
+(approves) and `review-lint-defect-B` (rejects with critique
+"`greeting.rs` introduces clippy::useless_conversion"). The
+kernel emits `ReviewAggregationCompleted { verdict:
+"AtLeastOneRejected" }` and skips the `KernelPush::ReviewRejected`
+push because no Orchestrator session is live at that instant.
+The post-`SubmitReview` Orchestrator respawn fires, but the
+Orchestrator NNSP under iter41 contains only "rule 3: if a row
+is `failed`, call `retry_subtask`" — no rule for the
+`approved=false`-but-`complete` case. The Orchestrator therefore
+proceeds to `integration_merge` and the
+`ReviewerSubstantiveDisagreementWitness` panics with
+`saw_executor_respawn = false` + `saw_aggregation_pass = false`.
+The fix adds rule 3a (scan `reviewer_verdicts=`; on
+`approved=false`, call `retry_subtask`) and tightens rule 4
+(merge only when all verdicts are `approved=true`).
+
+**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
+responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
+NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
+
+**Pinned regression coverage.**
+`crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule`
+(NNSP unit test) +
+`kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
+(end-to-end audit-chain witness wired into
+`kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`).
 
 ---
 
