@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 18;
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -124,6 +124,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 18 {
         apply_migration_18(conn)?;
+    }
+    if current_version < 19 {
+        apply_migration_19(conn)?;
     }
 
     Ok(())
@@ -2407,6 +2410,81 @@ CREATE INDEX idx_{structured_outputs}_session
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (18, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 19 — Orchestrator no-progress respawn counter.
+//
+// `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` requires a structural
+// backstop against unbounded orchestrator respawn loops on rejected
+// intents. The Orchestrator agent is short-lived (per
+// `session_spawn_orchestrator.rs::respawn_orchestrator_for_initiative`);
+// it boots, reads the KSB, calls one terminal tool, and exits. When
+// the kernel rejects the intent (e.g. `RetrySubTaskRejectedNotRetryable`
+// per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`), the session exits
+// cleanly (no `Failed` FSM transition) and the post-exit hook
+// re-spawns. Without a per-initiative counter, the orchestrator can
+// loop on a rejected intent indefinitely (observed on the second
+// iter42: 45 `SessionVmSpawned` in 18 min, zero progress, zero
+// `Failed` transitions to trigger `crash_count`).
+//
+// This migration adds `orchestrator_no_progress_respawn_count` to
+// `initiatives`. The counter is:
+//
+//   * incremented in `respawn_orchestrator_for_initiative` BEFORE
+//     each new orchestrator session is spawned;
+//   * reset to 0 whenever the kernel observes a task-FSM advance or
+//     a new `subtask_activations` row insert for that initiative
+//     (i.e. real DAG progress, NOT just an intent landing);
+//   * compared against
+//     `respawn_orchestrator_for_initiative`'s constant
+//     `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3).
+//
+// On ceiling exceed: the kernel marks the initiative `Failed` with
+// `reason = "orchestrator no-progress respawn ceiling exceeded"`,
+// emits `AuditEventKind::OrchestratorRespawnCeilingExceeded`, and
+// refuses further respawns for that initiative.
+//
+// Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-migration
+// leaves the pre-migration schema intact (every-migration invariant
+// declared at the top of this module).
+//
+// Pre-Migration-19 rows default to 0 — the moment migration completes
+// every initiative observably has no respawns counted, consistent
+// with "fresh kernel start treats all initiatives as un-loop-stalled".
+// ---------------------------------------------------------------------------
+
+fn apply_migration_19(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_19_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 19 failed: {e}"))
+    })
+}
+
+/// The complete migration-19 DDL.
+pub fn render_migration_19_ddl() -> String {
+    let initiatives    = Table::Initiatives.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- Add the orchestrator-respawn no-progress counter. Default 0 ⇒
+-- pre-Migration-19 rows observably have not accumulated respawns
+-- (the counter only ever increments on a fresh respawn). Type is
+-- INTEGER (SQLite stores it as i64 native); the kernel narrows
+-- to u32 on read.
+ALTER TABLE {initiatives}
+    ADD COLUMN orchestrator_no_progress_respawn_count INTEGER NOT NULL DEFAULT 0;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (19, strftime('%s', 'now'));
 
 COMMIT;
 "

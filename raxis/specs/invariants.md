@@ -69,6 +69,7 @@
 | Kernel store — V1 | INV-STORE-01..03 | 3 |
 | Policy epochs — V1 | INV-POLICY-01 | 1 |
 | Scheduler — V1 | INV-SCHED-01, INV-SCHED-02, INV-SCHED-03 | 3 |
+| Orchestrator respawn ceiling — V2 | INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01 | 1 |
 | VCS path enforcement — V1 | INV-TASK-PATH-01, INV-TASK-PATH-02 | 2 |
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
@@ -1202,6 +1203,195 @@ polled silently until the 3900 s deadline. Post-fix
 `PlanLaneNotInPolicy("e2e-realistic-sibling-lane", declared:
 "default", ...)` and the harness registers the lanes in the
 same fix commit so the live-e2e runs to completion.
+
+## §6.5 — Orchestrator respawn ceiling (INV-ORCH-RESPAWN-*)
+
+Canonical home: `v2/v2-deep-spec.md` §Step 12 (V2.5b extension —
+Orchestrator no-progress respawn counter). The pre-existing
+bounded-capability invariants (`INV-CONVERGENCE-01` review-round
+cap, `crash_count` Executor-Failed cap, `max_orch_turns`
+per-session fetch quota) do **not** cover the loop pattern where
+the Orchestrator cleanly exits on a kernel-rejected intent
+without any task FSM transition — none of those counters
+advances on a clean exit, so the orchestrator-respawn loop runs
+silently and unbounded until the harness-side wall-clock
+deadline fires. This section closes that gap as a
+structural backstop on top of the higher-fidelity NNSP fix
+(`INV-PLANNER-ORCH-RETRY-ON-REJECT-01`,
+`INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`) and the kernel's
+fail-closed admission gate
+(`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).
+
+### INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01 — Per-initiative respawn ceiling without task FSM progress
+
+**Statement.** For any initiative `i`, the kernel MUST NOT spawn
+more than `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3)
+orchestrator sessions for `i` without an intervening task FSM
+transition on any task belonging to `i`. The counter
+(`initiatives.orchestrator_no_progress_respawn_count`, INTEGER
+NOT NULL DEFAULT 0, added by Migration 19) is maintained as
+follows:
+
+* **Increment.** Every `respawn_orchestrator_for_initiative`
+  call (the post-exit respawn path in
+  `kernel/src/session_spawn_orchestrator.rs`) calls
+  `orch_respawn_ceiling::increment_no_progress_count_in_tx`
+  **before** issuing the new orchestrator spawn. The increment
+  is paired with a read of the post-increment value, returned as
+  `CeilingOutcome::Permitted { new_count }` if
+  `new_count <= MAX_ORCH_NO_PROGRESS_RESPAWNS` or
+  `CeilingOutcome::Exceeded { new_count, attempts }` otherwise.
+* **Reset.** Every legal task FSM transition in
+  `transition_task_in_tx` (kernel/src/initiatives/
+  task_transitions.rs) — `Admitted → Running`, `Running →
+  Completed`, `Running → Failed`, `* → Aborted`, `* →
+  Cancelled` — calls
+  `orch_respawn_ceiling::reset_no_progress_count_in_tx` on the
+  parent initiative inside the SAME transaction as the FSM flip.
+  Any forward FSM progress restarts the budget from 0.
+* **Ceiling enforcement.** When the increment returns
+  `Exceeded`, the same transaction updates
+  `initiatives.state = 'Failed'` and `initiatives.completed_at`
+  to the current epoch second; the post-commit async task emits
+  `AuditEventKind::OrchestratorRespawnCeilingExceeded
+  { initiative_id, attempts }` to the audit chain
+  (paired-write contract documented in
+  `audit-paired-writes.md §4.1`/`§4.3`); the spawn returns
+  early with `orchestrator_respawn_skipped reason=
+  "no-progress respawn ceiling exceeded"`.
+
+After ceiling-exceeded, `respawn_orchestrator_for_initiative`
+short-circuits on subsequent invocations because the
+`initiatives.state = 'Failed'` row no longer satisfies the
+"orchestrator-eligible initiative" predicate at the call site.
+The audit event is the operator-facing failure surface; the
+dashboard's notification filter promotes
+`OrchestratorRespawnCeilingExceeded` to `Critical` priority via
+`raxis-dashboard-kernel::notification_filter::
+notification_priority`.
+
+**Justification.** The Orchestrator runs as a one-shot
+planner-session per turn: it enters with a fresh KSB, the LLM
+proposes a terminal tool call (`activate_subtask`,
+`retry_subtask`, `integration_merge`, etc.), the kernel
+admits or rejects, the session exits, and the post-exit hook
+optionally respawns. None of the pre-existing
+bounded-capability counters fires on the "kernel rejected the
+intent" path:
+
+* `INV-CONVERGENCE-01` review-round cap counts review rounds,
+  not orchestrator decision-cycles. A Completed-with-aggregate-
+  Pending KSB never crosses a review-round boundary, so the cap
+  stays inert.
+* `crash_count` increments only on Executor `Failed` task FSM
+  transitions. A clean orchestrator exit on an admit-rejected
+  intent never touches Executor state, so this counter stays
+  at 0.
+* `max_orch_turns` (`INV-PLANNER-HARNESS-01`) caps planner
+  fetches **per session**. Every fresh respawn starts with a
+  fresh quota, so a no-progress respawn loop charges 0 against
+  this ceiling.
+
+Iter42 reproduced the failure mode in production: 45
+`SessionVmSpawned` in 18 minutes, zero
+`ReviewAggregationCompleted`, zero
+`ExecutorRespawnFromReviewRejection`, zero `TaskStateChanged`.
+The orchestrator NNSP-aggregate fix
+(`INV-PLANNER-ORCH-RETRY-ON-REJECT-01` /
+`INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`) closes the
+**immediate** loop class for one specific upstream cause
+(NNSP rule racing the kernel aggregator). This invariant adds
+the **structural** backstop so any future regression with a
+different upstream cause (new NNSP bug, projection drift, LLM
+hallucination on a fresh aggregator surface) is still
+guaranteed to bound worst-case observability + operator
+recovery surface to four consecutive respawns, after which the
+initiative is loudly Failed with an audited reason.
+
+The reset-on-FSM-transition policy is deliberate: any forward
+progress (a Reviewer voting, an Executor activation
+admitting, an integration-merge completing) is taken as a
+signal the orchestrator is making real decisions and the
+counter resets. Only the pathological "respawn → reject →
+respawn" treadmill — by construction unable to advance the
+FSM — accumulates the counter.
+
+**Scenario.** Iter42 second run (`/tmp/raxis-e2e-realistic-
+iter42.log`, 2026-05-13). The orchestrator NNSP rule fires
+`retry_subtask { subtask_task_id: "lint-defect" }`. The kernel
+admits the intent against the activation row's
+`activation_state=Completed, review_reject_count=0` and rejects
+with `RetrySubTaskRejectedNotRetryable` (per
+`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`'s fail-closed
+default). The session exits clean; the post-exit hook fires
+`respawn_orchestrator_for_initiative`; Step 1b calls
+`increment_no_progress_count_in_tx` → returns
+`CeilingOutcome::Permitted { new_count: 1 }`; the new
+orchestrator spawns and re-reads the same KSB and fires the
+same `retry_subtask`. Three more iterations:
+`Permitted { 2 }`, `Permitted { 3 }`,
+`Permitted { 4 }` (= MAX). On the fifth call, the
+increment returns `Exceeded { attempts: 5 }`; the same
+transaction sets `initiatives.state = 'Failed'`,
+`completed_at = <now>`; the post-commit task emits
+`OrchestratorRespawnCeilingExceeded { initiative_id, attempts: 5
+}` to the audit chain; the spawn returns early with
+`orchestrator_respawn_skipped reason="no-progress respawn
+ceiling exceeded"`. The dashboard renders a Critical-priority
+notification; the operator opens the audit log, sees the
+ceiling event, and either operator-aborts the initiative or
+intervenes upstream. No silent harness-deadline hang.
+
+A second scenario: the NNSP fix lands and the orchestrator
+correctly waits on `aggregate=AtLeastOneRejected` before
+firing `retry_subtask`. The reviewer pass aggregates,
+`subtask_activations.review_reject_count` bumps to 1, the
+`RetrySubTask` admits, and the Executor activation flips
+back to `Running`. The FSM transition fires
+`transition_task_in_tx`, which calls
+`reset_no_progress_count_in_tx` in the same transaction,
+dropping `orchestrator_no_progress_respawn_count` back to 0.
+The ceiling never fires for the legitimate retry path; it
+remains armed as a backstop for the next pathological loop.
+
+**Pinned regression tests.**
+
+* `kernel/src/orch_respawn_ceiling.rs`:
+  - `fresh_initiative_increments_from_zero_to_one`
+  - `ceiling_exceeded_after_max_plus_one_increments`
+  - `reset_drops_count_back_to_zero`
+  - `increment_against_missing_initiative_is_permitted_no_op`
+  - `reset_against_zero_count_is_idempotent`
+  - `lookup_initiative_id_for_task_resolves_existing_task`
+  - `lookup_initiative_id_for_missing_task_returns_none`
+  - `build_ceiling_event_returns_none_on_permitted`
+  - `build_ceiling_event_returns_some_on_exceeded`
+* `kernel/src/initiatives/task_transitions.rs`: the existing
+  `transition_task_in_tx` test suite re-runs against the
+  reset-on-transition hook (the reset is idempotent against a
+  zero count per the pinned test above, so legacy tests pass
+  unchanged).
+* `crates/store/tests/migration_sql_dumps.rs`: Migration 19
+  drift-detector — re-running with
+  `RAXIS_DUMP_MIGRATION_SQL=1` regenerates the SQL file
+  byte-for-byte, and the test panics on any drift.
+
+**Canonical home.** `kernel/src/orch_respawn_ceiling.rs` (module
+implementing the predicate + audit-event constructor);
+`kernel/src/session_spawn_orchestrator.rs` Step 1b (increment +
+ceiling check + state update); `kernel/src/initiatives/
+task_transitions.rs` (reset on FSM transition);
+`crates/audit/src/event.rs::AuditEventKind::
+OrchestratorRespawnCeilingExceeded`;
+`crates/dashboard-kernel/src/notification_filter.rs`
+(`Critical` priority promotion);
+`crates/store/src/migration.rs::apply_migration_19` +
+`render_migration_19_ddl` (schema migration);
+`specs/v2/v2-deep-spec.md §Step 12` V2.5b extension;
+`specs/v2/audit-paired-writes.md §4.1`/`§4.3`
+(`OrchestratorRespawnCeilingExceeded` paired-class registration).
+
+---
 
 ---
 

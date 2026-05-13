@@ -47,6 +47,7 @@ mod elastic;
 mod ipc;
 mod recovery;
 mod initiatives;
+mod orch_respawn_ceiling;
 mod scheduler;
 mod vcs;
 mod witness_index;

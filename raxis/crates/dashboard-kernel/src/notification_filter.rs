@@ -201,6 +201,7 @@ pub fn notification_priority_for_kind_str(
         | "WitnessAccepted"
         | "ReviewAggregationCompleted"
         | "ExecutorRespawnFromReviewRejection"
+        | "OrchestratorRespawnCeilingExceeded"
         | "GitConsistencyRepaired"
         | "DryRunAdmitted"
         | "PathScopeOverrideApplied" => Some(Medium),
@@ -380,6 +381,13 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // multi-round disagreement, Low would hide a loop that's
         // burning rounds against `max_review_rejections`.
         K::ExecutorRespawnFromReviewRejection { .. } => Some(Medium),
+        // `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` — initiative
+        // failure on the structural backstop. Critical because the
+        // initiative is now terminal-Failed and the operator must
+        // intervene (abort, escalate, or open a fresh plan); the
+        // kernel will refuse all subsequent orchestrator respawns
+        // for the offending initiative.
+        K::OrchestratorRespawnCeilingExceeded { .. } => Some(Critical),
         K::GitConsistencyRepaired { .. } => Some(Medium),
         K::DryRunAdmitted { .. } => Some(Medium),
         K::PathScopeOverrideApplied { .. } => Some(Medium),

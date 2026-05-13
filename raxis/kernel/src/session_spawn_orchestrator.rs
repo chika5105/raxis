@@ -1849,6 +1849,128 @@ pub async fn respawn_orchestrator_for_initiative(
         );
         return None;
     }
+
+    // ── Step 1b: `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` ──────────
+    //
+    // Increment the per-initiative
+    // `orchestrator_no_progress_respawn_count` and compare against
+    // `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3). The counter resets
+    // to zero on every legal task FSM transition (see
+    // `initiatives::task_transitions::transition_task_in_tx` end-of-
+    // function reset hook), so honest DAG progress always clears the
+    // loop counter. A clean orchestrator exit on a kernel-rejected
+    // intent (e.g. `RetrySubTaskRejectedNotRetryable` per
+    // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`) keeps the
+    // counter and walks it toward the ceiling.
+    //
+    // On exceedance: mark the initiative `Failed`, emit
+    // `OrchestratorRespawnCeilingExceeded`, refuse the spawn. The
+    // `is_executing` preflight above will short-circuit on every
+    // subsequent post-exit-hook trigger for this initiative.
+    let store_for_ceiling   = Arc::clone(&ctx.store);
+    let init_for_ceiling    = initiative_id.to_owned();
+    let ceiling_outcome = tokio::task::spawn_blocking(move || -> Result<
+        Option<crate::orch_respawn_ceiling::CeilingOutcome>,
+        rusqlite::Error,
+    > {
+        let mut conn = store_for_ceiling.lock_sync();
+        let tx = conn.transaction()?;
+        let outcome = crate::orch_respawn_ceiling::increment_no_progress_count_in_tx(
+            &tx, &init_for_ceiling,
+        )?;
+        if let crate::orch_respawn_ceiling::CeilingOutcome::Exceeded { .. } = outcome {
+            // Mark the initiative `Failed` per
+            // `InitiativeState::Failed` (`fsm.rs`). The on-the-wire
+            // reason ("orchestrator no-progress respawn ceiling
+            // exceeded") lives in the `OrchestratorRespawnCeilingExceeded`
+            // audit event the caller emits post-commit — the
+            // `initiatives` table itself does not carry a
+            // `failure_reason` column at the V2 baseline schema
+            // (kernel-store.md §2.5.1 Table 2). The dashboard's
+            // failure-surface joins `initiatives.state = 'Failed'`
+            // against the chain-side audit row for the operator-
+            // facing string.
+            tx.execute(
+                &format!(
+                    "UPDATE {init}
+                        SET state        = 'Failed',
+                            completed_at = strftime('%s','now')
+                      WHERE initiative_id = ?1",
+                    init = raxis_store::Table::Initiatives.as_str(),
+                ),
+                rusqlite::params![&init_for_ceiling],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(outcome))
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten();
+
+    match ceiling_outcome {
+        None => {
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"orchestrator_respawn_ceiling_check_failed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"reason\":\"sql_error_treated_as_fail_closed\"}}",
+            );
+            return None;
+        }
+        Some(crate::orch_respawn_ceiling::CeilingOutcome::Exceeded {
+            count_after_increment, max_attempts,
+        }) => {
+            eprintln!(
+                "{{\"level\":\"error\",\
+                 \"event\":\"orchestrator_respawn_ceiling_exceeded\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"attempts\":{count_after_increment},\
+                 \"max_attempts\":{max_attempts}}}",
+            );
+            // Audit emission is the chain-side half of the paired
+            // write. The SQLite-side state mutation
+            // (`initiatives.state = 'Failed' + failure_reason`)
+            // already committed in the spawn_blocking above; this
+            // emission runs post-commit per `audit-paired-writes.md
+            // §4`. A crash between commit + emit leaves a
+            // consistent SQLite state (`Failed`, no further
+            // respawns) with a missing audit anchor; the recovery
+            // sweep is advisory per `INV-AUDIT-PAIRED-06`.
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::OrchestratorRespawnCeilingExceeded {
+                    initiative_id: initiative_id.to_owned(),
+                    attempts:      count_after_increment,
+                    max_attempts,
+                },
+                None,
+                None,
+                Some(initiative_id),
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"OrchestratorRespawnCeilingExceededAuditEmitFailed\",\
+                     \"initiative_id\":\"{initiative_id}\",\
+                     \"error\":\"{e}\"}}",
+                );
+            }
+            return None;
+        }
+        Some(crate::orch_respawn_ceiling::CeilingOutcome::Permitted {
+            count_after_increment,
+        }) => {
+            eprintln!(
+                "{{\"level\":\"info\",\
+                 \"event\":\"orchestrator_no_progress_respawn_count_incremented\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"count\":{count_after_increment},\
+                 \"max\":{max}}}",
+                max = crate::orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS,
+            );
+        }
+    }
+
     if active_orchestrator {
         // Common case for tightly-clustered DAG events — e.g. the
         // executor's `task_complete` admission, then a reviewer's

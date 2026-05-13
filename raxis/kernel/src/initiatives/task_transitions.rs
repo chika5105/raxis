@@ -189,6 +189,26 @@ pub fn transition_task_in_tx(
         )?;
     }
 
+    // `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` — any legal task FSM
+    // transition observably IS progress, so the per-initiative
+    // orchestrator no-progress respawn counter resets to zero.
+    // Resolving `task_id → initiative_id` against `tasks` keeps the
+    // FSM-step API surface unchanged (callers don't have to thread
+    // the initiative through every transition call). A miss here
+    // (initiative row absent, e.g. raced abort + delete) is a
+    // soft-fail: the UPDATE matches zero rows and the kernel-side
+    // `respawn_orchestrator_for_initiative` preflight will short-
+    // circuit on `is_executing == false` anyway.
+    if let Some(initiative_id) =
+        crate::orch_respawn_ceiling::lookup_initiative_id_for_task_in_tx(
+            conn, task_id,
+        ).map_err(LifecycleError::Sql)?
+    {
+        crate::orch_respawn_ceiling::reset_no_progress_count_in_tx(
+            conn, &initiative_id,
+        ).map_err(LifecycleError::Sql)?;
+    }
+
     Ok(())
 }
 

@@ -1345,6 +1345,58 @@ pub enum AuditEventKind {
         review_reject_count: u32,
     },
 
+    /// Emitted when the per-initiative
+    /// `orchestrator_no_progress_respawn_count` counter exceeds
+    /// `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3) in
+    /// `session_spawn_orchestrator::respawn_orchestrator_for_initiative`.
+    /// The initiative is then transitioned to `Failed` with
+    /// `reason = "orchestrator no-progress respawn ceiling exceeded"`
+    /// and the kernel refuses further respawns for this initiative.
+    ///
+    /// **What this captures.** The structural backstop against an
+    /// unbounded orchestrator respawn loop where the agent boots,
+    /// reads the KSB, calls a kernel-rejected terminal tool (e.g.
+    /// `retry_subtask` while `aggregate=Pending`), exits cleanly,
+    /// and is re-spawned by the post-exit hook — repeating
+    /// indefinitely with no `Failed` FSM transition to drive the
+    /// existing `crash_count` ceiling (observed on iter42 second
+    /// run: 45 `SessionVmSpawned` in 18 min, zero progress).
+    ///
+    /// **When fired.** ONCE per ceiling exceedance, immediately
+    /// before the initiative-`Failed` transition fires. Subsequent
+    /// post-exit-hook triggers for the same initiative are
+    /// silently skipped (the `is_executing` preflight in
+    /// `respawn_orchestrator_for_initiative` short-circuits to
+    /// `not_executing`).
+    ///
+    /// **Paired with what.** Per `audit-paired-writes.md §4`, this
+    /// event is the chain-side half of the SQLite-side state
+    /// mutation in `respawn_orchestrator_for_initiative` Step 1c
+    /// (the `UPDATE initiatives SET state='Failed', failure_reason=…`
+    /// row mutation). Pairing is post-commit: SQLite commits first,
+    /// then the audit event fires in the same async task. A crash
+    /// between leaves a consistent SQLite state (initiative-Failed,
+    /// no further respawns) with a missing audit anchor; the
+    /// recovery sweep is advisory per `INV-AUDIT-PAIRED-06`.
+    ///
+    /// Closes `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`.
+    OrchestratorRespawnCeilingExceeded {
+        /// The initiative whose respawn counter exceeded the
+        /// ceiling. Cross-references
+        /// `initiatives.initiative_id`.
+        initiative_id: String,
+        /// `initiatives.orchestrator_no_progress_respawn_count`
+        /// value AFTER the incrementing step that tripped the
+        /// ceiling. Always strictly greater than `max_attempts`
+        /// (the increment fires before the check; the off-by-one
+        /// is observable on the wire).
+        attempts: u32,
+        /// `MAX_ORCH_NO_PROGRESS_RESPAWNS`. Carried explicitly so
+        /// audit-replay readers can interpret the event without
+        /// pinning the constant in their reader binary.
+        max_attempts: u32,
+    },
+
     // --- Escalation ---
     EscalationSubmitted {
         escalation_id: String,
@@ -3678,6 +3730,7 @@ impl AuditEventKind {
             Self::VerifierProcessFailed { .. } => "VerifierProcessFailed",
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
+            Self::OrchestratorRespawnCeilingExceeded { .. } => "OrchestratorRespawnCeilingExceeded",
             Self::EscalationSubmitted { .. } => "EscalationSubmitted",
             Self::EscalationApproved { .. } => "EscalationApproved",
             Self::EscalationDenied { .. } => "EscalationDenied",
