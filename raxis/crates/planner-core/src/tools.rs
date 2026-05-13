@@ -46,6 +46,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::ToolSpec;
+use crate::tool_audit::ToolAuditSink;
 
 // ---------------------------------------------------------------------------
 // ToolOutput / ToolError / Tool trait
@@ -158,7 +159,7 @@ pub trait Tool: Send + Sync {
 
 /// Per-execution context the dispatch loop hands to every tool
 /// invocation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     /// Workspace root the planner is operating in (the per-session
     /// VM's worktree mount, e.g. `/workspace`). Tool path inputs
@@ -170,6 +171,28 @@ pub struct ToolContext {
     /// surface a structured-error output rather than blocking the
     /// dispatch loop indefinitely.
     pub deadline:       Option<Duration>,
+    /// Optional tool-side audit sink. Credential-bearing tools
+    /// (`postgres_query`, `mongo_query`, `redis_query`, `smtp_send`)
+    /// emit a `ToolAuditEvent` after every invocation when a sink is
+    /// installed. The sink is best-effort observability — the tool's
+    /// correctness MUST NOT depend on it being installed. Tests
+    /// install a [`crate::tool_audit::RecordingAuditSink`] to assert
+    /// against the sanitized event shape; production binaries install
+    /// a sink that forwards to the planner's tracing pipeline.
+    pub tool_audit_sink: Option<Arc<dyn ToolAuditSink>>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("workspace_root", &self.workspace_root)
+            .field("deadline", &self.deadline)
+            .field(
+                "tool_audit_sink",
+                &self.tool_audit_sink.as_ref().map(|_| "<installed>"),
+            )
+            .finish()
+    }
 }
 
 impl ToolContext {
@@ -177,9 +200,17 @@ impl ToolContext {
     /// that don't exercise the timeout path.
     pub fn for_workspace(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
-            workspace_root: workspace_root.into(),
-            deadline:       None,
+            workspace_root:  workspace_root.into(),
+            deadline:        None,
+            tool_audit_sink: None,
         }
+    }
+
+    /// Install an audit sink on this context. Builder-style so a
+    /// caller can chain `ToolContext::for_workspace(p).with_audit_sink(s)`.
+    pub fn with_audit_sink(mut self, sink: Arc<dyn ToolAuditSink>) -> Self {
+        self.tool_audit_sink = Some(sink);
+        self
     }
 }
 

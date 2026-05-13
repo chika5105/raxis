@@ -88,6 +88,7 @@ pub mod provider_model;
 pub mod retry;
 pub mod sidecar_client;
 pub mod streaming;
+pub mod tool_audit;
 pub mod tools;
 pub mod transport;
 
