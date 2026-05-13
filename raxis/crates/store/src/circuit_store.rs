@@ -25,6 +25,26 @@
 //! `SQLITE_BUSY` retry dance entirely — acceptable because circuit
 //! breaker writes are extremely infrequent (one per failed/succeeded
 //! inference attempt, at most once per multi-second model call).
+//!
+//! ## Lock contract (single-lock-per-operation)
+//!
+//! Every public method on this store acquires `self.conn` **exactly
+//! once** for the full duration of the operation:
+//!
+//! - `load`, `list_all`, `try_acquire_probe`, `release_probe` each
+//!   take a single read/write lock and release it on return.
+//! - `record_failure`, `record_success`, `maybe_promote`,
+//!   `manual_reset` each take **one** write lock that wraps the
+//!   `BEGIN IMMEDIATE` transaction *and* the post-commit read-back.
+//!   The post-commit read-back is performed via the private
+//!   `load_with_conn(&Connection, …)` helper which reuses the
+//!   already-held guard — `Mutex<Connection>` is **not** re-entrant
+//!   on the same thread, so any attempt to re-lock from within a
+//!   guarded scope (as the May-10 `8524f50` shape did via
+//!   `self.load(...)`) parks the thread in `__psynch_mutexwait`.
+//!
+//! Public-API behaviour is unchanged; this is purely a deadlock
+//! correctness contract.
 
 use rusqlite::{Connection, params};
 use std::sync::Mutex;
@@ -156,8 +176,28 @@ impl SqliteCircuitStore {
     /// Read the current state for `(provider, model)`.
     ///
     /// Returns a default `Closed` row if no entry exists yet.
+    ///
+    /// Lock contract: acquires `self.conn` once for the duration of
+    /// the read and releases it on return. Internal callers that
+    /// already hold the guard MUST use [`Self::load_with_conn`] to
+    /// avoid re-entering the non-reentrant `Mutex<Connection>`.
     pub fn load(&self, provider: &str, model: &str) -> CircuitRowSqlite {
         let conn = self.conn.lock().unwrap();
+        Self::load_with_conn(&conn, provider, model)
+    }
+
+    /// Read the current state using an already-held connection.
+    ///
+    /// Internal helper used by mutating methods after they commit
+    /// their transaction but while still holding `self.conn`. The
+    /// public [`Self::load`] wraps this with a single lock
+    /// acquisition; mutating sites call this directly so the read
+    /// reuses the outer guard (one lock per public operation).
+    fn load_with_conn(
+        conn: &Connection,
+        provider: &str,
+        model: &str,
+    ) -> CircuitRowSqlite {
         let tbl = Table::ProviderCircuitState.as_str();
         let sql = format!(
             "{} WHERE provider = ?1 AND model = ?2",
@@ -184,6 +224,12 @@ impl SqliteCircuitStore {
     ///
     /// If the failure count reaches `trip_threshold`, transitions to
     /// `Open` and returns `Some(CircuitTransition)`.
+    ///
+    /// Lock contract: acquires `self.conn` **once** for the
+    /// `BEGIN IMMEDIATE` transaction *and* the post-commit
+    /// read-back; the read-back uses [`Self::load_with_conn`] to
+    /// reuse the outer guard (the underlying `Mutex<Connection>`
+    /// is not re-entrant on the same thread).
     pub fn record_failure(
         &self,
         provider: &str,
@@ -255,13 +301,17 @@ impl SqliteCircuitStore {
 
         tx.commit().unwrap();
 
-        // Re-read final state.
-        let final_row = self.load(provider, model);
+        // Re-read final state using the still-held guard.
+        let final_row = Self::load_with_conn(&conn, provider, model);
         (final_row, transition)
     }
 
     /// Atomically record a success. Resets failures and closes if
     /// the previous state was `HalfOpen`.
+    ///
+    /// Lock contract: acquires `self.conn` **once** for the
+    /// transaction and the post-commit read-back (see
+    /// `record_failure` for the rationale).
     pub fn record_success(
         &self,
         provider: &str,
@@ -321,7 +371,7 @@ impl SqliteCircuitStore {
         }
 
         tx.commit().unwrap();
-        let final_row = self.load(provider, model);
+        let final_row = Self::load_with_conn(&conn, provider, model);
         (final_row, transition)
     }
 
@@ -353,6 +403,10 @@ impl SqliteCircuitStore {
     }
 
     /// Lazily promote `Open → HalfOpen` if the open window has elapsed.
+    ///
+    /// Lock contract: acquires `self.conn` **once** for the
+    /// transaction and the post-commit read-back (see
+    /// `record_failure` for the rationale).
     pub fn maybe_promote(
         &self,
         provider: &str,
@@ -390,11 +444,15 @@ impl SqliteCircuitStore {
         }
 
         tx.commit().unwrap();
-        let final_row = self.load(provider, model);
+        let final_row = Self::load_with_conn(&conn, provider, model);
         (final_row, transition)
     }
 
     /// Manual operator reset: force the breaker to `Closed`.
+    ///
+    /// Lock contract: acquires `self.conn` **once** for the
+    /// transaction and the post-commit read-back (see
+    /// `record_failure` for the rationale).
     pub fn manual_reset(
         &self,
         provider: &str,
@@ -451,11 +509,14 @@ impl SqliteCircuitStore {
         }
 
         tx.commit().unwrap();
-        let final_row = self.load(provider, model);
+        let final_row = Self::load_with_conn(&conn, provider, model);
         (final_row, transition)
     }
 
     /// List all circuit breaker rows. Used by `raxis providers status`.
+    ///
+    /// Lock contract: acquires `self.conn` once for the duration of
+    /// the read.
     pub fn list_all(&self) -> Vec<CircuitRowSqlite> {
         let conn = self.conn.lock().unwrap();
         let tbl = Table::ProviderCircuitState.as_str();
