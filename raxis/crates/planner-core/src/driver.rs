@@ -865,7 +865,24 @@ pub async fn run_role_session_with_connected_transport(
     //    the role-specific NNSP via `assemble_system_prompt` when
     //    the kernel stamped a snapshot. Falls back to NNSP-only when
     //    the env var is absent or failed to parse (logged upstream).
-    let role_nnsp = render_system_prompt_for_role(role, &args);
+    //
+    //    V2 `INV-EXEC-DISCOVERY-01` — also stamp the in-VM
+    //    capability hint so the LLM sees what binaries / language
+    //    runtimes / pre-installed packages / credential-proxy env
+    //    vars are available on its first turn (no trial-and-error
+    //    `pip install` required). The `vm_capabilities` tool is
+    //    the recourse for finer queries; the hint covers the
+    //    common case. Computed via the same in-guest probe the
+    //    tool uses (and cached behind the same per-process
+    //    `OnceLock`), so the system-prompt summary and the tool
+    //    output are coherent byte-for-byte for the same image +
+    //    session env.
+    let capability_manifest = crate::vm_capabilities::cached_capabilities();
+    let capability_hint     = crate::vm_capabilities::build_capability_hint(
+        capability_manifest.as_ref(),
+    );
+    let role_nnsp_raw = render_system_prompt_for_role(role, &args);
+    let role_nnsp = format!("{role_nnsp_raw}\n\n{capability_hint}");
     let system_prompt = match ksb_snapshot.as_ref() {
         Some(snap) => raxis_ksb::assemble_system_prompt(&role_nnsp, snap)
             .map_err(|e| DriverError::KsbAssembleFailed(e.to_string()))?,
@@ -1597,6 +1614,16 @@ mod tests {
             "KSB block MUST stamp the budget; got: {sys}");
         assert!(sys.contains("fold-test description"),
             "KSB block MUST stamp the task_description; got: {sys}");
+        // V2 `INV-EXEC-DISCOVERY-01` — the assembled system
+        // prompt MUST also carry the capability-hint section so
+        // the LLM's first turn knows what the VM has
+        // pre-installed without trial-and-error `pip install`.
+        assert!(sys.contains("## VM Environment"),
+            "system prompt MUST carry the `## VM Environment` \
+             capability hint header; got: {sys}");
+        assert!(sys.contains("No outbound network"),
+            "capability hint MUST warn the LLM that egress is \
+             gated and `pip install` will fail; got: {sys}");
     }
 
     /// V2 `v2_extended_gaps.md §2.4` — when no KSB snapshot is
