@@ -19,14 +19,20 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Json;
 use base64::Engine;
+use raxis_audit_tools::AuditEventKind;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
-use crate::data::{PolicyAdvancement, PolicySnapshotView};
+use crate::data::{operator_outcome, PolicyAdvancement, PolicySnapshotView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
 /// `GET /api/policy` — structured snapshot.
+///
+/// `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`: emits
+/// `OperatorViewedPolicySnapshot`. The snapshot exposes the
+/// active operator roster + permitted-op allowlist; reading it
+/// is itself a forensically interesting event.
 pub async fn snapshot<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -38,12 +44,45 @@ where
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
+        emit_snapshot_audit(&*state.data, &op, 0, operator_outcome::REJECTED_PERMISSION);
         return Err(ApiError::Forbidden { required: "read".into() });
     }
-    Ok(Json(state.data.policy_snapshot()?))
+    let view = match state.data.policy_snapshot() {
+        Ok(v) => v,
+        Err(err) => {
+            emit_snapshot_audit(&*state.data, &op, 0, operator_outcome::outcome_from_api_error(&err));
+            return Err(err);
+        }
+    };
+    let epoch = view.epoch;
+    state.data.emit_operator_audit(AuditEventKind::OperatorViewedPolicySnapshot {
+        operator_fingerprint: op.fingerprint.clone(),
+        policy_epoch: epoch,
+        outcome: operator_outcome::ACCEPTED.into(),
+    })?;
+    Ok(Json(view))
+}
+
+fn emit_snapshot_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    policy_epoch: u64,
+    outcome: &'static str,
+) where D: crate::data::DashboardData + ?Sized {
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedPolicySnapshot {
+        operator_fingerprint: op.fingerprint.clone(),
+        policy_epoch,
+        outcome: outcome.into(),
+    });
 }
 
 /// `GET /api/policy/toml` — raw TOML bytes (write_policy role).
+///
+/// `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`: emits
+/// `OperatorViewedPolicyToml` because the raw bytes carry the
+/// full operator-roster + permitted-op allowlist verbatim. The
+/// snapshot endpoint hides the per-operator certs; this one
+/// surfaces them.
 pub async fn raw_toml<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -52,13 +91,43 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::WritePolicy) && !op.has_role(DashboardRole::Admin) {
+        emit_raw_toml_audit(&*state.data, &op, 0, operator_outcome::REJECTED_PERMISSION);
         return Err(ApiError::Forbidden { required: "write_policy".into() });
     }
-    let body = state.data.policy_toml_bytes()?;
+    let body = match state.data.policy_toml_bytes() {
+        Ok(b) => b,
+        Err(err) => {
+            emit_raw_toml_audit(&*state.data, &op, 0, operator_outcome::outcome_from_api_error(&err));
+            return Err(err);
+        }
+    };
+    // Best-effort epoch resolution for the audit row — failure
+    // here MUST NOT fail the response (the operator already
+    // got their bytes; the audit row stays correct except for
+    // the epoch field).
+    let policy_epoch = state.data.policy_snapshot().map(|s| s.epoch).unwrap_or(0);
+    state.data.emit_operator_audit(AuditEventKind::OperatorViewedPolicyToml {
+        operator_fingerprint: op.fingerprint.clone(),
+        policy_epoch,
+        outcome: operator_outcome::ACCEPTED.into(),
+    })?;
     Ok((
         [(header::CONTENT_TYPE, "application/toml; charset=utf-8")],
         body,
     ))
+}
+
+fn emit_raw_toml_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    policy_epoch: u64,
+    outcome: &'static str,
+) where D: crate::data::DashboardData + ?Sized {
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedPolicyToml {
+        operator_fingerprint: op.fingerprint.clone(),
+        policy_epoch,
+        outcome: outcome.into(),
+    });
 }
 
 /// Request body for `PUT /api/policy/toml`. Both fields are

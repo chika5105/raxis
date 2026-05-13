@@ -9,10 +9,11 @@ use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use futures_util::stream::{self, Stream, StreamExt};
+use raxis_audit_tools::AuditEventKind;
 use serde::Deserialize;
 
 use crate::auth::DashboardRole;
-use crate::data::SessionView;
+use crate::data::{operator_outcome, SessionView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator, ShutdownSignal};
 use crate::stream::StreamEvent;
@@ -40,11 +41,40 @@ pub async fn list<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    Ok(Json(state.data.list_sessions(
-        q.limit.clamp(1, 200),
-        q.initiative_id.as_deref(),
-    )?))
+    if let Err(e) = require_read(&op) {
+        emit_list_audit(&*state.data, &op, 0, q.initiative_id.as_deref(), operator_outcome::outcome_from_api_error(&e));
+        return Err(e);
+    }
+    let rows = match state.data.list_sessions(q.limit.clamp(1, 200), q.initiative_id.as_deref()) {
+        Ok(r) => r,
+        Err(err) => {
+            emit_list_audit(&*state.data, &op, 0, q.initiative_id.as_deref(), operator_outcome::outcome_from_api_error(&err));
+            return Err(err);
+        }
+    };
+    let count = rows.len() as u32;
+    state.data.emit_operator_audit(AuditEventKind::OperatorViewedSessionList {
+        operator_fingerprint: op.fingerprint.clone(),
+        count,
+        initiative_id_filter: q.initiative_id.clone(),
+        outcome: operator_outcome::ACCEPTED.into(),
+    })?;
+    Ok(Json(rows))
+}
+
+fn emit_list_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    count: u32,
+    initiative_id_filter: Option<&str>,
+    outcome: &'static str,
+) where D: crate::data::DashboardData + ?Sized {
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedSessionList {
+        operator_fingerprint: op.fingerprint.clone(),
+        count,
+        initiative_id_filter: initiative_id_filter.map(str::to_owned),
+        outcome: outcome.into(),
+    });
 }
 
 /// `GET /api/sessions/:id`.
@@ -56,8 +86,36 @@ pub async fn detail<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    Ok(Json(state.data.get_session(&id)?))
+    if let Err(e) = require_read(&op) {
+        emit_detail_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&e));
+        return Err(e);
+    }
+    let view = match state.data.get_session(&id) {
+        Ok(v) => v,
+        Err(err) => {
+            emit_detail_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&err));
+            return Err(err);
+        }
+    };
+    state.data.emit_operator_audit(AuditEventKind::OperatorViewedSession {
+        operator_fingerprint: op.fingerprint.clone(),
+        session_id: id.clone(),
+        outcome: operator_outcome::ACCEPTED.into(),
+    })?;
+    Ok(Json(view))
+}
+
+fn emit_detail_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    session_id: &str,
+    outcome: &'static str,
+) where D: crate::data::DashboardData + ?Sized {
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedSession {
+        operator_fingerprint: op.fingerprint.clone(),
+        session_id: session_id.to_owned(),
+        outcome: outcome.into(),
+    });
 }
 
 /// Query string for `GET /api/sessions/:id/stream`.
@@ -135,7 +193,10 @@ pub async fn stream<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
+    if let Err(e) = require_read(&op) {
+        emit_stream_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&e));
+        return Err(e);
+    }
     // Spec contract (`dashboard-hardening.md §1.6`):
     //
     // > Unknown session: `404 Not Found` JSON envelope (NOT a hung
@@ -155,7 +216,20 @@ where
     // failure surface for the SSE handler matches the rest of the
     // session API surface (`/api/sessions/:id` returns 404 / 500
     // through the same path).
-    state.data.get_session(&id)?;
+    if let Err(err) = state.data.get_session(&id) {
+        emit_stream_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&err));
+        return Err(err);
+    }
+    // Audit the SSE attach BEFORE we hand the long-lived
+    // connection to the operator. Per
+    // `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01` the
+    // attach itself is the audited event; the keepalive frames
+    // that follow are NOT audited (they would flood the chain).
+    state.data.emit_operator_audit(AuditEventKind::OperatorOpenedSessionStream {
+        operator_fingerprint: op.fingerprint.clone(),
+        session_id: id.clone(),
+        outcome: operator_outcome::ACCEPTED.into(),
+    })?;
     // Fast-path the kernel-shutdown case: a freshly-attached
     // subscriber that hits a kernel that already triggered
     // shutdown gets a single sentinel frame and a clean close
@@ -198,6 +272,19 @@ where
                 .text("keep-alive"),
         )
         .into_response())
+}
+
+fn emit_stream_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    session_id: &str,
+    outcome: &'static str,
+) where D: crate::data::DashboardData + ?Sized {
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorOpenedSessionStream {
+        operator_fingerprint: op.fingerprint.clone(),
+        session_id: session_id.to_owned(),
+        outcome: outcome.into(),
+    });
 }
 
 /// Parse the SSE `Last-Event-ID` request header into a `u64`

@@ -37,6 +37,12 @@ pub struct ListQuery {
 fn default_limit() -> u32 { 100 }
 
 /// `GET /api/audit`.
+///
+/// `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`: paging
+/// the chain itself audits via `OperatorViewedAuditChain` so a
+/// forensic reviewer can reconstruct who walked which range
+/// and when. The cursor + filter are recorded so the rebuilt
+/// page is unambiguous.
 pub async fn list<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -45,12 +51,47 @@ pub async fn list<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    Ok(Json(state.data.list_audit(
+    if let Err(e) = require_read(&op) {
+        emit_list_audit(&*state.data, &op, q.cursor, 0, q.initiative_id.as_deref(), operator_outcome::outcome_from_api_error(&e));
+        return Err(e);
+    }
+    let rows = match state.data.list_audit(
         q.cursor,
         q.limit.clamp(1, 500),
         q.initiative_id.as_deref(),
-    )?))
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            emit_list_audit(&*state.data, &op, q.cursor, 0, q.initiative_id.as_deref(), operator_outcome::outcome_from_api_error(&err));
+            return Err(err);
+        }
+    };
+    let count = rows.len() as u32;
+    state.data.emit_operator_audit(AuditEventKind::OperatorViewedAuditChain {
+        operator_fingerprint: op.fingerprint.clone(),
+        cursor_seq: q.cursor,
+        count,
+        initiative_id_filter: q.initiative_id.clone(),
+        outcome: operator_outcome::ACCEPTED.into(),
+    })?;
+    Ok(Json(rows))
+}
+
+fn emit_list_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    cursor_seq: Option<u64>,
+    count: u32,
+    initiative_id_filter: Option<&str>,
+    outcome: &'static str,
+) where D: crate::data::DashboardData + ?Sized {
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedAuditChain {
+        operator_fingerprint: op.fingerprint.clone(),
+        cursor_seq,
+        count,
+        initiative_id_filter: initiative_id_filter.map(str::to_owned),
+        outcome: outcome.into(),
+    });
 }
 
 /// Query string for `GET /api/audit/chain-status`.

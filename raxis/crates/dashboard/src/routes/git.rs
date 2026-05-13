@@ -54,8 +54,37 @@ pub async fn list<D>(
 where
     D: crate::data::DashboardData,
 {
-    require_read(&op)?;
-    Ok(Json(state.data.list_worktrees()?))
+    if let Err(e) = require_read(&op) {
+        emit_worktree_list_audit(&*state.data, &op, 0, operator_outcome::outcome_from_api_error(&e));
+        return Err(e);
+    }
+    let rows = match state.data.list_worktrees() {
+        Ok(r) => r,
+        Err(err) => {
+            emit_worktree_list_audit(&*state.data, &op, 0, operator_outcome::outcome_from_api_error(&err));
+            return Err(err);
+        }
+    };
+    let count = rows.len() as u32;
+    state.data.emit_operator_audit(AuditEventKind::OperatorViewedWorktreeList {
+        operator_fingerprint: op.fingerprint.clone(),
+        count,
+        outcome: operator_outcome::ACCEPTED.into(),
+    })?;
+    Ok(Json(rows))
+}
+
+fn emit_worktree_list_audit<D>(
+    data: &D,
+    op: &AuthorizedOperator,
+    count: u32,
+    outcome: &'static str,
+) where D: crate::data::DashboardData + ?Sized {
+    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedWorktreeList {
+        operator_fingerprint: op.fingerprint.clone(),
+        count,
+        outcome: outcome.into(),
+    });
 }
 
 /// `GET /api/git/worktrees/:name`.
