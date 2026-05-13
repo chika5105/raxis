@@ -15,3 +15,21 @@ path = "src/main.rs"
 # Same `vsock-transport` rationale as `planner-orchestrator/Cargo.toml`.
 raxis-planner-core = { path = "../planner-core", features = ["executor", "vsock-transport"] }
 tokio              = { workspace = true }
+# In-VM credential-proxy reachability (INV-CRED-PROXY-VM-REACHABILITY-01).
+#
+# The substrate-loopback fix landed by `8a26540` registers the host-side
+# vsock listener that splices to the credential-proxy host loopback ports
+# AND stamps `RAXIS_VSOCK_LOOPBACK_PLAN` into `vm_spec.env`. The matching
+# in-guest TCP→AF_VSOCK fan-out lives in `raxis_tproxy::loopback_forwarder`.
+#
+# `raxis-tproxy` is NOT shipped as a separate binary in the executor
+# canonical rootfs (`planner-harness.md §14.4` confirms only the
+# `raxis-executor` binary is on the cpio.gz initramfs — no /usr/bin/git,
+# no /bin/bash, no /usr/local/bin/raxis-tproxy). So we link the
+# forwarder's library API directly into the executor binary and call
+# `spawn_forwarder` from `async_main` BEFORE the dispatch loop opens
+# its first credential-proxy connection. Without this dep the in-VM
+# `127.0.0.1:<port>` URLs the kernel stamps into the agent's env are
+# unreachable and every credential-bearing task fails with
+# `error connecting to server`.
+raxis-tproxy      = { workspace = true }

@@ -3848,6 +3848,7 @@ name = "raxis-planner-executor"
 version = "0.1.0"
 dependencies = [
  "raxis-planner-core",
+ "raxis-tproxy",
  "tokio",
 ]
 

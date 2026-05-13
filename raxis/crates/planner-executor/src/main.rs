@@ -62,6 +62,9 @@ fn main() -> ! {
 }
 
 async fn async_main() -> u8 {
+    if let Err(code) = activate_vsock_loopback_forwarder().await {
+        return code;
+    }
     match run().await {
         Ok(())  => 0,
         Err(e)  => {
@@ -71,6 +74,73 @@ async fn async_main() -> u8 {
                 e.to_string(),
             );
             e.exit_code() as u8
+        }
+    }
+}
+
+/// Bring up the in-guest TCP→AF_VSOCK fan-out for the
+/// credential-proxy URLs the kernel substrate stamped into the
+/// executor's environment (`INV-CRED-PROXY-VM-REACHABILITY-01`).
+///
+/// Behaviour:
+/// * `RAXIS_VSOCK_LOOPBACK_PLAN` unset / empty → skip silently
+///   (the kernel did not request any credential proxies for this
+///   session, e.g. an executor task with `[[tasks.credentials]]
+///   = []`).
+/// * Plan present and well-formed → bind one
+///   `127.0.0.1:<guest_loopback_port>` listener per entry and
+///   spawn the splice loop on the same tokio runtime that drives
+///   the dispatch loop. Returns once every bind has succeeded so
+///   any failure is observed by the caller before the agent's
+///   first tool fires.
+/// * Plan present but malformed, or any bind fails → fail-closed:
+///   exit with the planner's "isolation diagnostic" exit code so
+///   the substrate observes a clean `SessionVmExited` and the
+///   kernel surfaces a structured error rather than the
+///   downstream `error connecting to server` cascade an
+///   un-forwarded loopback would produce. The executor canonical
+///   rootfs ships only this binary, so silently swallowing the
+///   failure here would strand every credential-bearing task in
+///   the same opaque cascade `8a26540` was meant to fix.
+async fn activate_vsock_loopback_forwarder() -> Result<(), u8> {
+    use raxis_tproxy::loopback_forwarder;
+    match loopback_forwarder::loopback_plan_from_env() {
+        Ok(None) => {
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"vsock-loopback-forwarder\",\
+                  \"role\":\"executor\",\"outcome\":\"skipped\",\
+                  \"reason\":\"RAXIS_VSOCK_LOOPBACK_PLAN unset or empty\"}}"
+            );
+            Ok(())
+        }
+        Ok(Some(plan)) => match loopback_forwarder::spawn_forwarder(&plan).await {
+            Ok(()) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"step\":\"vsock-loopback-forwarder\",\
+                      \"role\":\"executor\",\"outcome\":\"activated\",\
+                      \"entries\":{}}}",
+                    plan.len(),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"vsock-loopback-forwarder\",\
+                      \"role\":\"executor\",\"outcome\":\"bind-failed\",\
+                      \"reason\":{:?}}}",
+                    e.to_string(),
+                );
+                Err(64)
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"vsock-loopback-forwarder\",\
+                  \"role\":\"executor\",\"outcome\":\"plan-decode-failed\",\
+                  \"reason\":{:?}}}",
+                e.to_string(),
+            );
+            Err(64)
         }
     }
 }
