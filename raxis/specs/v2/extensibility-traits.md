@@ -626,6 +626,50 @@ pub trait IsolatedSession: Send + 'static {
     ///   - Mock:      `SessionTransportId::Process { pid: u32 }`
     /// MUST be stable for the lifetime of the session.
     fn session_identity(&self) -> SessionTransportId;
+
+    /// Register a per-VM AF_VSOCK listener that splices accepted
+    /// vsock connections to host `127.0.0.1:<host_loopback_port>`.
+    /// Called once per credential proxy by `raxis-session-spawn`
+    /// after [`IsolationBackend::spawn`] returns and before the
+    /// in-guest forwarder reads its env-stamped plan
+    /// (`RAXIS_VSOCK_LOOPBACK_PLAN`). The kernel-side composer is
+    /// the only call-site; planners cannot reach this method.
+    ///
+    /// Implements the substrate half of
+    /// `INV-CRED-PROXY-VM-REACHABILITY-01` (`invariants.md`) and
+    /// `credential-proxy.md §12a.3`. Per-VM device boundary IS the
+    /// per-session isolation boundary: the listener is bound on
+    /// **this VM's** vsock device, not on a shared host CID, so a
+    /// guest in a different session that dials
+    /// `(VMADDR_CID_HOST, vsock_port)` reaches its own VM's
+    /// listener (or none), never another session's.
+    ///
+    /// **Default impl returns `Err(IsolationError::BackendInternal)`**.
+    /// Substrates that don't run the agent in a VM (`SubprocessIsolation`,
+    /// `MockIsolation`) cannot satisfy the invariant; the kernel must
+    /// pick a substrate that overrides this method for any session
+    /// that declared credentials. The fail-closed default is what makes
+    /// `INV-CRED-PROXY-VM-REACHABILITY-01` mechanical: a substrate
+    /// silently lacking the implementation cannot ship a session
+    /// whose agent would not be able to reach its credentials.
+    ///
+    /// **Conformance test (`R-cred-proxy-reachability`).** Spawn a
+    /// VM with one credential proxy, register a listener, and dial
+    /// `(VMADDR_CID_HOST, vsock_port)` from inside the guest. The
+    /// host-side accepter MUST splice to `127.0.0.1:<host_loopback_port>`.
+    /// A failed override MUST return `Err(IsolationError::*)` and
+    /// the kernel-side composer MUST tear the VM down.
+    fn register_loopback_listener(
+        &mut self,
+        _vsock_port:         u32,
+        _host_loopback_port: u16,
+    ) -> Result<(), IsolationError> {
+        Err(IsolationError::BackendInternal(
+            "session: register_loopback_listener is not supported by this substrate \
+             — credential proxies require an in-VM substrate (Apple-VZ / Firecracker)"
+                .to_owned(),
+        ))
+    }
 }
 ```
 
@@ -677,11 +721,17 @@ pub struct VmSpec {
                                               // `kernel/src/canonical_images_preflight.rs::linux_kernel_path`.
     pub env:               BTreeMap<String, String>, // per-spawn env block — the kernel
                                               // SessionSpawnService stamps credential-
-                                              // proxy loopback URLs and the egress-
-                                              // admission service address here at
+                                              // proxy loopback URLs, the egress-
+                                              // admission service address, and the
+                                              // vsock-loopback fan-out plan
+                                              // (`RAXIS_VSOCK_LOOPBACK_PLAN`,
+                                              // comma-separated
+                                              // `<vsock_port>:<guest_loopback_port>`
+                                              // pairs — wire format owned by
+                                              // `crates/vsock-loopback`) here at
                                               // session-spawn time. See
-                                              // `credential-proxy.md §1` and
-                                              // `vm-network-isolation.md §3-§5`.
+                                              // `credential-proxy.md §1`, §12a.1,
+                                              // and `vm-network-isolation.md §3-§5`.
 }
 ```
 
