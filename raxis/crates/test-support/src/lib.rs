@@ -8,32 +8,28 @@
 //
 // ── Enforcement layers (defense in depth) ──────────────────────────────
 //
-//   Layer 1 (compile-time, this file): every public item is gated on
-//     `#[cfg(any(debug_assertions, test))]`. In a release build, the
-//     gate is FALSE, so the items disappear and any consumer that
-//     references `GitRepo` / `FakeClock` / `mem_store` / `FakeAuditSink`
-//     fails to compile with E0432. This makes a misuse like
-//     `[dependencies] raxis-test-support = { ... }` followed by
-//     `cargo build --release` a hard build failure rather than a
-//     silent shipping risk.
-//
-//   Layer 2 (PR-time, src/workspace_guard.rs): a `#[test]` walks every
+//   Layer 1 (PR-time, src/workspace_guard.rs): a `#[test]` walks every
 //     workspace member's `Cargo.toml` and asserts `raxis-test-support`
-//     appears ONLY under `[dev-dependencies]`. Catches the misuse at
+//     appears ONLY under `[dev-dependencies]`. Catches misuse at
 //     `cargo test --workspace` (i.e. CI) regardless of build profile.
+//     This is the strongest enforcement — it fires in every CI run
+//     and pinpoints the offending Cargo.toml.
 //
-//   Layer 3 (release-build noise, this file): the crate root carries
+//   Layer 2 (release-build noise, this file): the crate root carries
 //     `#![cfg_attr(not(debug_assertions), deprecated)]` so any release
 //     build that does manage to depend on this crate emits a clearly
 //     worded deprecation warning at every use site.
 //
-// `cargo test --release` is the one configuration where all three layers
-// fire simultaneously: Layer 1 hides the public API, Layer 2 still
-// detects the bad dep, and Layer 3 prints the warning. We accept that
-// `cargo test --release` of a downstream crate cannot compile against
-// `raxis-test-support` — the crate is for tests, and `cargo test`
-// without `--release` is the supported path. Benchmarks belong in
-// `criterion` benches, not in `tests/`.
+// Historical note: an earlier "Layer 1" pattern gated every public item
+// on `#[cfg(any(debug_assertions, test))]` so release builds would
+// fail to find the symbols. That broke the legitimate
+// `cargo build --release --tests` workflow used by the live-e2e
+// pre-build (dev-deps are compiled in release mode without the
+// downstream consumer's `cfg(test)` set, so the gate evaluated to
+// `false` and the items disappeared from the dep's surface even though
+// the consumer's test target legitimately needed them). The
+// workspace_guard test (now Layer 1) gives strictly stronger guarantees
+// and works in every profile.
 
 #![cfg_attr(
     not(debug_assertions),
@@ -97,60 +93,39 @@
 //     re-export here is purely a discoverability / dependency-count
 //     convenience.
 
-// ── Layer 1 enforcement — every public item is gated on the
-//    "this is a debug or test build" predicate. In a release build of
-//    a downstream crate that (incorrectly) takes `raxis-test-support`
-//    as a regular dep, none of the items below exist and the consumer
-//    fails to compile. The guard test in `workspace_guard.rs` (Layer 2)
-//    is what catches the misuse before that point.
-#[cfg(any(debug_assertions, test))]
+// Public surface — kept unconditional so that the legitimate
+// `cargo build --release --tests` workflow (used by the live-e2e
+// pre-build) sees the items. Misuse — taking `raxis-test-support`
+// as a `[dependencies]` / `[build-dependencies]` dep rather than
+// `[dev-dependencies]` — is caught by the workspace_guard `#[test]`
+// (Layer 1) and the release-build deprecation warning (Layer 2),
+// both of which fire regardless of compile profile.
 pub mod audit_dir;
-#[cfg(any(debug_assertions, test))]
 pub mod audit_sink;
-#[cfg(any(debug_assertions, test))]
 pub mod cert;
-#[cfg(any(debug_assertions, test))]
 pub mod clock;
-#[cfg(any(debug_assertions, test))]
 pub mod disk_store;
-#[cfg(any(debug_assertions, test))]
 pub mod gateway_backend;
-#[cfg(any(debug_assertions, test))]
 pub mod git_repo;
-#[cfg(any(debug_assertions, test))]
 pub mod subprocess_isolation;
-#[cfg(any(debug_assertions, test))]
 mod workspace_guard;
 
-#[cfg(any(debug_assertions, test))]
 pub use audit_dir::{AuditDir, GenesisInfo};
-#[cfg(any(debug_assertions, test))]
 pub use audit_sink::{CapturedEvent, FakeAuditSink};
-#[cfg(any(debug_assertions, test))]
 pub use cert::{
     ephemeral_cert, ephemeral_cert_with_key, ephemeral_cert_with_opts,
     ephemeral_signing_key, pubkey_hex, stub_cert_for_pubkey, CertOpts,
 };
-#[cfg(any(debug_assertions, test))]
 pub use clock::FakeClock;
-#[cfg(any(debug_assertions, test))]
 pub use disk_store::DiskStore;
-#[cfg(any(debug_assertions, test))]
 pub use gateway_backend::MockBackend;
-#[cfg(any(debug_assertions, test))]
 pub use git_repo::{git_available, GitRepo};
-#[cfg(any(debug_assertions, test))]
 pub use subprocess_isolation::{SubprocessIsolation, SubprocessSession};
 
 // ---------------------------------------------------------------------------
 // mem_store — one-line in-memory Store factory.
-//
-// Same Layer 1 gate as the other public items: in a release build of
-// any consumer that mistakenly takes us as a regular dep, `mem_store`
-// does not exist and the consumer fails to compile.
 // ---------------------------------------------------------------------------
 
-#[cfg(any(debug_assertions, test))]
 use raxis_store::Store;
 
 /// Open a fresh in-memory `raxis_store::Store` with all migrations
@@ -160,7 +135,6 @@ use raxis_store::Store;
 /// The returned `Store` is fully isolated from any other `mem_store()`
 /// call (each one allocates a separate `:memory:` SQLite database), so
 /// tests can call this in `#[test]` setup without ordering concerns.
-#[cfg(any(debug_assertions, test))]
 pub fn mem_store() -> Store {
     Store::open_in_memory()
         .expect("raxis-test-support::mem_store: in-memory Store::open_in_memory failed")

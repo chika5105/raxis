@@ -37,14 +37,16 @@
 // `ephemeral_signing_key(seed)` directly to obtain a `SigningKey` you
 // hold across two `ephemeral_cert_with_key(&key, ...)` calls.
 //
-// ── Layer 1 enforcement ──────────────────────────────────────────────
+// ── Misuse enforcement ───────────────────────────────────────────────
 //
-// Same `#[cfg(any(debug_assertions, test))]` gate as the rest of
-// `raxis-test-support`. Release builds of consumers that mistakenly
-// take this crate as a non-dev-dep cannot resolve `cert::*` and fail
-// to compile, per the crate-level rule in `lib.rs`.
-
-#![cfg(any(debug_assertions, test))]
+// `raxis-test-support` is dev-dep-only; the `workspace_guard` `#[test]`
+// in `crates/test-support/src/workspace_guard.rs` walks every
+// workspace member's `Cargo.toml` at `cargo test --workspace` time
+// and fails if this crate appears outside `[dev-dependencies]`. The
+// crate root also carries `#![cfg_attr(not(debug_assertions),
+// deprecated)]` so a release build of any consumer that does manage
+// to depend on this crate emits a deprecation warning at every use
+// site.
 
 use ed25519_dalek::SigningKey;
 use raxis_crypto::cert::sign_cert;
