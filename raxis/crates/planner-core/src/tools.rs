@@ -46,6 +46,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::ToolSpec;
+use crate::tools_vm_capabilities::VmCapabilitiesTool;
 
 // ---------------------------------------------------------------------------
 // ToolOutput / ToolError / Tool trait
@@ -1521,6 +1522,11 @@ pub fn build_executor_registry() -> ToolRegistry {
     // overrides via [`build_executor_registry_with_sleep`] when the
     // operator policy declares `[budget.sleep_caps]`.
     r.register(Arc::new(SleepTool::disabled()));
+    // V2 `INV-EXEC-DISCOVERY-01` — capability discovery. Available
+    // unconditionally; cached per-process. The system-prompt
+    // capability-hint block (`render_capability_hint`) covers the
+    // common case; this tool is the recourse for finer queries.
+    r.register(Arc::new(VmCapabilitiesTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(TaskCompleteTool));
     r.register(Arc::new(ReportFailureTool));
@@ -1539,6 +1545,14 @@ pub fn build_reviewer_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(GrepSearchTool));
+    // V2 `INV-EXEC-DISCOVERY-01` — capability discovery is read-
+    // only (no workspace mutation, no egress, no shell exec
+    // beyond cheap `--version` probes). Including it in the
+    // reviewer registry lets the reviewer query "what test
+    // runners are available?" before recommending a remediation,
+    // without violating INV-PLANNER-HARNESS-04 (no workspace-
+    // mutating tools for the reviewer).
+    r.register(Arc::new(VmCapabilitiesTool));
     r.register(Arc::new(SubmitReviewTool));
     r
 }
@@ -1559,6 +1573,13 @@ pub fn build_orchestrator_registry() -> ToolRegistry {
     // overrides via [`build_orchestrator_registry_with_sleep`] when
     // the operator policy declares `[budget.sleep_caps]`.
     r.register(Arc::new(SleepTool::disabled()));
+    // V2 `INV-EXEC-DISCOVERY-01` — capability discovery. The
+    // orchestrator rarely needs it (its toolchain is the
+    // canonical orchestrator-core image) but registering keeps
+    // the introspection surface uniform across roles, which
+    // simplifies reasoning about "which manifest fields can the
+    // model query in which role" — answer: always all of them.
+    r.register(Arc::new(VmCapabilitiesTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(ActivateSubtaskTool));
     r.register(Arc::new(RetrySubtaskTool));
@@ -1583,6 +1604,9 @@ pub fn build_executor_registry_with_sleep(
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(GitCommitTool));
     r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    // V2 `INV-EXEC-DISCOVERY-01` — capability discovery (sleep
+    // variant of the executor registry).
+    r.register(Arc::new(VmCapabilitiesTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(TaskCompleteTool));
     r.register(Arc::new(ReportFailureTool));
@@ -1601,6 +1625,8 @@ pub fn build_orchestrator_registry_with_sleep(
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    // V2 `INV-EXEC-DISCOVERY-01` — capability discovery.
+    r.register(Arc::new(VmCapabilitiesTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(ActivateSubtaskTool));
     r.register(Arc::new(RetrySubtaskTool));
@@ -1859,6 +1885,38 @@ mod tests {
         let r = build_reviewer_registry();
         assert!(r.get("submit_review").is_some(),
             "reviewer registry MUST declare `submit_review`");
+    }
+
+    /// V2 `INV-EXEC-DISCOVERY-01` — every role's registry MUST
+    /// expose `vm_capabilities` so the LLM can query the in-VM
+    /// manifest before writing scripts. The capability-hint block
+    /// in the system prompt covers the common case; this tool is
+    /// the recourse for finer queries (e.g. "is `numpy`
+    /// available?").
+    #[test]
+    fn every_role_registry_includes_vm_capabilities() {
+        for (label, r) in [
+            ("executor",     build_executor_registry()),
+            ("reviewer",     build_reviewer_registry()),
+            ("orchestrator", build_orchestrator_registry()),
+        ] {
+            assert!(
+                r.get("vm_capabilities").is_some(),
+                "INV-EXEC-DISCOVERY-01: {label} registry MUST declare \
+                 `vm_capabilities`",
+            );
+        }
+        // Same invariant for the `_with_sleep` constructors that
+        // the planner binaries use when the operator policy
+        // declares `[budget.sleep_caps]`.
+        assert!(
+            build_executor_registry_with_sleep(60, 300).get("vm_capabilities").is_some(),
+            "executor _with_sleep registry MUST include vm_capabilities",
+        );
+        assert!(
+            build_orchestrator_registry_with_sleep(60, 300).get("vm_capabilities").is_some(),
+            "orchestrator _with_sleep registry MUST include vm_capabilities",
+        );
     }
 
     #[test]
