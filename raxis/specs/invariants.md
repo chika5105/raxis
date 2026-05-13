@@ -87,8 +87,8 @@
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
-| Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01 | 2 |
-| **Total** | | **107** |
+| Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01, INV-OBS-OPERATOR-IPC-COVERAGE-01 | 3 |
+| **Total** | | **108** |
 
 ---
 
@@ -5935,6 +5935,95 @@ without opening the audit log or the supervisor's stderr file.
 rows for `KernelRespawnTotal` / `KernelRespawnDuration` /
 `SupervisorRefusedRestartTotal`) + cross-ref from
 `v2/self-healing-supervisor.md §9`.
+
+### INV-OBS-OPERATOR-IPC-COVERAGE-01 — Every operator IPC dispatch is paired with one counter increment + one duration sample
+
+**Statement.** Every operator IPC frame the kernel dispatches in
+`kernel/src/ipc/operator.rs::dispatch_loop` MUST emit exactly one
+`OperatorIpcTotal` counter increment AND exactly one
+`OperatorIpcDuration` histogram observation, both labelled with the
+same `command_kind` and `accepted` values. Coverage is one-to-one:
+`rate(OperatorIpcTotal[5m]) == rate(OperatorIpcDuration[5m])` per
+`(command_kind, accepted)` series.
+
+The label vocabularies are CLOSED:
+* `command_kind` — every `OperatorRequest` variant in
+  `raxis_types::operator_wire`, projected to `snake_case`. The
+  closed set is pinned by
+  `kernel/src/observability.rs::COMMAND_KIND_CLOSED_SET` and the
+  total-mapping helper `operator_command_kind` whose match arm is
+  exhaustive over the wire enum (the compiler enforces the
+  invariant at every variant-addition refactor).
+* `accepted` — `Bool`. `false` iff the response is
+  `OperatorResponse::Error` (the sole error envelope per
+  `peripherals.md §3 "Operator socket"`); `true` for every other
+  response variant including `Ack`. The boolean projection is
+  pinned by `operator_response_accepted`.
+
+**Justification.** Operator UDS dispatch is the single entry point
+for every operator-driven kernel mutation: `CreateInitiative`,
+`ApprovePlan`, `RotateEpoch`, `QuarantineInitiative`,
+`ApproveEscalation`, etc. Pre-iter44 the operator-visible signals
+were the structured stderr log line emitted by
+`dispatch_log::op_response` and the audit-chain entry — both
+durable, neither pivot-able into a Grafana panel. The "accepted vs
+rejected per command" panel on the new `15-ipc.json` dashboard
+(slice 4b) is the operator's first dashboard view of "is the
+operator socket healthy and what commands are getting rejected
+right now". Pinning the rate equality between counter and histogram
+also gives the dashboard PromQL surface a structural redundancy:
+if either series silently drops sampling (sample-rate change, hub
+disabled per-environment), the operator sees the divergence
+immediately.
+
+**Scenario.** A misconfigured CLI build retries `ApprovePlan` with
+a wrong-epoch signature. The kernel's plan-approval handler
+returns `OperatorResponse::Error { code: "FAIL_APPROVE_PLAN",
+detail: "epoch mismatch" }`. With this invariant:
+
+  1. `OperatorIpcTotal{command_kind="approve_plan",
+     accepted="false"}` increments by 1.
+  2. `OperatorIpcDuration{command_kind="approve_plan",
+     accepted="false"}` observes the dispatch latency.
+  3. The dashboard's "Operator IPC: rate by command_kind" panel
+     shows the spike on the `approve_plan` series; the "accepted
+     vs rejected" panel shows the rejection rate climbing.
+  4. The operator pivots from the rejection rate to the structured
+     stderr log (which already carries the same `command_kind` /
+     `code` / `detail` fields) and resolves the bad CLI build.
+
+Without the metric, the operator's only signal is the audit log —
+which is durable but not real-time-pivot-able from a Grafana
+dashboard.
+
+**Witness.** Four unit tests in
+`kernel/src/observability.rs::operator_ipc_tests`:
+
+* `every_variant_emits_paired_metrics` — drives one fixture
+  instance per `OperatorRequest` variant through
+  `operator_command_kind` and asserts both the counter and the
+  histogram observation land with the matching labels and the
+  iter44 wide-bucket override (not the hub'''s global default).
+* `rejected_response_emits_accepted_false` — pins the `accepted =
+  false` polarity for `OperatorResponse::Error` so a future
+  refactor cannot silently invert it.
+* `closed_set_matches_op_name_table` — pins the closed lexicon
+  against the `operator_command_kind` projection in both
+  directions: every variant produces a closed-set value, and
+  every closed-set value (except `unknown`) is reachable from at
+  least one variant.
+* `response_accepted_is_total` — pins
+  `operator_response_accepted` over a representative slice of
+  `OperatorResponse` variants (non-Error → true, Error → false).
+
+The `operator_command_kind` match arm is itself a structural
+witness — adding a new `OperatorRequest` variant produces a
+compile error here until the variant is mapped, which forces the
+closed-lexicon update to be a single PR.
+
+**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+rows for `OperatorIpcTotal` and `OperatorIpcDuration`). Referenced
+from `v3/observability-prometheus.md §3.12` (Prometheus inventory).
 
 ---
 

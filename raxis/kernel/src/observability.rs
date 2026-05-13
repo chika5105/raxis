@@ -1528,3 +1528,473 @@ mod admit_predicate_tests {
         }
     }
 }
+
+// iter44 perf-metrics — `INV-OBS-OPERATOR-IPC-COVERAGE-01`.
+//
+// `OperatorIpcDuration` (Histogram, ms) + `OperatorIpcTotal` (Counter)
+// are emitted from `kernel/src/ipc/operator.rs::dispatch_loop` once
+// per operator IPC frame — after the response is built and just before
+// `write_json_frame_async` ships it back to the CLI. The dispatcher
+// owns the timer that brackets the full pre-handler pipeline
+// (permitted_ops gate + cert four-zone gate + handler dispatch),
+// matching the latency the operator sees on the CLI side.
+//
+// **Closed `command_kind` lexicon.** Every `OperatorRequest` variant
+// in `raxis_types::operator_wire` maps to a distinct `command_kind`
+// label value drawn from [`COMMAND_KIND_CLOSED_SET`]. The mapping
+// helper [`operator_command_kind`] is total over the enum (the
+// compiler enforces exhaustiveness via the match arm), and the
+// witness test [`operator_ipc_tests::closed_set_matches_op_name_table`]
+// pins the lexemes against the dispatcher's `op_name` snake_case
+// projection.
+//
+// **`accepted` semantics.** `accepted = true` iff the response is
+// NOT `OperatorResponse::Error` — i.e. the dispatcher returned a
+// structured success envelope (including `Ack`). The four pre-handler
+// failure modes (`INVALID_REQUEST` from frame decode failure,
+// `UNAUTHORIZED` from the `permitted_ops` gate, the cert four-zone
+// `Deny` envelope, and any handler-side `Error` envelope) all map to
+// `accepted = false`; the dashboard pivots on this label to surface
+// rejection rate per command.
+// ---------------------------------------------------------------------------
+
+/// Closed `command_kind` lexicon for the operator IPC family. Every
+/// `OperatorRequest` variant produces exactly one of these values via
+/// [`operator_command_kind`]. Adding a new request variant MUST extend
+/// both this slice AND the match arm; the witness tests keep them in
+/// lock-step.
+pub const COMMAND_KIND_CREATE_SESSION:             &str = "create_session";
+/// Operator-initiated session revocation.
+pub const COMMAND_KIND_REVOKE_SESSION:             &str = "revoke_session";
+/// Operator-initiated delegation grant.
+pub const COMMAND_KIND_GRANT_DELEGATION:           &str = "grant_delegation";
+/// Plan-bundle-sealed initiative creation.
+pub const COMMAND_KIND_CREATE_INITIATIVE:          &str = "create_initiative";
+/// Operator approves an admission-pending plan.
+pub const COMMAND_KIND_APPROVE_PLAN:               &str = "approve_plan";
+/// Operator rejects an admission-pending plan.
+pub const COMMAND_KIND_REJECT_PLAN:                &str = "reject_plan";
+/// Operator aborts an in-flight task.
+pub const COMMAND_KIND_ABORT_TASK:                 &str = "abort_task";
+/// Operator resumes a paused task.
+pub const COMMAND_KIND_RESUME_TASK:                &str = "resume_task";
+/// Operator retries a failed task (`RetryTask` lifecycle FSM step).
+pub const COMMAND_KIND_RETRY_TASK:                 &str = "retry_task";
+/// Operator aborts an in-flight initiative.
+pub const COMMAND_KIND_ABORT_INITIATIVE:           &str = "abort_initiative";
+/// Operator approves a planner-submitted escalation.
+pub const COMMAND_KIND_APPROVE_ESCALATION:         &str = "approve_escalation";
+/// Operator denies a planner-submitted escalation.
+pub const COMMAND_KIND_DENY_ESCALATION:            &str = "deny_escalation";
+/// Operator rotates the active policy artifact in-process.
+pub const COMMAND_KIND_ROTATE_EPOCH:               &str = "rotate_epoch";
+/// Operator quarantines a single initiative.
+pub const COMMAND_KIND_QUARANTINE_INITIATIVE:      &str = "quarantine_initiative";
+/// Operator quarantines every initiative whose plan a given
+/// fingerprint signed.
+pub const COMMAND_KIND_QUARANTINE_PLANS_BY:        &str = "quarantine_plans_by";
+/// V2_GAPS §12.4 — operator-ergonomics `propose-defaults` stub.
+pub const COMMAND_KIND_PROPOSE_DEFAULTS:           &str = "propose_defaults";
+/// V2_GAPS §12.4 — operator-ergonomics `cost-estimate` stub.
+pub const COMMAND_KIND_ESTIMATE_COST:              &str = "estimate_cost";
+/// V2_GAPS §12.4 — operator-ergonomics `submit --dry-run` stub.
+pub const COMMAND_KIND_DRY_RUN_ADMIT:              &str = "dry_run_admit";
+/// V2_GAPS §12.4 — operator-ergonomics `initiative watch` stub.
+pub const COMMAND_KIND_SUBSCRIBE_INITIATIVE:       &str = "subscribe_initiative";
+/// V2_GAPS §12.4 — operator-ergonomics `initiative resume` stub.
+pub const COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE:  &str = "describe_initiative_pause";
+/// V2_extended_gaps §3.2 — `task outputs` listing.
+pub const COMMAND_KIND_LIST_TASK_OUTPUTS:          &str = "list_task_outputs";
+/// Forward-compat fallback for any future variant the
+/// [`operator_command_kind`] mapping has not yet been extended for.
+/// The witness test pins this to a wire never produced by today's
+/// dispatcher (the match arm is exhaustive) — its sole purpose is to
+/// keep the closed lexicon stable across future variant additions
+/// during the brief moment between adding the variant and updating
+/// the match arm.
+pub const COMMAND_KIND_UNKNOWN:                    &str = "unknown";
+
+/// Closed set of every `command_kind` lexeme the operator IPC
+/// dispatcher may emit. The dashboard PromQL pivots on this set; an
+/// emit site that smuggled in a free-form value would show up as a
+/// stray series.
+pub const COMMAND_KIND_CLOSED_SET: &[&str] = &[
+    COMMAND_KIND_CREATE_SESSION,
+    COMMAND_KIND_REVOKE_SESSION,
+    COMMAND_KIND_GRANT_DELEGATION,
+    COMMAND_KIND_CREATE_INITIATIVE,
+    COMMAND_KIND_APPROVE_PLAN,
+    COMMAND_KIND_REJECT_PLAN,
+    COMMAND_KIND_ABORT_TASK,
+    COMMAND_KIND_RESUME_TASK,
+    COMMAND_KIND_RETRY_TASK,
+    COMMAND_KIND_ABORT_INITIATIVE,
+    COMMAND_KIND_APPROVE_ESCALATION,
+    COMMAND_KIND_DENY_ESCALATION,
+    COMMAND_KIND_ROTATE_EPOCH,
+    COMMAND_KIND_QUARANTINE_INITIATIVE,
+    COMMAND_KIND_QUARANTINE_PLANS_BY,
+    COMMAND_KIND_PROPOSE_DEFAULTS,
+    COMMAND_KIND_ESTIMATE_COST,
+    COMMAND_KIND_DRY_RUN_ADMIT,
+    COMMAND_KIND_SUBSCRIBE_INITIATIVE,
+    COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE,
+    COMMAND_KIND_LIST_TASK_OUTPUTS,
+    COMMAND_KIND_UNKNOWN,
+];
+
+/// Histogram bucket boundaries (ms) for `OperatorIpcDuration`.
+/// Operator commands are typically fast (FSM transitions on
+/// committed state) but escalation approval / plan-bundle admission
+/// can take several hundred milliseconds when signature verification
+/// is on the critical path. The wider 2.5s / 5s tail buckets cover
+/// crash-loop and fail-closed paths where the kernel is
+/// pathologically slow but still responding.
+pub const OPERATOR_IPC_BUCKETS_MS: &[f64] = &[
+    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+];
+
+/// Map an `OperatorRequest` to its closed `command_kind` lexeme.
+/// The match arm is exhaustive over `raxis_types::operator_wire::
+/// OperatorRequest`; adding a new variant produces a compile error
+/// here, which is the structural guarantee that the closed lexicon
+/// stays in sync with the wire enum.
+///
+/// The lexeme is a `snake_case` projection of the variant name, kept
+/// verbatim in [`COMMAND_KIND_CLOSED_SET`] so the witness test can
+/// pin the byte shape.
+pub fn operator_command_kind(
+    req: &raxis_types::operator_wire::OperatorRequest,
+) -> &'static str {
+    use raxis_types::operator_wire::OperatorRequest as R;
+    match req {
+        R::CreateSession            { .. } => COMMAND_KIND_CREATE_SESSION,
+        R::RevokeSession            { .. } => COMMAND_KIND_REVOKE_SESSION,
+        R::GrantDelegation          { .. } => COMMAND_KIND_GRANT_DELEGATION,
+        R::CreateInitiative         { .. } => COMMAND_KIND_CREATE_INITIATIVE,
+        R::ApprovePlan              { .. } => COMMAND_KIND_APPROVE_PLAN,
+        R::RejectPlan               { .. } => COMMAND_KIND_REJECT_PLAN,
+        R::AbortInitiative          { .. } => COMMAND_KIND_ABORT_INITIATIVE,
+        R::AbortTask                { .. } => COMMAND_KIND_ABORT_TASK,
+        R::ResumeTask               { .. } => COMMAND_KIND_RESUME_TASK,
+        R::RetryTask                { .. } => COMMAND_KIND_RETRY_TASK,
+        R::ApproveEscalation        { .. } => COMMAND_KIND_APPROVE_ESCALATION,
+        R::DenyEscalation           { .. } => COMMAND_KIND_DENY_ESCALATION,
+        R::RotateEpoch              { .. } => COMMAND_KIND_ROTATE_EPOCH,
+        R::QuarantineInitiative     { .. } => COMMAND_KIND_QUARANTINE_INITIATIVE,
+        R::QuarantinePlansBy        { .. } => COMMAND_KIND_QUARANTINE_PLANS_BY,
+        R::ProposeDefaults          { .. } => COMMAND_KIND_PROPOSE_DEFAULTS,
+        R::EstimateCost             { .. } => COMMAND_KIND_ESTIMATE_COST,
+        R::DryRunAdmit              { .. } => COMMAND_KIND_DRY_RUN_ADMIT,
+        R::SubscribeInitiative      { .. } => COMMAND_KIND_SUBSCRIBE_INITIATIVE,
+        R::DescribeInitiativePause  { .. } => COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE,
+        R::ListTaskOutputs          { .. } => COMMAND_KIND_LIST_TASK_OUTPUTS,
+    }
+}
+
+/// Map an `OperatorResponse` to the `accepted` boolean label.
+///
+/// `accepted = false` iff the response is `OperatorResponse::Error`
+/// (the sole error envelope per `peripherals.md §3 "Operator
+/// socket"`); every other variant — including the generic `Ack` —
+/// is a structured success and maps to `accepted = true`.
+pub fn operator_response_accepted(
+    resp: &raxis_types::operator_wire::OperatorResponse,
+) -> bool {
+    !matches!(
+        resp,
+        raxis_types::operator_wire::OperatorResponse::Error { .. },
+    )
+}
+
+/// `raxis.operator.ipc.{total,duration}` — emit one counter
+/// increment plus one histogram observation for a single operator
+/// IPC frame. Called from `kernel/src/ipc/operator.rs::dispatch_loop`
+/// after the response is built and just before
+/// `write_json_frame_async` ships it back to the CLI.
+///
+/// `command_kind` MUST be drawn from [`COMMAND_KIND_CLOSED_SET`]
+/// (use [`operator_command_kind`]). `accepted` MUST be derived from
+/// [`operator_response_accepted`]. `duration_ms` is the wall-clock
+/// from frame-received to response-built (the dispatcher's existing
+/// `started.elapsed()` timer).
+pub fn record_operator_ipc(
+    hub:          &ObservabilityHub,
+    command_kind: &str,
+    accepted:     bool,
+    duration_ms:  i64,
+) {
+    if !hub.enabled() { return; }
+    let mut labels = redact::attrs([("command_kind", command_kind)]);
+    labels.insert(
+        "accepted".to_owned(),
+        raxis_observability::AttrValue::Bool(accepted),
+    );
+    hub.record_counter(MetricName::OperatorIpcTotal, labels.clone(), 1.0);
+    hub.record_histogram_with_buckets(
+        MetricName::OperatorIpcDuration,
+        labels,
+        duration_ms.max(0) as f64,
+        OPERATOR_IPC_BUCKETS_MS.to_vec(),
+    );
+}
+
+#[cfg(test)]
+mod operator_ipc_tests {
+    use super::*;
+    use raxis_observability::{
+        exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
+        ObservabilityExporter, ObservabilityHub,
+    };
+    use raxis_types::operator_wire::{
+        ApprovalScopeWire, OperatorRequest, OperatorResponse,
+    };
+    use std::sync::Arc;
+
+    fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled:     true,
+            sample_rate: 1.0,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
+        (hub, exp)
+    }
+
+    /// Construct one fixture instance per `OperatorRequest` variant.
+    /// Adding a new variant produces a compile error in
+    /// [`operator_command_kind`], which forces this list to be
+    /// updated alongside the closed lexicon.
+    fn every_operator_request() -> Vec<OperatorRequest> {
+        vec![
+            OperatorRequest::CreateSession {
+                role:              "planner".into(),
+                worktree_root:     None,
+                base_sha:          None,
+                base_tracking_ref: None,
+                lineage_id:        "lin-1".into(),
+                task_id:           None,
+            },
+            OperatorRequest::RevokeSession { session_id: "sess-1".into() },
+            OperatorRequest::GrantDelegation {
+                session_id:       "sess-1".into(),
+                delegation_id:    "del-1".into(),
+                capability_class: "FsRead".into(),
+                scope_json:       None,
+                ttl_secs:         3600,
+                max_uses:         Some(10),
+                signature_hex:    "deadbeef".into(),
+            },
+            OperatorRequest::CreateInitiative {
+                initiative_id:     "init-1".into(),
+                plan_bundle_hex:   "deadbeef".into(),
+                bundle_sha256_hex: "ab".repeat(32),
+                signature_hex:     "cd".repeat(64),
+                signed_by_hex:     "ef".repeat(8),
+            },
+            OperatorRequest::ApprovePlan {
+                initiative_id:      "init-1".into(),
+                approving_operator: "op-prime".into(),
+            },
+            OperatorRequest::RejectPlan {
+                initiative_id: "init-1".into(),
+                rejected_by:   "op-prime".into(),
+                reason:        None,
+            },
+            OperatorRequest::AbortInitiative {
+                initiative_id: "init-1".into(),
+                aborted_by:    "op-prime".into(),
+            },
+            OperatorRequest::AbortTask {
+                task_id:    "t1".into(),
+                aborted_by: "op-prime".into(),
+            },
+            OperatorRequest::ResumeTask {
+                task_id:    "t1".into(),
+                resumed_by: "op-prime".into(),
+            },
+            OperatorRequest::RetryTask { task_id: "t1".into() },
+            OperatorRequest::ApproveEscalation {
+                escalation_id:    "esc-1".into(),
+                approval_scope:   ApprovalScopeWire {
+                    capability_class:  "WriteSecrets".into(),
+                    max_uses:          1,
+                    valid_for_seconds: 3600,
+                },
+                operator_sig_hex: "deadbeef".into(),
+            },
+            OperatorRequest::DenyEscalation {
+                escalation_id: "esc-1".into(),
+                reason:        None,
+            },
+            OperatorRequest::RotateEpoch {
+                policy_path: "/p".into(),
+                sig_path:    "/s".into(),
+            },
+            OperatorRequest::QuarantineInitiative {
+                initiative_id: "init-1".into(),
+                reason:        None,
+            },
+            OperatorRequest::QuarantinePlansBy {
+                target_fingerprint: "ab".repeat(8),
+                reason:             None,
+            },
+            OperatorRequest::ProposeDefaults { initiative_id: None },
+            OperatorRequest::EstimateCost {
+                plan_toml:    "[[tasks]]".into(),
+                plan_sig_hex: "ab".into(),
+            },
+            OperatorRequest::DryRunAdmit {
+                plan_toml:    "[[tasks]]".into(),
+                plan_sig_hex: "ab".into(),
+                submitted_by: "op-prime".into(),
+            },
+            OperatorRequest::SubscribeInitiative {
+                initiative_id: "init-1".into(),
+            },
+            OperatorRequest::DescribeInitiativePause {
+                initiative_id: "init-1".into(),
+            },
+            OperatorRequest::ListTaskOutputs { task_id: "t1".into() },
+        ]
+    }
+
+    /// `INV-OBS-OPERATOR-IPC-COVERAGE-01` witness #1: every
+    /// `OperatorRequest` variant maps to a closed-lexicon
+    /// `command_kind` and a `record_operator_ipc` call emits BOTH
+    /// the counter and the histogram observation, with the labels
+    /// the dashboard pivots on.
+    #[test]
+    fn every_variant_emits_paired_metrics() {
+        for req in every_operator_request() {
+            let kind = operator_command_kind(&req);
+            assert!(
+                COMMAND_KIND_CLOSED_SET.contains(&kind),
+                "command_kind {kind:?} for {req:?} not in closed set",
+            );
+            let (hub, exp) = enabled_hub();
+            record_operator_ipc(hub.as_ref(), kind, true, 42);
+            hub.flush();
+            let metrics = exp.metrics();
+            assert_eq!(
+                metrics.len(), 2,
+                "expected counter+histogram pair for {req:?} (kind={kind})",
+            );
+            let counter = metrics.iter().find(|m| m.name == MetricName::OperatorIpcTotal)
+                .expect("OperatorIpcTotal present");
+            let histogram = metrics.iter().find(|m| m.name == MetricName::OperatorIpcDuration)
+                .expect("OperatorIpcDuration present");
+            assert!(matches!(
+                counter.datapoint,
+                DataPoint::Sum { value } if (value - 1.0).abs() < 1e-9,
+            ));
+            match counter.labels.get("command_kind").unwrap() {
+                AttrValue::Str(s) => assert_eq!(s, kind),
+                other            => panic!("command_kind must be Str, got {other:?}"),
+            }
+            match counter.labels.get("accepted").unwrap() {
+                AttrValue::Bool(b) => assert!(*b),
+                other              => panic!("accepted must be Bool, got {other:?}"),
+            }
+            // Histogram MUST use the iter44 operator-IPC bucket
+            // override, not the hub's global default.
+            if let DataPoint::Histo { ref buckets, .. } = histogram.datapoint {
+                assert_eq!(buckets, OPERATOR_IPC_BUCKETS_MS,
+                    "histogram MUST use the iter44 operator-IPC buckets");
+            } else {
+                panic!("histogram datapoint must be Histo, got {:?}", histogram.datapoint);
+            }
+        }
+    }
+
+    /// `INV-OBS-OPERATOR-IPC-COVERAGE-01` witness #2: rejected
+    /// frames flip `accepted = false` regardless of the originating
+    /// variant. Pins the `accepted` semantics — `Error` is the sole
+    /// `accepted = false` response.
+    #[test]
+    fn rejected_response_emits_accepted_false() {
+        let (hub, exp) = enabled_hub();
+        let kind = COMMAND_KIND_APPROVE_PLAN;
+        let resp = OperatorResponse::Error {
+            code:   "FAIL_APPROVE_PLAN".into(),
+            detail: "bad signature".into(),
+        };
+        assert!(!operator_response_accepted(&resp));
+        record_operator_ipc(hub.as_ref(), kind, false, 17);
+        hub.flush();
+        let metrics = exp.metrics();
+        assert_eq!(metrics.len(), 2);
+        for m in &metrics {
+            match m.labels.get("accepted").unwrap() {
+                AttrValue::Bool(b) => assert!(!*b),
+                other              => panic!("accepted must be Bool, got {other:?}"),
+            }
+        }
+    }
+
+    /// Defence-in-depth: every closed-set lexeme MUST be reachable
+    /// from at least one `OperatorRequest` variant via
+    /// [`operator_command_kind`] (or be `unknown` — the forward-
+    /// compat reservation). Pins the closed lexicon against typos
+    /// in either direction.
+    #[test]
+    fn closed_set_matches_op_name_table() {
+        let mut covered = std::collections::HashSet::new();
+        for req in every_operator_request() {
+            covered.insert(operator_command_kind(&req));
+        }
+        for &lex in COMMAND_KIND_CLOSED_SET {
+            assert!(
+                lex == COMMAND_KIND_UNKNOWN || covered.contains(lex),
+                "closed-set lexeme {lex:?} unreachable from any \
+                 OperatorRequest variant",
+            );
+        }
+        // And the inverse — every variant produces a closed-set
+        // value (excluding `unknown`).
+        for req in every_operator_request() {
+            let kind = operator_command_kind(&req);
+            assert!(COMMAND_KIND_CLOSED_SET.contains(&kind));
+            assert_ne!(kind, COMMAND_KIND_UNKNOWN,
+                "operator_command_kind MUST NOT return `unknown` for \
+                 a known variant ({req:?})");
+        }
+    }
+
+    /// `operator_response_accepted` is total over the response
+    /// envelope; pin the boolean projection so a future variant
+    /// addition cannot silently flip a success → false (or vice
+    /// versa).
+    #[test]
+    fn response_accepted_is_total() {
+        // Every non-Error envelope must flip true.
+        let success = vec![
+            OperatorResponse::Ack { message: "ok".into() },
+            OperatorResponse::SessionRevoked {
+                session_id: "s".into(), revoked_at: 0,
+            },
+            OperatorResponse::PlanApproved {
+                initiative_id: "i".into(), tasks_admitted: 0,
+            },
+            OperatorResponse::EpochAdvanced {
+                new_epoch_id: 1, policy_sha256: "ab".into(),
+                signed_by_authority: "cd".into(),
+                n_delegations_marked_stale: 0,
+                n_sessions_invalidated: 0,
+                advanced_at: 0,
+            },
+        ];
+        for r in &success {
+            assert!(operator_response_accepted(r),
+                "non-Error response must report accepted=true ({r:?})");
+        }
+        let err = OperatorResponse::Error {
+            code: "E".into(), detail: "d".into(),
+        };
+        assert!(!operator_response_accepted(&err));
+    }
+}

@@ -446,6 +446,25 @@ pub enum MetricName {
     /// (OperatorStop[Forced])` state, indicating the supervisor
     /// previously refused to spawn another kernel.
     SupervisorRefusedRestartTotal,
+
+    // ── iter44: operator IPC metrics (slice 4a) ──────────────────────
+    //
+    // Counterparts to the `OperatorIpc` span (`v3/otel-observability.md
+    // §7.1`). Recording site is the operator UDS dispatcher in
+    // `kernel/src/ipc/operator.rs::dispatch_loop`. Spec: `v3/otel-
+    // observability.md §8` rows added under iter44 + invariant
+    // `INV-OBS-OPERATOR-IPC-COVERAGE-01`.
+    /// `raxis.operator.ipc.duration` — Histogram (ms). Labels:
+    /// `command_kind` (closed allow-list = every `OperatorRequest`
+    /// variant in `raxis_types::operator_wire`), `accepted: bool`.
+    /// One observation per operator IPC frame the dispatcher
+    /// processes — fast path; per `INV-OBS-OPERATOR-IPC-COVERAGE-01`
+    /// the rate equals `OperatorIpcTotal`'s rate (one-to-one).
+    OperatorIpcDuration,
+    /// `raxis.operator.ipc.total` — Counter. Labels: `command_kind`,
+    /// `accepted: bool`. One increment per dispatched operator IPC
+    /// frame.
+    OperatorIpcTotal,
 }
 
 impl MetricName {
@@ -535,6 +554,9 @@ impl MetricName {
             Self::KernelRespawnTotal                   => "raxis.kernel.respawn.total",
             Self::KernelRespawnDuration                => "raxis.kernel.respawn.duration",
             Self::SupervisorRefusedRestartTotal        => "raxis.supervisor.refused_restart.total",
+
+            Self::OperatorIpcDuration                  => "raxis.operator.ipc.duration",
+            Self::OperatorIpcTotal                     => "raxis.operator.ipc.total",
         }
     }
 
@@ -566,7 +588,8 @@ impl MetricName {
             | Self::ReviewRevisionRound
             | Self::GitWorktreeProvisionDuration
             | Self::GitMergeDuration
-            | Self::KernelRespawnDuration => MetricType::Histogram,
+            | Self::KernelRespawnDuration
+            | Self::OperatorIpcDuration => MetricType::Histogram,
 
             Self::CircuitBreakerState
             | Self::SessionsActive
@@ -612,7 +635,8 @@ impl MetricName {
             | Self::ReviewerDisagreementTotal
             | Self::GitCommitTotal
             | Self::KernelRespawnTotal
-            | Self::SupervisorRefusedRestartTotal => MetricType::Counter,
+            | Self::SupervisorRefusedRestartTotal
+            | Self::OperatorIpcTotal => MetricType::Counter,
         }
     }
 
@@ -643,7 +667,8 @@ impl MetricName {
             | Self::ReviewerReviewDuration
             | Self::GitWorktreeProvisionDuration
             | Self::GitMergeDuration
-            | Self::KernelRespawnDuration => Unit::Milliseconds,
+            | Self::KernelRespawnDuration
+            | Self::OperatorIpcDuration => Unit::Milliseconds,
 
             Self::TokensConsumed
             | Self::PlannerInferenceTokensTotal => Unit::Tokens,

@@ -23,6 +23,15 @@
 //   ApproveEscalation  — fully wired (authority::escalation::approve_escalation)
 //   DenyEscalation     — fully wired (authority::escalation::deny_escalation)
 //   RotateEpoch        — fully wired (policy_manager::advance_epoch)
+//
+// Observability instrumentation: every dispatched frame emits one
+// `OperatorIpcTotal` counter increment plus one `OperatorIpcDuration`
+// histogram observation, both labelled with `command_kind` (closed
+// snake_case lexicon — see
+// `crate::observability::COMMAND_KIND_CLOSED_SET`) and `accepted`
+// (Bool — `false` iff the response is `OperatorResponse::Error`).
+// Spec: `v3/otel-observability.md §8` rows for `OperatorIpc{Total,
+// Duration}` + invariant `INV-OBS-OPERATOR-IPC-COVERAGE-01`.
 
 use std::sync::Arc;
 
@@ -201,6 +210,17 @@ pub async fn dispatch_loop(
                         op_name, &operator.fingerprint, operator_display_str,
                         &ack, &context_fields, latency_ms,
                     );
+                    // iter44 — `INV-OBS-OPERATOR-IPC-COVERAGE-01`.
+                    // Emit before the streaming runner takes over —
+                    // the metric MUST cover the ack frame even
+                    // though the connection persists for the
+                    // subsequent event stream.
+                    crate::observability::record_operator_ipc(
+                        ctx.observability.as_ref(),
+                        crate::observability::COMMAND_KIND_SUBSCRIBE_INITIATIVE,
+                        crate::observability::operator_response_accepted(&ack),
+                        latency_ms as i64,
+                    );
                     // Hand the connection over to the streaming
                     // runner. It writes the ack, then loops
                     // events, then returns when the initiative
@@ -216,12 +236,24 @@ pub async fn dispatch_loop(
                         op_name, &operator.fingerprint, operator_display_str,
                         &err_resp, &context_fields, latency_ms,
                     );
+                    crate::observability::record_operator_ipc(
+                        ctx.observability.as_ref(),
+                        crate::observability::COMMAND_KIND_SUBSCRIBE_INITIATIVE,
+                        crate::observability::operator_response_accepted(&err_resp),
+                        latency_ms as i64,
+                    );
                     write_json_frame_async(&mut stream, &err_resp).await?;
                     continue;
                 }
             }
         }
 
+        // Capture the closed-lexicon `command_kind` BEFORE the
+        // handler consumes the request by value. The closed lexicon
+        // (`crate::observability::COMMAND_KIND_CLOSED_SET`) and the
+        // exhaustive `operator_command_kind` match arm are the
+        // structural witness for `INV-OBS-OPERATOR-IPC-COVERAGE-01`.
+        let command_kind = crate::observability::operator_command_kind(&request);
         let response = handle_request(request, &operator, &ctx).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         dispatch_log::op_response(
@@ -231,6 +263,18 @@ pub async fn dispatch_loop(
             &response,
             &context_fields,
             latency_ms,
+        );
+        // iter44 — `INV-OBS-OPERATOR-IPC-COVERAGE-01`. Emit one
+        // `OperatorIpcTotal` increment + one `OperatorIpcDuration`
+        // sample per processed frame, regardless of response
+        // outcome. The `accepted` label flips false iff the
+        // response is `OperatorResponse::Error` (the sole error
+        // envelope per `peripherals.md §3 "Operator socket"`).
+        crate::observability::record_operator_ipc(
+            ctx.observability.as_ref(),
+            command_kind,
+            crate::observability::operator_response_accepted(&response),
+            latency_ms as i64,
         );
         write_json_frame_async(&mut stream, &response).await?;
     }

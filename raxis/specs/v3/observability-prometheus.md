@@ -239,6 +239,13 @@ key that is not on the list drops the entire metric and bumps
 | `raxis.kernel.respawn.duration`                | Histogram (ms) | `trigger` |
 | `raxis.supervisor.refused_restart.total`       | Counter        | `reason` |
 
+### 3.12 Operator IPC (iter44)
+
+| Metric (OTel) | Type | Attributes |
+|---|---|---|
+| `raxis.operator.ipc.duration`                  | Histogram (ms) | `command_kind`, `accepted` |
+| `raxis.operator.ipc.total`                     | Counter        | `command_kind`, `accepted` |
+
 ## 4. Grafana dashboards
 
 Ten dashboards live under
