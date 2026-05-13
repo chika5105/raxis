@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import clsx from "clsx";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -8,7 +9,16 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
+import {
+  StatusFilterPills,
+  StatusLegend,
+} from "@/components/StatusLegend";
 import { fmtRelative, plural } from "@/lib/format";
+import {
+  parseStatusParam,
+  serializeStatusParam,
+  toggleStatus,
+} from "@/lib/status-filter";
 
 const STATE_OPTIONS = [
   "All",
@@ -33,8 +43,32 @@ export function InitiativesPage() {
     const sp = new URLSearchParams(searchParams);
     if (next === "All") sp.delete("state");
     else sp.set("state", next);
+    // Changing the server-side state filter invalidates any
+    // narrower `?status=` legend selection — drop it so the
+    // operator doesn't see "0/0" right after picking a dropdown
+    // value that overlaps zero legend chips.
+    sp.delete("status");
     setSearchParams(sp, { replace: true });
   };
+  // Secondary, FE-side multi-select status legend filter. Stacks
+  // on top of the server-side dropdown above: the dropdown drives
+  // which initiatives we fetch; the legend dims rows that don't
+  // match the operator's narrower per-state focus.
+  const activeStatuses = useMemo(
+    () => parseStatusParam(searchParams.get("status")),
+    [searchParams],
+  );
+  const writeStatuses = (next: string[]) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next.length === 0) sp.delete("status");
+    else sp.set("status", serializeStatusParam(next));
+    setSearchParams(sp, { replace: true });
+  };
+  const handleToggle = (status: string, multiSelect: boolean) =>
+    writeStatuses(toggleStatus(activeStatuses, status, multiSelect));
+  const handleClearStatus = () => writeStatuses([]);
+  const handleRemoveStatus = (status: string) =>
+    writeStatuses(activeStatuses.filter((s) => s !== status));
   const [search, setSearch] = useState("");
 
   const q = useQuery({
@@ -50,7 +84,7 @@ export function InitiativesPage() {
     refetchInterval: 5_000,
   });
 
-  const filtered = useMemo(() => {
+  const searchFiltered = useMemo(() => {
     if (!q.data) return [];
     if (search.trim() === "") return q.data;
     const needle = search.trim().toLowerCase();
@@ -60,6 +94,17 @@ export function InitiativesPage() {
         i.initiative_id.toLowerCase().includes(needle),
     );
   }, [q.data, search]);
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const i of searchFiltered) c[i.state] = (c[i.state] ?? 0) + 1;
+    return c;
+  }, [searchFiltered]);
+  const activeSet = new Set(activeStatuses);
+  const filterActive = activeStatuses.length > 0;
+  // Rows always render — non-matching ones dim. Matches the
+  // user-stated "highlight" intent and lets the operator keep
+  // situational awareness of total scope.
+  const filtered = searchFiltered;
 
   return (
     <div className="space-y-4">
@@ -90,6 +135,34 @@ export function InitiativesPage() {
           </select>
         </div>
       </header>
+
+      {Object.keys(counts).length > 0 && (
+        <section
+          className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2"
+          aria-label="Initiative status legend"
+        >
+          <StatusLegend
+            counts={counts}
+            activeStatuses={activeStatuses}
+            onToggle={handleToggle}
+            onClear={handleClearStatus}
+            itemNoun="initiative"
+          />
+          {filterActive && (
+            <span className="text-[11px] text-ink-subtle">
+              · non-matching rows dimmed · Cmd-click for multi-select
+            </span>
+          )}
+        </section>
+      )}
+
+      {filterActive && (
+        <StatusFilterPills
+          activeStatuses={activeStatuses}
+          onRemove={handleRemoveStatus}
+          onClearAll={handleClearStatus}
+        />
+      )}
 
       {q.isPending ? (
         <PageSpinner />
@@ -126,10 +199,12 @@ export function InitiativesPage() {
             <tbody>
               {filtered.map((i) => {
                 const href = `/initiatives/${i.initiative_id}`;
+                const dimmed = filterActive && !activeSet.has(i.state);
                 return (
                   <tr
                     key={i.initiative_id}
                     tabIndex={0}
+                    data-dimmed={dimmed || undefined}
                     onClick={() => navigate(href)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
@@ -137,7 +212,11 @@ export function InitiativesPage() {
                         navigate(href);
                       }
                     }}
-                    className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                    className={clsx(
+                      "border-t border-edge/40 hover:bg-panel-high cursor-pointer",
+                      "focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high transition-opacity",
+                      dimmed && "opacity-40 hover:opacity-90",
+                    )}
                   >
                     <td className="px-4 py-2.5">
                       <Link

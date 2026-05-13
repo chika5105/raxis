@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import clsx from "clsx";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -8,7 +9,16 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
+import {
+  StatusFilterPills,
+  StatusLegend,
+} from "@/components/StatusLegend";
 import { fmtRelative, fmtTokens } from "@/lib/format";
+import {
+  parseStatusParam,
+  serializeStatusParam,
+  toggleStatus,
+} from "@/lib/status-filter";
 
 const ROLES = ["All", "Orchestrator", "Executor", "Reviewer"];
 
@@ -16,6 +26,21 @@ export function SessionsPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const initiativeId = params.get("initiative_id") ?? undefined;
+  const activeStatuses = useMemo(
+    () => parseStatusParam(params.get("status")),
+    [params],
+  );
+  const writeStatuses = (next: string[]) => {
+    const sp = new URLSearchParams(params);
+    if (next.length === 0) sp.delete("status");
+    else sp.set("status", serializeStatusParam(next));
+    setParams(sp, { replace: true });
+  };
+  const handleToggle = (status: string, multiSelect: boolean) =>
+    writeStatuses(toggleStatus(activeStatuses, status, multiSelect));
+  const handleClear = () => writeStatuses([]);
+  const handleRemove = (status: string) =>
+    writeStatuses(activeStatuses.filter((s) => s !== status));
   const [role, setRole] = useState<string>("All");
   const [search, setSearch] = useState("");
 
@@ -32,13 +57,22 @@ export function SessionsPage() {
     refetchInterval: 3_000,
   });
 
-  const filtered = useMemo(() => {
+  // Per-state legend counts are computed from the role/search-
+  // narrowed list (excluding the status filter itself) — that way
+  // the counts reflect the operator's other filters and don't
+  // shrink to "X/X" the moment they click a chip.
+  const roleSearchFiltered = useMemo(() => {
     if (!q.data) return [];
     return q.data.filter((s) => {
       if (role !== "All" && s.role !== role) return false;
       if (search) {
         const needle = search.toLowerCase();
-        const haystack = [s.session_id, s.task_id ?? "", s.initiative_id ?? "", s.model ?? ""]
+        const haystack = [
+          s.session_id,
+          s.task_id ?? "",
+          s.initiative_id ?? "",
+          s.model ?? "",
+        ]
           .join(" ")
           .toLowerCase();
         if (!haystack.includes(needle)) return false;
@@ -46,6 +80,19 @@ export function SessionsPage() {
       return true;
     });
   }, [q.data, role, search]);
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const s of roleSearchFiltered) {
+      c[s.state] = (c[s.state] ?? 0) + 1;
+    }
+    return c;
+  }, [roleSearchFiltered]);
+  const activeSet = new Set(activeStatuses);
+  const filterActive = activeStatuses.length > 0;
+  // Rows always render — when a status filter is active we dim the
+  // non-matching ones (highlight semantics) rather than removing
+  // them, matching the user's stated "highlight" intent.
+  const filtered = roleSearchFiltered;
 
   return (
     <div className="space-y-4">
@@ -80,6 +127,34 @@ export function SessionsPage() {
         </div>
       )}
 
+      {Object.keys(counts).length > 0 && (
+        <section
+          className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2"
+          aria-label="Session status legend"
+        >
+          <StatusLegend
+            counts={counts}
+            activeStatuses={activeStatuses}
+            onToggle={handleToggle}
+            onClear={handleClear}
+            itemNoun="session"
+          />
+          {filterActive && (
+            <span className="text-[11px] text-ink-subtle">
+              · non-matching rows dimmed · Cmd-click for multi-select
+            </span>
+          )}
+        </section>
+      )}
+
+      {filterActive && (
+        <StatusFilterPills
+          activeStatuses={activeStatuses}
+          onRemove={handleRemove}
+          onClearAll={handleClear}
+        />
+      )}
+
       {q.isPending ? (
         <PageSpinner />
       ) : q.error ? (
@@ -103,10 +178,12 @@ export function SessionsPage() {
             <tbody>
               {filtered.map((s) => {
                 const href = `/sessions/${s.session_id}`;
+                const dimmed = filterActive && !activeSet.has(s.state);
                 return (
                 <tr
                   key={s.session_id}
                   tabIndex={0}
+                  data-dimmed={dimmed || undefined}
                   onClick={() => navigate(href)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -114,7 +191,11 @@ export function SessionsPage() {
                       navigate(href);
                     }
                   }}
-                  className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                  className={clsx(
+                    "border-t border-edge/40 hover:bg-panel-high cursor-pointer",
+                    "focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high transition-opacity",
+                    dimmed && "opacity-40 hover:opacity-90",
+                  )}
                 >
                   <td className="px-4 py-2">
                     <Link

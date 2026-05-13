@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
@@ -10,7 +10,18 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
-import { stateTone, toneClasses } from "@/lib/state-color";
+import {
+  StatusFilterPills,
+  StatusLegend,
+} from "@/components/StatusLegend";
+import {
+  parseStatusParam,
+  serializeStatusParam,
+  toggleStatus,
+} from "@/lib/status-filter";
+// `stateTone`/`toneClasses` previously colored static badge chips
+// in this view; they now live inside the interactive
+// `<StatusLegend>` component above.
 
 /// Dedicated DAG view at `/initiatives/:id/dag`. Backed by the
 /// lightweight `GET /api/initiatives/:id/dag` endpoint (nodes +
@@ -28,6 +39,27 @@ export function InitiativeDagPage() {
   const navigate = useNavigate();
   const [selected, setSelected] = useState<string | null>(null);
   const [rankdir, setRankdir] = useState<"LR" | "TB">("LR");
+
+  // Mirror the InitiativeDetail page's URL-state convention so an
+  // operator can swap between the detail and DAG views with the
+  // filter intact (Cmd-click to multi-select, click again to
+  // clear, `?status=Running,Completed` survives reload).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeStatuses = useMemo(
+    () => parseStatusParam(searchParams.get("status")),
+    [searchParams],
+  );
+  const writeStatuses = (next: string[]) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next.length === 0) sp.delete("status");
+    else sp.set("status", serializeStatusParam(next));
+    setSearchParams(sp, { replace: true });
+  };
+  const handleToggle = (status: string, multiSelect: boolean) =>
+    writeStatuses(toggleStatus(activeStatuses, status, multiSelect));
+  const handleClear = () => writeStatuses([]);
+  const handleRemove = (status: string) =>
+    writeStatuses(activeStatuses.filter((s) => s !== status));
 
   // Two queries, joined client-side: the DAG endpoint gives us
   // the nodes/edges quickly; the initiative endpoint surfaces
@@ -126,20 +158,38 @@ export function InitiativeDagPage() {
         </div>
       </header>
 
-      {/* Per-state counters — at-a-glance progress bar. */}
+      {/* Per-state counters — clickable to focus the DAG on a
+       * single status (or Cmd-click for multi-select). Non-matching
+       * nodes fade rather than disappearing, preserving the
+       * operator's mental model of the full dependency graph. */}
       {nodes.length > 0 && (
-        <section className="flex flex-wrap gap-2">
-          {Object.entries(counts)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([state, n]) => (
-              <span
-                key={state}
-                className={`badge ${toneClasses(stateTone(state))}`}
-              >
-                {state} · {n}
-              </span>
-            ))}
+        <section
+          className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2"
+          aria-label="Task status legend"
+        >
+          <StatusLegend
+            counts={Object.fromEntries(
+              Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)),
+            )}
+            activeStatuses={activeStatuses}
+            onToggle={handleToggle}
+            onClear={handleClear}
+            itemNoun="task"
+          />
+          {activeStatuses.length > 0 && (
+            <span className="text-[11px] text-ink-subtle">
+              · non-matching nodes faded · Cmd-click for multi-select
+            </span>
+          )}
         </section>
+      )}
+
+      {activeStatuses.length > 0 && (
+        <StatusFilterPills
+          activeStatuses={activeStatuses}
+          onRemove={handleRemove}
+          onClearAll={handleClear}
+        />
       )}
 
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
@@ -168,6 +218,8 @@ export function InitiativeDagPage() {
               onActivate={(taskId) => navigate(`/tasks/${taskId}`)}
               selected={selected}
               rankdir={rankdir}
+              activeStates={activeStatuses}
+              hideLegend
               // Generous floor: 80 px per row + a 200 px base.
               height={Math.min(900, 240 + nodes.length * 32)}
             />

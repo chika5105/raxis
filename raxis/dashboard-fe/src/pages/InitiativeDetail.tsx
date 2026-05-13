@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import clsx from "clsx";
 
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
@@ -11,17 +12,47 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import {
+  StatusFilterPills,
+  StatusLegend,
+} from "@/components/StatusLegend";
+import {
   fmtAbsolute,
   fmtRelative,
   plural,
   shortFingerprint,
   shortSha,
 } from "@/lib/format";
+import {
+  parseStatusParam,
+  serializeStatusParam,
+  toggleStatus,
+} from "@/lib/status-filter";
 
 export function InitiativeDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
+
+  // URL-driven status filter — same `?status=Running,Completed`
+  // shape as the rest of the dashboard. Reads survive reload and
+  // are copy-link-shareable; other URL params (focus, future
+  // additions) are preserved across toggles.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeStatuses = useMemo(
+    () => parseStatusParam(searchParams.get("status")),
+    [searchParams],
+  );
+  const writeStatuses = (next: string[]) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next.length === 0) sp.delete("status");
+    else sp.set("status", serializeStatusParam(next));
+    setSearchParams(sp, { replace: true });
+  };
+  const handleToggle = (status: string, multiSelect: boolean) =>
+    writeStatuses(toggleStatus(activeStatuses, status, multiSelect));
+  const handleClear = () => writeStatuses([]);
+  const handleRemove = (status: string) =>
+    writeStatuses(activeStatuses.filter((s) => s !== status));
 
   const q = useQuery({
     queryKey: ["initiative", id],
@@ -30,11 +61,24 @@ export function InitiativeDetailPage() {
     enabled: id.length > 0,
   });
 
+  // Per-task-state counts for the legend. Computed even when the
+  // query is pending so hook order stays stable; the early returns
+  // below short-circuit before render.
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const t of q.data?.tasks ?? []) {
+      c[t.state] = (c[t.state] ?? 0) + 1;
+    }
+    return c;
+  }, [q.data]);
+
   if (q.isPending) return <PageSpinner />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const init = q.data;
   const focusedTask =
     selectedTask && init.tasks.find((t) => t.task_id === selectedTask);
+  const activeSet = new Set(activeStatuses);
+  const filterActive = activeStatuses.length > 0;
 
   return (
     <div className="space-y-5">
@@ -76,6 +120,38 @@ export function InitiativeDetailPage() {
         </div>
       </header>
 
+      {/* Clickable status legend — drives a URL-stored `?status=`
+       * filter that dims non-matching rows in the task table and
+       * fades non-matching nodes in the DAG. Cmd/Ctrl-click for
+       * multi-select. */}
+      {init.tasks.length > 0 && (
+        <section
+          className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2"
+          aria-label="Task status legend"
+        >
+          <StatusLegend
+            counts={counts}
+            activeStatuses={activeStatuses}
+            onToggle={handleToggle}
+            onClear={handleClear}
+            itemNoun="task"
+          />
+          {filterActive && (
+            <span className="text-[11px] text-ink-subtle">
+              · non-matching rows dimmed · Cmd-click for multi-select
+            </span>
+          )}
+        </section>
+      )}
+
+      {filterActive && (
+        <StatusFilterPills
+          activeStatuses={activeStatuses}
+          onRemove={handleRemove}
+          onClearAll={handleClear}
+        />
+      )}
+
       {/* DAG */}
       <section className="card p-4">
         <header className="flex items-center justify-between mb-2 gap-2 flex-wrap">
@@ -104,6 +180,8 @@ export function InitiativeDetailPage() {
             onActivate={(taskId) => navigate(`/tasks/${taskId}`)}
             selected={selectedTask}
             height={Math.min(640, 80 + init.tasks.length * 40)}
+            activeStates={activeStatuses}
+            hideLegend
           />
         )}
       </section>
@@ -130,14 +208,20 @@ export function InitiativeDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {init.tasks.map((t) => (
+                {init.tasks.map((t) => {
+                  const dimmed = filterActive && !activeSet.has(t.state);
+                  return (
                   <tr
                     key={t.task_id}
                     tabIndex={0}
                     aria-selected={selectedTask === t.task_id}
-                    className={`border-b border-edge/40 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
-                      selectedTask === t.task_id ? "bg-panel-high" : ""
-                    }`}
+                    data-dimmed={dimmed || undefined}
+                    className={clsx(
+                      "border-b border-edge/40 last:border-b-0 hover:bg-panel-high cursor-pointer",
+                      "focus:outline-none focus-visible:ring-1 focus-visible:ring-accent transition-opacity",
+                      selectedTask === t.task_id && "bg-panel-high",
+                      dimmed && "opacity-40 hover:opacity-90",
+                    )}
                     onClick={() => setSelectedTask(t.task_id)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
@@ -181,7 +265,8 @@ export function InitiativeDetailPage() {
                       {fmtRelative(t.updated_at)}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
