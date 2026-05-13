@@ -46,7 +46,7 @@ pub struct FakeResponse {
     /// Column names (text format only).
     pub columns: Vec<String>,
     /// Rows in arrival order.
-    pub rows:    Vec<FakeRow>,
+    pub rows: Vec<FakeRow>,
     /// Command-complete tag the backend should emit (e.g. `"SELECT 3"`).
     pub command_tag: String,
 }
@@ -55,8 +55,8 @@ impl FakeResponse {
     /// Empty result-set + a synthetic SELECT command tag.
     pub fn empty() -> Self {
         Self {
-            columns:     vec!["dummy".into()],
-            rows:        vec![],
+            columns: vec!["dummy".into()],
+            rows: vec![],
             command_tag: "SELECT 0".into(),
         }
     }
@@ -65,7 +65,7 @@ impl FakeResponse {
 /// Fake backend handle. Use [`FakeBackend::start`] to bind, then
 /// query [`FakeBackend::addr`] for the listen address.
 pub struct FakeBackend {
-    addr:    std::net::SocketAddr,
+    addr: std::net::SocketAddr,
 }
 
 impl FakeBackend {
@@ -132,11 +132,16 @@ async fn serve_one(
 
     // ----- Handshake response -----
     s.write_all(&authentication_ok()).await?;
-    s.write_all(&parameter_status("server_version", "14.0 (raxis-fake)")).await?;
-    s.write_all(&parameter_status("client_encoding", "UTF8")).await?;
-    s.write_all(&parameter_status("DateStyle", "ISO, MDY")).await?;
-    s.write_all(&parameter_status("integer_datetimes", "on")).await?;
-    s.write_all(&parameter_status("standard_conforming_strings", "on")).await?;
+    s.write_all(&parameter_status("server_version", "14.0 (raxis-fake)"))
+        .await?;
+    s.write_all(&parameter_status("client_encoding", "UTF8"))
+        .await?;
+    s.write_all(&parameter_status("DateStyle", "ISO, MDY"))
+        .await?;
+    s.write_all(&parameter_status("integer_datetimes", "on"))
+        .await?;
+    s.write_all(&parameter_status("standard_conforming_strings", "on"))
+        .await?;
     s.write_all(&parameter_status("TimeZone", "UTC")).await?;
     s.write_all(&backend_key_data(0, 0)).await?;
     s.write_all(&ready_for_query(b'I')).await?;
@@ -145,32 +150,30 @@ async fn serve_one(
     loop {
         let mut tag = [0u8; 1];
         let n = s.read(&mut tag).await?;
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
         match tag[0] {
             b'Q' => {
                 let len = s.read_i32().await?;
                 let mut body = vec![0u8; (len as usize) - 4];
                 s.read_exact(&mut body).await?;
-                let nul = body.iter().position(|&b| b == 0)
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no nul"))?;
+                let nul = body.iter().position(|&b| b == 0).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "no nul")
+                })?;
                 let sql = std::str::from_utf8(&body[..nul])
                     .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "non-utf8"))?
                     .to_owned();
-                let resp = responses(&sql).unwrap_or_else(|| {
-                    FakeResponse {
-                        columns:     vec![],
-                        rows:        vec![],
-                        command_tag: "DO".into(),
-                    }
+                let resp = responses(&sql).unwrap_or_else(|| FakeResponse {
+                    columns: vec![],
+                    rows: vec![],
+                    command_tag: "DO".into(),
                 });
                 if !resp.columns.is_empty() {
                     s.write_all(&row_description_text(&resp.columns)).await?;
                     for row in &resp.rows {
-                        let refs: Vec<Option<&[u8]>> = row
-                            .values
-                            .iter()
-                            .map(|v| v.as_deref())
-                            .collect();
+                        let refs: Vec<Option<&[u8]>> =
+                            row.values.iter().map(|v| v.as_deref()).collect();
                         s.write_all(&data_row(&refs)).await?;
                     }
                 }
@@ -185,7 +188,11 @@ async fn serve_one(
                     let mut body = vec![0u8; (len as usize) - 4];
                     s.read_exact(&mut body).await?;
                 }
-                s.write_all(&error_response_simple(b"0A000", "fake-pg: unsupported message")).await?;
+                s.write_all(&error_response_simple(
+                    b"0A000",
+                    "fake-pg: unsupported message",
+                ))
+                .await?;
                 s.write_all(&ready_for_query(b'I')).await?;
             }
         }
@@ -244,12 +251,12 @@ fn row_description_text(columns: &[String]) -> Vec<u8> {
         for col in columns {
             b.put_slice(col.as_bytes());
             b.put_u8(0);
-            b.put_i32(0);   // table OID
-            b.put_i16(0);   // attr num
-            b.put_i32(25);  // text OID
-            b.put_i16(-1);  // type size
-            b.put_i32(-1);  // type modifier
-            b.put_i16(0);   // text format
+            b.put_i32(0); // table OID
+            b.put_i16(0); // attr num
+            b.put_i32(25); // text OID
+            b.put_i16(-1); // type size
+            b.put_i32(-1); // type modifier
+            b.put_i16(0); // text format
         }
     })
 }

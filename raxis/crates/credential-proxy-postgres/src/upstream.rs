@@ -62,10 +62,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use raxis_credentials::{CredentialBackend, CredentialError, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialError, CredentialName};
 
+use crate::wire::{command_complete, data_row, row_description, FieldDescriptor};
 use crate::OwnedConsumer;
-use crate::wire::{FieldDescriptor, command_complete, data_row, row_description};
 
 /// Maximum size of an upstream payload the proxy will buffer in
 /// memory while re-encoding for the agent. Mirrors the `i32` length
@@ -262,11 +262,19 @@ pub fn redact_for_audit(msg: &str) -> String {
 /// makes forward progress (the message is already a redaction-only
 /// surface, so a malformed UTF-8 byte is fine to skip).
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 { 1 }
-    else if lead < 0xc0 { 1 }   // continuation; treat as single
-    else if lead < 0xe0 { 2 }
-    else if lead < 0xf0 { 3 }
-    else { 4 }
+    if lead < 0x80 {
+        1
+    } else if lead < 0xc0 {
+        1
+    }
+    // continuation; treat as single
+    else if lead < 0xe0 {
+        2
+    } else if lead < 0xf0 {
+        3
+    } else {
+        4
+    }
 }
 
 /// Parsed view of a libpq credential URL. Held by the proxy across
@@ -311,11 +319,9 @@ impl ParsedUpstreamUrl {
         let (host, port) = match authority.rfind(':') {
             Some(colon) => {
                 let h = &authority[..colon];
-                let p = authority[colon + 1..].parse::<u16>().map_err(|_| {
-                    UpstreamError::InvalidUrl(
-                        "port is not a valid u16".into(),
-                    )
-                })?;
+                let p = authority[colon + 1..]
+                    .parse::<u16>()
+                    .map_err(|_| UpstreamError::InvalidUrl("port is not a valid u16".into()))?;
                 (h.to_owned(), p)
             }
             None => (authority.to_owned(), 5432u16),
@@ -333,7 +339,12 @@ impl ParsedUpstreamUrl {
             || raw[scheme_end + host_end..]
                 .to_lowercase()
                 .contains("sslmode=verify-full");
-        Ok(Self { host, port, require_tls, raw })
+        Ok(Self {
+            host,
+            port,
+            require_tls,
+            raw,
+        })
     }
 
     /// The libpq URL bytes — passed to `tokio_postgres::Config`.
@@ -370,12 +381,11 @@ pub fn resolve_upstream_url(
     // `tokio_postgres::Error` already redacts and (b)
     // `redact_for_audit()` is the only path through which the URL
     // bytes reach an audit envelope.
-    value
-        .with_bytes(|bytes| {
-            std::str::from_utf8(bytes)
-                .map_err(|_| UpstreamError::InvalidUrl("credential value is not UTF-8".into()))
-                .and_then(ParsedUpstreamUrl::parse)
-        })
+    value.with_bytes(|bytes| {
+        std::str::from_utf8(bytes)
+            .map_err(|_| UpstreamError::InvalidUrl("credential value is not UTF-8".into()))
+            .and_then(ParsedUpstreamUrl::parse)
+    })
 }
 
 /// Outcome of a forwarded simple query.
@@ -398,16 +408,16 @@ pub struct ForwardOutcome {
 /// One live upstream session, held across the lifetime of the
 /// agent's connection (one upstream per agent in V2 — pooling is V3).
 pub struct UpstreamSession {
-    client:        tokio_postgres::Client,
+    client: tokio_postgres::Client,
     /// Hostname the audit envelope reports.
-    pub host:      String,
+    pub host: String,
     /// Port the audit envelope reports.
-    pub port:      u16,
+    pub port: u16,
     /// True if the URL requested TLS — V2.1 surfaces this in the
     /// audit envelope but the implementation only supports
     /// `NoTls` for the MVP. A `?sslmode=require` URL fails fast in
     /// `connect()` with `UpstreamError::Handshake`.
-    pub tls:       bool,
+    pub tls: bool,
     /// Wall-clock for the connect handshake — fed into
     /// `CredentialProxyUpstreamConnected.handshake_ms`.
     pub handshake_ms: u32,
@@ -430,15 +440,14 @@ impl UpstreamSession {
         if url.require_tls {
             return Err(UpstreamError::Handshake(
                 "?sslmode=require is not supported by the V2.1 MVP — \
-                 upgrade the proxy when TLS-to-upstream lands".into(),
+                 upgrade the proxy when TLS-to-upstream lands"
+                    .into(),
             ));
         }
         let started = Instant::now();
         let connect_fut = async {
-            let cfg: tokio_postgres::Config = url
-                .raw()
-                .parse()
-                .map_err(|e: tokio_postgres::Error| {
+            let cfg: tokio_postgres::Config =
+                url.raw().parse().map_err(|e: tokio_postgres::Error| {
                     UpstreamError::InvalidUrl(redact_for_audit(&e.to_string()))
                 })?;
             let (client, conn) = cfg
@@ -508,7 +517,7 @@ impl UpstreamSession {
                     if bytes_returned as usize > MAX_REENCODE_PAYLOAD_BYTES {
                         return Err(UpstreamError::PayloadTooLarge {
                             bytes: bytes_returned as usize,
-                            max:   MAX_REENCODE_PAYLOAD_BYTES,
+                            max: MAX_REENCODE_PAYLOAD_BYTES,
                         });
                     }
                     frames.push(frame);
@@ -527,7 +536,7 @@ impl UpstreamSession {
                     if bytes_returned as usize > MAX_REENCODE_PAYLOAD_BYTES {
                         return Err(UpstreamError::PayloadTooLarge {
                             bytes: bytes_returned as usize,
-                            max:   MAX_REENCODE_PAYLOAD_BYTES,
+                            max: MAX_REENCODE_PAYLOAD_BYTES,
                         });
                     }
                     frames.push(frame);
@@ -606,16 +615,19 @@ impl UpstreamSession {
             .columns()
             .iter()
             .map(|c| FieldDescriptor {
-                name:          c.name().to_owned(),
-                table_oid:     c.table_oid().unwrap_or(0) as i32,
+                name: c.name().to_owned(),
+                table_oid: c.table_oid().unwrap_or(0) as i32,
                 attribute_num: c.column_id().unwrap_or(0) as i16,
-                type_oid:      c.type_().oid() as i32,
-                type_size:     -1,
+                type_oid: c.type_().oid() as i32,
+                type_size: -1,
                 type_modifier: -1,
-                format_code:   0,
+                format_code: 0,
             })
             .collect();
-        Ok(UpstreamPreparedMeta { param_oids, columns })
+        Ok(UpstreamPreparedMeta {
+            param_oids,
+            columns,
+        })
     }
 }
 
@@ -652,7 +664,10 @@ fn classify_query_error(e: &tokio_postgres::Error) -> UpstreamError {
         .as_db_error()
         .map(|d| d.code().code().to_owned())
         .unwrap_or_else(|| "XX000".to_owned());
-    UpstreamError::QueryFailed { sqlstate, message: msg }
+    UpstreamError::QueryFailed {
+        sqlstate,
+        message: msg,
+    }
 }
 
 /// Synthesize the libpq-style command-complete tag from the SQL the
@@ -702,10 +717,8 @@ mod tests {
 
     #[test]
     fn parse_url_sslmode_require_marks_tls() {
-        let p = ParsedUpstreamUrl::parse(
-            "postgresql://u:p@db.example.com/mydb?sslmode=require",
-        )
-        .unwrap();
+        let p = ParsedUpstreamUrl::parse("postgresql://u:p@db.example.com/mydb?sslmode=require")
+            .unwrap();
         assert!(p.require_tls);
     }
 
@@ -780,7 +793,10 @@ mod tests {
 
     #[test]
     fn derive_command_tag_insert_has_zero_oid() {
-        assert_eq!(derive_command_tag("INSERT INTO t VALUES (1)", 1), "INSERT 0 1");
+        assert_eq!(
+            derive_command_tag("INSERT INTO t VALUES (1)", 1),
+            "INSERT 0 1"
+        );
     }
 
     #[test]

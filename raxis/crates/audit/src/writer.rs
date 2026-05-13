@@ -49,7 +49,9 @@ pub enum AuditWriterError {
     /// `last_chain_state` walked the segment and found a record whose
     /// `prev_sha256` does not equal `SHA-256(prev_line_bytes_with_newline)`.
     /// Same fail-closed posture as above.
-    #[error("audit chain has a prev_sha256 break at line {line_number}: expected={expected}, got={got}")]
+    #[error(
+        "audit chain has a prev_sha256 break at line {line_number}: expected={expected}, got={got}"
+    )]
     ChainPrevSha256Break {
         line_number: u64,
         expected: String,
@@ -346,13 +348,12 @@ pub fn last_chain_state(path: &Path) -> Result<Option<ChainResumeInfo>, AuditWri
                 reason: format!("JSON parse error: {e}"),
             })?;
 
-        let seq = parsed
-            .get("seq")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| AuditWriterError::MalformedRecord {
+        let seq = parsed.get("seq").and_then(|v| v.as_u64()).ok_or_else(|| {
+            AuditWriterError::MalformedRecord {
                 line_number,
                 reason: "missing or non-integer `seq` field".to_owned(),
-            })?;
+            }
+        })?;
 
         let prev_sha256 = parsed
             .get("prev_sha256")
@@ -562,8 +563,10 @@ mod tests {
         let missing = tmp.path().join("does-not-exist.jsonl");
 
         let info = last_chain_state(&missing).expect("scan should succeed");
-        assert!(info.is_none(),
-            "missing file is the genesis case, not an error");
+        assert!(
+            info.is_none(),
+            "missing file is the genesis case, not an error"
+        );
     }
 
     #[test]
@@ -572,8 +575,10 @@ mod tests {
         // File exists, length 0.
 
         let info = last_chain_state(tmp.path()).expect("scan should succeed");
-        assert!(info.is_none(),
-            "empty file is the genesis case, not an error");
+        assert!(
+            info.is_none(),
+            "empty file is the genesis case, not an error"
+        );
     }
 
     #[test]
@@ -585,19 +590,24 @@ mod tests {
                 policy_epoch: 1,
                 schema_version: 1,
             },
-            None, None, None,
-        ).unwrap();
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         drop(w); // close writer to flush
 
         // Append a stray blank line — common artefact of editor tampering.
-        let mut f = OpenOptions::new()
-            .append(true).open(tmp.path()).unwrap();
+        let mut f = OpenOptions::new().append(true).open(tmp.path()).unwrap();
         f.write_all(b"\n").unwrap();
         drop(f);
 
         let info = last_chain_state(tmp.path()).expect("scan should tolerate blank lines");
         let info = info.expect("file is non-empty");
-        assert_eq!(info.next_seq, 1, "blank line must NOT advance the seq counter");
+        assert_eq!(
+            info.next_seq, 1,
+            "blank line must NOT advance the seq counter"
+        );
     }
 
     #[test]
@@ -605,9 +615,14 @@ mod tests {
         let (mut w, tmp) = make_writer();
         for i in 0..3 {
             w.append(
-                AuditEventKind::KernelStopped { reason: format!("r{i}") },
-                None, None, None,
-            ).unwrap();
+                AuditEventKind::KernelStopped {
+                    reason: format!("r{i}"),
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         }
         drop(w);
 
@@ -631,20 +646,31 @@ mod tests {
         let (mut w, tmp) = make_writer();
         for i in 0..3 {
             w.append(
-                AuditEventKind::KernelStopped { reason: format!("phase1-{i}") },
-                None, None, None,
-            ).unwrap();
+                AuditEventKind::KernelStopped {
+                    reason: format!("phase1-{i}"),
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         }
         drop(w);
 
         // Phase 2: resume via last_chain_state + AuditWriter::open, append 2 more.
         let resume = last_chain_state(tmp.path()).unwrap().unwrap();
-        let mut w2 = AuditWriter::open(tmp.path(), resume.next_seq, Some(resume.prev_sha256)).unwrap();
+        let mut w2 =
+            AuditWriter::open(tmp.path(), resume.next_seq, Some(resume.prev_sha256)).unwrap();
         for i in 0..2 {
             w2.append(
-                AuditEventKind::KernelStopped { reason: format!("phase2-{i}") },
-                None, None, None,
-            ).unwrap();
+                AuditEventKind::KernelStopped {
+                    reason: format!("phase2-{i}"),
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         }
         drop(w2);
 
@@ -652,23 +678,31 @@ mod tests {
         let final_info = last_chain_state(tmp.path())
             .expect("post-resume scan must not error")
             .expect("file is non-empty");
-        assert_eq!(final_info.next_seq, 5,
-            "5 records written total: 3 (phase 1) + 2 (phase 2)");
+        assert_eq!(
+            final_info.next_seq, 5,
+            "5 records written total: 3 (phase 1) + 2 (phase 2)"
+        );
 
         // Spot-check: every line's seq is exactly its index, and every
         // prev_sha256 chains correctly.
         let records = read_lines(tmp.path());
         assert_eq!(records.len(), 5);
         for (i, r) in records.iter().enumerate() {
-            assert_eq!(r["seq"].as_u64().unwrap(), i as u64,
-                "seq monotonicity must hold across resume boundary");
+            assert_eq!(
+                r["seq"].as_u64().unwrap(),
+                i as u64,
+                "seq monotonicity must hold across resume boundary"
+            );
         }
         let raw = std::fs::read_to_string(tmp.path()).unwrap();
         let lines: Vec<&str> = raw.lines().collect();
         for i in 1..lines.len() {
             let expected = sha256_hex(format!("{}\n", lines[i - 1]).as_bytes());
-            assert_eq!(records[i]["prev_sha256"].as_str().unwrap(), expected,
-                "chain link at line {i} must reference SHA-256 of previous line");
+            assert_eq!(
+                records[i]["prev_sha256"].as_str().unwrap(),
+                expected,
+                "chain link at line {i} must reference SHA-256 of previous line"
+            );
         }
     }
 
@@ -677,7 +711,10 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         // Hand-craft two records: seq=0, then seq=2 (gap).
         let mut f = OpenOptions::new()
-            .write(true).truncate(true).open(tmp.path()).unwrap();
+            .write(true)
+            .truncate(true)
+            .open(tmp.path())
+            .unwrap();
         let line0 = serde_json::json!({
             "seq": 0,
             "event_id": "00000000-0000-0000-0000-000000000000",
@@ -688,7 +725,8 @@ mod tests {
             "payload": { "KernelStopped": { "reason": "x" } },
             "emitted_at": 0,
             "prev_sha256": AuditWriter::GENESIS_PREV_SHA256,
-        }).to_string();
+        })
+        .to_string();
         let line0_with_nl = format!("{line0}\n");
         f.write_all(line0_with_nl.as_bytes()).unwrap();
 
@@ -702,14 +740,19 @@ mod tests {
             "payload": { "KernelStopped": { "reason": "y" } },
             "emitted_at": 0,
             "prev_sha256": sha256_hex(line0_with_nl.as_bytes()),
-        }).to_string();
+        })
+        .to_string();
         f.write_all(line2.as_bytes()).unwrap();
         f.write_all(b"\n").unwrap();
         drop(f);
 
         let err = last_chain_state(tmp.path()).expect_err("gap must fail-close");
         match err {
-            AuditWriterError::ChainSequenceGap { line_number, expected, got } => {
+            AuditWriterError::ChainSequenceGap {
+                line_number,
+                expected,
+                got,
+            } => {
                 assert_eq!(line_number, 2);
                 assert_eq!(expected, 1);
                 assert_eq!(got, 2);
@@ -722,7 +765,10 @@ mod tests {
     fn last_chain_state_detects_prev_sha256_break() {
         let tmp = NamedTempFile::new().unwrap();
         let mut f = OpenOptions::new()
-            .write(true).truncate(true).open(tmp.path()).unwrap();
+            .write(true)
+            .truncate(true)
+            .open(tmp.path())
+            .unwrap();
         let line0 = serde_json::json!({
             "seq": 0,
             "event_id": "00000000-0000-0000-0000-000000000000",
@@ -733,7 +779,8 @@ mod tests {
             "payload": { "KernelStopped": { "reason": "x" } },
             "emitted_at": 0,
             "prev_sha256": AuditWriter::GENESIS_PREV_SHA256,
-        }).to_string();
+        })
+        .to_string();
         f.write_all(format!("{line0}\n").as_bytes()).unwrap();
 
         // Second record with a deliberately wrong prev_sha256.
@@ -747,7 +794,8 @@ mod tests {
             "payload": { "KernelStopped": { "reason": "y" } },
             "emitted_at": 0,
             "prev_sha256": "deadbeef".repeat(8),
-        }).to_string();
+        })
+        .to_string();
         f.write_all(format!("{line1}\n").as_bytes()).unwrap();
         drop(f);
 
@@ -764,19 +812,28 @@ mod tests {
     fn last_chain_state_detects_malformed_json() {
         let tmp = NamedTempFile::new().unwrap();
         let mut f = OpenOptions::new()
-            .write(true).truncate(true).open(tmp.path()).unwrap();
+            .write(true)
+            .truncate(true)
+            .open(tmp.path())
+            .unwrap();
         f.write_all(b"this is not json\n").unwrap();
         drop(f);
 
         let err = last_chain_state(tmp.path()).expect_err("malformed line must fail-close");
-        assert!(matches!(err, AuditWriterError::MalformedRecord { line_number: 1, .. }));
+        assert!(matches!(
+            err,
+            AuditWriterError::MalformedRecord { line_number: 1, .. }
+        ));
     }
 
     #[test]
     fn last_chain_state_detects_first_record_without_genesis_prev() {
         let tmp = NamedTempFile::new().unwrap();
         let mut f = OpenOptions::new()
-            .write(true).truncate(true).open(tmp.path()).unwrap();
+            .write(true)
+            .truncate(true)
+            .open(tmp.path())
+            .unwrap();
         // First record with seq=0 but a non-genesis prev_sha256 — also a chain break.
         let line = serde_json::json!({
             "seq": 0,
@@ -788,11 +845,15 @@ mod tests {
             "payload": { "KernelStopped": { "reason": "x" } },
             "emitted_at": 0,
             "prev_sha256": "abcdef".repeat(10) + "abcd",
-        }).to_string();
+        })
+        .to_string();
         f.write_all(format!("{line}\n").as_bytes()).unwrap();
         drop(f);
 
         let err = last_chain_state(tmp.path()).expect_err("non-genesis first prev must fail-close");
-        assert!(matches!(err, AuditWriterError::ChainPrevSha256Break { line_number: 1, .. }));
+        assert!(matches!(
+            err,
+            AuditWriterError::ChainPrevSha256Break { line_number: 1, .. }
+        ));
     }
 }

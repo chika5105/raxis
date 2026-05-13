@@ -84,11 +84,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 
 // `AuditSink` is intentionally NOT imported here — see Cargo.toml.
 
@@ -107,13 +107,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier. See `ConsumerIdentity::kind`.
     pub kind: String,
     /// Free-form disambiguator. See `ConsumerIdentity::id`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -127,12 +130,12 @@ pub mod upstream;
 pub mod wire;
 
 pub use restriction::{
-    Restrictions, OperationKind, RestrictionDecision, RestrictionReason,
-    classify_first_operation, extract_relations,
+    classify_first_operation, extract_relations, OperationKind, RestrictionDecision,
+    RestrictionReason, Restrictions,
 };
 pub use upstream::{
-    ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamPreparedMeta, UpstreamSession,
-    redact_for_audit, resolve_upstream_url,
+    redact_for_audit, resolve_upstream_url, ForwardOutcome, ParsedUpstreamUrl, UpstreamError,
+    UpstreamPreparedMeta, UpstreamSession,
 };
 
 // ---------------------------------------------------------------------------
@@ -200,7 +203,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// The address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error from `tokio::net::TcpListener::bind`.
         source: std::io::Error,
     },
@@ -208,7 +211,7 @@ pub enum ProxyError {
     #[error("credential lookup failed for `{name}`: {detail}")]
     CredentialLookup {
         /// Name of the credential whose resolution failed.
-        name:   String,
+        name: String,
         /// Human-readable detail (never includes the credential value).
         detail: String,
     },
@@ -223,17 +226,17 @@ pub struct ProxyStats {
     /// Number of accepted connections served (regardless of success).
     pub connections_served: AtomicU32,
     /// Number of queries audited (auditing precedes restriction).
-    pub queries_audited:    AtomicU32,
+    pub queries_audited: AtomicU32,
     /// Number of queries blocked by restrictions.
-    pub queries_blocked:    AtomicU32,
+    pub queries_blocked: AtomicU32,
     /// Number of upstream TCP+auth handshakes started (V2.1+).
     pub upstream_connects_attempted: AtomicU32,
     /// Subset that reached a usable session (V2.1+).
     pub upstream_connects_succeeded: AtomicU32,
     /// Subset that failed (DNS / TCP / TLS / auth / timeout, V2.1+).
-    pub upstream_connects_failed:    AtomicU32,
+    pub upstream_connects_failed: AtomicU32,
     /// Sum of upstream→agent payload bytes relayed (V2.1+).
-    pub upstream_bytes_forwarded:    AtomicU32,
+    pub upstream_bytes_forwarded: AtomicU32,
     /// V2.2 — queries blocked because the walker resolved a table
     /// outside `allowed_tables` or inside `forbidden_tables`.
     /// Subset of `queries_blocked` (proxy-table-allowlists.md §10).
@@ -241,30 +244,33 @@ pub struct ProxyStats {
     /// V2.2 — queries blocked because the walker returned
     /// `Ambiguous` while an allowlist was configured. Subset of
     /// `queries_blocked`.
-    pub queries_blocked_by_ambiguous_sql:    AtomicU32,
+    pub queries_blocked_by_ambiguous_sql: AtomicU32,
     /// V2.2 — queries whose result-set stream was truncated by
     /// `max_result_rows`. Not a subset of `queries_blocked`
     /// (the query was admitted; the result set was capped).
-    pub queries_capped_by_max_result_rows:   AtomicU32,
+    pub queries_capped_by_max_result_rows: AtomicU32,
 }
 
 impl ProxyStats {
     /// Snapshot the counters.
     pub fn snapshot(&self) -> ProxyStatsSnapshot {
         ProxyStatsSnapshot {
-            connections_served:          self.connections_served       .load(Ordering::Relaxed),
-            queries_audited:             self.queries_audited          .load(Ordering::Relaxed),
-            queries_blocked:             self.queries_blocked          .load(Ordering::Relaxed),
+            connections_served: self.connections_served.load(Ordering::Relaxed),
+            queries_audited: self.queries_audited.load(Ordering::Relaxed),
+            queries_blocked: self.queries_blocked.load(Ordering::Relaxed),
             upstream_connects_attempted: self.upstream_connects_attempted.load(Ordering::Relaxed),
             upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
-            upstream_connects_failed:    self.upstream_connects_failed   .load(Ordering::Relaxed),
-            upstream_bytes_forwarded:    self.upstream_bytes_forwarded   .load(Ordering::Relaxed),
-            queries_blocked_by_table_allowlist:
-                self.queries_blocked_by_table_allowlist.load(Ordering::Relaxed),
-            queries_blocked_by_ambiguous_sql:
-                self.queries_blocked_by_ambiguous_sql  .load(Ordering::Relaxed),
-            queries_capped_by_max_result_rows:
-                self.queries_capped_by_max_result_rows .load(Ordering::Relaxed),
+            upstream_connects_failed: self.upstream_connects_failed.load(Ordering::Relaxed),
+            upstream_bytes_forwarded: self.upstream_bytes_forwarded.load(Ordering::Relaxed),
+            queries_blocked_by_table_allowlist: self
+                .queries_blocked_by_table_allowlist
+                .load(Ordering::Relaxed),
+            queries_blocked_by_ambiguous_sql: self
+                .queries_blocked_by_ambiguous_sql
+                .load(Ordering::Relaxed),
+            queries_capped_by_max_result_rows: self
+                .queries_capped_by_max_result_rows
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -275,23 +281,23 @@ pub struct ProxyStatsSnapshot {
     /// Number of accepted connections served.
     pub connections_served: u32,
     /// Number of queries audited.
-    pub queries_audited:    u32,
+    pub queries_audited: u32,
     /// Number of queries blocked by restrictions.
-    pub queries_blocked:    u32,
+    pub queries_blocked: u32,
     /// Number of upstream TCP+auth handshakes started.
     pub upstream_connects_attempted: u32,
     /// Subset that reached a usable session.
     pub upstream_connects_succeeded: u32,
     /// Subset that failed.
-    pub upstream_connects_failed:    u32,
+    pub upstream_connects_failed: u32,
     /// Sum of upstream→agent payload bytes relayed.
-    pub upstream_bytes_forwarded:    u32,
+    pub upstream_bytes_forwarded: u32,
     /// V2.2 — subset of `queries_blocked` from the table walker.
     pub queries_blocked_by_table_allowlist: u32,
     /// V2.2 — subset of `queries_blocked` from walker ambiguity.
-    pub queries_blocked_by_ambiguous_sql:    u32,
+    pub queries_blocked_by_ambiguous_sql: u32,
     /// V2.2 — queries truncated by `max_result_rows`.
-    pub queries_capped_by_max_result_rows:   u32,
+    pub queries_capped_by_max_result_rows: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,10 +313,10 @@ pub struct ProxyStatsSnapshot {
 /// Spawn the per-connection task with [`PostgresProxy::serve`].
 pub struct PostgresProxy {
     listener: tokio::net::TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    stats:    Arc<ProxyStats>,
-    audit:    Arc<dyn AuditChannel>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 }
 
 impl PostgresProxy {
@@ -328,7 +334,7 @@ impl PostgresProxy {
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
         config: ProxyConfig,
-        audit:   Arc<dyn AuditChannel>,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
         let listener = tokio::net::TcpListener::bind(&config.listen_addr)
             .await
@@ -368,11 +374,13 @@ impl PostgresProxy {
         loop {
             match self.listener.accept().await {
                 Ok((stream, peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend  = self.backend.clone();
-                    let config   = self.config.clone();
-                    let stats    = self.stats.clone();
-                    let audit    = Arc::clone(&self.audit);
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
+                    let backend = self.backend.clone();
+                    let config = self.config.clone();
+                    let stats = self.stats.clone();
+                    let audit = Arc::clone(&self.audit);
                     tokio::spawn(async move {
                         if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
                             tracing::warn!(peer = %peer, error = %e, "postgres proxy connection ended");
@@ -402,19 +410,25 @@ async fn serve_one(
     use crate::wire::*;
 
     // Step 1: read either an SSLRequest or a StartupMessage.
-    let startup = read_startup(&mut client_stream).await
+    let startup = read_startup(&mut client_stream)
+        .await
         .map_err(|e| ProxyError::AuditSink(format!("startup read: {e}")))?;
     match startup {
         StartupKind::SslRequest => {
             // Reject SSL on loopback per the MVP doc above.
             use tokio::io::AsyncWriteExt;
-            client_stream.write_all(b"N").await
+            client_stream
+                .write_all(b"N")
+                .await
                 .map_err(|e| ProxyError::AuditSink(format!("ssl reject: {e}")))?;
             // Now read the actual StartupMessage.
-            let StartupKind::Startup(_) = read_startup(&mut client_stream).await
+            let StartupKind::Startup(_) = read_startup(&mut client_stream)
+                .await
                 .map_err(|e| ProxyError::AuditSink(format!("post-ssl startup: {e}")))?
             else {
-                return Err(ProxyError::AuditSink("expected StartupMessage post-SSL".into()));
+                return Err(ProxyError::AuditSink(
+                    "expected StartupMessage post-SSL".into(),
+                ));
             };
         }
         StartupKind::Startup(_) => {}
@@ -426,15 +440,25 @@ async fn serve_one(
 
     // Step 2: AuthenticationOk + minimal startup completion.
     use tokio::io::AsyncWriteExt;
-    client_stream.write_all(&authentication_ok()).await
+    client_stream
+        .write_all(&authentication_ok())
+        .await
         .map_err(|e| ProxyError::AuditSink(format!("auth_ok: {e}")))?;
-    client_stream.write_all(&parameter_status("server_version", "raxis-proxy-0.1")).await
+    client_stream
+        .write_all(&parameter_status("server_version", "raxis-proxy-0.1"))
+        .await
         .map_err(|e| ProxyError::AuditSink(format!("param_status: {e}")))?;
-    client_stream.write_all(&parameter_status("client_encoding", "UTF8")).await
+    client_stream
+        .write_all(&parameter_status("client_encoding", "UTF8"))
+        .await
         .map_err(|e| ProxyError::AuditSink(format!("param_status: {e}")))?;
-    client_stream.write_all(&backend_key_data(0, 0)).await
+    client_stream
+        .write_all(&backend_key_data(0, 0))
+        .await
         .map_err(|e| ProxyError::AuditSink(format!("backend_key_data: {e}")))?;
-    client_stream.write_all(&ready_for_query(b'I')).await
+    client_stream
+        .write_all(&ready_for_query(b'I'))
+        .await
         .map_err(|e| ProxyError::AuditSink(format!("ready_for_query: {e}")))?;
 
     // Step 3: resolve the upstream URL through the credential
@@ -450,7 +474,37 @@ async fn serve_one(
         &config.credential_name,
         &config.consumer,
     ) {
-        Ok(u) => Some(u),
+        Ok(u) => {
+            // The substitution moment: the real credential material
+            // now sits in the proxy's address space (inside
+            // `ParsedUpstreamUrl::raw()`) and will be presented to
+            // the upstream on the first allowed query's lazy connect.
+            // Whatever the agent's connection string carried
+            // (operator-staged placeholder, hallucinated value, empty
+            // string) was discarded when we sent `AuthenticationOk`
+            // above; this audit emission pins that fact on the chain
+            // so the test in
+            // `credential_substitution_evidence.rs` can assert
+            // structurally rather than inferring it from the
+            // surrounding `CredentialProxyUpstreamConnected`.
+            //
+            // Audit-safety: `substitution_shape` is a fixed string
+            // describing the SHAPE of the substitution. It MUST NOT
+            // carry the placeholder bytes or the real-credential
+            // bytes.
+            audit.emit(AuditEvent::CredentialProxySubstituted {
+                timestamp_unix_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                consumer: config.consumer.clone(),
+                credential: config.credential_name.clone(),
+                substitution_shape: "postgres-url: agent-supplied user/password discarded; \
+                     backend-resolved url applied to upstream"
+                    .to_owned(),
+            });
+            Some(u)
+        }
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -480,12 +534,17 @@ async fn serve_one(
     loop {
         use tokio::io::AsyncReadExt;
         let mut tag = [0u8; 1];
-        let n = client_stream.read(&mut tag).await
+        let n = client_stream
+            .read(&mut tag)
+            .await
             .map_err(|e| ProxyError::AuditSink(format!("read tag: {e}")))?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         match tag[0] {
             b'Q' => {
-                let body = read_message_body(&mut client_stream).await
+                let body = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body: {e}")))?;
                 let sql = parse_query_message(&body)
                     .map_err(|e| ProxyError::AuditSink(format!("parse query: {e}")))?;
@@ -498,18 +557,23 @@ async fn serve_one(
                     bump_blocked_counters(&stats, &decision);
                 }
                 audit.emit(audit_query_executed(
-                    &config, &sql, &op, blocked,
-                    tables_referenced, restriction_reason,
+                    &config,
+                    &sql,
+                    &op,
+                    blocked,
+                    tables_referenced,
+                    restriction_reason,
                 ));
 
                 if blocked {
                     let (sqlstate, msg) = error_for_decision(&decision);
-                    client_stream.write_all(&error_response(
-                        b"ERROR",
-                        sqlstate.as_bytes(),
-                        &msg,
-                    )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
-                    client_stream.write_all(&ready_for_query(b'I')).await
+                    client_stream
+                        .write_all(&error_response(b"ERROR", sqlstate.as_bytes(), &msg))
+                        .await
+                        .map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+                    client_stream
+                        .write_all(&ready_for_query(b'I'))
+                        .await
                         .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
                     continue;
                 }
@@ -524,7 +588,9 @@ async fn serve_one(
                                 b"08000",
                                 "RAXIS proxy: upstream credential could not be resolved (FAIL_PROXY_UPSTREAM_URL_INVALID)",
                             )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
-                            client_stream.write_all(&ready_for_query(b'I')).await
+                            client_stream
+                                .write_all(&ready_for_query(b'I'))
+                                .await
                                 .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
                             continue;
                         }
@@ -532,36 +598,44 @@ async fn serve_one(
                     let host = url.host.clone();
                     let port = url.port;
                     let _tls = url.require_tls;
-                    stats.upstream_connects_attempted.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .upstream_connects_attempted
+                        .fetch_add(1, Ordering::Relaxed);
                     match UpstreamSession::connect(url, std::time::Duration::from_secs(8)).await {
                         Ok(sess) => {
-                            stats.upstream_connects_succeeded.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .upstream_connects_succeeded
+                                .fetch_add(1, Ordering::Relaxed);
                             audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
                                 timestamp_unix_seconds: SystemTime::now()
                                     .duration_since(UNIX_EPOCH)
-                                    .map(|d| d.as_secs()).unwrap_or(0),
-                                consumer:      config.consumer.clone(),
-                                credential:    config.credential_name.clone(),
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0),
+                                consumer: config.consumer.clone(),
+                                credential: config.credential_name.clone(),
                                 upstream_host: sess.host.clone(),
                                 upstream_port: sess.port,
-                                tls:           sess.tls,
-                                handshake_ms:  sess.handshake_ms,
+                                tls: sess.tls,
+                                handshake_ms: sess.handshake_ms,
                             });
                             upstream_connected_emitted = true;
                             upstream_session = Some(sess);
                         }
                         Err(e) => {
-                            stats.upstream_connects_failed.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .upstream_connects_failed
+                                .fetch_add(1, Ordering::Relaxed);
                             audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
                                 timestamp_unix_seconds: SystemTime::now()
                                     .duration_since(UNIX_EPOCH)
-                                    .map(|d| d.as_secs()).unwrap_or(0),
-                                consumer:      config.consumer.clone(),
-                                credential:    config.credential_name.clone(),
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0),
+                                consumer: config.consumer.clone(),
+                                credential: config.credential_name.clone(),
                                 upstream_host: host,
                                 upstream_port: port,
-                                reason:        e.audit_reason().to_owned(),
-                                detail:        e.audit_detail(),
+                                reason: e.audit_reason().to_owned(),
+                                detail: e.audit_detail(),
                             });
                             // The agent sees a single ErrorResponse
                             // mapped from the failure category. The
@@ -577,12 +651,13 @@ async fn serve_one(
                                 }
                                 _ => ("08000", "RAXIS proxy: upstream connection failed"),
                             };
-                            client_stream.write_all(&error_response(
-                                b"ERROR",
-                                sqlstate.as_bytes(),
-                                msg,
-                            )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
-                            client_stream.write_all(&ready_for_query(b'I')).await
+                            client_stream
+                                .write_all(&error_response(b"ERROR", sqlstate.as_bytes(), msg))
+                                .await
+                                .map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+                            client_stream
+                                .write_all(&ready_for_query(b'I'))
+                                .await
                                 .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
                             continue;
                         }
@@ -599,28 +674,34 @@ async fn serve_one(
                 };
                 match session.forward_simple_query(&sql).await {
                     Ok(outcome) => {
-                        let capped = apply_max_result_rows_cap(
-                            outcome,
-                            config.restrictions.max_result_rows,
-                        );
+                        let capped =
+                            apply_max_result_rows_cap(outcome, config.restrictions.max_result_rows);
                         for frame in &capped.frames {
-                            client_stream.write_all(frame).await
+                            client_stream
+                                .write_all(frame)
+                                .await
                                 .map_err(|e| ProxyError::AuditSink(format!("relay frame: {e}")))?;
                         }
                         if capped.cap_triggered {
                             let n = config.restrictions.max_result_rows;
-                            stats.queries_capped_by_max_result_rows
+                            stats
+                                .queries_capped_by_max_result_rows
                                 .fetch_add(1, Ordering::Relaxed);
-                            client_stream.write_all(&error_response(
-                                b"ERROR",
-                                b"54000",
-                                &format!(
-                                    "blocked by RAXIS policy: max_result_rows_exceeded \
+                            client_stream
+                                .write_all(&error_response(
+                                    b"ERROR",
+                                    b"54000",
+                                    &format!(
+                                        "blocked by RAXIS policy: max_result_rows_exceeded \
                                      (result-set row count exceeded max_result_rows = {n})",
-                                ),
-                            )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+                                    ),
+                                ))
+                                .await
+                                .map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
                         }
-                        client_stream.write_all(&ready_for_query(b'I')).await
+                        client_stream
+                            .write_all(&ready_for_query(b'I'))
+                            .await
                             .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
                         stats.upstream_bytes_forwarded.fetch_add(
                             capped.bytes_returned.min(u32::MAX as u64) as u32,
@@ -629,13 +710,14 @@ async fn serve_one(
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_secs()).unwrap_or(0),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  capped.rows_returned,
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: capped.rows_returned,
                             bytes_returned: capped.bytes_returned,
-                            duration_ms:    capped.duration_ms,
+                            duration_ms: capped.duration_ms,
                             upstream_error: if capped.cap_triggered {
                                 Some("max_result_rows_exceeded".to_owned())
                             } else {
@@ -650,23 +732,25 @@ async fn serve_one(
                             }
                             other => ("XX000".to_owned(), other.audit_detail()),
                         };
-                        client_stream.write_all(&error_response(
-                            b"ERROR",
-                            sqlstate.as_bytes(),
-                            &message,
-                        )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
-                        client_stream.write_all(&ready_for_query(b'I')).await
+                        client_stream
+                            .write_all(&error_response(b"ERROR", sqlstate.as_bytes(), &message))
+                            .await
+                            .map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+                        client_stream
+                            .write_all(&ready_for_query(b'I'))
+                            .await
                             .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_secs()).unwrap_or(0),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  0,
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: 0,
                             bytes_returned: 0,
-                            duration_ms:    0,
+                            duration_ms: 0,
                             upstream_error: Some(sqlstate),
                         });
                     }
@@ -675,12 +759,18 @@ async fn serve_one(
             b'X' => break,
             b'P' => {
                 // Parse: capture SQL + classify, restriction-check.
-                let body = read_message_body(&mut client_stream).await
+                let body = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body (Parse): {e}")))?;
                 let parsed = match parse_parse_message(&body) {
                     Ok(p) => p,
                     Err(e) => {
-                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Parse message: {e}")).await?;
+                        send_extended_error(
+                            &mut client_stream,
+                            "08P01",
+                            &format!("malformed Parse message: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -693,8 +783,12 @@ async fn serve_one(
                     bump_blocked_counters(&stats, &decision);
                 }
                 audit.emit(audit_query_executed(
-                    &config, &parsed.sql, &op, blocked,
-                    tables_referenced, restriction_reason,
+                    &config,
+                    &parsed.sql,
+                    &op,
+                    blocked,
+                    tables_referenced,
+                    restriction_reason,
                 ));
                 if blocked {
                     let (sqlstate, msg) = error_for_decision(&decision);
@@ -704,22 +798,30 @@ async fn serve_one(
                 ext_state.prepared.insert(
                     parsed.statement_name.clone(),
                     crate::extended::ParsedStatement {
-                        sql:              parsed.sql.clone(),
+                        sql: parsed.sql.clone(),
                         agent_param_oids: parsed.param_oids.clone(),
-                        upstream_meta:    None,
+                        upstream_meta: None,
                     },
                 );
-                client_stream.write_all(&parse_complete()).await
+                client_stream
+                    .write_all(&parse_complete())
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("ParseComplete: {e}")))?;
             }
             b'B' => {
                 // Bind: store portal.
-                let body = read_message_body(&mut client_stream).await
+                let body = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body (Bind): {e}")))?;
                 let bind = match parse_bind_message(&body) {
                     Ok(b) => b,
                     Err(e) => {
-                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Bind message: {e}")).await?;
+                        send_extended_error(
+                            &mut client_stream,
+                            "08P01",
+                            &format!("malformed Bind message: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -727,8 +829,12 @@ async fn serve_one(
                     send_extended_error(
                         &mut client_stream,
                         "26000",
-                        &format!("RAXIS proxy: prepared statement '{}' does not exist", bind.statement_name),
-                    ).await?;
+                        &format!(
+                            "RAXIS proxy: prepared statement '{}' does not exist",
+                            bind.statement_name
+                        ),
+                    )
+                    .await?;
                     continue;
                 }
                 ext_state.portals.insert(
@@ -738,17 +844,25 @@ async fn serve_one(
                         bind,
                     },
                 );
-                client_stream.write_all(&bind_complete()).await
+                client_stream
+                    .write_all(&bind_complete())
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("BindComplete: {e}")))?;
             }
             b'D' => {
                 // Describe (statement or portal).
-                let body = read_message_body(&mut client_stream).await
+                let body = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body (Describe): {e}")))?;
                 let desc = match parse_describe_message(&body) {
                     Ok(d) => d,
                     Err(e) => {
-                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Describe message: {e}")).await?;
+                        send_extended_error(
+                            &mut client_stream,
+                            "08P01",
+                            &format!("malformed Describe message: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -761,7 +875,8 @@ async fn serve_one(
                                 &mut client_stream,
                                 "26000",
                                 &format!("RAXIS proxy: portal '{}' does not exist", desc.name),
-                            ).await?;
+                            )
+                            .await?;
                             continue;
                         }
                     },
@@ -777,7 +892,9 @@ async fn serve_one(
                     &stats,
                     &audit,
                     &mut upstream_connected_emitted,
-                ).await? {
+                )
+                .await?
+                {
                     // ensure_upstream_meta wrote an ErrorResponse;
                     // continue to the Sync.
                     continue;
@@ -785,28 +902,40 @@ async fn serve_one(
                 let stmt = ext_state.prepared.get(&stmt_name).expect("ensured above");
                 let meta = stmt.upstream_meta.as_ref().expect("ensured above");
                 if desc.kind == b'S' {
-                    client_stream.write_all(&parameter_description(&meta.param_oids)).await
+                    client_stream
+                        .write_all(&parameter_description(&meta.param_oids))
+                        .await
                         .map_err(|e| ProxyError::AuditSink(format!("ParameterDescription: {e}")))?;
                 }
                 match crate::extended::row_description_for(meta) {
                     Some(frame) => {
-                        client_stream.write_all(&frame).await
+                        client_stream
+                            .write_all(&frame)
+                            .await
                             .map_err(|e| ProxyError::AuditSink(format!("RowDescription: {e}")))?;
                     }
                     None => {
-                        client_stream.write_all(&no_data()).await
+                        client_stream
+                            .write_all(&no_data())
+                            .await
                             .map_err(|e| ProxyError::AuditSink(format!("NoData: {e}")))?;
                     }
                 }
             }
             b'E' => {
                 // Execute portal.
-                let body = read_message_body(&mut client_stream).await
+                let body = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body (Execute): {e}")))?;
                 let exec = match parse_execute_message(&body) {
                     Ok(e) => e,
                     Err(e) => {
-                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Execute message: {e}")).await?;
+                        send_extended_error(
+                            &mut client_stream,
+                            "08P01",
+                            &format!("malformed Execute message: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -817,7 +946,8 @@ async fn serve_one(
                             &mut client_stream,
                             "26000",
                             &format!("RAXIS proxy: portal '{}' does not exist", exec.portal_name),
-                        ).await?;
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -831,19 +961,26 @@ async fn serve_one(
                     &stats,
                     &audit,
                     &mut upstream_connected_emitted,
-                ).await? {
+                )
+                .await?
+                {
                     continue;
                 }
-                let stmt = ext_state.prepared.get(&portal.statement_name).expect("ensured above").clone();
+                let stmt = ext_state
+                    .prepared
+                    .get(&portal.statement_name)
+                    .expect("ensured above")
+                    .clone();
                 let meta = stmt.upstream_meta.as_ref().expect("ensured above");
-                let substituted = match crate::extended::substitute(&stmt.sql, &portal.bind, &meta.param_oids) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let (sqlstate, msg) = e.to_wire();
-                        send_extended_error(&mut client_stream, sqlstate, &msg).await?;
-                        continue;
-                    }
-                };
+                let substituted =
+                    match crate::extended::substitute(&stmt.sql, &portal.bind, &meta.param_oids) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let (sqlstate, msg) = e.to_wire();
+                            send_extended_error(&mut client_stream, sqlstate, &msg).await?;
+                            continue;
+                        }
+                    };
                 let session = upstream_session.as_mut().expect("upstream connected above");
                 let sql_sha = {
                     use sha2::{Digest, Sha256};
@@ -853,10 +990,8 @@ async fn serve_one(
                 };
                 match session.forward_simple_query(&substituted).await {
                     Ok(outcome) => {
-                        let capped = apply_max_result_rows_cap(
-                            outcome,
-                            config.restrictions.max_result_rows,
-                        );
+                        let capped =
+                            apply_max_result_rows_cap(outcome, config.restrictions.max_result_rows);
                         // The simple-query outcome carries
                         // RowDescription + DataRow + CommandComplete.
                         // Per the extended-query protocol, the
@@ -867,12 +1002,15 @@ async fn serve_one(
                             if frame.first().copied() == Some(b'T') {
                                 continue;
                             }
-                            client_stream.write_all(frame).await
+                            client_stream
+                                .write_all(frame)
+                                .await
                                 .map_err(|e| ProxyError::AuditSink(format!("relay frame: {e}")))?;
                         }
                         if capped.cap_triggered {
                             let n = config.restrictions.max_result_rows;
-                            stats.queries_capped_by_max_result_rows
+                            stats
+                                .queries_capped_by_max_result_rows
                                 .fetch_add(1, Ordering::Relaxed);
                             // Extended-query path: send the error
                             // but NOT a RFQ — the agent's Sync drives
@@ -884,7 +1022,8 @@ async fn serve_one(
                                     "blocked by RAXIS policy: max_result_rows_exceeded \
                                      (result-set row count exceeded max_result_rows = {n})",
                                 ),
-                            ).await?;
+                            )
+                            .await?;
                         }
                         // No ReadyForQuery here — Sync sends it.
                         stats.upstream_bytes_forwarded.fetch_add(
@@ -894,13 +1033,14 @@ async fn serve_one(
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_secs()).unwrap_or(0),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  capped.rows_returned,
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: capped.rows_returned,
                             bytes_returned: capped.bytes_returned,
-                            duration_ms:    capped.duration_ms,
+                            duration_ms: capped.duration_ms,
                             upstream_error: if capped.cap_triggered {
                                 Some("max_result_rows_exceeded".to_owned())
                             } else {
@@ -915,21 +1055,21 @@ async fn serve_one(
                             }
                             other => ("XX000".to_owned(), other.audit_detail()),
                         };
-                        client_stream.write_all(&error_response(
-                            b"ERROR",
-                            sqlstate.as_bytes(),
-                            &message,
-                        )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+                        client_stream
+                            .write_all(&error_response(b"ERROR", sqlstate.as_bytes(), &message))
+                            .await
+                            .map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_secs()).unwrap_or(0),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  0,
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: 0,
                             bytes_returned: 0,
-                            duration_ms:    0,
+                            duration_ms: 0,
                             upstream_error: Some(sqlstate),
                         });
                     }
@@ -939,43 +1079,64 @@ async fn serve_one(
                 // Close ('C' frontend) — extended-query close, not to
                 // be confused with CommandComplete (which is also
                 // tagged 'C' but on the BACKEND wire).
-                let body = read_message_body(&mut client_stream).await
+                let body = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body (Close): {e}")))?;
                 let close = match parse_close_message(&body) {
                     Ok(c) => c,
                     Err(e) => {
-                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Close message: {e}")).await?;
+                        send_extended_error(
+                            &mut client_stream,
+                            "08P01",
+                            &format!("malformed Close message: {e}"),
+                        )
+                        .await?;
                         continue;
                     }
                 };
                 match close.kind {
-                    b'S' => { ext_state.prepared.remove(&close.name); }
-                    b'P' => { ext_state.portals.remove(&close.name); }
+                    b'S' => {
+                        ext_state.prepared.remove(&close.name);
+                    }
+                    b'P' => {
+                        ext_state.portals.remove(&close.name);
+                    }
                     _ => unreachable!("parse_close_message validated kind"),
                 }
-                client_stream.write_all(&close_complete()).await
+                client_stream
+                    .write_all(&close_complete())
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("CloseComplete: {e}")))?;
             }
             b'S' => {
                 // Sync: empty body. Reply ReadyForQuery.
-                let _ = read_message_body(&mut client_stream).await
+                let _ = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body (Sync): {e}")))?;
-                client_stream.write_all(&ready_for_query(b'I')).await
+                client_stream
+                    .write_all(&ready_for_query(b'I'))
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
             }
             b'H' => {
                 // Flush: empty body. Proxy does not buffer; no-op.
-                let _ = read_message_body(&mut client_stream).await
+                let _ = read_message_body(&mut client_stream)
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("read body (Flush): {e}")))?;
             }
             other => {
                 let _ = read_message_body(&mut client_stream).await;
-                client_stream.write_all(&error_response(
-                    b"ERROR",
-                    b"0A000",
-                    &format!("RAXIS proxy does not yet support frontend message tag {other:?}"),
-                )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
-                client_stream.write_all(&ready_for_query(b'I')).await
+                client_stream
+                    .write_all(&error_response(
+                        b"ERROR",
+                        b"0A000",
+                        &format!("RAXIS proxy does not yet support frontend message tag {other:?}"),
+                    ))
+                    .await
+                    .map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+                client_stream
+                    .write_all(&ready_for_query(b'I'))
+                    .await
                     .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
             }
         }
@@ -1018,12 +1179,12 @@ async fn send_extended_error(
 async fn ensure_upstream_meta(
     client_stream: &mut tokio::net::TcpStream,
     upstream_session: &mut Option<UpstreamSession>,
-    upstream_url:    Option<&ParsedUpstreamUrl>,
+    upstream_url: Option<&ParsedUpstreamUrl>,
     ext_state: &mut crate::extended::ExtendedState,
     statement_name: &str,
     config: &ProxyConfig,
-    stats:  &Arc<ProxyStats>,
-    audit:  &Arc<dyn AuditChannel>,
+    stats: &Arc<ProxyStats>,
+    audit: &Arc<dyn AuditChannel>,
     upstream_connected_emitted: &mut bool,
 ) -> Result<bool, ProxyError> {
     let stmt = match ext_state.prepared.get(statement_name) {
@@ -1033,7 +1194,8 @@ async fn ensure_upstream_meta(
                 client_stream,
                 "26000",
                 &format!("RAXIS proxy: prepared statement '{statement_name}' does not exist"),
-            ).await?;
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -1055,36 +1217,44 @@ async fn ensure_upstream_meta(
         };
         let host = url.host.clone();
         let port = url.port;
-        stats.upstream_connects_attempted.fetch_add(1, Ordering::Relaxed);
+        stats
+            .upstream_connects_attempted
+            .fetch_add(1, Ordering::Relaxed);
         match UpstreamSession::connect(url, std::time::Duration::from_secs(8)).await {
             Ok(sess) => {
-                stats.upstream_connects_succeeded.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .upstream_connects_succeeded
+                    .fetch_add(1, Ordering::Relaxed);
                 audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
                     timestamp_unix_seconds: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs()).unwrap_or(0),
-                    consumer:      config.consumer.clone(),
-                    credential:    config.credential_name.clone(),
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    consumer: config.consumer.clone(),
+                    credential: config.credential_name.clone(),
                     upstream_host: sess.host.clone(),
                     upstream_port: sess.port,
-                    tls:           sess.tls,
-                    handshake_ms:  sess.handshake_ms,
+                    tls: sess.tls,
+                    handshake_ms: sess.handshake_ms,
                 });
                 *upstream_connected_emitted = true;
                 *upstream_session = Some(sess);
             }
             Err(e) => {
-                stats.upstream_connects_failed.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .upstream_connects_failed
+                    .fetch_add(1, Ordering::Relaxed);
                 audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
                     timestamp_unix_seconds: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs()).unwrap_or(0),
-                    consumer:      config.consumer.clone(),
-                    credential:    config.credential_name.clone(),
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    consumer: config.consumer.clone(),
+                    credential: config.credential_name.clone(),
                     upstream_host: host,
                     upstream_port: port,
-                    reason:        e.audit_reason().to_owned(),
-                    detail:        e.audit_detail(),
+                    reason: e.audit_reason().to_owned(),
+                    detail: e.audit_detail(),
                 });
                 let (sqlstate, msg) = crate::extended::prepare_error_to_wire(&e);
                 send_extended_error(client_stream, &sqlstate, &msg).await?;
@@ -1121,25 +1291,22 @@ async fn ensure_upstream_meta(
 /// at the relay layer, AFTER the walker has admitted the query.
 #[derive(Debug)]
 struct CappedOutcome {
-    frames:         Vec<Vec<u8>>,
-    rows_returned:  u64,
+    frames: Vec<Vec<u8>>,
+    rows_returned: u64,
     bytes_returned: u64,
-    duration_ms:    u32,
-    cap_triggered:  bool,
+    duration_ms: u32,
+    cap_triggered: bool,
 }
 
-fn apply_max_result_rows_cap(
-    outcome: ForwardOutcome,
-    max_result_rows: u64,
-) -> CappedOutcome {
+fn apply_max_result_rows_cap(outcome: ForwardOutcome, max_result_rows: u64) -> CappedOutcome {
     let duration_ms = outcome.duration_ms;
     if max_result_rows == 0 || outcome.rows_returned <= max_result_rows {
         return CappedOutcome {
-            frames:         outcome.frames,
-            rows_returned:  outcome.rows_returned,
+            frames: outcome.frames,
+            rows_returned: outcome.rows_returned,
             bytes_returned: outcome.bytes_returned,
             duration_ms,
-            cap_triggered:  false,
+            cap_triggered: false,
         };
     }
     // Cap fires. Walk frames in order, retaining the
@@ -1169,11 +1336,11 @@ fn apply_max_result_rows_cap(
         }
     }
     CappedOutcome {
-        frames:         out,
-        rows_returned:  rows_kept,
+        frames: out,
+        rows_returned: rows_kept,
         bytes_returned: bytes,
         duration_ms,
-        cap_triggered:  true,
+        cap_triggered: true,
     }
 }
 
@@ -1182,19 +1349,27 @@ fn apply_max_result_rows_cap(
 /// Per `proxy-table-allowlists.md §8.3`: `AuditOnly` decisions
 /// surface as `blocked = false` BUT carry the would-have-blocked
 /// reason in `restriction_reason`.
-fn decision_to_audit_fields(
-    decision: &RestrictionDecision,
-) -> (bool, Vec<String>, Option<String>) {
+fn decision_to_audit_fields(decision: &RestrictionDecision) -> (bool, Vec<String>, Option<String>) {
     match decision {
         RestrictionDecision::Admit { tables_referenced } => {
             (false, tables_referenced.clone(), None)
         }
-        RestrictionDecision::Block { reason, tables_referenced } => {
-            (true, tables_referenced.clone(), Some(reason.as_str().to_owned()))
-        }
-        RestrictionDecision::AuditOnly { reason, tables_referenced } => {
-            (false, tables_referenced.clone(), Some(reason.as_str().to_owned()))
-        }
+        RestrictionDecision::Block {
+            reason,
+            tables_referenced,
+        } => (
+            true,
+            tables_referenced.clone(),
+            Some(reason.as_str().to_owned()),
+        ),
+        RestrictionDecision::AuditOnly {
+            reason,
+            tables_referenced,
+        } => (
+            false,
+            tables_referenced.clone(),
+            Some(reason.as_str().to_owned()),
+        ),
     }
 }
 
@@ -1204,15 +1379,16 @@ fn bump_blocked_counters(stats: &Arc<ProxyStats>, decision: &RestrictionDecision
     stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
     if let RestrictionDecision::Block { reason, .. } = decision {
         match reason {
-            RestrictionReason::TableNotInAllowedList
-            | RestrictionReason::TableInForbiddenList => {
-                stats.queries_blocked_by_table_allowlist
+            RestrictionReason::TableNotInAllowedList | RestrictionReason::TableInForbiddenList => {
+                stats
+                    .queries_blocked_by_table_allowlist
                     .fetch_add(1, Ordering::Relaxed);
             }
             RestrictionReason::AmbiguousSqlMultiStatement
             | RestrictionReason::AmbiguousSqlDynamic
             | RestrictionReason::AmbiguousSqlMalformed => {
-                stats.queries_blocked_by_ambiguous_sql
+                stats
+                    .queries_blocked_by_ambiguous_sql
                     .fetch_add(1, Ordering::Relaxed);
             }
             RestrictionReason::AllowOnlySelect => {}
@@ -1251,15 +1427,15 @@ fn audit_query_executed(
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        consumer:    config.consumer.clone(),
-        credential:  config.credential_name.clone(),
-        sql_sha256:  sha,
-        sql_text:    None,
-        operation:   match op {
-            OperationKind::Select   => "SELECT".to_owned(),
-            OperationKind::Insert   => "INSERT".to_owned(),
-            OperationKind::Update   => "UPDATE".to_owned(),
-            OperationKind::Delete   => "DELETE".to_owned(),
+        consumer: config.consumer.clone(),
+        credential: config.credential_name.clone(),
+        sql_sha256: sha,
+        sql_text: None,
+        operation: match op {
+            OperationKind::Select => "SELECT".to_owned(),
+            OperationKind::Insert => "INSERT".to_owned(),
+            OperationKind::Update => "UPDATE".to_owned(),
+            OperationKind::Delete => "DELETE".to_owned(),
             OperationKind::Other(_) => "OTHER".to_owned(),
         },
         blocked,
@@ -1384,5 +1560,42 @@ pub enum AuditEvent {
         reason: String,
         /// Short redacted message; never carries credential bytes.
         detail: String,
+    },
+
+    /// Emitted once per agent connection at the moment the postgres
+    /// proxy successfully resolved real credential material via
+    /// `CredentialBackend::resolve(...)` and is committed to using
+    /// that material on the upstream connection. The proxy already
+    /// ack'd the agent's `StartupMessage` with `AuthenticationOk`
+    /// (no password challenge) — anything the agent presented in
+    /// its connection string (real, placeholder, or empty) was
+    /// already discarded by the proxy's handshake before this event
+    /// fires.
+    ///
+    /// Load-bearing for the credential-substitution test discipline
+    /// pinned in `specs/v2/secrets-model.md §2.5` /
+    /// `INV-SECRET-05`. The witness in
+    /// `kernel/tests/extended_e2e_support/
+    /// credential_substitution_evidence.rs` filters the chain on
+    /// this event to assert the substitution happened structurally.
+    ///
+    /// Audit-safety: the `substitution_shape` payload is a fixed
+    /// short string that describes WHAT was substituted, never the
+    /// bytes. The proxy implementation pins the exact wording
+    /// inline at the emission site; an emission carrying credential
+    /// bytes in `substitution_shape` is a bug in the proxy, not in
+    /// the audit envelope.
+    CredentialProxySubstituted {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session that connected to the proxy.
+        consumer: OwnedConsumer,
+        /// Credential name (never the value).
+        credential: CredentialName,
+        /// Audit-safe descriptor pinned by the postgres proxy:
+        /// `"postgres-url: agent-supplied user/password discarded;
+        ///  backend-resolved url applied to upstream"`. The string
+        /// MUST NOT carry credential bytes.
+        substitution_shape: String,
     },
 }

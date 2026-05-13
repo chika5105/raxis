@@ -27,9 +27,7 @@ pub enum StartupKind {
 }
 
 /// Read the first message of a Postgres protocol session.
-pub async fn read_startup<R: tokio::io::AsyncRead + Unpin>(
-    r: &mut R,
-) -> io::Result<StartupKind> {
+pub async fn read_startup<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> io::Result<StartupKind> {
     let len = r.read_i32().await?;
     if len < 8 || len > 1_000_000 {
         return Err(io::Error::new(
@@ -40,7 +38,10 @@ pub async fn read_startup<R: tokio::io::AsyncRead + Unpin>(
     let mut buf = vec![0u8; (len as usize) - 4];
     r.read_exact(&mut buf).await?;
     if buf.len() < 4 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "startup too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "startup too short",
+        ));
     }
     let code = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
     match code {
@@ -58,9 +59,7 @@ pub async fn read_startup<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Read the body of a tagged frontend message (length-prefixed).
-pub async fn read_message_body<R: tokio::io::AsyncRead + Unpin>(
-    r: &mut R,
-) -> io::Result<Vec<u8>> {
+pub async fn read_message_body<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> io::Result<Vec<u8>> {
     let len = r.read_i32().await?;
     if !(4..=10_000_000).contains(&len) {
         return Err(io::Error::new(
@@ -75,8 +74,11 @@ pub async fn read_message_body<R: tokio::io::AsyncRead + Unpin>(
 
 /// Parse a `Query` message body — a single C-string SQL.
 pub fn parse_query_message(body: &[u8]) -> Result<String, &'static str> {
-    let nul = body.iter().position(|&b| b == 0).ok_or("missing NUL terminator")?;
-    let s   = std::str::from_utf8(&body[..nul]).map_err(|_| "non-UTF-8 SQL")?;
+    let nul = body
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or("missing NUL terminator")?;
+    let s = std::str::from_utf8(&body[..nul]).map_err(|_| "non-UTF-8 SQL")?;
     Ok(s.to_owned())
 }
 
@@ -188,13 +190,13 @@ impl FieldDescriptor {
     /// upstream metadata doesn't carry a richer type OID.
     pub fn text(name: impl Into<String>) -> Self {
         Self {
-            name:          name.into(),
-            table_oid:     0,
+            name: name.into(),
+            table_oid: 0,
             attribute_num: 0,
-            type_oid:      25, // text
-            type_size:     -1,
+            type_oid: 25, // text
+            type_size: -1,
             type_modifier: -1,
-            format_code:   0,  // text
+            format_code: 0, // text
         }
     }
 }
@@ -220,7 +222,11 @@ pub fn row_description(fields: &[FieldDescriptor]) -> Vec<u8> {
             // implicitly bounded by `i16::MAX` total bytes per
             // RowDescription, which 255 keeps comfortably under.
             let name_bytes = f.name.as_bytes();
-            let name = if name_bytes.len() > 255 { &name_bytes[..255] } else { name_bytes };
+            let name = if name_bytes.len() > 255 {
+                &name_bytes[..255]
+            } else {
+                name_bytes
+            };
             b.put_slice(name);
             b.put_u8(0);
             b.put_i32(f.table_oid);
@@ -310,7 +316,7 @@ pub struct ParseMessage {
 /// Parse a `'P'` Parse message body.
 pub fn parse_parse_message(body: &[u8]) -> Result<ParseMessage, &'static str> {
     let (name, rest) = read_cstr(body)?;
-    let (sql,  rest) = read_cstr(rest)?;
+    let (sql, rest) = read_cstr(rest)?;
     let (count, mut rest) = read_i16(rest)?;
     if count < 0 {
         return Err("negative param count");
@@ -323,8 +329,8 @@ pub fn parse_parse_message(body: &[u8]) -> Result<ParseMessage, &'static str> {
     }
     Ok(ParseMessage {
         statement_name: name.to_owned(),
-        sql:            sql.to_owned(),
-        param_oids:     oids,
+        sql: sql.to_owned(),
+        param_oids: oids,
     })
 }
 
@@ -374,8 +380,8 @@ impl BindMessage {
 
 /// Parse a `'B'` Bind message body.
 pub fn parse_bind_message(body: &[u8]) -> Result<BindMessage, &'static str> {
-    let (portal,   rest) = read_cstr(body)?;
-    let (stmt,     rest) = read_cstr(rest)?;
+    let (portal, rest) = read_cstr(body)?;
+    let (stmt, rest) = read_cstr(rest)?;
     let (fmt_count, mut rest) = read_i16(rest)?;
     if fmt_count < 0 {
         return Err("negative format count");
@@ -419,9 +425,9 @@ pub fn parse_bind_message(body: &[u8]) -> Result<BindMessage, &'static str> {
     }
     let _ = rest; // trailing bytes are tolerated (some clients pad).
     Ok(BindMessage {
-        portal_name:         portal.to_owned(),
-        statement_name:      stmt.to_owned(),
-        param_format_codes:  formats,
+        portal_name: portal.to_owned(),
+        statement_name: stmt.to_owned(),
+        param_format_codes: formats,
         values,
         result_format_codes: rfmts,
     })
@@ -446,7 +452,10 @@ pub fn parse_describe_message(body: &[u8]) -> Result<DescribeMessage, &'static s
         return Err("invalid describe kind (must be 'S' or 'P')");
     }
     let (name, _) = read_cstr(&body[1..])?;
-    Ok(DescribeMessage { kind, name: name.to_owned() })
+    Ok(DescribeMessage {
+        kind,
+        name: name.to_owned(),
+    })
 }
 
 /// Parsed `'E'` Execute message body.
@@ -461,10 +470,10 @@ pub struct ExecuteMessage {
 /// Parse a `'E'` Execute message body.
 pub fn parse_execute_message(body: &[u8]) -> Result<ExecuteMessage, &'static str> {
     let (portal, rest) = read_cstr(body)?;
-    let (max,    _)    = read_i32(rest)?;
+    let (max, _) = read_i32(rest)?;
     Ok(ExecuteMessage {
         portal_name: portal.to_owned(),
-        max_rows:    max,
+        max_rows: max,
     })
 }
 
@@ -487,7 +496,10 @@ pub fn parse_close_message(body: &[u8]) -> Result<CloseMessage, &'static str> {
         return Err("invalid close kind (must be 'S' or 'P')");
     }
     let (name, _) = read_cstr(&body[1..])?;
-    Ok(CloseMessage { kind, name: name.to_owned() })
+    Ok(CloseMessage {
+        kind,
+        name: name.to_owned(),
+    })
 }
 
 /// `'1'` ParseComplete (empty body).
@@ -534,18 +546,25 @@ pub fn parameter_description(oids: &[i32]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn read_cstr(buf: &[u8]) -> Result<(&str, &[u8]), &'static str> {
-    let nul = buf.iter().position(|&b| b == 0).ok_or("missing NUL terminator")?;
-    let s   = std::str::from_utf8(&buf[..nul]).map_err(|_| "non-UTF-8 string")?;
+    let nul = buf
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or("missing NUL terminator")?;
+    let s = std::str::from_utf8(&buf[..nul]).map_err(|_| "non-UTF-8 string")?;
     Ok((s, &buf[nul + 1..]))
 }
 
 fn read_i16(buf: &[u8]) -> Result<(i16, &[u8]), &'static str> {
-    if buf.len() < 2 { return Err("short i16"); }
+    if buf.len() < 2 {
+        return Err("short i16");
+    }
     Ok((i16::from_be_bytes([buf[0], buf[1]]), &buf[2..]))
 }
 
 fn read_i32(buf: &[u8]) -> Result<(i32, &[u8]), &'static str> {
-    if buf.len() < 4 { return Err("short i32"); }
+    if buf.len() < 4 {
+        return Err("short i32");
+    }
     Ok((
         i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]),
         &buf[4..],
@@ -572,7 +591,7 @@ mod tests {
     #[test]
     fn parse_query_rejects_missing_nul() {
         let body = b"SELECT 1".to_vec();
-        let err  = parse_query_message(&body).unwrap_err();
+        let err = parse_query_message(&body).unwrap_err();
         assert!(err.contains("NUL"));
     }
 
@@ -614,10 +633,7 @@ mod tests {
 
     #[test]
     fn row_description_layout_two_fields() {
-        let fields = [
-            FieldDescriptor::text("id"),
-            FieldDescriptor::text("name"),
-        ];
+        let fields = [FieldDescriptor::text("id"), FieldDescriptor::text("name")];
         let bytes = row_description(&fields);
         assert_eq!(bytes[0], b'T');
         let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
@@ -640,8 +656,10 @@ mod tests {
 
     fn build_parse_body(name: &str, sql: &str, oids: &[i32]) -> Vec<u8> {
         let mut body = Vec::new();
-        body.extend_from_slice(name.as_bytes()); body.push(0);
-        body.extend_from_slice(sql.as_bytes());  body.push(0);
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(sql.as_bytes());
+        body.push(0);
         body.extend_from_slice(&(oids.len() as i16).to_be_bytes());
         for &oid in oids {
             body.extend_from_slice(&oid.to_be_bytes());
@@ -675,8 +693,10 @@ mod tests {
         result_fmts: &[i16],
     ) -> Vec<u8> {
         let mut body = Vec::new();
-        body.extend_from_slice(portal.as_bytes()); body.push(0);
-        body.extend_from_slice(stmt.as_bytes());   body.push(0);
+        body.extend_from_slice(portal.as_bytes());
+        body.push(0);
+        body.extend_from_slice(stmt.as_bytes());
+        body.push(0);
         body.extend_from_slice(&(param_fmts.len() as i16).to_be_bytes());
         for &c in param_fmts {
             body.extend_from_slice(&c.to_be_bytes());
@@ -710,7 +730,7 @@ mod tests {
             &[],
         );
         let m = parse_bind_message(&body).unwrap();
-        assert_eq!(m.portal_name,    "portal_a");
+        assert_eq!(m.portal_name, "portal_a");
         assert_eq!(m.statement_name, "stmt1");
         assert!(m.param_format_codes.is_empty());
         assert_eq!(m.values.len(), 3);
@@ -745,14 +765,16 @@ mod tests {
     fn describe_message_kinds() {
         let mut body = Vec::new();
         body.push(b'S');
-        body.extend_from_slice(b"stmt_x"); body.push(0);
+        body.extend_from_slice(b"stmt_x");
+        body.push(0);
         let m = parse_describe_message(&body).unwrap();
         assert_eq!(m.kind, b'S');
         assert_eq!(m.name, "stmt_x");
 
         let mut body2 = Vec::new();
         body2.push(b'P');
-        body2.extend_from_slice(b"portal_y"); body2.push(0);
+        body2.extend_from_slice(b"portal_y");
+        body2.push(0);
         let m2 = parse_describe_message(&body2).unwrap();
         assert_eq!(m2.kind, b'P');
         assert_eq!(m2.name, "portal_y");
@@ -766,7 +788,8 @@ mod tests {
     #[test]
     fn execute_message_max_rows() {
         let mut body = Vec::new();
-        body.extend_from_slice(b"port"); body.push(0);
+        body.extend_from_slice(b"port");
+        body.push(0);
         body.extend_from_slice(&100i32.to_be_bytes());
         let m = parse_execute_message(&body).unwrap();
         assert_eq!(m.portal_name, "port");
@@ -777,7 +800,8 @@ mod tests {
     fn close_message_kinds_and_name() {
         let mut body = Vec::new();
         body.push(b'P');
-        body.extend_from_slice(b"to_close"); body.push(0);
+        body.extend_from_slice(b"to_close");
+        body.push(0);
         let m = parse_close_message(&body).unwrap();
         assert_eq!(m.kind, b'P');
         assert_eq!(m.name, "to_close");
@@ -817,7 +841,10 @@ mod tests {
         assert_eq!(i16::from_be_bytes([body[0], body[1]]), 3);
         assert_eq!(i32::from_be_bytes([body[2], body[3], body[4], body[5]]), 23);
         assert_eq!(i32::from_be_bytes([body[6], body[7], body[8], body[9]]), 25);
-        assert_eq!(i32::from_be_bytes([body[10], body[11], body[12], body[13]]), 16);
+        assert_eq!(
+            i32::from_be_bytes([body[10], body[11], body[12], body[13]]),
+            16
+        );
     }
 
     #[test]
@@ -832,9 +859,15 @@ mod tests {
         assert_eq!(i32::from_be_bytes([body[2], body[3], body[4], body[5]]), 5);
         assert_eq!(&body[6..11], b"hello");
         // Second value: i32 length -1 (NULL).
-        assert_eq!(i32::from_be_bytes([body[11], body[12], body[13], body[14]]), -1);
+        assert_eq!(
+            i32::from_be_bytes([body[11], body[12], body[13], body[14]]),
+            -1
+        );
         // Third value: i32 length 0, no bytes.
-        assert_eq!(i32::from_be_bytes([body[15], body[16], body[17], body[18]]), 0);
+        assert_eq!(
+            i32::from_be_bytes([body[15], body[16], body[17], body[18]]),
+            0
+        );
         assert_eq!(body.len(), 19);
     }
 }

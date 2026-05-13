@@ -20,9 +20,7 @@ use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_manager::CredentialProxyManager;
 use raxis_credentials::{CredentialBackend, CredentialName};
 use raxis_credentials_file::FileCredentialBackend;
-use raxis_plan_credentials::{
-    PostgresRestrictions, ProxyDecl, TaskCredentialDecl,
-};
+use raxis_plan_credentials::{PostgresRestrictions, ProxyDecl, TaskCredentialDecl};
 use raxis_test_support::FakeAuditSink;
 
 #[tokio::test]
@@ -48,10 +46,13 @@ async fn postgres_listener_accepts_connection_and_counter_increments_through_shu
     );
 
     let decls = vec![TaskCredentialDecl {
-        name:     CredentialName::new("pg-staging"),
+        name: CredentialName::new("pg-staging"),
         mount_as: "DATABASE_URL".to_owned(),
-        proxy:    ProxyDecl::Postgres {
-            restrictions: PostgresRestrictions { allow_only_select: false, ..Default::default() },
+        proxy: ProxyDecl::Postgres {
+            restrictions: PostgresRestrictions {
+                allow_only_select: false,
+                ..Default::default()
+            },
         },
     }];
 
@@ -91,14 +92,16 @@ async fn postgres_listener_accepts_connection_and_counter_increments_through_shu
     );
 
     // Stopped audit event carries the same counter.
-    let stopped_events: Vec<_> = audit.events()
+    let stopped_events: Vec<_> = audit
+        .events()
         .into_iter()
         .filter(|e| e.kind.as_str() == "CredentialProxyStopped")
         .collect();
     assert_eq!(stopped_events.len(), 1);
     let raxis_audit_tools::AuditEventKind::CredentialProxyStopped {
         connections_served, ..
-    } = &stopped_events[0].kind else {
+    } = &stopped_events[0].kind
+    else {
         panic!("expected CredentialProxyStopped variant")
     };
     assert!(

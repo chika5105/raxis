@@ -94,7 +94,9 @@ impl FileAuditSink {
     /// Wrap an existing `AuditWriter`. The kernel constructs the writer
     /// during bootstrap (after the store opens) and then wraps it here.
     pub fn new(writer: AuditWriter) -> Self {
-        Self { inner: Mutex::new(writer) }
+        Self {
+            inner: Mutex::new(writer),
+        }
     }
 }
 
@@ -110,7 +112,9 @@ impl AuditSink for FileAuditSink {
         // which is itself a fatal corruption signal — the kernel cannot
         // continue with a half-flushed line. Panic with a clear message
         // so the supervisor restarts.
-        let mut guard = self.inner.lock()
+        let mut guard = self
+            .inner
+            .lock()
             .expect("audit writer mutex poisoned — previous append panicked");
         guard.append(kind, session_id, task_id, initiative_id)
     }

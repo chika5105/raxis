@@ -170,16 +170,29 @@ impl ChainRecord {
 #[derive(Debug, Error)]
 pub enum ChainReadError {
     #[error("audit directory {path} is not readable: {source}")]
-    AuditDirOpen { path: PathBuf, #[source] source: std::io::Error },
+    AuditDirOpen {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("no segment files found in {path}")]
     NoSegments { path: PathBuf },
 
     #[error("segment file {path} could not be opened: {source}")]
-    SegmentOpen { path: PathBuf, #[source] source: std::io::Error },
+    SegmentOpen {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("segment file {path} read I/O failed at line {line_no}: {source}")]
-    SegmentIo { path: PathBuf, line_no: u64, #[source] source: std::io::Error },
+    SegmentIo {
+        path: PathBuf,
+        line_no: u64,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("malformed JSON in {path} line {line_no}: {reason}")]
     MalformedRecord {
@@ -227,11 +240,10 @@ impl ChainReader {
     /// `<audit_dir>` and order them by NNN ascending. The reader does
     /// not validate any byte yet — `records` does that lazily.
     pub fn open(audit_dir: &Path) -> Result<Self, ChainReadError> {
-        let entries =
-            std::fs::read_dir(audit_dir).map_err(|e| ChainReadError::AuditDirOpen {
-                path: audit_dir.to_path_buf(),
-                source: e,
-            })?;
+        let entries = std::fs::read_dir(audit_dir).map_err(|e| ChainReadError::AuditDirOpen {
+            path: audit_dir.to_path_buf(),
+            source: e,
+        })?;
         let mut by_index: BTreeMap<u32, PathBuf> = BTreeMap::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -268,7 +280,11 @@ impl ChainReader {
     /// Latest segment by ascending index. Always present (`open`
     /// returns `NoSegments` when the directory is empty).
     pub fn latest_segment(&self) -> &Path {
-        &self.segments.last().expect("ChainReader always has >=1 segment").1
+        &self
+            .segments
+            .last()
+            .expect("ChainReader always has >=1 segment")
+            .1
     }
 
     /// Iterate every record across every segment in order. Each item
@@ -387,7 +403,10 @@ impl<'a> Iterator for ChainRecordIter<'a> {
                 }
             };
 
-            let seq_u64 = parsed_value.get("seq").and_then(|v| v.as_u64()).ok_or(())
+            let seq_u64 = parsed_value
+                .get("seq")
+                .and_then(|v| v.as_u64())
+                .ok_or(())
                 .map_err(|_| ChainReadError::MalformedRecord {
                     path: path.clone(),
                     line_no: self.line_no,
@@ -544,9 +563,15 @@ pub fn quick_chain_check(audit_dir: &Path) -> ChainQuickCheck {
         // The genesis record is seq=0; we still call this OK because
         // a kernel that emitted only its genesis record is in a
         // valid (if extremely fresh) state.
-        return ChainQuickCheck::Ok { last_seq, segment_count };
+        return ChainQuickCheck::Ok {
+            last_seq,
+            segment_count,
+        };
     }
-    ChainQuickCheck::Ok { last_seq, segment_count }
+    ChainQuickCheck::Ok {
+        last_seq,
+        segment_count,
+    }
 }
 
 /// Verdict returned by [`verify_chain_full`].
@@ -619,7 +644,7 @@ pub fn verify_chain_from(audit_dir: &Path, from_seq: u64) -> Result<ChainStats, 
         // `from_seq.saturating_sub(1)` so a stats consumer can
         // always read it as "highest seq ≤ this is the requested
         // window's lower-bound predecessor".
-        last_seq:      last_seq.unwrap_or_else(|| from_seq.saturating_sub(1)),
+        last_seq: last_seq.unwrap_or_else(|| from_seq.saturating_sub(1)),
         segment_count: segments_in_slice.len(),
     })
 }
@@ -647,7 +672,8 @@ mod tests {
             "event_kind": "GenesisRecord",
             "prev_sha256": GENESIS_PREV_SHA256_LITERAL,
             "emitted_at": 1_700_000_000_i64,
-        }).to_string();
+        })
+        .to_string();
         let line0_with_nl = format!("{genesis_line}\n");
 
         let mut hasher = Sha256::new();
@@ -663,7 +689,8 @@ mod tests {
             "task_id": null,
             "initiative_id": null,
             "payload": { "data_dir": "/tmp/raxis", "policy_epoch": 1, "schema_version": 1 },
-        }).to_string();
+        })
+        .to_string();
         let content = format!("{genesis_line}\n{line1}\n");
         write_segment(audit_dir, 0, &content);
         line0_sha
@@ -673,7 +700,10 @@ mod tests {
     fn open_reports_no_segments_when_dir_empty() {
         let tmp = TempDir::new().unwrap();
         let err = ChainReader::open(tmp.path()).unwrap_err();
-        assert!(matches!(err, ChainReadError::NoSegments { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ChainReadError::NoSegments { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -681,7 +711,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bad = tmp.path().join("does-not-exist");
         let err = ChainReader::open(&bad).unwrap_err();
-        assert!(matches!(err, ChainReadError::AuditDirOpen { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ChainReadError::AuditDirOpen { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -721,12 +754,16 @@ mod tests {
             "seq": 0,
             "event_kind": "GenesisRecord",
             "prev_sha256": "deadbeef".repeat(8), // 64 hex chars but wrong
-        }).to_string();
+        })
+        .to_string();
         write_segment(tmp.path(), 0, &format!("{line0}\n"));
         let reader = ChainReader::open(tmp.path()).unwrap();
         let mut iter = reader.records();
         let err = iter.next().unwrap().unwrap_err();
-        assert!(matches!(err, ChainReadError::ChainBreak { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ChainReadError::ChainBreak { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -736,23 +773,28 @@ mod tests {
             "seq": 0,
             "event_kind": "GenesisRecord",
             "prev_sha256": GENESIS_PREV_SHA256_LITERAL,
-        }).to_string();
+        })
+        .to_string();
         let line0_nl = format!("{line0}\n");
 
-        let mut h = Sha256::new(); h.update(line0_nl.as_bytes());
+        let mut h = Sha256::new();
+        h.update(line0_nl.as_bytes());
         let line0_sha = hex::encode(h.finalize());
 
         // seq=2 (not 1)
         let line2 = serde_json::json!({
             "seq": 2, "event_kind": "K", "prev_sha256": line0_sha,
-        }).to_string();
+        })
+        .to_string();
         write_segment(tmp.path(), 0, &format!("{line0_nl}{line2}\n"));
         let reader = ChainReader::open(tmp.path()).unwrap();
         let mut iter = reader.records();
         let _ = iter.next().unwrap().unwrap();
         let err = iter.next().unwrap().unwrap_err();
         match err {
-            ChainReadError::SequenceGap { expected, actual, .. } => {
+            ChainReadError::SequenceGap {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, 1);
                 assert_eq!(actual, 2);
             }
@@ -767,7 +809,10 @@ mod tests {
         let reader = ChainReader::open(tmp.path()).unwrap();
         let mut iter = reader.records();
         let err = iter.next().unwrap().unwrap_err();
-        assert!(matches!(err, ChainReadError::MalformedRecord { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ChainReadError::MalformedRecord { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -779,8 +824,10 @@ mod tests {
         let err = reader.records().next().unwrap().unwrap_err();
         match err {
             ChainReadError::MalformedRecord { reason, .. } => {
-                assert!(reason.contains("seq") || reason.contains("event_kind"),
-                    "got: {reason}");
+                assert!(
+                    reason.contains("seq") || reason.contains("event_kind"),
+                    "got: {reason}"
+                );
             }
             other => panic!("expected MalformedRecord; got {other:?}"),
         }
@@ -812,7 +859,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_valid_chain(tmp.path());
         match quick_chain_check(tmp.path()) {
-            ChainQuickCheck::Ok { last_seq, segment_count } => {
+            ChainQuickCheck::Ok {
+                last_seq,
+                segment_count,
+            } => {
                 assert_eq!(last_seq, 1);
                 assert_eq!(segment_count, 1);
             }
@@ -846,24 +896,32 @@ mod tests {
             "seq": 0,
             "event_kind": "GenesisRecord",
             "prev_sha256": GENESIS_PREV_SHA256_LITERAL,
-        }).to_string();
+        })
+        .to_string();
         // line 1 with a wrong prev_sha256
         let line1 = serde_json::json!({
             "seq": 1,
             "event_kind": "K",
             "prev_sha256": "00".repeat(32),
-        }).to_string();
+        })
+        .to_string();
         write_segment(tmp.path(), 0, &format!("{line0}\n{line1}\n"));
         let err = verify_chain_full(tmp.path()).unwrap_err();
-        assert!(matches!(err, ChainReadError::ChainBreak { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ChainReadError::ChainBreak { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
     fn payload_str_extracts_nested_field() {
         let tmp = TempDir::new().unwrap();
         write_valid_chain(tmp.path());
-        let recs: Vec<_> =
-            ChainReader::open(tmp.path()).unwrap().records().collect::<Result<_, _>>().unwrap();
+        let recs: Vec<_> = ChainReader::open(tmp.path())
+            .unwrap()
+            .records()
+            .collect::<Result<_, _>>()
+            .unwrap();
         // The KernelStarted record carries payload.data_dir.
         assert_eq!(recs[1].payload_str("data_dir"), Some("/tmp/raxis"));
     }
@@ -885,7 +943,8 @@ mod tests {
                 "event_kind": if seq == 0 { "GenesisRecord" } else { "KernelStarted" },
                 "prev_sha256": prev_sha,
                 "emitted_at": 1_700_000_000_i64 + seq as i64,
-            }).to_string();
+            })
+            .to_string();
             let with_nl = format!("{line}\n");
             let mut h = Sha256::new();
             h.update(with_nl.as_bytes());
@@ -903,8 +962,10 @@ mod tests {
         write_four_record_chain(tmp.path());
         let full = verify_chain_full(tmp.path()).expect("full");
         let from_zero = verify_chain_from(tmp.path(), 0).expect("from-zero");
-        assert_eq!(full, from_zero,
-            "verify_chain_from(0) MUST be identical to verify_chain_full");
+        assert_eq!(
+            full, from_zero,
+            "verify_chain_from(0) MUST be identical to verify_chain_full"
+        );
     }
 
     #[test]
@@ -961,17 +1022,22 @@ mod tests {
             "seq": 0,
             "event_kind": "GenesisRecord",
             "prev_sha256": GENESIS_PREV_SHA256_LITERAL,
-        }).to_string();
+        })
+        .to_string();
         // Second record with a deliberately wrong prev_sha256
         // (chain break at seq=1).
         let line1 = serde_json::json!({
             "seq": 1,
             "event_kind": "K",
             "prev_sha256": "deadbeef".repeat(8),
-        }).to_string();
+        })
+        .to_string();
         write_segment(tmp.path(), 0, &format!("{line0}\n{line1}\n"));
 
         let err = verify_chain_from(tmp.path(), 3).expect_err("must fail-close");
-        assert!(matches!(err, ChainReadError::ChainBreak { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ChainReadError::ChainBreak { .. }),
+            "got: {err:?}"
+        );
     }
 }

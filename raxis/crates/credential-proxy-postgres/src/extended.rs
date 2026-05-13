@@ -34,8 +34,8 @@
 
 use std::collections::HashMap;
 
-use crate::wire::{BindMessage, BindValue, FieldDescriptor};
 use crate::upstream::{UpstreamError, UpstreamPreparedMeta};
+use crate::wire::{BindMessage, BindValue, FieldDescriptor};
 
 // ---------------------------------------------------------------------------
 // Per-connection extended-query state
@@ -74,7 +74,7 @@ pub struct ExtendedState {
     /// Statements by name (empty string = unnamed/anonymous).
     pub prepared: HashMap<String, ParsedStatement>,
     /// Portals by name (empty string = unnamed).
-    pub portals:  HashMap<String, BoundPortal>,
+    pub portals: HashMap<String, BoundPortal>,
 }
 
 impl ExtendedState {
@@ -252,8 +252,8 @@ fn text_decoded_with_cast(oid: i32, s: &str) -> DecodedParam {
     use oids::*;
     match oid {
         BOOL => match s.trim() {
-            "t" | "T" | "true"  | "TRUE"  | "1" | "yes" | "YES" => DecodedParam::Raw("TRUE".into()),
-            "f" | "F" | "false" | "FALSE" | "0" | "no"  | "NO"  => DecodedParam::Raw("FALSE".into()),
+            "t" | "T" | "true" | "TRUE" | "1" | "yes" | "YES" => DecodedParam::Raw("TRUE".into()),
+            "f" | "F" | "false" | "FALSE" | "0" | "no" | "NO" => DecodedParam::Raw("FALSE".into()),
             other => DecodedParam::Raw(format!("{}::bool", dollar_quote(other))),
         },
         INT2 | INT4 | INT8 | OID | XID | OID_REGCLASS | OID_REGPROC => {
@@ -263,46 +263,50 @@ fn text_decoded_with_cast(oid: i32, s: &str) -> DecodedParam {
                 INT2 => "::int2",
                 INT4 => "::int4",
                 INT8 => "::int8",
-                OID  => "::oid",
-                _    => "",
+                OID => "::oid",
+                _ => "",
             };
             DecodedParam::Raw(format!("{}{}", dollar_quote(s), cast))
         }
         FLOAT4 => DecodedParam::Raw(format!("{}::float4", dollar_quote(s))),
         FLOAT8 => DecodedParam::Raw(format!("{}::float8", dollar_quote(s))),
         NUMERIC => DecodedParam::Raw(format!("{}::numeric", dollar_quote(s))),
-        UUID    => DecodedParam::Raw(format!("{}::uuid",   dollar_quote(s))),
-        DATE       => DecodedParam::Raw(format!("{}::date",        dollar_quote(s))),
-        TIME       => DecodedParam::Raw(format!("{}::time",        dollar_quote(s))),
-        TIMETZ     => DecodedParam::Raw(format!("{}::timetz",      dollar_quote(s))),
-        TIMESTAMP  => DecodedParam::Raw(format!("{}::timestamp",   dollar_quote(s))),
-        TIMESTAMPTZ=> DecodedParam::Raw(format!("{}::timestamptz", dollar_quote(s))),
-        JSON       => DecodedParam::Raw(format!("{}::json",        dollar_quote(s))),
-        JSONB      => DecodedParam::Raw(format!("{}::jsonb",       dollar_quote(s))),
-        BYTEA      => DecodedParam::Raw(format!("{}::bytea",       dollar_quote(s))),
+        UUID => DecodedParam::Raw(format!("{}::uuid", dollar_quote(s))),
+        DATE => DecodedParam::Raw(format!("{}::date", dollar_quote(s))),
+        TIME => DecodedParam::Raw(format!("{}::time", dollar_quote(s))),
+        TIMETZ => DecodedParam::Raw(format!("{}::timetz", dollar_quote(s))),
+        TIMESTAMP => DecodedParam::Raw(format!("{}::timestamp", dollar_quote(s))),
+        TIMESTAMPTZ => DecodedParam::Raw(format!("{}::timestamptz", dollar_quote(s))),
+        JSON => DecodedParam::Raw(format!("{}::json", dollar_quote(s))),
+        JSONB => DecodedParam::Raw(format!("{}::jsonb", dollar_quote(s))),
+        BYTEA => DecodedParam::Raw(format!("{}::bytea", dollar_quote(s))),
         _ => DecodedParam::Text(s.to_owned()),
     }
 }
 
-fn decode_binary(
-    position: u32,
-    oid: i32,
-    bytes: &[u8],
-) -> Result<DecodedParam, SubstitutionError> {
+fn decode_binary(position: u32, oid: i32, bytes: &[u8]) -> Result<DecodedParam, SubstitutionError> {
     use oids::*;
     match oid {
         BOOL => {
             if bytes.len() != 1 {
                 return Err(SubstitutionError::MalformedBinaryValue {
-                    position, oid, reason: "bool must be 1 byte",
+                    position,
+                    oid,
+                    reason: "bool must be 1 byte",
                 });
             }
-            Ok(DecodedParam::Raw(if bytes[0] != 0 { "TRUE".into() } else { "FALSE".into() }))
+            Ok(DecodedParam::Raw(if bytes[0] != 0 {
+                "TRUE".into()
+            } else {
+                "FALSE".into()
+            }))
         }
         INT2 => {
             if bytes.len() != 2 {
                 return Err(SubstitutionError::MalformedBinaryValue {
-                    position, oid, reason: "int2 must be 2 bytes",
+                    position,
+                    oid,
+                    reason: "int2 must be 2 bytes",
                 });
             }
             let v = i16::from_be_bytes([bytes[0], bytes[1]]);
@@ -311,22 +315,26 @@ fn decode_binary(
         INT4 | OID | XID => {
             if bytes.len() != 4 {
                 return Err(SubstitutionError::MalformedBinaryValue {
-                    position, oid, reason: "int4 must be 4 bytes",
+                    position,
+                    oid,
+                    reason: "int4 must be 4 bytes",
                 });
             }
             let v = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             let cast = match oid {
                 INT4 => "::int4",
-                OID  => "::oid",
-                XID  => "::xid",
-                _    => "",
+                OID => "::oid",
+                XID => "::xid",
+                _ => "",
             };
             Ok(DecodedParam::Raw(format!("{v}{cast}")))
         }
         INT8 => {
             if bytes.len() != 8 {
                 return Err(SubstitutionError::MalformedBinaryValue {
-                    position, oid, reason: "int8 must be 8 bytes",
+                    position,
+                    oid,
+                    reason: "int8 must be 8 bytes",
                 });
             }
             let mut a = [0u8; 8];
@@ -337,7 +345,9 @@ fn decode_binary(
         FLOAT4 => {
             if bytes.len() != 4 {
                 return Err(SubstitutionError::MalformedBinaryValue {
-                    position, oid, reason: "float4 must be 4 bytes",
+                    position,
+                    oid,
+                    reason: "float4 must be 4 bytes",
                 });
             }
             let v = f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -346,7 +356,9 @@ fn decode_binary(
         FLOAT8 => {
             if bytes.len() != 8 {
                 return Err(SubstitutionError::MalformedBinaryValue {
-                    position, oid, reason: "float8 must be 8 bytes",
+                    position,
+                    oid,
+                    reason: "float8 must be 8 bytes",
                 });
             }
             let mut a = [0u8; 8];
@@ -365,19 +377,28 @@ fn decode_binary(
         BYTEA => {
             // Binary `bytea` is just the raw bytes; render as the
             // canonical hex form.
-            Ok(DecodedParam::Raw(format!("'\\x{}'::bytea", hex_lower(bytes))))
+            Ok(DecodedParam::Raw(format!(
+                "'\\x{}'::bytea",
+                hex_lower(bytes)
+            )))
         }
         UUID => {
             if bytes.len() != 16 {
                 return Err(SubstitutionError::MalformedBinaryValue {
-                    position, oid, reason: "uuid must be 16 bytes",
+                    position,
+                    oid,
+                    reason: "uuid must be 16 bytes",
                 });
             }
             // Format as 8-4-4-4-12 hex.
             let h = hex_lower(bytes);
             let formatted = format!(
                 "{}-{}-{}-{}-{}",
-                &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32],
+                &h[0..8],
+                &h[8..12],
+                &h[12..16],
+                &h[16..20],
+                &h[20..32],
             );
             Ok(DecodedParam::Raw(format!("'{formatted}'::uuid")))
         }
@@ -399,10 +420,7 @@ fn decode_binary(
     }
 }
 
-fn rewrite_placeholders(
-    sql: &str,
-    decoded: &[DecodedParam],
-) -> Result<String, SubstitutionError> {
+fn rewrite_placeholders(sql: &str, decoded: &[DecodedParam]) -> Result<String, SubstitutionError> {
     let mut out = String::with_capacity(sql.len() + 32);
     let bytes = sql.as_bytes();
     let mut i = 0;
@@ -452,19 +470,23 @@ fn rewrite_placeholders(
             }
             if j > i + 1 {
                 let n_str = &sql[i + 1..j];
-                let n: u32 = n_str.parse().map_err(|_| {
-                    SubstitutionError::PlaceholderOutOfRange { placeholder: 0, supplied: decoded.len() as u32 }
-                })?;
+                let n: u32 =
+                    n_str
+                        .parse()
+                        .map_err(|_| SubstitutionError::PlaceholderOutOfRange {
+                            placeholder: 0,
+                            supplied: decoded.len() as u32,
+                        })?;
                 if n == 0 || (n as usize) > decoded.len() {
                     return Err(SubstitutionError::PlaceholderOutOfRange {
                         placeholder: n,
-                        supplied:    decoded.len() as u32,
+                        supplied: decoded.len() as u32,
                     });
                 }
                 match &decoded[(n - 1) as usize] {
-                    DecodedParam::Null      => out.push_str("NULL"),
-                    DecodedParam::Raw(s)    => out.push_str(s),
-                    DecodedParam::Text(s)   => out.push_str(&dollar_quote(s)),
+                    DecodedParam::Null => out.push_str("NULL"),
+                    DecodedParam::Raw(s) => out.push_str(s),
+                    DecodedParam::Text(s) => out.push_str(&dollar_quote(s)),
                 }
                 i = j;
                 continue;
@@ -530,14 +552,14 @@ fn scan_block_comment(bytes: &[u8], start: usize) -> usize {
 /// where the close-tag begins at `body_end`. `tag` may be empty
 /// (`$$...$$`).
 fn scan_dollar_quote(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
-    if bytes[start] != b'$' { return None; }
+    if bytes[start] != b'$' {
+        return None;
+    }
     // Tag is `[A-Za-z_][A-Za-z0-9_]*` between two `$`.
     let mut j = start + 1;
     if j < bytes.len() && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'_') {
         j += 1;
-        while j < bytes.len()
-            && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-        {
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
             j += 1;
         }
     }
@@ -594,30 +616,30 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// upstream is the source of truth — these mirror the values from
 /// `tokio_postgres::types::Type::*`.
 mod oids {
-    pub const BOOL:        i32 = 16;
-    pub const BYTEA:       i32 = 17;
-    pub const NAME:        i32 = 19;
-    pub const INT8:        i32 = 20;
-    pub const INT2:        i32 = 21;
-    pub const INT4:        i32 = 23;
-    pub const TEXT:        i32 = 25;
-    pub const OID:         i32 = 26;
-    pub const XID:         i32 = 28;
-    pub const FLOAT4:      i32 = 700;
-    pub const FLOAT8:      i32 = 701;
-    pub const UNKNOWN_TEXT:i32 = 705;
-    pub const BPCHAR:      i32 = 1042;
-    pub const VARCHAR:     i32 = 1043;
-    pub const DATE:        i32 = 1082;
-    pub const TIME:        i32 = 1083;
-    pub const TIMESTAMP:   i32 = 1114;
+    pub const BOOL: i32 = 16;
+    pub const BYTEA: i32 = 17;
+    pub const NAME: i32 = 19;
+    pub const INT8: i32 = 20;
+    pub const INT2: i32 = 21;
+    pub const INT4: i32 = 23;
+    pub const TEXT: i32 = 25;
+    pub const OID: i32 = 26;
+    pub const XID: i32 = 28;
+    pub const FLOAT4: i32 = 700;
+    pub const FLOAT8: i32 = 701;
+    pub const UNKNOWN_TEXT: i32 = 705;
+    pub const BPCHAR: i32 = 1042;
+    pub const VARCHAR: i32 = 1043;
+    pub const DATE: i32 = 1082;
+    pub const TIME: i32 = 1083;
+    pub const TIMESTAMP: i32 = 1114;
     pub const TIMESTAMPTZ: i32 = 1184;
-    pub const TIMETZ:      i32 = 1266;
-    pub const NUMERIC:     i32 = 1700;
-    pub const UUID:        i32 = 2950;
-    pub const JSON:        i32 = 114;
-    pub const JSONB:       i32 = 3802;
-    pub const OID_REGCLASS:i32 = 2205;
+    pub const TIMETZ: i32 = 1266;
+    pub const NUMERIC: i32 = 1700;
+    pub const UUID: i32 = 2950;
+    pub const JSON: i32 = 114;
+    pub const JSONB: i32 = 3802;
+    pub const OID_REGCLASS: i32 = 2205;
     pub const OID_REGPROC: i32 = 24;
 }
 
@@ -639,22 +661,24 @@ pub fn row_description_for(meta: &UpstreamPreparedMeta) -> Option<Vec<u8>> {
 /// query paths.
 pub fn prepare_error_to_wire(e: &UpstreamError) -> (String, String) {
     match e {
-        UpstreamError::QueryFailed { sqlstate, message } => {
-            (sqlstate.clone(), message.clone())
-        }
+        UpstreamError::QueryFailed { sqlstate, message } => (sqlstate.clone(), message.clone()),
         UpstreamError::InvalidUrl(_) => (
             "08000".into(),
             "RAXIS proxy: upstream URL invalid (FAIL_PROXY_UPSTREAM_URL_INVALID)".into(),
         ),
         UpstreamError::AuthRejected(_) => (
             "28P01".into(),
-            "RAXIS proxy: upstream authentication rejected (FAIL_PROXY_UPSTREAM_AUTH_REJECTED)".into(),
+            "RAXIS proxy: upstream authentication rejected (FAIL_PROXY_UPSTREAM_AUTH_REJECTED)"
+                .into(),
         ),
         UpstreamError::TcpConnect(_) | UpstreamError::Timeout { .. } => (
             "08006".into(),
             "RAXIS proxy: upstream unreachable (FAIL_PROXY_UPSTREAM_UNREACHABLE)".into(),
         ),
-        _ => ("XX000".into(), "RAXIS proxy: upstream prepare failed".into()),
+        _ => (
+            "XX000".into(),
+            "RAXIS proxy: upstream prepare failed".into(),
+        ),
     }
 }
 
@@ -676,9 +700,9 @@ mod tests {
 
     fn bind(values: Vec<BindValue>, fmts: Vec<i16>) -> BindMessage {
         BindMessage {
-            portal_name:         String::new(),
-            statement_name:      String::new(),
-            param_format_codes:  fmts,
+            portal_name: String::new(),
+            statement_name: String::new(),
+            param_format_codes: fmts,
             values,
             result_format_codes: Vec::new(),
         }
@@ -748,7 +772,10 @@ mod tests {
         let b = bind(vec![BindValue::Bytes(b"x".to_vec())], vec![]);
         let err = substitute("SELECT $2", &b, &[oids::TEXT]).unwrap_err();
         match err {
-            SubstitutionError::PlaceholderOutOfRange { placeholder, supplied } => {
+            SubstitutionError::PlaceholderOutOfRange {
+                placeholder,
+                supplied,
+            } => {
                 assert_eq!(placeholder, 2);
                 assert_eq!(supplied, 1);
             }
@@ -768,12 +795,7 @@ mod tests {
     #[test]
     fn substitute_skips_placeholder_inside_dollar_quote() {
         let b = bind(vec![BindValue::Bytes(b"X".to_vec())], vec![]);
-        let out = substitute(
-            "SELECT $tag$has $1 inside$tag$, $1",
-            &b,
-            &[oids::TEXT],
-        )
-        .unwrap();
+        let out = substitute("SELECT $tag$has $1 inside$tag$, $1", &b, &[oids::TEXT]).unwrap();
         assert!(out.contains("$tag$has $1 inside$tag$"));
         assert!(out.contains("$raxis$X$raxis$"));
     }
@@ -814,7 +836,10 @@ mod tests {
         let bytes: Vec<u8> = (0u8..16).collect();
         let b = bind(vec![BindValue::Bytes(bytes)], vec![1]);
         let out = substitute("SELECT $1", &b, &[oids::UUID]).unwrap();
-        assert!(out.contains("'00010203-0405-0607-0809-0a0b0c0d0e0f'::uuid"), "got {out}");
+        assert!(
+            out.contains("'00010203-0405-0607-0809-0a0b0c0d0e0f'::uuid"),
+            "got {out}"
+        );
     }
 
     #[test]

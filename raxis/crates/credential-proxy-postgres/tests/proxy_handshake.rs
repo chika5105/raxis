@@ -30,16 +30,16 @@
 
 mod support;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use raxis_credential_proxy_postgres::{
-    AuditChannel, AuditEvent, NoopAuditChannel, OwnedConsumer, PostgresProxy, ProxyConfig,
-    restriction::Restrictions,
+    restriction::Restrictions, AuditChannel, AuditEvent, NoopAuditChannel, OwnedConsumer,
+    PostgresProxy, ProxyConfig,
 };
 use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    ConsumerIdentity, Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -51,14 +51,14 @@ use support::{FakeBackend as FakePg, FakeResponse, FakeRow};
 // ---------------------------------------------------------------------------
 
 struct FakeBackend {
-    value:    std::sync::Mutex<Vec<u8>>,
+    value: std::sync::Mutex<Vec<u8>>,
     resolves: AtomicU32,
 }
 
 impl FakeBackend {
     fn new(value: Vec<u8>) -> Self {
         Self {
-            value:    std::sync::Mutex::new(value),
+            value: std::sync::Mutex::new(value),
             resolves: AtomicU32::new(0),
         }
     }
@@ -74,7 +74,9 @@ impl CredentialBackend for FakeBackend {
             return Err(CredentialError::NotFound(name.clone()));
         }
         self.resolves.fetch_add(1, Ordering::Relaxed);
-        Ok(CredentialValue::from_bytes(self.value.lock().unwrap().clone()))
+        Ok(CredentialValue::from_bytes(
+            self.value.lock().unwrap().clone(),
+        ))
     }
 
     fn rotate(
@@ -84,7 +86,7 @@ impl CredentialBackend for FakeBackend {
         _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
-            name:   name.clone(),
+            name: name.clone(),
             reason: "fake backend does not support rotation".to_owned(),
         })
     }
@@ -164,8 +166,7 @@ async fn boot_fake_pg(
 }
 
 fn pg_url(addr: std::net::SocketAddr) -> Vec<u8> {
-    format!("postgresql://demo:demo@{}:{}/demo", addr.ip(), addr.port())
-        .into_bytes()
+    format!("postgresql://demo:demo@{}:{}/demo", addr.ip(), addr.port()).into_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -181,21 +182,26 @@ async fn handshake_completes_to_ready_for_query() {
         b"postgresql://demo:demo@127.0.0.1:1/demo".to_vec(),
     ));
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("demo"),
-        consumer:        OwnedConsumer::new("credential_proxy", "test:postgres:0"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("credential_proxy", "test:postgres:0"),
+        restrictions: Restrictions::default(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
-    let addr  = proxy.local_addr().unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel))
+        .await
+        .unwrap();
+    let addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
     let mut s = TcpStream::connect(addr).await.unwrap();
     write_startup(&mut s).await;
     let msgs = drain_until_ready(&mut s).await;
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    assert!(tags.contains(&b'R'), "expected AuthenticationOk; tags = {tags:?}");
+    assert!(
+        tags.contains(&b'R'),
+        "expected AuthenticationOk; tags = {tags:?}"
+    );
     assert!(tags.contains(&b'Z'), "expected ReadyForQuery");
 
     write_terminate(&mut s).await;
@@ -218,17 +224,20 @@ async fn select_query_returns_real_rows_through_upstream() {
         } else {
             None
         }
-    })).await;
+    }))
+    .await;
     let backend = Arc::new(FakeBackend::new(pg_url(pg_addr)));
 
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("demo"),
-        consumer:        OwnedConsumer::new("credential_proxy", "test:postgres:1"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("credential_proxy", "test:postgres:1"),
+        restrictions: Restrictions::default(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel))
+        .await
+        .unwrap();
     let proxy_stats = proxy.stats_handle();
     let addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
@@ -241,8 +250,14 @@ async fn select_query_returns_real_rows_through_upstream() {
     let msgs = drain_until_ready(&mut s).await;
 
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    assert!(tags.contains(&b'T'), "expected RowDescription; tags = {tags:?}");
-    assert!(tags.contains(&b'D'), "expected at least one DataRow; tags = {tags:?}");
+    assert!(
+        tags.contains(&b'T'),
+        "expected RowDescription; tags = {tags:?}"
+    );
+    assert!(
+        tags.contains(&b'D'),
+        "expected at least one DataRow; tags = {tags:?}"
+    );
     assert!(tags.contains(&b'C'), "expected CommandComplete");
     assert_eq!(tags.last(), Some(&b'Z'));
 
@@ -271,17 +286,20 @@ async fn insert_blocked_under_select_only_short_circuits_before_upstream() {
     let pg_addr = boot_fake_pg(Arc::new(move |_sql: &str| {
         calls.fetch_add(1, Ordering::Relaxed);
         Some(FakeResponse::empty())
-    })).await;
+    }))
+    .await;
 
     let backend = Arc::new(FakeBackend::new(pg_url(pg_addr)));
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("demo"),
-        consumer:        OwnedConsumer::new("credential_proxy", "test:postgres:2"),
-        restrictions:    Restrictions::select_only(),
+        consumer: OwnedConsumer::new("credential_proxy", "test:postgres:2"),
+        restrictions: Restrictions::select_only(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel))
+        .await
+        .unwrap();
     let proxy_stats = proxy.stats_handle();
     let addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
@@ -294,10 +312,17 @@ async fn insert_blocked_under_select_only_short_circuits_before_upstream() {
     let msgs = drain_until_ready(&mut s).await;
 
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    assert!(tags.contains(&b'E'), "expected ErrorResponse; tags = {tags:?}");
+    assert!(
+        tags.contains(&b'E'),
+        "expected ErrorResponse; tags = {tags:?}"
+    );
     assert_eq!(tags.last(), Some(&b'Z'));
 
-    let err_body = msgs.iter().find(|(t, _)| *t == b'E').map(|(_, b)| b).unwrap();
+    let err_body = msgs
+        .iter()
+        .find(|(t, _)| *t == b'E')
+        .map(|(_, b)| b)
+        .unwrap();
     let body_str = String::from_utf8_lossy(err_body);
     assert!(
         body_str.contains("blocked by RAXIS policy"),
@@ -333,13 +358,15 @@ async fn unreachable_upstream_surfaces_clean_error_response() {
         b"postgresql://demo:demo@127.0.0.1:1/demo".to_vec(),
     ));
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("demo"),
-        consumer:        OwnedConsumer::new("credential_proxy", "test:postgres:unreach"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("credential_proxy", "test:postgres:unreach"),
+        restrictions: Restrictions::default(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel))
+        .await
+        .unwrap();
     let proxy_stats = proxy.stats_handle();
     let addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
@@ -352,7 +379,10 @@ async fn unreachable_upstream_surfaces_clean_error_response() {
     let msgs = drain_until_ready(&mut s).await;
 
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    assert!(tags.contains(&b'E'), "expected ErrorResponse; tags = {tags:?}");
+    assert!(
+        tags.contains(&b'E'),
+        "expected ErrorResponse; tags = {tags:?}"
+    );
     assert_eq!(tags.last(), Some(&b'Z'));
 
     let stats = proxy_stats.snapshot();
@@ -371,14 +401,16 @@ async fn missing_credential_returns_clean_error_on_first_query() {
         b"postgresql://demo:demo@127.0.0.1:5432/demo".to_vec(),
     ));
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("does-not-exist"),
-        consumer:        OwnedConsumer::new("credential_proxy", "test:postgres:miss"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("credential_proxy", "test:postgres:miss"),
+        restrictions: Restrictions::default(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
-    let addr  = proxy.local_addr().unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel))
+        .await
+        .unwrap();
+    let addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
     let mut s = TcpStream::connect(addr).await.unwrap();
@@ -389,7 +421,10 @@ async fn missing_credential_returns_clean_error_on_first_query() {
     let msgs = drain_until_ready(&mut s).await;
 
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    assert!(tags.contains(&b'E'), "expected ErrorResponse; tags = {tags:?}");
+    assert!(
+        tags.contains(&b'E'),
+        "expected ErrorResponse; tags = {tags:?}"
+    );
     assert_eq!(tags.last(), Some(&b'Z'));
 
     write_terminate(&mut s).await;
@@ -426,19 +461,22 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
         } else {
             None
         }
-    })).await;
+    }))
+    .await;
 
     let backend = Arc::new(FakeBackend::new(pg_url(pg_addr)));
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("demo"),
-        consumer:        OwnedConsumer::new("credential_proxy", "test:postgres:audit"),
-        restrictions:    Restrictions::select_only(),
+        consumer: OwnedConsumer::new("credential_proxy", "test:postgres:audit"),
+        restrictions: Restrictions::select_only(),
     };
     let audit = Arc::new(CapturingAudit::default());
 
-    let proxy = PostgresProxy::bind(backend, cfg, audit.clone()).await.unwrap();
-    let addr  = proxy.local_addr().unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, audit.clone())
+        .await
+        .unwrap();
+    let addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
     let mut s = TcpStream::connect(addr).await.unwrap();
@@ -465,12 +503,19 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
     assert!(
         events.len() >= 4,
         "expected at least 4 audit events; got {}: {:#?}",
-        events.len(), events,
+        events.len(),
+        events,
     );
 
     // First event: DatabaseQueryExecuted for SELECT.
     match &events[0] {
-        AuditEvent::DatabaseQueryExecuted { operation, blocked, sql_sha256, credential, .. } => {
+        AuditEvent::DatabaseQueryExecuted {
+            operation,
+            blocked,
+            sql_sha256,
+            credential,
+            ..
+        } => {
             assert_eq!(operation, "SELECT");
             assert!(!blocked);
             assert_eq!(credential.as_str(), "demo");
@@ -482,7 +527,10 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
     // Second event: CredentialProxyUpstreamConnected.
     match &events[1] {
         AuditEvent::CredentialProxyUpstreamConnected {
-            upstream_host, upstream_port, tls, ..
+            upstream_host,
+            upstream_port,
+            tls,
+            ..
         } => {
             assert_eq!(upstream_host, &pg_addr.ip().to_string());
             assert_eq!(*upstream_port, pg_addr.port());
@@ -494,7 +542,10 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
     // Third event: DatabaseQueryCompleted for SELECT.
     match &events[2] {
         AuditEvent::DatabaseQueryCompleted {
-            rows_returned, bytes_returned, upstream_error, ..
+            rows_returned,
+            bytes_returned,
+            upstream_error,
+            ..
         } => {
             assert_eq!(*rows_returned, 1, "expected 1 row from SELECT 1 fixture");
             assert!(*bytes_returned > 0);
@@ -505,7 +556,9 @@ async fn audit_channel_receives_full_v2_1_event_sequence() {
 
     // Fourth event: DatabaseQueryExecuted for blocked INSERT.
     match &events[3] {
-        AuditEvent::DatabaseQueryExecuted { operation, blocked, .. } => {
+        AuditEvent::DatabaseQueryExecuted {
+            operation, blocked, ..
+        } => {
             assert_eq!(operation, "INSERT");
             assert!(*blocked, "select-only restriction must block INSERT");
         }

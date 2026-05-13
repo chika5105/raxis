@@ -111,11 +111,7 @@ impl SecurityViolationClass {
     /// All variants — pinned-count regression target. See the test
     /// `security_violation_class_variant_count_is_pinned` for the
     /// drift contract.
-    pub const ALL: [Self; 3] = [
-        Self::FrameMalformation,
-        Self::AuthorityProbe,
-        Self::Replay,
-    ];
+    pub const ALL: [Self; 3] = [Self::FrameMalformation, Self::AuthorityProbe, Self::Replay];
 
     /// Stable on-wire string name (matches the PascalCase serde
     /// projection). Useful for log aggregation pipelines that match
@@ -123,8 +119,8 @@ impl SecurityViolationClass {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FrameMalformation => "FrameMalformation",
-            Self::AuthorityProbe    => "AuthorityProbe",
-            Self::Replay            => "Replay",
+            Self::AuthorityProbe => "AuthorityProbe",
+            Self::Replay => "Replay",
         }
     }
 }
@@ -241,22 +237,22 @@ pub enum AuditEventKind {
         /// Session id the VM was booted for. References both
         /// `sessions.session_id` and the spawn-service's per-VM
         /// session table.
-        session_id:        String,
+        session_id: String,
         /// Owning task id (`None` for the canonical Orchestrator
         /// session, which has no `[[tasks]]` row).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        task_id:           Option<String>,
+        task_id: Option<String>,
         /// Owning initiative id; pins the spawn into the
         /// initiative's lineage.
-        initiative_id:     String,
+        initiative_id: String,
         /// `Backend::backend_id()` of the substrate that booted the
         /// VM. Stable string; pairs with `IsolationSubstrateSelected`
         /// at audit-replay time.
-        backend_id:        String,
+        backend_id: String,
         /// `EgressTier` that the substrate enforces for this VM,
         /// stringified PascalCase. Operator dashboards key on this
         /// to surface "Tier1Tproxy" vs "Tier2CredProxy" sessions.
-        egress_tier:       String,
+        egress_tier: String,
         /// `host:port` of the per-session egress-admission listener
         /// the in-guest tproxy phones home to. Loopback in dev,
         /// vsock-shaped at V2 GA. Recorded for forensic replay
@@ -280,7 +276,7 @@ pub enum AuditEventKind {
     /// lints enforce the pairing.
     SessionVmExited {
         /// Echo of the spawn event's `session_id`.
-        session_id:    String,
+        session_id: String,
         /// Stable, PascalCase classification of the exit. One of:
         ///   * `"GracefulExit"` — guest PID 1 returned a code.
         ///   * `"SignalKilled"` — substrate sent a signal.
@@ -288,12 +284,12 @@ pub enum AuditEventKind {
         ///   * `"BackendError"` — substrate-internal failure.
         /// Closed set; new variants land here AND in
         /// `IsolationError::ExitStatus` together.
-        signal_class:  String,
+        signal_class: String,
         /// Numeric exit code reduced from `ExitStatus`. Mapping is
         /// pinned by `raxis-session-spawn::exit_status_code` —
         /// dashboards rely on the specific numbers (e.g. -2 for
         /// `BackendError`).
-        exit_code:     i32,
+        exit_code: i32,
         /// Free-form payload from the substrate when
         /// `signal_class == "BackendError"`. `None` for the other
         /// classes.
@@ -325,40 +321,40 @@ pub enum AuditEventKind {
     SessionVmRespawnAttempted {
         /// Session id the respawn targets. References
         /// `sessions.session_id`.
-        session_id:        String,
+        session_id: String,
         /// Owning task id (`None` for the canonical Orchestrator
         /// session, which has no `[[tasks]]` row).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        task_id:           Option<String>,
+        task_id: Option<String>,
         /// Owning initiative id; pins the respawn into the
         /// initiative's lineage.
-        initiative_id:     String,
+        initiative_id: String,
         /// 1-indexed attempt counter. The first retry is
         /// `attempt = 1`; the original spawn is implicitly
         /// `attempt = 0` and is reflected by the previous
         /// `SessionVmSpawned` / failure-emitting code path.
-        attempt:           u32,
+        attempt: u32,
         /// Operator-policy ceiling (`policy.[elastic].
         /// transient_retry_max_attempts`) at the time of this
         /// respawn. Recorded so dashboards can surface
         /// "attempt 2 of 3"-style progress without re-reading
         /// the policy snapshot.
-        max_attempts:      u32,
+        max_attempts: u32,
         /// Failure-class projection of the previous attempt's
         /// `IsolationError` per `IsolationError::classify` —
         /// always `"Transient"` by construction.
-        failure_class:     String,
+        failure_class: String,
         /// Substrate-facing reason string from the previous
         /// attempt. Unstructured (the substrate's diagnostic
         /// message) — operator-facing diagnostics only; the
         /// kernel does not key behaviour off the value.
-        previous_reason:   String,
+        previous_reason: String,
         /// Backoff applied before this respawn, in milliseconds.
         /// Computed as `min(initial * 2^(attempt-1), max)` per
         /// `elastic-vm-scaling.md §3.2`. Recorded so audit-replay
         /// can confirm the backoff schedule honoured the policy
         /// caps.
-        backoff_ms:        u32,
+        backoff_ms: u32,
     },
 
     /// V2 `elastic-vm-scaling.md §3.2 / §3.3` — terminal failure of
@@ -379,28 +375,28 @@ pub enum AuditEventKind {
     /// to cover this either/or rule.
     SessionVmFailedFinal {
         /// Session id whose spawn lineage failed.
-        session_id:        String,
+        session_id: String,
         /// Owning task id (`None` for the canonical Orchestrator
         /// session).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        task_id:           Option<String>,
+        task_id: Option<String>,
         /// Owning initiative id; pins the failure into the
         /// initiative's lineage.
-        initiative_id:     String,
+        initiative_id: String,
         /// Total attempts taken before giving up (1-indexed; e.g.
         /// `1` when a `Permanent` first-attempt failure surfaces,
         /// `transient_retry_max_attempts + 1` when retries
         /// exhaust).
-        total_attempts:    u32,
+        total_attempts: u32,
         /// Failure-class projection of the LAST attempt per
         /// `IsolationError::classify` (one of `"Transient"` or
         /// `"Permanent"`). When `"Transient"`, the lineage hit
         /// the retry-exhaustion path; when `"Permanent"`, the
         /// lineage short-circuited at the first failure.
-        failure_class:     String,
+        failure_class: String,
         /// Final substrate-facing reason string. Audit-replay
         /// dashboards surface this as the operator diagnostic.
-        final_reason:      String,
+        final_reason: String,
     },
 
     /// V2 `elastic-vm-scaling.md §4` — admitted scaling decision.
@@ -419,35 +415,35 @@ pub enum AuditEventKind {
         /// session id; the previous session's
         /// `SessionVmExited` is emitted independently as part of
         /// the drain.
-        session_id:        String,
+        session_id: String,
         /// Owning task id (`None` for the orchestrator session).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        task_id:           Option<String>,
+        task_id: Option<String>,
         /// Owning initiative id.
-        initiative_id:     String,
+        initiative_id: String,
         /// `"Up"` or `"Down"`. Stable PascalCase string;
         /// dashboards key on this. INV-ELASTIC-05 requires that
         /// `direction = "Up"` is mechanically forbidden when
         /// the resolved `elastic` flag is `false` for this
         /// session — emitting that combination is a kernel bug.
-        direction:         String,
+        direction: String,
         /// Pre-decision vCPU count.
-        prev_vcpus:        u32,
+        prev_vcpus: u32,
         /// Post-decision vCPU count (`prev_vcpus * 2` clamped to
         /// the policy ceiling for scale-up; ≤ `prev_vcpus` for
         /// scale-down).
-        new_vcpus:         u32,
+        new_vcpus: u32,
         /// Pre-decision memory in MiB.
-        prev_memory_mb:    u32,
+        prev_memory_mb: u32,
         /// Post-decision memory in MiB (`prev_memory_mb * 3 / 2`
         /// clamped to the policy ceiling for scale-up; ≤
         /// `prev_memory_mb` for scale-down).
-        new_memory_mb:     u32,
+        new_memory_mb: u32,
         /// Substrate-agnostic reason for the decision. Free-form
         /// audit-string; the kernel does not key behaviour off the
         /// value. Examples: `"InferenceTokenBurnRate"`,
         /// `"MemoryPressure"`, `"NextSpawnUnderUtilizedBias"`.
-        reason:            String,
+        reason: String,
     },
 
     /// V2 `elastic-vm-scaling.md §4.3` — scaling decision deferred
@@ -458,20 +454,20 @@ pub enum AuditEventKind {
     /// pre-scale-up `VmSpec`.
     SessionVmScaleDeferred {
         /// Session id the deferred decision applied to.
-        session_id:        String,
+        session_id: String,
         /// Owning task id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        task_id:           Option<String>,
+        task_id: Option<String>,
         /// Owning initiative id.
-        initiative_id:     String,
+        initiative_id: String,
         /// What the engine was about to do (`"Up"` or `"Down"`)
         /// before the rate-limit check denied admission.
-        direction:         String,
+        direction: String,
         /// Stable PascalCase reason tag. Closed set:
         ///   * `"RateLimit"` — the per-minute window was full.
         /// New reasons land here AND in the kernel-side decision
         /// engine in lockstep.
-        reason:             String,
+        reason: String,
     },
 
     /// A security boundary the kernel enforces was violated AT the
@@ -552,23 +548,23 @@ pub enum AuditEventKind {
         /// `OperatorRequest::DryRunAdmit::submitted_by` wire field;
         /// historical V1 `CreateInitiative` carried the same field
         /// pre-V2.5).
-        submitted_by:   String,
+        submitted_by: String,
         /// Active policy epoch at the moment of dry-run; lets a
         /// later forensic query line dry-run results up against
         /// the epoch the live submission ran under.
-        policy_epoch:   u64,
+        policy_epoch: u64,
         /// SHA-256 hex of the `plan_toml` bytes — the same
         /// digest the kernel would compute at live submission.
-        plan_sha256:    String,
+        plan_sha256: String,
         /// The would-be `target_ref` resolved from the plan and
         /// the policy `[git]` section.
-        target_ref:     String,
+        target_ref: String,
         /// Number of non-fatal warnings the handler returned.
         warnings_count: u32,
         /// Workspace lane the plan declared.
-        lane_id:        String,
+        lane_id: String,
         /// Number of `[[tasks]]` entries in the plan.
-        task_count:     u32,
+        task_count: u32,
     },
     /// kernel-store.md §2.5.8 `path_scope_override` semantics:
     /// emitted by `approve_plan` for **every** task in the plan that has
@@ -743,14 +739,14 @@ pub enum AuditEventKind {
         /// Initiative the fast-forward belongs to.
         initiative_id: String,
         /// Commit SHA the kernel attempted to fast-forward to.
-        commit_sha:    String,
+        commit_sha: String,
         /// Operator-configured target ref (`refs/heads/<name>`).
-        target_ref:    String,
+        target_ref: String,
         /// Stable-wire short string for the failure class.
-        category:      String,
+        category: String,
         /// Free-form reason captured from the failure path.
         /// Truncated at 4 KiB to keep audit rows bounded.
-        reason:        String,
+        reason: String,
     },
 
     /// V2_GAPS §C6 — emitted when the kernel begins a push to the
@@ -761,11 +757,11 @@ pub enum AuditEventKind {
         /// Initiative the push belongs to.
         initiative_id: String,
         /// Commit SHA being pushed.
-        commit_sha:    String,
+        commit_sha: String,
         /// Remote name (`"origin"` typically).
-        remote:        String,
+        remote: String,
         /// Refspec (`"refs/heads/main:refs/heads/main"` typically).
-        refspec:       String,
+        refspec: String,
     },
 
     /// V2_GAPS §C6 — emitted on `git push` exit-0. Carries the
@@ -776,13 +772,13 @@ pub enum AuditEventKind {
         /// Initiative the push belongs to.
         initiative_id: String,
         /// Commit SHA that was pushed.
-        commit_sha:    String,
+        commit_sha: String,
         /// Remote name.
-        remote:        String,
+        remote: String,
         /// Refspec.
-        refspec:       String,
+        refspec: String,
         /// First-line summary of the push (`git push` stderr).
-        summary:       String,
+        summary: String,
     },
 
     /// V2_GAPS §C6 — emitted on `git push` exit-non-zero or on
@@ -793,21 +789,21 @@ pub enum AuditEventKind {
         /// Initiative the push belongs to.
         initiative_id: String,
         /// Commit SHA the kernel attempted to push.
-        commit_sha:    String,
+        commit_sha: String,
         /// Remote name (or `""` if the failure happened before a
         /// remote was selected — e.g. policy misconfiguration).
-        remote:        String,
+        remote: String,
         /// Refspec (or `""` for early failures).
-        refspec:       String,
+        refspec: String,
         /// Stable-wire short string for the failure class. One of:
         /// `"push_failed"` (non-zero exit), `"spawn_failed"`
         /// (subprocess could not start), `"deadline_exceeded"`
         /// (wall-clock timeout), `"unopenable_repo"` (main repo
         /// missing).
-        category:      String,
+        category: String,
         /// Free-form reason captured from the failure path.
         /// Truncated at 4 KiB to keep audit rows bounded.
-        reason:        String,
+        reason: String,
     },
 
     // --- Session management ---
@@ -1195,7 +1191,7 @@ pub enum AuditEventKind {
     NotificationDeliveryFailed {
         channel_id: String,
         event_kind: String,
-        reason:     String,
+        reason: String,
     },
 
     /// V2_GAPS §C4 — successful notification delivery.
@@ -1209,13 +1205,13 @@ pub enum AuditEventKind {
     /// retries; `attempts` counts how many retries the dispatcher
     /// did (1 for first-try success).
     NotificationDelivered {
-        channel_id:        String,
-        channel_kind:      String,
-        event_kind:        String,
-        source_event_id:   String,
+        channel_id: String,
+        channel_kind: String,
+        event_kind: String,
+        source_event_id: String,
         upstream_trace_id: Option<String>,
-        delivery_ms:       u64,
-        attempts:          u32,
+        delivery_ms: u64,
+        attempts: u32,
     },
 
     // --- Provider circuit breaker (provider-failure-handling.md §6.3) -----
@@ -1241,37 +1237,36 @@ pub enum AuditEventKind {
     /// `provider_circuit_state` DDL (migration 15, §6.4).
     CircuitBreakerStateChanged {
         /// Provider key (e.g. `"anthropic"`, `"openai"`).
-        provider:             String,
+        provider: String,
         /// Model key (e.g. `"claude-opus-4.7"`).
-        model:                String,
+        model: String,
         /// State before this transition.
-        from_state:           String,
+        from_state: String,
         /// State after this transition.
-        to_state:             String,
+        to_state: String,
         /// Consecutive retryable failures at the moment of transition.
         consecutive_failures: u32,
         /// Error category of the failure that triggered the transition
         /// (e.g. `"Unavailable"`, `"Timeout"`). `None` for success-
         /// driven transitions (`HalfOpen → Closed`) and manual resets.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_failure_kind:    Option<String>,
+        last_failure_kind: Option<String>,
         /// When the circuit will expire its `Open` state and promote
         /// to `HalfOpen`. `None` when `to_state != "Open"`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        open_expires_at_ms:   Option<u64>,
+        open_expires_at_ms: Option<u64>,
         /// What caused this transition. One of:
         /// `"FailureThreshold"` — consecutive failures reached trip_threshold.
         /// `"ProbeSuccess"` — half-open probe succeeded.
         /// `"ProbeFailure"` — half-open probe failed, re-opened.
         /// `"OpenWindowElapsed"` — lazy Open → HalfOpen promotion.
         /// `"ManualReset"` — operator ran `raxis providers reset`.
-        trigger:              String,
+        trigger: String,
         /// Operator fingerprint when `trigger = "ManualReset"`.
         /// `None` for all other triggers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        operator:             Option<String>,
+        operator: Option<String>,
     },
-
 
     // --- Operator certificates (kernel-store.md §2.5.7, security-model.md §cert-lifecycle) ---
     /// Emitted by `policy_manager::advance_epoch` (and the genesis path)
@@ -1318,16 +1313,16 @@ pub enum AuditEventKind {
     ///   pubkey is unchanged across a rotation by INV-CERT-04 — see
     ///   `cli/src/commands/cert.rs::install`.)
     OperatorCertInstalled {
-        pubkey_fingerprint:     String,
-        epoch_id:               u64,
-        cert_kind:              String,
-        display_name:           String,
-        not_before:             i64,
-        not_after:              i64,
-        permitted_ops:          Vec<String>,
+        pubkey_fingerprint: String,
+        epoch_id: u64,
+        cert_kind: String,
+        display_name: String,
+        not_before: i64,
+        not_after: i64,
+        permitted_ops: Vec<String>,
         force_misconfig_bypass: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        previous_fingerprint:   Option<String>,
+        previous_fingerprint: Option<String>,
     },
 
     /// Emitted at policy load when a structural cert-validation error
@@ -1350,10 +1345,10 @@ pub enum AuditEventKind {
     /// the same wording the operator saw at validate time).
     OperatorCertMisconfigBypassed {
         pubkey_fingerprint: String,
-        epoch_id:           u64,
-        cert_kind:          String,
-        display_name:       String,
-        violations:         Vec<String>,
+        epoch_id: u64,
+        cert_kind: String,
+        display_name: String,
+        violations: Vec<String>,
     },
 
     /// Emitted by the cert-check runtime sweep when a Standard cert is
@@ -1369,10 +1364,10 @@ pub enum AuditEventKind {
     /// auditor can correlate the warning with downstream activity.
     OperatorCertExpiringSoon {
         pubkey_fingerprint: String,
-        epoch_id:           u64,
-        op:                 String,
-        not_after:          i64,
-        days_remaining:     i64,
+        epoch_id: u64,
+        op: String,
+        not_after: i64,
+        days_remaining: i64,
     },
 
     /// Emitted by the cert-check runtime sweep when a Standard cert is
@@ -1384,10 +1379,10 @@ pub enum AuditEventKind {
     /// Expired zone.
     OperatorCertInGracePeriod {
         pubkey_fingerprint: String,
-        epoch_id:           u64,
-        op:                 String,
-        not_after:          i64,
-        grace_ends_at:      i64,
+        epoch_id: u64,
+        op: String,
+        not_after: i64,
+        grace_ends_at: i64,
     },
 
     /// Emitted by the cert-check runtime sweep when an op is DENIED
@@ -1400,10 +1395,10 @@ pub enum AuditEventKind {
     /// can see exactly which operations were attempted post-expiry.
     OperatorCertExpiredOpDenied {
         pubkey_fingerprint: String,
-        epoch_id:           u64,
-        op:                 String,
-        not_after:          i64,
-        expired_at:         i64,
+        epoch_id: u64,
+        op: String,
+        not_after: i64,
+        expired_at: i64,
     },
 
     /// Emitted when an `EmergencyRecovery` cert is used to invoke
@@ -1415,8 +1410,8 @@ pub enum AuditEventKind {
     /// compromises the key cannot use it without leaving a trace.
     EmergencyOperatorUsed {
         pubkey_fingerprint: String,
-        epoch_id:           u64,
-        op:                 String,
+        epoch_id: u64,
+        op: String,
     },
 
     // --- Break-glass (kernel-core.md §2.3 `src/breakglass.rs`) -----------------
@@ -1442,12 +1437,12 @@ pub enum AuditEventKind {
         activation_id: String,
         /// Operator pubkey fingerprints (32-hex) of both signers, in
         /// canonical sort order. Always exactly two entries.
-        activated_by:  Vec<String>,
+        activated_by: Vec<String>,
         /// Wallclock at admission, RFC-3339 UTC.
-        activated_at:  String,
+        activated_at: String,
         /// Wallclock at TTL expiry, RFC-3339 UTC. The kernel refuses
         /// `expires_at > activated_at + breakglass_max_duration`.
-        expires_at:    String,
+        expires_at: String,
         /// Free-form one-line operator-supplied justification (256
         /// bytes max; redactor sanitises CRLF to spaces).
         justification: String,
@@ -1458,7 +1453,7 @@ pub enum AuditEventKind {
     /// guards activation.
     BreakglassDeactivated {
         /// Activation_id originally returned by `BreakglassActivated`.
-        activation_id:  String,
+        activation_id: String,
         /// Pubkey fingerprint of the operator who deactivated.
         deactivated_by: String,
         /// Wallclock at deactivation, RFC-3339 UTC.
@@ -1471,15 +1466,15 @@ pub enum AuditEventKind {
     /// emergency-bypass use.
     BreakglassAction {
         /// Activation_id this action was admitted under.
-        activation_id:      String,
+        activation_id: String,
         /// Session id (or `"-"` for global actions like a CLI policy
         /// load).
-        session_id:         String,
+        session_id: String,
         /// Free-form one-line description of the bypassed action,
         /// e.g. `"intent admission for task=… kind=CompleteTask"`.
         action_description: String,
         /// Wallclock at action time, RFC-3339 UTC.
-        action_at:          String,
+        action_at: String,
     },
 
     // --- Read-only CLI: redaction reveal (cli-readonly.md §5.4.2 / §5.7.2) ---
@@ -1512,11 +1507,11 @@ pub enum AuditEventKind {
     /// duplicates it so log readers don't have to project two fields
     /// to surface the read target in JSON output.
     PathReadAccessed {
-        actor:    String,
-        table:    String,
-        column:   String,
-        task_id:  String,
-        command:  String,
+        actor: String,
+        table: String,
+        column: String,
+        task_id: String,
+        command: String,
     },
 
     // --- Initiative quarantine (kernel-store.md §2.5.8) -------------------
@@ -1534,9 +1529,9 @@ pub enum AuditEventKind {
     /// convention in `kernel-store.md` §2.5.2 "Operator display-name
     /// fields".
     InitiativeQuarantined {
-        initiative_id:  String,
+        initiative_id: String,
         quarantined_by: String,
-        reason:         Option<String>,
+        reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quarantined_by_display_name: Option<String>,
     },
@@ -1561,9 +1556,9 @@ pub enum AuditEventKind {
     /// the historical-cert annotation per `kernel-store.md` §2.5.2.
     OperatorQuarantineSwept {
         target_fingerprint: String,
-        quarantined_by:     String,
-        count:              u64,
-        reason:             Option<String>,
+        quarantined_by: String,
+        count: u64,
+        reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quarantined_by_display_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1600,11 +1595,11 @@ pub enum AuditEventKind {
     ///     this event. The wire-stable boolean is sufficient for
     ///     forensic audit.
     CredentialAccessed {
-        name:          String,
+        name: String,
         consumer_kind: String,
-        consumer_id:   String,
-        backend_kind:  String,
-        success:       bool,
+        consumer_id: String,
+        backend_kind: String,
+        success: bool,
     },
 
     /// Emitted when a `CredentialBackend::rotate` succeeds. The new
@@ -1617,9 +1612,9 @@ pub enum AuditEventKind {
     /// Failed rotations do NOT emit this event; they surface as
     /// `CredentialError` returned to the operator CLI.
     CredentialRotated {
-        name:                String,
-        actor_fingerprint:   String,
-        backend_kind:        String,
+        name: String,
+        actor_fingerprint: String,
+        backend_kind: String,
     },
 
     /// V2_GAPS §C7 — emitted when `raxis credential add` writes a new
@@ -1643,11 +1638,11 @@ pub enum AuditEventKind {
     ///   * `backend_kind`     — concrete backend impl name (today:
     ///     always `"file"`).
     CredentialRegistered {
-        name:               String,
-        proxy_type:         String,
-        environment:        String,
-        actor_fingerprint:  String,
-        backend_kind:       String,
+        name: String,
+        proxy_type: String,
+        environment: String,
+        actor_fingerprint: String,
+        backend_kind: String,
     },
 
     /// V2_GAPS §C7 — emitted when `raxis credential remove` deletes
@@ -1655,10 +1650,10 @@ pub enum AuditEventKind {
     /// (`--force` was supplied) from the (V3-future) "gracefully
     /// detected zero active sessions" path.
     CredentialRemoved {
-        name:               String,
-        actor_fingerprint:  String,
-        backend_kind:       String,
-        forced:             bool,
+        name: String,
+        actor_fingerprint: String,
+        backend_kind: String,
+        forced: bool,
     },
 
     /// V2_GAPS §D1 — emitted when `raxis cert revoke` writes a
@@ -1667,11 +1662,11 @@ pub enum AuditEventKind {
     /// is the wire-stable signal that other observability paths
     /// (`raxis log`, the operator inbox) match on.
     OperatorCertRevoked {
-        subject_pubkey_fingerprint:    String,
-        subject_display_name:          Option<String>,
-        reason:                        String,
-        revoked_at:                    i64,
-        reference:                     String,
+        subject_pubkey_fingerprint: String,
+        subject_display_name: Option<String>,
+        reason: String,
+        revoked_at: i64,
+        reference: String,
         revoked_by_pubkey_fingerprint: String,
     },
 
@@ -1682,10 +1677,10 @@ pub enum AuditEventKind {
     /// attacker tried to reuse a revoked cert.
     OperatorCertRevokedOpDenied {
         pubkey_fingerprint: String,
-        epoch_id:           u64,
-        op:                 String,
-        reason:             String,
-        revoked_at:         i64,
+        epoch_id: u64,
+        op: String,
+        reason: String,
+        revoked_at: i64,
     },
 
     // ── V2_GAPS §D2 — host-capacity admission + watchdogs ──────────────
@@ -1695,7 +1690,6 @@ pub enum AuditEventKind {
     // session state, round-robin fairness, per-operator overrides, and
     // WAL pressure monitoring is deferred to V3 (see
     // `V2_GAPS.md §D2`).
-
     /// Emitted when an `ActivateSubTask` (or first-task spawn) is
     /// refused because a host-capacity cap would be exceeded. V2
     /// returns `FAIL_VM_CONCURRENCY_AT_CAP` to the caller; the
@@ -1707,15 +1701,15 @@ pub enum AuditEventKind {
     /// variants are reserved for V3's full admission queue.
     AdmissionDeferredAtCap {
         /// Cap that fired (`"VmCount"`, `"VmMemory"`, …).
-        cap_kind:        String,
+        cap_kind: String,
         /// `running` count at the moment of the decision.
         current_running: u32,
         /// The cap configured in `policy.toml [host_capacity]`.
-        cap:             u32,
+        cap: u32,
         /// Optional initiative the deferred sub-task belongs to.
-        initiative_id:   Option<String>,
+        initiative_id: Option<String>,
         /// Optional task id the deferral applies to.
-        task_id:         Option<String>,
+        task_id: Option<String>,
     },
 
     /// Emitted when the global admission queue is at depth and a
@@ -1723,9 +1717,9 @@ pub enum AuditEventKind {
     /// `admission_queue_depth` is exhausted (see
     /// `host-capacity.md §10.1`).
     AdmissionQueueFull {
-        intent_kind:        String,
-        operator:           Option<String>,
-        rejected_at_depth:  u32,
+        intent_kind: String,
+        operator: Option<String>,
+        rejected_at_depth: u32,
     },
 
     /// Emitted when the disk-full watchdog (5-second poll on
@@ -1733,8 +1727,8 @@ pub enum AuditEventKind {
     /// `DiskFullHalt`. V2 only implements `disk_full_behavior =
     /// "halt_admit"`; `gc_then_retry` and `halt_all` are V3.
     DiskFullHaltEntered {
-        free_mb:  u64,
-        cap_mb:   u64,
+        free_mb: u64,
+        cap_mb: u64,
         behavior: String,
     },
 
@@ -1743,8 +1737,8 @@ pub enum AuditEventKind {
     /// halt lasted so operators can size disk capacity from the
     /// audit trail.
     DiskHealthyAfterFull {
-        previous_free_mb:      u64,
-        current_free_mb:       u64,
+        previous_free_mb: u64,
+        current_free_mb: u64,
         halt_duration_seconds: u64,
     },
 
@@ -1758,7 +1752,7 @@ pub enum AuditEventKind {
     /// `#[serde(tag = "kind")]` for its variant discriminator.
     OperatorAttentionRequired {
         attention_kind: String,
-        details:        String,
+        details: String,
     },
 
     /// V2_GAPS §12.1 — emitted by `kernel/src/push/dispatcher.rs`
@@ -1796,12 +1790,12 @@ pub enum AuditEventKind {
     /// V3 will extend this with a live network probe per proxy type;
     /// the audit-event shape is forward-compatible with that.
     CredentialVerified {
-        name:               String,
-        proxy_type:         String,
-        success:            bool,
-        latency_ms:         u64,
-        actor_fingerprint:  String,
-        backend_kind:       String,
+        name: String,
+        proxy_type: String,
+        success: bool,
+        latency_ms: u64,
+        actor_fingerprint: String,
+        backend_kind: String,
     },
 
     // --- Tier 1 transparent egress (`vm-network-isolation.md §3.2`).
@@ -1819,16 +1813,16 @@ pub enum AuditEventKind {
     /// not observe an admission whose audit failed.
     TransparentProxyAdmitted {
         /// Session whose VM the connection came from.
-        session_id:        String,
+        session_id: String,
         /// Host or SNI passed to admission. `None` when the in-VM
         /// proxy could not extract one (raw TCP database bypass).
-        host_or_sni:       Option<String>,
+        host_or_sni: Option<String>,
         /// Original destination address as seen by the proxy.
-        original_dst_ip:   String,
+        original_dst_ip: String,
         /// Original destination port.
         original_dst_port: u16,
         /// Layer-7 protocol guess (`https` / `http` / `tcp`).
-        protocol:          String,
+        protocol: String,
     },
 
     /// Emitted when the kernel's egress admission service denies
@@ -1844,19 +1838,19 @@ pub enum AuditEventKind {
     /// upstream directly".
     TransparentProxyDenied {
         /// Session whose VM the connection came from.
-        session_id:        String,
+        session_id: String,
         /// Host or SNI passed to admission, when available.
-        host_or_sni:       Option<String>,
+        host_or_sni: Option<String>,
         /// Original destination address as seen by the proxy.
-        original_dst_ip:   String,
+        original_dst_ip: String,
         /// Original destination port.
         original_dst_port: u16,
         /// Layer-7 protocol guess (`https` / `http` / `tcp`).
-        protocol:          String,
+        protocol: String,
         /// Stable short reason string (`host_not_in_allowlist`,
         /// `proxy_target_bypass`, `protocol_not_permitted`,
         /// `port_not_redirected`, `unknown`).
-        reason:            String,
+        reason: String,
     },
 
     // --- V2 reviewer-egress-defaults-decision.md §5.
@@ -1947,13 +1941,13 @@ pub enum AuditEventKind {
     /// state mutation is paired-class through its own event).
     CredentialProxyStarted {
         /// Session whose VM the proxy is provisioned for.
-        session_id:      String,
+        session_id: String,
         /// Proxy type (`postgres`, `http`, `mysql`, etc.).
-        proxy_type:      String,
+        proxy_type: String,
         /// Policy-declared credential name. Never the value.
         credential_name: String,
         /// Loopback address the agent connects to.
-        addr:            String,
+        addr: String,
     },
 
     /// Emitted when the kernel tears down a credential-proxy
@@ -1961,17 +1955,17 @@ pub enum AuditEventKind {
     /// the final counters snapshot.
     CredentialProxyStopped {
         /// Session whose VM the proxy was provisioned for.
-        session_id:         String,
+        session_id: String,
         /// Proxy type (`postgres`, `http`, `mysql`, etc.).
-        proxy_type:         String,
+        proxy_type: String,
         /// Policy-declared credential name. Never the value.
-        credential_name:    String,
+        credential_name: String,
         /// Total accepted connections served.
         connections_served: u32,
         /// Number of requests/queries forwarded.
         forwards_completed: u32,
         /// Number of requests/queries rejected by `Restrictions`.
-        forwards_blocked:   u32,
+        forwards_blocked: u32,
     },
 
     /// Emitted by the Postgres credential proxy on every audited
@@ -1981,17 +1975,17 @@ pub enum AuditEventKind {
     /// proxy state row is paired through the lifecycle pair above.
     DatabaseQueryExecuted {
         /// Session whose VM submitted the query.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Operation kind (`SELECT`, `INSERT`, ...).
-        operation:       String,
+        operation: String,
         /// SHA-256 of the SQL text. Always present.
-        sql_sha256:      String,
+        sql_sha256: String,
         /// Plaintext SQL. `None` unless policy opt-in is set.
-        sql_plaintext:   Option<String>,
+        sql_plaintext: Option<String>,
         /// True if the proxy refused the query under restrictions.
-        blocked:         bool,
+        blocked: bool,
     },
 
     /// Emitted by a database credential proxy (Postgres, MySQL,
@@ -2005,29 +1999,29 @@ pub enum AuditEventKind {
     /// see `credential-proxy.md §14.5.1`.
     DatabaseQueryCompleted {
         /// Session whose VM submitted the query.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Proxy type (`"postgres" | "mysql" | "mssql" | "mongodb" |
         /// "redis"`).
-        proxy_type:      String,
+        proxy_type: String,
         /// SHA-256 of the SQL / command text. Matches the prior
         /// `DatabaseQueryExecuted` event so an audit reader can pair
         /// the two without indexing on `(session_id, seq)`.
-        sql_sha256:      String,
+        sql_sha256: String,
         /// Number of rows returned by the upstream (`0` for write
         /// statements / commands that produce no result set).
-        rows_returned:   u64,
+        rows_returned: u64,
         /// Number of payload bytes relayed upstream→agent for this
         /// query (RowDescription + DataRow + CommandComplete +
         /// ReadyForQuery, or the protocol equivalent).
-        bytes_returned:  u64,
+        bytes_returned: u64,
         /// Wall-clock duration from agent's first byte of the query
         /// to the upstream's terminal frame, in milliseconds.
-        duration_ms:     u32,
+        duration_ms: u32,
         /// `Some(<sqlstate or errno>)` if the upstream returned an
         /// error response; `None` on success.
-        upstream_error:  Option<String>,
+        upstream_error: Option<String>,
     },
 
     /// Emitted by a TCP-protocol credential proxy (Postgres, MySQL,
@@ -2040,25 +2034,76 @@ pub enum AuditEventKind {
     CredentialProxyUpstreamConnected {
         /// Session whose VM holds the agent connection that triggered
         /// upstream contact.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Proxy type (`"postgres" | ... | "smtp"`).
-        proxy_type:      String,
+        proxy_type: String,
         /// Upstream **hostname from the credential URL** (NOT a
         /// resolved IP) so dashboards can group events by upstream
         /// cluster without leaking DNS-resolution noise.
-        upstream_host:   String,
+        upstream_host: String,
         /// Upstream port from the credential URL (after default-port
         /// substitution if the URL omitted it).
-        upstream_port:   u16,
+        upstream_port: u16,
         /// True if the upstream connection negotiated TLS
         /// (`?sslmode=require` / `?ssl-mode=REQUIRED` / `?tls=true` /
         /// `?encrypt=true` / `smtps:` scheme).
-        tls:             bool,
+        tls: bool,
         /// Wall-clock from `TcpStream::connect()` start to first
         /// usable session, in milliseconds.
-        handshake_ms:    u32,
+        handshake_ms: u32,
+    },
+
+    /// Emitted by a TCP-protocol credential proxy at the moment the
+    /// proxy resolves real credential material from the
+    /// `CredentialBackend` and applies it to the upstream connection
+    /// — i.e. substitutes operator-supplied / agent-supplied
+    /// placeholder credentials with the real material before
+    /// forwarding to the upstream. Single-class observability event
+    /// paired with the `CredentialProxyStarted` / `CredentialProxy-
+    /// Stopped` lifecycle.
+    ///
+    /// Load-bearing for the credential-substitution test discipline
+    /// pinned in `specs/v2/secrets-model.md §2.5` / `INV-SECRET-05`:
+    /// the witness in `kernel/tests/extended_e2e_support/
+    /// credential_substitution_evidence.rs` keys on this event to
+    /// assert the substitution happened mechanically (rather than
+    /// inferring it from the surrounding chain).
+    ///
+    /// **The payload MUST NEVER carry credential bytes.** The
+    /// `substitution_shape` field is an audit-safe descriptor of
+    /// *what kind of substitution* happened (e.g. `"postgres-url:
+    /// agent-supplied user/password discarded; backend-resolved url
+    /// applied to upstream"`). It is the proxy implementation's
+    /// responsibility to redact, NOT the audit-pipeline's; an
+    /// implementation that includes byte-content of either the
+    /// placeholder or the real material in this field is a bug to
+    /// fix in the proxy, not in the audit envelope.
+    CredentialProxySubstituted {
+        /// Session whose VM holds the agent connection that
+        /// triggered the substitution.
+        session_id: String,
+        /// Policy-declared credential name. Never the value.
+        credential_name: String,
+        /// Proxy type (`"postgres" | "mysql" | "mssql" | "mongodb" |
+        /// "redis" | "smtp" | "http" | "aws" | "gcp" | "azure" |
+        /// "k8s"`).
+        proxy_type: String,
+        /// `true` whenever this event is emitted — the variant exists
+        /// only at the moment the backend resolution succeeded and
+        /// the proxy is about to forward to the upstream. The field
+        /// is named explicitly rather than implicitly so a downstream
+        /// auditor (operator dashboard, forensic tool) doesn't have
+        /// to infer it from the chain's structural shape.
+        real_resolved: bool,
+        /// Audit-safe descriptor of the substitution. Free-form short
+        /// string per proxy type; pinned at the proxy implementation
+        /// (and surfaced through the `CredentialProxySubstituted`
+        /// variants' inline doc on each emission site) so an
+        /// operator dashboard can render it without an enum-to-text
+        /// table. The string MUST NOT carry credential bytes.
+        substitution_shape: String,
     },
 
     /// Emitted by a TCP-protocol credential proxy on every upstream-
@@ -2073,21 +2118,21 @@ pub enum AuditEventKind {
     CredentialProxyUpstreamFailed {
         /// Session whose VM holds the agent connection that triggered
         /// upstream contact.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Proxy type (`"postgres" | ... | "smtp"`).
-        proxy_type:      String,
+        proxy_type: String,
         /// Upstream hostname from the credential URL.
-        upstream_host:   String,
+        upstream_host: String,
         /// Upstream port from the credential URL.
-        upstream_port:   u16,
+        upstream_port: u16,
         /// Failure category. One of `"DnsResolveFailed" |
         /// "TcpConnectFailed" | "TlsHandshakeFailed" |
         /// "ProtocolHandshakeFailed" | "AuthRejected" | "Timeout"`.
-        reason:          String,
+        reason: String,
         /// Short redacted message; never carries credential bytes.
-        detail:          String,
+        detail: String,
     },
 
     /// Emitted by the HTTP credential proxy on every forwarded
@@ -2096,20 +2141,20 @@ pub enum AuditEventKind {
     /// `blocked` flag. Single-class observability event.
     HttpProxyRequestExecuted {
         /// Session whose VM submitted the request.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Request method (uppercase).
-        method:          String,
+        method: String,
         /// Request path (no scheme/host).
-        path:            String,
+        path: String,
         /// SHA-256 of `"<METHOD> <path>"`.
-        path_sha256:     String,
+        path_sha256: String,
         /// Status returned to the agent (or 0 if the proxy
         /// short-circuited before any HTTP shape was decided).
-        status_code:     u16,
+        status_code: u16,
         /// True if a restriction blocked this request.
-        blocked:         bool,
+        blocked: bool,
     },
 
     /// Emitted by the Redis credential proxy on every audited
@@ -2126,16 +2171,16 @@ pub enum AuditEventKind {
     /// arguments on the audit chain.
     RedisCommandExecuted {
         /// Session whose VM submitted the command.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Uppercased command verb (e.g. `"GET"`, `"AUTH"`).
-        command:         String,
+        command: String,
         /// SHA-256 of the rendered RESP request frame the upstream
         /// would have seen. Always present.
-        frame_sha256:    String,
+        frame_sha256: String,
         /// True if the proxy refused the command under restrictions.
-        blocked:         bool,
+        blocked: bool,
     },
 
     /// Emitted by the AWS credential proxy on every served (or
@@ -2152,16 +2197,16 @@ pub enum AuditEventKind {
     /// credential window.
     AwsCredentialServed {
         /// Session whose VM made the request.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Request path (`/creds`, etc.).
-        path:            String,
+        path: String,
         /// SHA-256 of `"<METHOD> <path>"`.
-        path_sha256:     String,
+        path_sha256: String,
         /// Operator-declared IAM role ARN. Empty when the decl
         /// does not declare one.
-        role_arn:        String,
+        role_arn: String,
         /// V2_GAPS §9 Phase 2 — operator-declared service scope
         /// (e.g. `["s3", "sqs"]`). Echoed in audit so reviewers
         /// can cross-check the egress allowlist; runtime
@@ -2173,9 +2218,9 @@ pub enum AuditEventKind {
         /// (e.g. `["us-east-1"]`). Same enforcement model as
         /// `allowed_services`.
         #[serde(default)]
-        allowed_regions:  Vec<String>,
+        allowed_regions: Vec<String>,
         /// True if a restriction blocked the request.
-        blocked:         bool,
+        blocked: bool,
     },
 
     /// Emitted by the GCP credential proxy on every served (or
@@ -2185,15 +2230,15 @@ pub enum AuditEventKind {
     /// declared GCP project ID — never the access token bytes.
     GcpMetadataServed {
         /// Session whose VM made the request.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Request path (`/computeMetadata/v1/...`).
-        path:            String,
+        path: String,
         /// SHA-256 of `"<METHOD> <path>"`.
-        path_sha256:     String,
+        path_sha256: String,
         /// Operator-declared GCP project ID.
-        project_id:      String,
+        project_id: String,
         /// V2_GAPS §9 Phase 2 — operator-declared OAuth scopes.
         /// Echoed in audit so reviewers can confirm the scope
         /// narrowing the proxy applied to the token response.
@@ -2202,7 +2247,7 @@ pub enum AuditEventKind {
         allowed_scopes: Vec<String>,
         /// True if a restriction or missing
         /// `Metadata-Flavor: Google` header blocked the request.
-        blocked:         bool,
+        blocked: bool,
     },
 
     /// Emitted by the Azure credential proxy on every served (or
@@ -2211,19 +2256,19 @@ pub enum AuditEventKind {
     /// minted for operator-declared resources.
     AzureTokenServed {
         /// Session whose VM made the request.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// Request path (always `/metadata/identity/oauth2/token`
         /// in V2; future-proofed for additional IMDS endpoints).
-        path:            String,
+        path: String,
         /// Resource URI the agent requested in the `?resource=`
         /// query parameter. Empty when the parameter was missing.
-        resource:        String,
+        resource: String,
         /// SHA-256 of `"<METHOD> <path>?resource=<resource>"`.
-        request_sha256:  String,
+        request_sha256: String,
         /// Operator-declared tenant ID.
-        tenant_id:       String,
+        tenant_id: String,
         /// V2_GAPS §9 Phase 2 — operator-declared ARM action
         /// vocabulary for the requested resource. Echoed in audit
         /// so reviewers can confirm the declared scope. Empty list
@@ -2234,7 +2279,7 @@ pub enum AuditEventKind {
         allowed_actions: Vec<String>,
         /// True if a restriction or missing `Metadata: true`
         /// header blocked the request.
-        blocked:         bool,
+        blocked: bool,
     },
 
     /// V3 cloud-forwarding event. Emitted by the AWS / GCP /
@@ -2255,26 +2300,26 @@ pub enum AuditEventKind {
     /// "one upstream exchange per N in-VM requests" cardinality.
     CloudCredentialForwarded {
         /// Session whose VM made the request.
-        session_id:        String,
+        session_id: String,
         /// Policy-declared credential name.
-        credential_name:   String,
+        credential_name: String,
         /// `"aws" | "gcp" | "azure"` — closed enum.
-        provider:          String,
+        provider: String,
         /// `"assume_role" | "jwt_bearer" | "client_credentials"` —
         /// closed enum.
-        exchange_kind:     String,
+        exchange_kind: String,
         /// Upstream FQDN the proxy called. Never a full URL,
         /// never carries query parameters. Always one of the
         /// hosts in the §3 allowlist.
         upstream_endpoint: String,
         /// `"success" | "failure"`.
-        outcome:           String,
+        outcome: String,
         /// Wall-clock duration of the upstream call in
         /// milliseconds. `0` on transport failures that did not
         /// produce a response.
-        latency_ms:        u32,
+        latency_ms: u32,
         /// Upstream HTTP status code. `0` on transport failure.
-        status_code:       u16,
+        status_code: u16,
         /// Byte count of the upstream response body. NEVER the
         /// body itself; the count is for redaction-respecting
         /// rate sizing.
@@ -2299,15 +2344,15 @@ pub enum AuditEventKind {
     /// upstream-canonical error envelope per §6.
     CloudCredentialForwardingDenied {
         /// Session whose VM made the request.
-        session_id:        String,
+        session_id: String,
         /// Policy-declared credential name.
-        credential_name:   String,
+        credential_name: String,
         /// `"aws" | "gcp" | "azure"`.
-        provider:          String,
+        provider: String,
         /// Closed-enum exchange kind: `"assume_role" |
         /// "jwt_bearer" | "client_credentials"`.
         #[serde(default)]
-        exchange_kind:     String,
+        exchange_kind: String,
         /// Canonical upstream FQDN the proxy attempted to dial
         /// (or would have, on a construction-time refusal).
         /// Empty for `egress_allowlist` denials that never had
@@ -2315,15 +2360,15 @@ pub enum AuditEventKind {
         #[serde(default)]
         upstream_endpoint: String,
         /// Closed-enum denial reason (see above).
-        reason:            String,
+        reason: String,
         /// HTTP status observed (0 when no HTTP wire was
         /// reached).
         #[serde(default)]
-        status_code:       u16,
+        status_code: u16,
         /// Wall-clock latency at the point of failure, in
         /// milliseconds.
         #[serde(default)]
-        latency_ms:        u32,
+        latency_ms: u32,
     },
 
     /// V3 cloud-forwarding cache-hit event. Emitted by the cloud
@@ -2336,18 +2381,18 @@ pub enum AuditEventKind {
     /// settings.
     CloudCredentialCacheHit {
         /// Session whose VM made the request.
-        session_id:       String,
+        session_id: String,
         /// Policy-declared credential name.
-        credential_name:  String,
+        credential_name: String,
         /// `"aws" | "gcp" | "azure"`.
-        provider:         String,
+        provider: String,
         /// Closed-enum exchange kind: `"assume_role" |
         /// "jwt_bearer" | "client_credentials"`.
         #[serde(default)]
-        exchange_kind:    String,
+        exchange_kind: String,
         /// Age of the cached token in milliseconds (now -
         /// refreshed_at).
-        age_ms:           u32,
+        age_ms: u32,
         /// Time remaining until the cached token expires, in
         /// milliseconds. May be less than the safety window
         /// (in which case a background refresh has been or will
@@ -2364,18 +2409,18 @@ pub enum AuditEventKind {
     CloudCredentialCacheRefreshed {
         /// Session whose VM made the request that triggered the
         /// refresh.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// `"aws" | "gcp" | "azure"`.
-        provider:        String,
+        provider: String,
         /// Closed-enum exchange kind.
         #[serde(default)]
-        exchange_kind:   String,
+        exchange_kind: String,
         /// Age in ms of the cached token BEFORE the refresh.
-        prior_age_ms:    u32,
+        prior_age_ms: u32,
         /// TTL in ms of the freshly-installed token.
-        new_ttl_ms:      u32,
+        new_ttl_ms: u32,
     },
 
     /// Emitted by the MongoDB credential proxy on every classified
@@ -2393,18 +2438,18 @@ pub enum AuditEventKind {
     /// without putting BSON document bodies on the audit chain.
     MongoCommandExecuted {
         /// Session whose VM submitted the command.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// MongoDB command name (e.g. `"find"`, `"insert"`,
         /// `"hello"`). Lower-cased to match the wire protocol.
-        command:         String,
+        command: String,
         /// SHA-256 (hex-encoded) of the rendered `OP_MSG` body
         /// the upstream would have seen. Always present.
-        body_sha256:     String,
+        body_sha256: String,
         /// True if the proxy refused the command under
         /// restrictions.
-        blocked:         bool,
+        blocked: bool,
     },
 
     /// Emitted by the SMTP credential proxy when an envelope passes
@@ -2426,7 +2471,7 @@ pub enum AuditEventKind {
     /// 1:1.
     SmtpMessageRelayed {
         /// Session whose VM submitted the envelope.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// SHA-256 (hex-encoded) of the canonical envelope key
@@ -2435,7 +2480,7 @@ pub enum AuditEventKind {
         /// Number of recipients in the envelope (>= 1, post-gate).
         recipient_count: u32,
         /// Total DATA bytes the agent submitted.
-        bytes_relayed:   u64,
+        bytes_relayed: u64,
     },
 
     /// Emitted by the SMTP credential proxy when an envelope is
@@ -2449,7 +2494,7 @@ pub enum AuditEventKind {
     /// `rate_limit_exceeded`). Single-class observability event.
     SmtpMessageRejected {
         /// Session whose VM submitted the envelope.
-        session_id:      String,
+        session_id: String,
         /// Policy-declared credential name.
         credential_name: String,
         /// SHA-256 (hex-encoded) of the canonical envelope key
@@ -2464,7 +2509,7 @@ pub enum AuditEventKind {
         /// Stable short reason string for filtering. Matches the
         /// `audit_summary` prefixes the proxy crate documents in
         /// `credential-proxy.md §22`.
-        reason:          String,
+        reason: String,
     },
 
     // --- V2 §3.2 typed structured outputs --------------------------------
@@ -2486,13 +2531,13 @@ pub enum AuditEventKind {
     /// CLI surface: `raxis audit query --event-type StructuredOutputEmitted`.
     StructuredOutputEmitted {
         /// `output_id` PK of the matching `structured_outputs` row.
-        output_id:     String,
+        output_id: String,
         /// Initiative the emitting session belongs to.
         initiative_id: String,
         /// Task the emitting session is bound to.
-        task_id:       String,
+        task_id: String,
         /// Emitting session.
-        session_id:    String,
+        session_id: String,
         /// Variant tag (`progress_report`, `diagnostic_flag`,
         /// `task_summary`) — matches `StructuredOutputKind::variant_tag`.
         ///
@@ -2501,11 +2546,11 @@ pub enum AuditEventKind {
         /// uses `#[serde(tag = "kind")]` for its internal-tag
         /// projection; serde rejects a struct-variant field whose
         /// name collides with the internal tag.
-        output_kind:   String,
+        output_kind: String,
         /// `info` / `warning` / `critical` for `diagnostic_flag`,
         /// `None` for the other two variants.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        severity:      Option<String>,
+        severity: Option<String>,
         /// Byte length of the validated/normalised
         /// `payload_json` written to `structured_outputs`. Operators
         /// can quickly spot pathologically-large outputs without
@@ -2539,11 +2584,11 @@ pub enum AuditEventKind {
         /// Operator pubkey fingerprint (SHA-256[:16] hex).
         operator_fingerprint: String,
         /// Epoch the kernel was running before the PUT.
-        previous_epoch:       u64,
+        previous_epoch: u64,
         /// Epoch the kernel is running after the PUT.
-        new_epoch:            u64,
+        new_epoch: u64,
         /// SHA-256 of the new policy artifact bytes.
-        policy_sha256:        String,
+        policy_sha256: String,
     },
 
     /// **V2 `integration-merge.md §11.3` Case A** — emitted by
@@ -2555,16 +2600,16 @@ pub enum AuditEventKind {
     /// post-condition. INV-MERGE-CONSISTENCY (§11.8).
     GitConsistencyRepaired {
         /// Initiative whose merge was repaired.
-        initiative_id:    String,
+        initiative_id: String,
         /// SHA the kernel restored on `refs/heads/<target_ref>`.
-        db_sha:           String,
+        db_sha: String,
         /// SHA `refs/heads/<target_ref>` was at BEFORE recovery —
         /// either the unchanged base sha (Case A — Phase 2 missed
         /// entirely), or a fetched-but-not-ref-updated state.
         previous_git_sha: String,
         /// `refs/heads/<name>` the recovery operated on (matches
         /// the operator-configured target_ref at admission time).
-        target_ref:       String,
+        target_ref: String,
     },
 
     /// **V2 `integration-merge.md §11.3` Case B** — emitted by
@@ -2577,9 +2622,9 @@ pub enum AuditEventKind {
         /// Initiative whose pending flag was cleared.
         initiative_id: String,
         /// SHA observed identical between SQLite and the git ref.
-        sha:           String,
+        sha: String,
         /// `refs/heads/<name>` the recovery operated on.
-        target_ref:    String,
+        target_ref: String,
     },
 
     /// **V2 `integration-merge.md §11.3` Case C — INV-MERGE-CONSISTENCY
@@ -2601,14 +2646,14 @@ pub enum AuditEventKind {
     /// recovery class violation, not a frame-validation class.
     GitStateInconsistent {
         /// Initiative whose merge cannot be reconciled.
-        initiative_id:   String,
+        initiative_id: String,
         /// SQLite-side `current_sha` (kernel-authoritative).
-        db_sha:          String,
+        db_sha: String,
         /// Git-side `refs/heads/<target_ref>` SHA observed at
         /// recovery time — left in place by recovery.
-        git_sha:         String,
+        git_sha: String,
         /// `refs/heads/<name>` the recovery operated on.
-        target_ref:      String,
+        target_ref: String,
         /// Stable-wire short string for the underlying cause.
         /// One of:
         ///   * `"orchestrator_worktree_missing"` — the worktree
@@ -2620,7 +2665,7 @@ pub enum AuditEventKind {
         ///     `IntegrationMergeCompleted` event for this
         ///     `(initiative_id, db_sha)` pair was found in the
         ///     audit log (chain corruption — extreme case).
-        reason:          String,
+        reason: String,
     },
 }
 
@@ -2636,9 +2681,9 @@ impl AuditEventKind {
             Self::SessionVmSpawned { .. } => "SessionVmSpawned",
             Self::SessionVmExited { .. } => "SessionVmExited",
             Self::SessionVmRespawnAttempted { .. } => "SessionVmRespawnAttempted",
-            Self::SessionVmFailedFinal { .. }      => "SessionVmFailedFinal",
-            Self::SessionVmScaleEvent { .. }       => "SessionVmScaleEvent",
-            Self::SessionVmScaleDeferred { .. }    => "SessionVmScaleDeferred",
+            Self::SessionVmFailedFinal { .. } => "SessionVmFailedFinal",
+            Self::SessionVmScaleEvent { .. } => "SessionVmScaleEvent",
+            Self::SessionVmScaleDeferred { .. } => "SessionVmScaleDeferred",
             Self::SecurityViolationDetected { .. } => "SecurityViolationDetected",
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",
@@ -2651,10 +2696,10 @@ impl AuditEventKind {
             Self::IntentAccepted { .. } => "IntentAccepted",
             Self::IntentRejected { .. } => "IntentRejected",
             Self::IntegrationMergeCompleted { .. } => "IntegrationMergeCompleted",
-            Self::MergeFastForwardFailed { .. }   => "MergeFastForwardFailed",
-            Self::PushAttempted { .. }            => "PushAttempted",
-            Self::PushCompleted { .. }            => "PushCompleted",
-            Self::PushFailed    { .. }            => "PushFailed",
+            Self::MergeFastForwardFailed { .. } => "MergeFastForwardFailed",
+            Self::PushAttempted { .. } => "PushAttempted",
+            Self::PushCompleted { .. } => "PushCompleted",
+            Self::PushFailed { .. } => "PushFailed",
             Self::SessionCreated { .. } => "SessionCreated",
             Self::SessionRevoked { .. } => "SessionRevoked",
             Self::DelegationGranted { .. } => "DelegationGranted",
@@ -2689,9 +2734,9 @@ impl AuditEventKind {
             Self::OperatorCertInGracePeriod { .. } => "OperatorCertInGracePeriod",
             Self::OperatorCertExpiredOpDenied { .. } => "OperatorCertExpiredOpDenied",
             Self::EmergencyOperatorUsed { .. } => "EmergencyOperatorUsed",
-            Self::BreakglassActivated { .. }   => "BreakglassActivated",
+            Self::BreakglassActivated { .. } => "BreakglassActivated",
             Self::BreakglassDeactivated { .. } => "BreakglassDeactivated",
-            Self::BreakglassAction { .. }      => "BreakglassAction",
+            Self::BreakglassAction { .. } => "BreakglassAction",
             Self::PathReadAccessed { .. } => "PathReadAccessed",
             Self::InitiativeQuarantined { .. } => "InitiativeQuarantined",
             Self::OperatorQuarantineSwept { .. } => "OperatorQuarantineSwept",
@@ -2718,6 +2763,7 @@ impl AuditEventKind {
             Self::DatabaseQueryExecuted { .. } => "DatabaseQueryExecuted",
             Self::DatabaseQueryCompleted { .. } => "DatabaseQueryCompleted",
             Self::CredentialProxyUpstreamConnected { .. } => "CredentialProxyUpstreamConnected",
+            Self::CredentialProxySubstituted { .. } => "CredentialProxySubstituted",
             Self::CredentialProxyUpstreamFailed { .. } => "CredentialProxyUpstreamFailed",
             Self::HttpProxyRequestExecuted { .. } => "HttpProxyRequestExecuted",
             Self::RedisCommandExecuted { .. } => "RedisCommandExecuted",
@@ -2735,9 +2781,9 @@ impl AuditEventKind {
             Self::StructuredOutputEmitted { .. } => "StructuredOutputEmitted",
             Self::CircuitBreakerStateChanged { .. } => "CircuitBreakerStateChanged",
             Self::PolicyUpdatedViaDashboard { .. } => "PolicyUpdatedViaDashboard",
-            Self::GitConsistencyRepaired { .. }    => "GitConsistencyRepaired",
-            Self::GitConsistencyVerified { .. }    => "GitConsistencyVerified",
-            Self::GitStateInconsistent { .. }      => "GitStateInconsistent",
+            Self::GitConsistencyRepaired { .. } => "GitConsistencyRepaired",
+            Self::GitConsistencyVerified { .. } => "GitConsistencyVerified",
+            Self::GitStateInconsistent { .. } => "GitStateInconsistent",
         }
     }
 }
@@ -2749,9 +2795,9 @@ mod path_read_accessed_tests {
     #[test]
     fn path_read_accessed_kind_string_matches_variant_name() {
         let kind = AuditEventKind::PathReadAccessed {
-            actor:   "fp-7d2c00".to_owned(),
-            table:   "task_plan_fields".to_owned(),
-            column:  "path_allowlist".to_owned(),
+            actor: "fp-7d2c00".to_owned(),
+            table: "task_plan_fields".to_owned(),
+            column: "path_allowlist".to_owned(),
             task_id: "task-001".to_owned(),
             command: "inspect".to_owned(),
         };
@@ -2761,9 +2807,9 @@ mod path_read_accessed_tests {
     #[test]
     fn path_read_accessed_serialises_with_kind_tag_and_all_fields() {
         let kind = AuditEventKind::PathReadAccessed {
-            actor:   "fp-7d2c00".to_owned(),
-            table:   "task_plan_fields".to_owned(),
-            column:  "path_allowlist".to_owned(),
+            actor: "fp-7d2c00".to_owned(),
+            table: "task_plan_fields".to_owned(),
+            column: "path_allowlist".to_owned(),
             task_id: "task-001".to_owned(),
             command: "inspect".to_owned(),
         };
@@ -2786,36 +2832,71 @@ mod path_read_accessed_tests {
     #[test]
     fn operator_cert_kind_strings_are_pinned() {
         let cases: Vec<(AuditEventKind, &str)> = vec![
-            (AuditEventKind::OperatorCertInstalled {
-                pubkey_fingerprint: "fp".into(), epoch_id: 1, cert_kind: "Standard".into(),
-                display_name: "chika".into(), not_before: 0, not_after: 0,
-                permitted_ops: vec![], force_misconfig_bypass: false,
-                previous_fingerprint: None,
-            }, "OperatorCertInstalled"),
-            (AuditEventKind::OperatorCertMisconfigBypassed {
-                pubkey_fingerprint: "fp".into(), epoch_id: 1,
-                cert_kind: "Standard".into(), display_name: "chika".into(),
-                violations: vec!["x".into()],
-            }, "OperatorCertMisconfigBypassed"),
-            (AuditEventKind::OperatorCertExpiringSoon {
-                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "AbortTask".into(),
-                not_after: 0, days_remaining: 14,
-            }, "OperatorCertExpiringSoon"),
-            (AuditEventKind::OperatorCertInGracePeriod {
-                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "AbortTask".into(),
-                not_after: 0, grace_ends_at: 0,
-            }, "OperatorCertInGracePeriod"),
-            (AuditEventKind::OperatorCertExpiredOpDenied {
-                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "AbortTask".into(),
-                not_after: 0, expired_at: 0,
-            }, "OperatorCertExpiredOpDenied"),
-            (AuditEventKind::EmergencyOperatorUsed {
-                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "RotateEpoch".into(),
-            }, "EmergencyOperatorUsed"),
+            (
+                AuditEventKind::OperatorCertInstalled {
+                    pubkey_fingerprint: "fp".into(),
+                    epoch_id: 1,
+                    cert_kind: "Standard".into(),
+                    display_name: "chika".into(),
+                    not_before: 0,
+                    not_after: 0,
+                    permitted_ops: vec![],
+                    force_misconfig_bypass: false,
+                    previous_fingerprint: None,
+                },
+                "OperatorCertInstalled",
+            ),
+            (
+                AuditEventKind::OperatorCertMisconfigBypassed {
+                    pubkey_fingerprint: "fp".into(),
+                    epoch_id: 1,
+                    cert_kind: "Standard".into(),
+                    display_name: "chika".into(),
+                    violations: vec!["x".into()],
+                },
+                "OperatorCertMisconfigBypassed",
+            ),
+            (
+                AuditEventKind::OperatorCertExpiringSoon {
+                    pubkey_fingerprint: "fp".into(),
+                    epoch_id: 1,
+                    op: "AbortTask".into(),
+                    not_after: 0,
+                    days_remaining: 14,
+                },
+                "OperatorCertExpiringSoon",
+            ),
+            (
+                AuditEventKind::OperatorCertInGracePeriod {
+                    pubkey_fingerprint: "fp".into(),
+                    epoch_id: 1,
+                    op: "AbortTask".into(),
+                    not_after: 0,
+                    grace_ends_at: 0,
+                },
+                "OperatorCertInGracePeriod",
+            ),
+            (
+                AuditEventKind::OperatorCertExpiredOpDenied {
+                    pubkey_fingerprint: "fp".into(),
+                    epoch_id: 1,
+                    op: "AbortTask".into(),
+                    not_after: 0,
+                    expired_at: 0,
+                },
+                "OperatorCertExpiredOpDenied",
+            ),
+            (
+                AuditEventKind::EmergencyOperatorUsed {
+                    pubkey_fingerprint: "fp".into(),
+                    epoch_id: 1,
+                    op: "RotateEpoch".into(),
+                },
+                "EmergencyOperatorUsed",
+            ),
         ];
         for (kind, expected) in cases {
-            assert_eq!(kind.as_str(), expected,
-                "as_str() drifted for {expected}");
+            assert_eq!(kind.as_str(), expected, "as_str() drifted for {expected}");
         }
     }
 
@@ -2827,15 +2908,15 @@ mod path_read_accessed_tests {
     #[test]
     fn operator_cert_installed_serialises_all_fields() {
         let kind = AuditEventKind::OperatorCertInstalled {
-            pubkey_fingerprint:     "abcd0123".to_owned(),
-            epoch_id:               2,
-            cert_kind:              "Standard".to_owned(),
-            display_name:           "chika".to_owned(),
-            not_before:             1_700_000_000,
-            not_after:              1_731_536_000,
-            permitted_ops:          vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()],
+            pubkey_fingerprint: "abcd0123".to_owned(),
+            epoch_id: 2,
+            cert_kind: "Standard".to_owned(),
+            display_name: "chika".to_owned(),
+            not_before: 1_700_000_000,
+            not_after: 1_731_536_000,
+            permitted_ops: vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()],
             force_misconfig_bypass: false,
-            previous_fingerprint:   None,
+            previous_fingerprint: None,
         };
         let v = serde_json::to_value(&kind).expect("serialises");
         // The serde tag (`#[serde(tag = "kind")]`) writes the variant
@@ -2849,7 +2930,10 @@ mod path_read_accessed_tests {
         assert_eq!(v["display_name"], serde_json::json!("chika"));
         assert_eq!(v["not_before"], serde_json::json!(1_700_000_000_i64));
         assert_eq!(v["not_after"], serde_json::json!(1_731_536_000_i64));
-        assert_eq!(v["permitted_ops"], serde_json::json!(["AbortTask", "ApprovePlan"]));
+        assert_eq!(
+            v["permitted_ops"],
+            serde_json::json!(["AbortTask", "ApprovePlan"])
+        );
         assert_eq!(v["force_misconfig_bypass"], serde_json::json!(false));
 
         // Round-trip pins lossless field decode for chain replay.
@@ -2857,20 +2941,31 @@ mod path_read_accessed_tests {
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::OperatorCertInstalled {
-                pubkey_fingerprint, epoch_id, cert_kind, display_name,
-                not_before, not_after, permitted_ops, force_misconfig_bypass,
+                pubkey_fingerprint,
+                epoch_id,
+                cert_kind,
+                display_name,
+                not_before,
+                not_after,
+                permitted_ops,
+                force_misconfig_bypass,
                 previous_fingerprint,
             } => {
                 assert_eq!(pubkey_fingerprint, "abcd0123");
-                assert_eq!(epoch_id,           2);
-                assert_eq!(cert_kind,          "Standard");
-                assert_eq!(display_name,       "chika");
-                assert_eq!(not_before,         1_700_000_000);
-                assert_eq!(not_after,          1_731_536_000);
-                assert_eq!(permitted_ops,      vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()]);
+                assert_eq!(epoch_id, 2);
+                assert_eq!(cert_kind, "Standard");
+                assert_eq!(display_name, "chika");
+                assert_eq!(not_before, 1_700_000_000);
+                assert_eq!(not_after, 1_731_536_000);
+                assert_eq!(
+                    permitted_ops,
+                    vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()]
+                );
                 assert!(!force_misconfig_bypass);
-                assert!(previous_fingerprint.is_none(),
-                    "previous_fingerprint defaults to None for non-rotation installs");
+                assert!(
+                    previous_fingerprint.is_none(),
+                    "previous_fingerprint defaults to None for non-rotation installs"
+                );
             }
             other => panic!("expected OperatorCertInstalled; got {other:?}"),
         }
@@ -2884,19 +2979,26 @@ mod path_read_accessed_tests {
     #[test]
     fn quarantine_kind_strings_are_pinned() {
         let cases: Vec<(AuditEventKind, &str)> = vec![
-            (AuditEventKind::InitiativeQuarantined {
-                initiative_id: "i1".into(), quarantined_by: "fp".into(),
-                reason: Some("compromised key".into()),
-                quarantined_by_display_name: None,
-            }, "InitiativeQuarantined"),
-            (AuditEventKind::OperatorQuarantineSwept {
-                target_fingerprint: "chika-fp".into(),
-                quarantined_by:     "rot-fp".into(),
-                count:              3,
-                reason:             None,
-                quarantined_by_display_name: None,
-                target_display_name:        None,
-            }, "OperatorQuarantineSwept"),
+            (
+                AuditEventKind::InitiativeQuarantined {
+                    initiative_id: "i1".into(),
+                    quarantined_by: "fp".into(),
+                    reason: Some("compromised key".into()),
+                    quarantined_by_display_name: None,
+                },
+                "InitiativeQuarantined",
+            ),
+            (
+                AuditEventKind::OperatorQuarantineSwept {
+                    target_fingerprint: "chika-fp".into(),
+                    quarantined_by: "rot-fp".into(),
+                    count: 3,
+                    reason: None,
+                    quarantined_by_display_name: None,
+                    target_display_name: None,
+                },
+                "OperatorQuarantineSwept",
+            ),
         ];
         for (kind, expected) in cases {
             assert_eq!(kind.as_str(), expected, "as_str() drifted for {expected}");
@@ -2906,23 +3008,28 @@ mod path_read_accessed_tests {
     #[test]
     fn initiative_quarantined_round_trips_through_json() {
         let kind = AuditEventKind::InitiativeQuarantined {
-            initiative_id:  "init-7".to_owned(),
+            initiative_id: "init-7".to_owned(),
             quarantined_by: "fp-rot".to_owned(),
-            reason:         Some("compromised plan signer".to_owned()),
+            reason: Some("compromised plan signer".to_owned()),
             quarantined_by_display_name: Some("Chika".to_owned()),
         };
         let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::InitiativeQuarantined {
-                initiative_id, quarantined_by, reason,
+                initiative_id,
+                quarantined_by,
+                reason,
                 quarantined_by_display_name,
             } => {
-                assert_eq!(initiative_id,  "init-7");
+                assert_eq!(initiative_id, "init-7");
                 assert_eq!(quarantined_by, "fp-rot");
                 assert_eq!(reason.as_deref(), Some("compromised plan signer"));
-                assert_eq!(quarantined_by_display_name.as_deref(), Some("Chika"),
-                    "display name must round-trip through the JSON wire");
+                assert_eq!(
+                    quarantined_by_display_name.as_deref(),
+                    Some("Chika"),
+                    "display name must round-trip through the JSON wire"
+                );
             }
             other => panic!("expected InitiativeQuarantined; got {other:?}"),
         }
@@ -2932,25 +3039,29 @@ mod path_read_accessed_tests {
     fn operator_quarantine_swept_round_trips_through_json() {
         let kind = AuditEventKind::OperatorQuarantineSwept {
             target_fingerprint: "chika-fp".to_owned(),
-            quarantined_by:     "rot-fp".to_owned(),
-            count:              42,
-            reason:             None,
+            quarantined_by: "rot-fp".to_owned(),
+            count: 42,
+            reason: None,
             quarantined_by_display_name: Some("Jinanwa".to_owned()),
-            target_display_name:        Some("Chika".to_owned()),
+            target_display_name: Some("Chika".to_owned()),
         };
         let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::OperatorQuarantineSwept {
-                target_fingerprint, quarantined_by, count, reason,
-                quarantined_by_display_name, target_display_name,
+                target_fingerprint,
+                quarantined_by,
+                count,
+                reason,
+                quarantined_by_display_name,
+                target_display_name,
             } => {
                 assert_eq!(target_fingerprint, "chika-fp");
-                assert_eq!(quarantined_by,     "rot-fp");
-                assert_eq!(count,              42);
+                assert_eq!(quarantined_by, "rot-fp");
+                assert_eq!(count, 42);
                 assert!(reason.is_none());
                 assert_eq!(quarantined_by_display_name.as_deref(), Some("Jinanwa"));
-                assert_eq!(target_display_name.as_deref(),         Some("Chika"));
+                assert_eq!(target_display_name.as_deref(), Some("Chika"));
             }
             other => panic!("expected OperatorQuarantineSwept; got {other:?}"),
         }
@@ -2971,9 +3082,12 @@ mod path_read_accessed_tests {
         let parsed: AuditEventKind = serde_json::from_value(legacy_initiative).unwrap();
         match parsed {
             AuditEventKind::InitiativeQuarantined {
-                quarantined_by_display_name, ..
-            } => assert!(quarantined_by_display_name.is_none(),
-                "missing field must default to None"),
+                quarantined_by_display_name,
+                ..
+            } => assert!(
+                quarantined_by_display_name.is_none(),
+                "missing field must default to None"
+            ),
             other => panic!("expected InitiativeQuarantined; got {other:?}"),
         }
 
@@ -2987,7 +3101,9 @@ mod path_read_accessed_tests {
         let parsed: AuditEventKind = serde_json::from_value(legacy_swept).unwrap();
         match parsed {
             AuditEventKind::OperatorQuarantineSwept {
-                quarantined_by_display_name, target_display_name, ..
+                quarantined_by_display_name,
+                target_display_name,
+                ..
             } => {
                 assert!(quarantined_by_display_name.is_none());
                 assert!(target_display_name.is_none());
@@ -3000,16 +3116,20 @@ mod path_read_accessed_tests {
     fn emergency_operator_used_round_trips() {
         let kind = AuditEventKind::EmergencyOperatorUsed {
             pubkey_fingerprint: "fp-emerg".to_owned(),
-            epoch_id:           5,
-            op:                 "RotateEpoch".to_owned(),
+            epoch_id: 5,
+            op: "RotateEpoch".to_owned(),
         };
         let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
-            AuditEventKind::EmergencyOperatorUsed { pubkey_fingerprint, epoch_id, op } => {
+            AuditEventKind::EmergencyOperatorUsed {
+                pubkey_fingerprint,
+                epoch_id,
+                op,
+            } => {
                 assert_eq!(pubkey_fingerprint, "fp-emerg");
                 assert_eq!(epoch_id, 5);
-                assert_eq!(op,       "RotateEpoch");
+                assert_eq!(op, "RotateEpoch");
             }
             other => panic!("expected EmergencyOperatorUsed; got {other:?}"),
         }
@@ -3023,16 +3143,20 @@ mod path_read_accessed_tests {
     fn operator_cert_misconfig_bypassed_serialises_violations_list() {
         let kind = AuditEventKind::OperatorCertMisconfigBypassed {
             pubkey_fingerprint: "fp-x".to_owned(),
-            epoch_id:           3,
-            cert_kind:          "EmergencyRecovery".to_owned(),
-            display_name:       "break-glass".to_owned(),
-            violations:         vec![
-                "EmergencyRecovery cert MUST declare permitted_ops = [\"RotateEpoch\"] only".to_owned(),
+            epoch_id: 3,
+            cert_kind: "EmergencyRecovery".to_owned(),
+            display_name: "break-glass".to_owned(),
+            violations: vec![
+                "EmergencyRecovery cert MUST declare permitted_ops = [\"RotateEpoch\"] only"
+                    .to_owned(),
                 "warn_before_expiry_days must be > 0".to_owned(),
             ],
         };
         let v = serde_json::to_value(&kind).unwrap();
-        assert_eq!(v["kind"], serde_json::json!("OperatorCertMisconfigBypassed"));
+        assert_eq!(
+            v["kind"],
+            serde_json::json!("OperatorCertMisconfigBypassed")
+        );
         assert_eq!(v["pubkey_fingerprint"], serde_json::json!("fp-x"));
         assert_eq!(v["epoch_id"], serde_json::json!(3));
         assert_eq!(v["cert_kind"], serde_json::json!("EmergencyRecovery"));
@@ -3044,19 +3168,25 @@ mod path_read_accessed_tests {
     #[test]
     fn path_read_accessed_round_trips_through_json() {
         let kind = AuditEventKind::PathReadAccessed {
-            actor:   "cli:chika".to_owned(),
-            table:   "task_plan_fields".to_owned(),
-            column:  "path_export_globs".to_owned(),
+            actor: "cli:chika".to_owned(),
+            table: "task_plan_fields".to_owned(),
+            column: "path_export_globs".to_owned(),
             task_id: "t-42".to_owned(),
             command: "inspect".to_owned(),
         };
-        let s    = serde_json::to_string(&kind).unwrap();
+        let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
-            AuditEventKind::PathReadAccessed { actor, table, column, task_id, command } => {
-                assert_eq!(actor,   "cli:chika");
-                assert_eq!(table,   "task_plan_fields");
-                assert_eq!(column,  "path_export_globs");
+            AuditEventKind::PathReadAccessed {
+                actor,
+                table,
+                column,
+                task_id,
+                command,
+            } => {
+                assert_eq!(actor, "cli:chika");
+                assert_eq!(table, "task_plan_fields");
+                assert_eq!(column, "path_export_globs");
                 assert_eq!(task_id, "t-42");
                 assert_eq!(command, "inspect");
             }
@@ -3073,10 +3203,13 @@ mod path_read_accessed_tests {
     /// surfaces drift at the test level before any handler regresses.
     #[test]
     fn security_violation_class_variant_count_is_pinned() {
-        assert_eq!(SecurityViolationClass::ALL.len(), 3,
+        assert_eq!(
+            SecurityViolationClass::ALL.len(),
+            3,
             "V2 has exactly 3 SecurityViolationClass variants \
              (FrameMalformation, AuthorityProbe, Replay); bumping this \
-             requires dispatch-matrix + pre-auth blocklist updates.");
+             requires dispatch-matrix + pre-auth blocklist updates."
+        );
     }
 
     /// Each class round-trips through JSON with the exact PascalCase
@@ -3087,10 +3220,12 @@ mod path_read_accessed_tests {
             let s = serde_json::to_string(&c).unwrap();
             let back: SecurityViolationClass = serde_json::from_str(&s).unwrap();
             assert_eq!(back, c, "round-trip failed for {c:?}: {s}");
-            assert_eq!(c.as_str(), s.trim_matches('"'),
-                "as_str must equal the JSON-projected discriminator");
-            assert_eq!(c.to_string(), c.as_str(),
-                "Display impl must equal as_str");
+            assert_eq!(
+                c.as_str(),
+                s.trim_matches('"'),
+                "as_str must equal the JSON-projected discriminator"
+            );
+            assert_eq!(c.to_string(), c.as_str(), "Display impl must equal as_str");
         }
     }
 
@@ -3100,11 +3235,11 @@ mod path_read_accessed_tests {
     #[test]
     fn security_violation_class_1_serialises_without_session_id() {
         let kind = AuditEventKind::SecurityViolation {
-            session_id:       None,
-            violation_class:  SecurityViolationClass::FrameMalformation,
+            session_id: None,
+            violation_class: SecurityViolationClass::FrameMalformation,
             raw_frame_sha256: "deadbeef".repeat(8), // 64-char hex
-            frame_size:       42,
-            peer_cid:         Some(123),
+            frame_size: 42,
+            peer_cid: Some(123),
         };
         let v = serde_json::to_value(&kind).unwrap();
         assert_eq!(v["kind"], serde_json::json!("SecurityViolation"));
@@ -3112,8 +3247,10 @@ mod path_read_accessed_tests {
         assert_eq!(v["frame_size"], serde_json::json!(42));
         assert_eq!(v["peer_cid"], serde_json::json!(123));
         // None fields are skipped by `skip_serializing_if = Option::is_none`.
-        assert!(!v.as_object().unwrap().contains_key("session_id"),
-            "session_id must be elided from class-1 wire shape");
+        assert!(
+            !v.as_object().unwrap().contains_key("session_id"),
+            "session_id must be elided from class-1 wire shape"
+        );
     }
 
     /// Pin the on-wire shape of a class-2 (AuthorityProbe)
@@ -3123,11 +3260,11 @@ mod path_read_accessed_tests {
     #[test]
     fn security_violation_class_2_serialises_with_session_id() {
         let kind = AuditEventKind::SecurityViolation {
-            session_id:       Some("s-abc".to_owned()),
-            violation_class:  SecurityViolationClass::AuthorityProbe,
+            session_id: Some("s-abc".to_owned()),
+            violation_class: SecurityViolationClass::AuthorityProbe,
             raw_frame_sha256: "f".repeat(64),
-            frame_size:       128,
-            peer_cid:         Some(7),
+            frame_size: 128,
+            peer_cid: Some(7),
         };
         let v = serde_json::to_value(&kind).unwrap();
         assert_eq!(v["kind"], serde_json::json!("SecurityViolation"));
@@ -3143,24 +3280,30 @@ mod path_read_accessed_tests {
     #[test]
     fn security_violation_replay_round_trips() {
         let kind = AuditEventKind::SecurityViolation {
-            session_id:       Some("s-replay".to_owned()),
-            violation_class:  SecurityViolationClass::Replay,
+            session_id: Some("s-replay".to_owned()),
+            violation_class: SecurityViolationClass::Replay,
             raw_frame_sha256: "ab".repeat(32),
-            frame_size:       1024,
-            peer_cid:         None,
+            frame_size: 1024,
+            peer_cid: None,
         };
         let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::SecurityViolation {
-                session_id, violation_class, raw_frame_sha256, frame_size, peer_cid,
+                session_id,
+                violation_class,
+                raw_frame_sha256,
+                frame_size,
+                peer_cid,
             } => {
                 assert_eq!(session_id.as_deref(), Some("s-replay"));
                 assert_eq!(violation_class, SecurityViolationClass::Replay);
                 assert_eq!(raw_frame_sha256.len(), 64);
                 assert_eq!(frame_size, 1024);
-                assert!(peer_cid.is_none(),
-                    "peer_cid is None on the legacy UDS path");
+                assert!(
+                    peer_cid.is_none(),
+                    "peer_cid is None on the legacy UDS path"
+                );
             }
             other => panic!("expected SecurityViolation; got {other:?}"),
         }
@@ -3172,11 +3315,11 @@ mod path_read_accessed_tests {
     #[test]
     fn security_violation_kind_string_is_pinned() {
         let kind = AuditEventKind::SecurityViolation {
-            session_id:       None,
-            violation_class:  SecurityViolationClass::FrameMalformation,
+            session_id: None,
+            violation_class: SecurityViolationClass::FrameMalformation,
             raw_frame_sha256: "0".repeat(64),
-            frame_size:       0,
-            peer_cid:         None,
+            frame_size: 0,
+            peer_cid: None,
         };
         assert_eq!(kind.as_str(), "SecurityViolation");
     }
@@ -3190,24 +3333,30 @@ mod path_read_accessed_tests {
     #[test]
     fn v2_session_created_attribution_chain_round_trips() {
         let kind = AuditEventKind::SessionCreated {
-            session_id:        "s-1".to_owned(),
-            role:              "planner".to_owned(),
-            lineage_id:        "l-1".to_owned(),
-            worktree_root:     Some("/work/orch".to_owned()),
-            initiative_id:     Some("init-7".to_owned()),
+            session_id: "s-1".to_owned(),
+            role: "planner".to_owned(),
+            lineage_id: "l-1".to_owned(),
+            worktree_root: Some("/work/orch".to_owned()),
+            initiative_id: Some("init-7".to_owned()),
             plan_bundle_sha256: Some("a".repeat(64)),
-            policy_epoch:      Some(42),
+            policy_epoch: Some(42),
             session_agent_type: Some("Orchestrator".to_owned()),
         };
         let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::SessionCreated {
-                session_id, role, lineage_id, worktree_root,
-                initiative_id, plan_bundle_sha256, policy_epoch, session_agent_type,
+                session_id,
+                role,
+                lineage_id,
+                worktree_root,
+                initiative_id,
+                plan_bundle_sha256,
+                policy_epoch,
+                session_agent_type,
             } => {
                 assert_eq!(session_id, "s-1");
-                assert_eq!(role,       "planner");
+                assert_eq!(role, "planner");
                 assert_eq!(lineage_id, "l-1");
                 assert_eq!(worktree_root.as_deref(), Some("/work/orch"));
                 assert_eq!(initiative_id.as_deref(), Some("init-7"));
@@ -3235,17 +3384,28 @@ mod path_read_accessed_tests {
         let parsed: AuditEventKind = serde_json::from_value(legacy).unwrap();
         match parsed {
             AuditEventKind::SessionCreated {
-                initiative_id, plan_bundle_sha256, policy_epoch,
-                session_agent_type, ..
+                initiative_id,
+                plan_bundle_sha256,
+                policy_epoch,
+                session_agent_type,
+                ..
             } => {
-                assert!(initiative_id.is_none(),
-                    "missing initiative_id must default to None");
-                assert!(plan_bundle_sha256.is_none(),
-                    "missing plan_bundle_sha256 must default to None");
-                assert!(policy_epoch.is_none(),
-                    "missing policy_epoch must default to None");
-                assert!(session_agent_type.is_none(),
-                    "missing session_agent_type must default to None");
+                assert!(
+                    initiative_id.is_none(),
+                    "missing initiative_id must default to None"
+                );
+                assert!(
+                    plan_bundle_sha256.is_none(),
+                    "missing plan_bundle_sha256 must default to None"
+                );
+                assert!(
+                    policy_epoch.is_none(),
+                    "missing policy_epoch must default to None"
+                );
+                assert!(
+                    session_agent_type.is_none(),
+                    "missing session_agent_type must default to None"
+                );
             }
             other => panic!("expected SessionCreated; got {other:?}"),
         }
@@ -3259,13 +3419,13 @@ mod path_read_accessed_tests {
     #[test]
     fn v1_session_created_under_v2_codebase_omits_v2_fields_on_wire() {
         let kind = AuditEventKind::SessionCreated {
-            session_id:        "s-v1".to_owned(),
-            role:              "planner".to_owned(),
-            lineage_id:        "l-1".to_owned(),
-            worktree_root:     None,
-            initiative_id:     None,
+            session_id: "s-v1".to_owned(),
+            role: "planner".to_owned(),
+            lineage_id: "l-1".to_owned(),
+            worktree_root: None,
+            initiative_id: None,
             plan_bundle_sha256: None,
-            policy_epoch:      None,
+            policy_epoch: None,
             session_agent_type: None,
         };
         let v = serde_json::to_value(&kind).unwrap();
@@ -3286,32 +3446,41 @@ mod path_read_accessed_tests {
     #[test]
     fn integration_merge_completed_operator_assisted_round_trips_through_json() {
         let kind = AuditEventKind::IntegrationMergeCompleted {
-            initiative_id:     "init-7".into(),
-            session_id:        "sess-orch-1".into(),
-            commit_sha:        "abc1234".into(),
-            previous_sha:      "f3d21a09".into(),
+            initiative_id: "init-7".into(),
+            session_id: "sess-orch-1".into(),
+            commit_sha: "abc1234".into(),
+            previous_sha: "f3d21a09".into(),
             operator_assisted: true,
-            escalation_id:     Some("esc-42".into()),
-            target_ref:        "refs/heads/main".into(),
+            escalation_id: Some("esc-42".into()),
+            target_ref: "refs/heads/main".into(),
         };
-        let s    = serde_json::to_string(&kind).unwrap();
+        let s = serde_json::to_string(&kind).unwrap();
         let back = serde_json::from_str::<AuditEventKind>(&s).unwrap();
         match back {
             AuditEventKind::IntegrationMergeCompleted {
-                initiative_id, session_id, commit_sha, previous_sha,
-                operator_assisted, escalation_id, target_ref,
+                initiative_id,
+                session_id,
+                commit_sha,
+                previous_sha,
+                operator_assisted,
+                escalation_id,
+                target_ref,
             } => {
-                assert_eq!(initiative_id,     "init-7");
-                assert_eq!(session_id,        "sess-orch-1");
-                assert_eq!(commit_sha,        "abc1234");
-                assert_eq!(previous_sha,      "f3d21a09");
-                assert!(operator_assisted,
+                assert_eq!(initiative_id, "init-7");
+                assert_eq!(session_id, "sess-orch-1");
+                assert_eq!(commit_sha, "abc1234");
+                assert_eq!(previous_sha, "f3d21a09");
+                assert!(
+                    operator_assisted,
                     "operator_assisted must round-trip as true — \
-                     dropping it would erase Step 30 attribution");
+                     dropping it would erase Step 30 attribution"
+                );
                 assert_eq!(escalation_id.as_deref(), Some("esc-42"));
-                assert_eq!(target_ref, "refs/heads/main",
+                assert_eq!(
+                    target_ref, "refs/heads/main",
                     "target_ref must round-trip so boot recovery can re-run \
-                     commit_merge_to_target_ref against the same ref");
+                     commit_merge_to_target_ref against the same ref"
+                );
             }
             other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
         }
@@ -3325,13 +3494,13 @@ mod path_read_accessed_tests {
     #[test]
     fn integration_merge_completed_standard_merge_round_trips_through_json() {
         let kind = AuditEventKind::IntegrationMergeCompleted {
-            initiative_id:     "init-7".into(),
-            session_id:        "sess-orch-1".into(),
-            commit_sha:        "def5678".into(),
-            previous_sha:      "f3d21a09".into(),
+            initiative_id: "init-7".into(),
+            session_id: "sess-orch-1".into(),
+            commit_sha: "def5678".into(),
+            previous_sha: "f3d21a09".into(),
             operator_assisted: false,
-            escalation_id:     None,
-            target_ref:        "refs/heads/main".into(),
+            escalation_id: None,
+            target_ref: "refs/heads/main".into(),
         };
         let v = serde_json::to_value(&kind).unwrap();
         let obj = v.as_object().unwrap();
@@ -3340,16 +3509,20 @@ mod path_read_accessed_tests {
         // is the discriminator for forensic reconstruction).
         assert_eq!(obj["operator_assisted"], serde_json::json!(false));
         // escalation_id is Option-typed with skip-on-None.
-        assert!(!obj.contains_key("escalation_id"),
+        assert!(
+            !obj.contains_key("escalation_id"),
             "escalation_id MUST be elided when None so legacy V1 audit \
-             readers can parse the line without learning the new field");
+             readers can parse the line without learning the new field"
+        );
         assert_eq!(obj["kind"], serde_json::json!("IntegrationMergeCompleted"));
 
         // Decode round-trip preserves the None on escalation_id.
         let back = serde_json::from_value::<AuditEventKind>(v).unwrap();
         match back {
             AuditEventKind::IntegrationMergeCompleted {
-                operator_assisted, escalation_id, ..
+                operator_assisted,
+                escalation_id,
+                ..
             } => {
                 assert!(!operator_assisted);
                 assert!(escalation_id.is_none());
@@ -3370,17 +3543,17 @@ mod path_read_accessed_tests {
     fn merge_fast_forward_failed_round_trips_through_json() {
         let kind = AuditEventKind::MergeFastForwardFailed {
             initiative_id: "init-ff-1".into(),
-            commit_sha:    "abc1234".into(),
-            target_ref:    "refs/heads/main".into(),
-            category:      "target_ref_advanced_concurrently".into(),
-            reason:        "ref txn rejected: expected 0000…, got deadbeef".into(),
+            commit_sha: "abc1234".into(),
+            target_ref: "refs/heads/main".into(),
+            category: "target_ref_advanced_concurrently".into(),
+            reason: "ref txn rejected: expected 0000…, got deadbeef".into(),
         };
-        let s    = serde_json::to_string(&kind).unwrap();
-        let v    = serde_json::from_str::<serde_json::Value>(&s).unwrap();
-        let obj  = v.as_object().unwrap();
+        let s = serde_json::to_string(&kind).unwrap();
+        let v = serde_json::from_str::<serde_json::Value>(&s).unwrap();
+        let obj = v.as_object().unwrap();
         assert_eq!(obj["kind"], serde_json::json!("MergeFastForwardFailed"));
         assert_eq!(obj["initiative_id"], serde_json::json!("init-ff-1"));
-        assert_eq!(obj["target_ref"],    serde_json::json!("refs/heads/main"));
+        assert_eq!(obj["target_ref"], serde_json::json!("refs/heads/main"));
         assert_eq!(
             obj["category"],
             serde_json::json!("target_ref_advanced_concurrently"),
@@ -3390,12 +3563,16 @@ mod path_read_accessed_tests {
         let back = serde_json::from_str::<AuditEventKind>(&s).unwrap();
         match back {
             AuditEventKind::MergeFastForwardFailed {
-                initiative_id, commit_sha, target_ref, category, reason,
+                initiative_id,
+                commit_sha,
+                target_ref,
+                category,
+                reason,
             } => {
                 assert_eq!(initiative_id, "init-ff-1");
-                assert_eq!(commit_sha,    "abc1234");
-                assert_eq!(target_ref,    "refs/heads/main");
-                assert_eq!(category,      "target_ref_advanced_concurrently");
+                assert_eq!(commit_sha, "abc1234");
+                assert_eq!(target_ref, "refs/heads/main");
+                assert_eq!(category, "target_ref_advanced_concurrently");
                 assert!(reason.contains("ref txn rejected"));
             }
             other => panic!("expected MergeFastForwardFailed; got {other:?}"),
@@ -3410,10 +3587,10 @@ mod path_read_accessed_tests {
     fn merge_fast_forward_failed_kind_string_matches_wire() {
         let kind = AuditEventKind::MergeFastForwardFailed {
             initiative_id: "init-x".into(),
-            commit_sha:    "fff".into(),
-            target_ref:    "refs/heads/feature".into(),
-            category:      "git_failed".into(),
-            reason:        "exit 128".into(),
+            commit_sha: "fff".into(),
+            target_ref: "refs/heads/feature".into(),
+            category: "git_failed".into(),
+            reason: "exit 128".into(),
         };
         assert_eq!(kind.as_str(), "MergeFastForwardFailed");
         let s = serde_json::to_string(&kind).unwrap();
@@ -3441,14 +3618,23 @@ mod path_read_accessed_tests {
         let parsed: AuditEventKind = serde_json::from_value(legacy).unwrap();
         match parsed {
             AuditEventKind::IntegrationMergeCompleted {
-                operator_assisted, escalation_id, target_ref, ..
+                operator_assisted,
+                escalation_id,
+                target_ref,
+                ..
             } => {
-                assert!(!operator_assisted,
-                    "missing operator_assisted defaults to false");
-                assert!(escalation_id.is_none(),
-                    "missing escalation_id defaults to None");
-                assert!(target_ref.is_empty(),
-                    "missing target_ref defaults to empty string");
+                assert!(
+                    !operator_assisted,
+                    "missing operator_assisted defaults to false"
+                );
+                assert!(
+                    escalation_id.is_none(),
+                    "missing escalation_id defaults to None"
+                );
+                assert!(
+                    target_ref.is_empty(),
+                    "missing target_ref defaults to empty string"
+                );
             }
             other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
         }
@@ -3462,75 +3648,75 @@ mod credential_proxy_kind_tests {
     #[test]
     fn credential_proxy_started_kind_string_is_pinned() {
         let kind = AuditEventKind::CredentialProxyStarted {
-            session_id:      "sess-1".to_owned(),
-            proxy_type:      "postgres".to_owned(),
+            session_id: "sess-1".to_owned(),
+            proxy_type: "postgres".to_owned(),
             credential_name: "db-staging".to_owned(),
-            addr:            "127.0.0.1:5432".to_owned(),
+            addr: "127.0.0.1:5432".to_owned(),
         };
         assert_eq!(kind.as_str(), "CredentialProxyStarted");
         let v = serde_json::to_value(&kind).expect("serialises");
-        assert_eq!(v["kind"],            serde_json::json!("CredentialProxyStarted"));
-        assert_eq!(v["session_id"],      serde_json::json!("sess-1"));
-        assert_eq!(v["proxy_type"],      serde_json::json!("postgres"));
+        assert_eq!(v["kind"], serde_json::json!("CredentialProxyStarted"));
+        assert_eq!(v["session_id"], serde_json::json!("sess-1"));
+        assert_eq!(v["proxy_type"], serde_json::json!("postgres"));
         assert_eq!(v["credential_name"], serde_json::json!("db-staging"));
-        assert_eq!(v["addr"],            serde_json::json!("127.0.0.1:5432"));
+        assert_eq!(v["addr"], serde_json::json!("127.0.0.1:5432"));
     }
 
     #[test]
     fn credential_proxy_stopped_kind_string_and_counters_pinned() {
         let kind = AuditEventKind::CredentialProxyStopped {
-            session_id:         "sess-1".to_owned(),
-            proxy_type:         "postgres".to_owned(),
-            credential_name:    "db-staging".to_owned(),
+            session_id: "sess-1".to_owned(),
+            proxy_type: "postgres".to_owned(),
+            credential_name: "db-staging".to_owned(),
             connections_served: 7,
             forwards_completed: 5,
-            forwards_blocked:   2,
+            forwards_blocked: 2,
         };
         assert_eq!(kind.as_str(), "CredentialProxyStopped");
         let v = serde_json::to_value(&kind).expect("serialises");
-        assert_eq!(v["kind"],               serde_json::json!("CredentialProxyStopped"));
+        assert_eq!(v["kind"], serde_json::json!("CredentialProxyStopped"));
         assert_eq!(v["connections_served"], serde_json::json!(7));
         assert_eq!(v["forwards_completed"], serde_json::json!(5));
-        assert_eq!(v["forwards_blocked"],   serde_json::json!(2));
+        assert_eq!(v["forwards_blocked"], serde_json::json!(2));
     }
 
     #[test]
     fn database_query_executed_kind_string_and_fields_pinned() {
         let kind = AuditEventKind::DatabaseQueryExecuted {
-            session_id:      "sess-1".to_owned(),
+            session_id: "sess-1".to_owned(),
             credential_name: "db-staging".to_owned(),
-            operation:       "SELECT".to_owned(),
-            sql_sha256:      "deadbeef".to_owned(),
-            sql_plaintext:   None,
-            blocked:         false,
+            operation: "SELECT".to_owned(),
+            sql_sha256: "deadbeef".to_owned(),
+            sql_plaintext: None,
+            blocked: false,
         };
         assert_eq!(kind.as_str(), "DatabaseQueryExecuted");
         let v = serde_json::to_value(&kind).expect("serialises");
-        assert_eq!(v["kind"],          serde_json::json!("DatabaseQueryExecuted"));
-        assert_eq!(v["operation"],     serde_json::json!("SELECT"));
-        assert_eq!(v["sql_sha256"],    serde_json::json!("deadbeef"));
+        assert_eq!(v["kind"], serde_json::json!("DatabaseQueryExecuted"));
+        assert_eq!(v["operation"], serde_json::json!("SELECT"));
+        assert_eq!(v["sql_sha256"], serde_json::json!("deadbeef"));
         assert_eq!(v["sql_plaintext"], serde_json::json!(null));
-        assert_eq!(v["blocked"],       serde_json::json!(false));
+        assert_eq!(v["blocked"], serde_json::json!(false));
     }
 
     #[test]
     fn http_proxy_request_executed_kind_string_and_fields_pinned() {
         let kind = AuditEventKind::HttpProxyRequestExecuted {
-            session_id:      "sess-1".to_owned(),
+            session_id: "sess-1".to_owned(),
             credential_name: "kube-prod".to_owned(),
-            method:          "GET".to_owned(),
-            path:            "/api/v1/widgets".to_owned(),
-            path_sha256:     "cafebabe".to_owned(),
-            status_code:     200,
-            blocked:         false,
+            method: "GET".to_owned(),
+            path: "/api/v1/widgets".to_owned(),
+            path_sha256: "cafebabe".to_owned(),
+            status_code: 200,
+            blocked: false,
         };
         assert_eq!(kind.as_str(), "HttpProxyRequestExecuted");
         let v = serde_json::to_value(&kind).expect("serialises");
-        assert_eq!(v["kind"],        serde_json::json!("HttpProxyRequestExecuted"));
-        assert_eq!(v["method"],      serde_json::json!("GET"));
-        assert_eq!(v["path"],        serde_json::json!("/api/v1/widgets"));
+        assert_eq!(v["kind"], serde_json::json!("HttpProxyRequestExecuted"));
+        assert_eq!(v["method"], serde_json::json!("GET"));
+        assert_eq!(v["path"], serde_json::json!("/api/v1/widgets"));
         assert_eq!(v["path_sha256"], serde_json::json!("cafebabe"));
         assert_eq!(v["status_code"], serde_json::json!(200));
-        assert_eq!(v["blocked"],     serde_json::json!(false));
+        assert_eq!(v["blocked"], serde_json::json!(false));
     }
 }

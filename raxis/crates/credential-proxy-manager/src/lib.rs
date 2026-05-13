@@ -101,43 +101,36 @@ use raxis_plan_credentials::{
     SmtpRestrictions, TaskCredentialDecl,
 };
 
-use raxis_credential_proxy_http::{
-    AuditChannel as HttpAuditChannel, AuditEvent as HttpAuditEvent, AuthMode as HttpAuthModeImpl,
-    HttpProxy, OwnedConsumer as HttpOwnedConsumer, ProxyConfig as HttpProxyConfig,
-    ProxyError as HttpProxyError, ProxyStats as HttpProxyStats,
-    Restrictions as HttpProxyRestrictions,
-};
-use raxis_credential_proxy_postgres::{
-    AuditChannel as PgAuditChannel, AuditEvent as PgAuditEvent,
-    OwnedConsumer as PgOwnedConsumer, PostgresProxy, ProxyConfig as PgProxyConfig,
-    ProxyError as PgProxyError, ProxyStats as PgProxyStats,
-    Restrictions as PgProxyRestrictions,
-};
 use raxis_credential_proxy_aws::{
     AuditChannel as AwsAuditChannel, AuditEvent as AwsAuditEvent, AwsProxy,
     ForwardingConfig as AwsForwardingConfig, OwnedConsumer as AwsOwnedConsumer,
     ProxyConfig as AwsProxyConfig, ProxyError as AwsProxyError, ProxyStats as AwsProxyStats,
     Restrictions as AwsProxyRestrictions, StsCacheValue as AwsStsCacheValue,
 };
-use raxis_credential_proxy_gcp::{
-    AuditChannel as GcpAuditChannel, AuditEvent as GcpAuditEvent,
-    ForwardingConfig as GcpForwardingConfig, GcpCacheValue, GcpProxy,
-    OwnedConsumer as GcpOwnedConsumer, ProxyConfig as GcpProxyConfig,
-    ProxyError as GcpProxyError, ProxyStats as GcpProxyStats,
-    Restrictions as GcpProxyRestrictions,
-};
 use raxis_credential_proxy_azure::{
     AuditChannel as AzureAuditChannel, AuditEvent as AzureAuditEvent, AzureCacheValue, AzureProxy,
     ForwardingConfig as AzureForwardingConfig, OwnedConsumer as AzureOwnedConsumer,
-    ProxyConfig as AzureProxyConfig, ProxyError as AzureProxyError,
-    ProxyStats as AzureProxyStats, Restrictions as AzureProxyRestrictions,
+    ProxyConfig as AzureProxyConfig, ProxyError as AzureProxyError, ProxyStats as AzureProxyStats,
+    Restrictions as AzureProxyRestrictions,
 };
 use raxis_credential_proxy_cloud_shared::{CloudHttpClient, CloudUpstreamHost, TokenCache};
-use raxis_credential_proxy_mysql::{
-    AuditChannel as MysqlAuditChannel, AuditEvent as MysqlAuditEvent, MysqlProxy,
-    OwnedConsumer as MysqlOwnedConsumer, ProxyConfig as MysqlProxyConfig,
-    ProxyError as MysqlProxyError, ProxyStats as MysqlProxyStats,
-    Restrictions as MysqlProxyRestrictions,
+use raxis_credential_proxy_gcp::{
+    AuditChannel as GcpAuditChannel, AuditEvent as GcpAuditEvent,
+    ForwardingConfig as GcpForwardingConfig, GcpCacheValue, GcpProxy,
+    OwnedConsumer as GcpOwnedConsumer, ProxyConfig as GcpProxyConfig, ProxyError as GcpProxyError,
+    ProxyStats as GcpProxyStats, Restrictions as GcpProxyRestrictions,
+};
+use raxis_credential_proxy_http::{
+    AuditChannel as HttpAuditChannel, AuditEvent as HttpAuditEvent, AuthMode as HttpAuthModeImpl,
+    HttpProxy, OwnedConsumer as HttpOwnedConsumer, ProxyConfig as HttpProxyConfig,
+    ProxyError as HttpProxyError, ProxyStats as HttpProxyStats,
+    Restrictions as HttpProxyRestrictions,
+};
+use raxis_credential_proxy_mongodb::{
+    AuditChannel as MongodbAuditChannel, AuditEvent as MongodbAuditEvent, MongodbProxy,
+    OwnedConsumer as MongodbOwnedConsumer, ProxyConfig as MongodbProxyConfig,
+    ProxyError as MongodbProxyError, ProxyStats as MongodbProxyStats,
+    Restrictions as MongodbProxyRestrictions,
 };
 use raxis_credential_proxy_mssql::{
     AuditChannel as MssqlAuditChannel, AuditEvent as MssqlAuditEvent, MssqlProxy,
@@ -145,11 +138,16 @@ use raxis_credential_proxy_mssql::{
     ProxyError as MssqlProxyError, ProxyStats as MssqlProxyStats,
     Restrictions as MssqlProxyRestrictions,
 };
-use raxis_credential_proxy_mongodb::{
-    AuditChannel as MongodbAuditChannel, AuditEvent as MongodbAuditEvent, MongodbProxy,
-    OwnedConsumer as MongodbOwnedConsumer, ProxyConfig as MongodbProxyConfig,
-    ProxyError as MongodbProxyError, ProxyStats as MongodbProxyStats,
-    Restrictions as MongodbProxyRestrictions,
+use raxis_credential_proxy_mysql::{
+    AuditChannel as MysqlAuditChannel, AuditEvent as MysqlAuditEvent, MysqlProxy,
+    OwnedConsumer as MysqlOwnedConsumer, ProxyConfig as MysqlProxyConfig,
+    ProxyError as MysqlProxyError, ProxyStats as MysqlProxyStats,
+    Restrictions as MysqlProxyRestrictions,
+};
+use raxis_credential_proxy_postgres::{
+    AuditChannel as PgAuditChannel, AuditEvent as PgAuditEvent, OwnedConsumer as PgOwnedConsumer,
+    PostgresProxy, ProxyConfig as PgProxyConfig, ProxyError as PgProxyError,
+    ProxyStats as PgProxyStats, Restrictions as PgProxyRestrictions,
 };
 use raxis_credential_proxy_redis::{
     AuditChannel as RedisAuditChannel, AuditEvent as RedisAuditEvent,
@@ -185,9 +183,9 @@ pub enum ManagerError {
         /// The colliding env-var name.
         mount_as: String,
         /// Credential name of the first declaration.
-        first:    String,
+        first: String,
         /// Credential name of the second declaration.
-        second:   String,
+        second: String,
     },
 
     /// A `K8s` declaration named a credential whose body could not
@@ -200,7 +198,7 @@ pub enum ManagerError {
         credential_name: String,
         /// Free-form diagnostic. NEVER includes the credential
         /// value (the kubeconfig body is treated as secret).
-        detail:          String,
+        detail: String,
     },
 
     /// Postgres proxy failed to bind / start.
@@ -333,7 +331,7 @@ pub enum ManagerError {
         credential_name: String,
         /// Free-form diagnostic. NEVER includes credential
         /// bytes.
-        detail:          String,
+        detail: String,
     },
 }
 
@@ -379,7 +377,7 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
 struct PostgresKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl PgAuditChannel for PostgresKernelAuditAdapter {
@@ -397,21 +395,19 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::DatabaseQueryCompleted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "postgres".to_owned(),
+                    proxy_type: "postgres".to_owned(),
                     sql_sha256,
                     rows_returned,
                     bytes_returned,
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -429,20 +425,18 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamConnected {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "postgres".to_owned(),
+                    proxy_type: "postgres".to_owned(),
                     upstream_host,
                     upstream_port,
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -460,20 +454,18 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamFailed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "postgres".to_owned(),
+                    proxy_type: "postgres".to_owned(),
                     upstream_host,
                     upstream_port,
                     reason,
                     detail,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -491,24 +483,46 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::DatabaseQueryExecuted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
                     operation,
                     sql_sha256,
-                    sql_plaintext:   sql_text,
+                    sql_plaintext: sql_text,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
                         error      = %e,
                         "DatabaseQueryExecuted audit emit failed; per-query audit chain entry skipped",
+                    );
+                }
+            }
+            PgAuditEvent::CredentialProxySubstituted {
+                credential,
+                substitution_shape,
+                ..
+            } => {
+                let kind = AuditEventKind::CredentialProxySubstituted {
+                    session_id: self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type: "postgres".to_owned(),
+                    real_resolved: true,
+                    substitution_shape,
+                };
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "CredentialProxySubstituted (postgres) audit emit failed",
                     );
                 }
             }
@@ -519,7 +533,7 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
 struct HttpKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl HttpAuditChannel for HttpKernelAuditAdapter {
@@ -535,7 +549,7 @@ impl HttpAuditChannel for HttpKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::HttpProxyRequestExecuted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
                     method,
                     path,
@@ -543,12 +557,10 @@ impl HttpAuditChannel for HttpKernelAuditAdapter {
                     status_code,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -562,9 +574,9 @@ impl HttpAuditChannel for HttpKernelAuditAdapter {
 }
 
 struct SmtpKernelAuditAdapter {
-    audit_sink:      Arc<dyn AuditSink>,
-    session_id:      String,
-    task_id:         String,
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id: String,
     credential_name: String,
 }
 
@@ -573,11 +585,11 @@ impl EnvelopeAuditSink for SmtpKernelAuditAdapter {
         let envelope_sha256 = hex::encode(event.envelope_sha256);
         let kind = match event.outcome {
             EnvelopeOutcome::Relayed => AuditEventKind::SmtpMessageRelayed {
-                session_id:      self.session_id.clone(),
+                session_id: self.session_id.clone(),
                 credential_name: self.credential_name.clone(),
                 envelope_sha256,
                 recipient_count: event.recipient_count,
-                bytes_relayed:   event.bytes_submitted,
+                bytes_relayed: event.bytes_submitted,
             },
             EnvelopeOutcome::Rejected => {
                 let reason = event
@@ -585,21 +597,19 @@ impl EnvelopeAuditSink for SmtpKernelAuditAdapter {
                     .unwrap_or_else(|| "unknown".to_owned());
                 let short_reason = short_reject_reason(&reason);
                 AuditEventKind::SmtpMessageRejected {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: self.credential_name.clone(),
                     envelope_sha256,
                     recipient_count: event.recipient_count,
                     bytes_submitted: event.bytes_submitted,
-                    reason:          short_reason.to_owned(),
+                    reason: short_reason.to_owned(),
                 }
             }
         };
-        if let Err(e) = self.audit_sink.emit(
-            kind,
-            Some(&self.session_id),
-            Some(&self.task_id),
-            None,
-        ) {
+        if let Err(e) =
+            self.audit_sink
+                .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+        {
             tracing::warn!(
                 target:     "raxis::credential_proxy::manager",
                 session_id = %self.session_id,
@@ -613,7 +623,7 @@ impl EnvelopeAuditSink for SmtpKernelAuditAdapter {
 struct AwsKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl AwsAuditChannel for AwsKernelAuditAdapter {
@@ -630,7 +640,7 @@ impl AwsAuditChannel for AwsKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::AwsCredentialServed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
                     path,
                     path_sha256,
@@ -639,12 +649,10 @@ impl AwsAuditChannel for AwsKernelAuditAdapter {
                     allowed_regions,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -660,7 +668,7 @@ impl AwsAuditChannel for AwsKernelAuditAdapter {
 struct RedisKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl RedisAuditChannel for RedisKernelAuditAdapter {
@@ -677,20 +685,18 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamConnected {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "redis".to_owned(),
+                    proxy_type: "redis".to_owned(),
                     upstream_host,
                     upstream_port,
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -708,20 +714,18 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamFailed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "redis".to_owned(),
+                    proxy_type: "redis".to_owned(),
                     upstream_host,
                     upstream_port,
                     reason,
                     detail,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -739,18 +743,16 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::RedisCommandExecuted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
                     command,
                     frame_sha256,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -766,7 +768,7 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
 struct GcpKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl GcpAuditChannel for GcpKernelAuditAdapter {
@@ -782,7 +784,7 @@ impl GcpAuditChannel for GcpKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::GcpMetadataServed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
                     path,
                     path_sha256,
@@ -790,12 +792,10 @@ impl GcpAuditChannel for GcpKernelAuditAdapter {
                     allowed_scopes,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -811,7 +811,7 @@ impl GcpAuditChannel for GcpKernelAuditAdapter {
 struct AzureKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl AzureAuditChannel for AzureKernelAuditAdapter {
@@ -828,7 +828,7 @@ impl AzureAuditChannel for AzureKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::AzureTokenServed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
                     path,
                     resource,
@@ -837,12 +837,10 @@ impl AzureAuditChannel for AzureKernelAuditAdapter {
                     allowed_actions,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -858,7 +856,7 @@ impl AzureAuditChannel for AzureKernelAuditAdapter {
 struct MysqlKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl MysqlAuditChannel for MysqlKernelAuditAdapter {
@@ -873,19 +871,17 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::DatabaseQueryExecuted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    operation:       mysql_operation_label(&operation).to_owned(),
+                    operation: mysql_operation_label(&operation).to_owned(),
                     sql_sha256,
-                    sql_plaintext:   sql_text,
+                    sql_plaintext: sql_text,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -906,21 +902,19 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::DatabaseQueryCompleted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mysql".to_owned(),
+                    proxy_type: "mysql".to_owned(),
                     sql_sha256,
                     rows_returned,
                     bytes_returned,
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -938,20 +932,18 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamConnected {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mysql".to_owned(),
+                    proxy_type: "mysql".to_owned(),
                     upstream_host,
                     upstream_port,
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -969,20 +961,18 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamFailed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mysql".to_owned(),
+                    proxy_type: "mysql".to_owned(),
                     upstream_host,
                     upstream_port,
                     reason,
                     detail,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -995,15 +985,13 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
     }
 }
 
-fn mysql_operation_label(
-    op: &raxis_credential_proxy_mysql::OperationKind,
-) -> &'static str {
+fn mysql_operation_label(op: &raxis_credential_proxy_mysql::OperationKind) -> &'static str {
     use raxis_credential_proxy_mysql::OperationKind as K;
     match op {
-        K::Select   => "SELECT",
-        K::Insert   => "INSERT",
-        K::Update   => "UPDATE",
-        K::Delete   => "DELETE",
+        K::Select => "SELECT",
+        K::Insert => "INSERT",
+        K::Update => "UPDATE",
+        K::Delete => "DELETE",
         K::Other(_) => "OTHER",
     }
 }
@@ -1011,7 +999,7 @@ fn mysql_operation_label(
 struct MssqlKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl MssqlAuditChannel for MssqlKernelAuditAdapter {
@@ -1026,19 +1014,17 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::DatabaseQueryExecuted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    operation:       mssql_operation_label(&operation).to_owned(),
+                    operation: mssql_operation_label(&operation).to_owned(),
                     sql_sha256,
-                    sql_plaintext:   sql_text,
+                    sql_plaintext: sql_text,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1059,21 +1045,19 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::DatabaseQueryCompleted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mssql".to_owned(),
+                    proxy_type: "mssql".to_owned(),
                     sql_sha256,
                     rows_returned,
                     bytes_returned,
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1091,20 +1075,18 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamConnected {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mssql".to_owned(),
+                    proxy_type: "mssql".to_owned(),
                     upstream_host,
                     upstream_port,
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1122,20 +1104,18 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamFailed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mssql".to_owned(),
+                    proxy_type: "mssql".to_owned(),
                     upstream_host,
                     upstream_port,
                     reason,
                     detail,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1148,15 +1128,13 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
     }
 }
 
-fn mssql_operation_label(
-    op: &raxis_credential_proxy_mssql::OperationKind,
-) -> &'static str {
+fn mssql_operation_label(op: &raxis_credential_proxy_mssql::OperationKind) -> &'static str {
     use raxis_credential_proxy_mssql::OperationKind as K;
     match op {
-        K::Select   => "SELECT",
-        K::Insert   => "INSERT",
-        K::Update   => "UPDATE",
-        K::Delete   => "DELETE",
+        K::Select => "SELECT",
+        K::Insert => "INSERT",
+        K::Update => "UPDATE",
+        K::Delete => "DELETE",
         K::Other(_) => "OTHER",
     }
 }
@@ -1164,7 +1142,7 @@ fn mssql_operation_label(
 struct MongodbKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
-    task_id:    String,
+    task_id: String,
 }
 
 impl MongodbAuditChannel for MongodbKernelAuditAdapter {
@@ -1178,18 +1156,16 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::MongoCommandExecuted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
                     command,
                     body_sha256,
                     blocked,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1210,21 +1186,19 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::DatabaseQueryCompleted {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mongodb".to_owned(),
-                    sql_sha256:      body_sha256,
+                    proxy_type: "mongodb".to_owned(),
+                    sql_sha256: body_sha256,
                     rows_returned,
                     bytes_returned,
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1242,20 +1216,18 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamConnected {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mongodb".to_owned(),
+                    proxy_type: "mongodb".to_owned(),
                     upstream_host,
                     upstream_port,
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1273,20 +1245,18 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                 ..
             } => {
                 let kind = AuditEventKind::CredentialProxyUpstreamFailed {
-                    session_id:      self.session_id.clone(),
+                    session_id: self.session_id.clone(),
                     credential_name: credential.as_str().to_owned(),
-                    proxy_type:      "mongodb".to_owned(),
+                    proxy_type: "mongodb".to_owned(),
                     upstream_host,
                     upstream_port,
                     reason,
                     detail,
                 };
-                if let Err(e) = self.audit_sink.emit(
-                    kind,
-                    Some(&self.session_id),
-                    Some(&self.task_id),
-                    None,
-                ) {
+                if let Err(e) =
+                    self.audit_sink
+                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
+                {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1370,7 +1340,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.queries_audited.saturating_sub(snap.queries_blocked),
-                    forwards_blocked:   snap.queries_blocked,
+                    forwards_blocked: snap.queries_blocked,
                 }
             }
             ProxyStatsHandle::Http(s) => {
@@ -1378,7 +1348,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.requests_forwarded,
-                    forwards_blocked:   snap.requests_blocked,
+                    forwards_blocked: snap.requests_blocked,
                 }
             }
             ProxyStatsHandle::Smtp(s) => {
@@ -1386,7 +1356,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.messages_relayed,
-                    forwards_blocked:   snap.messages_rejected,
+                    forwards_blocked: snap.messages_rejected,
                 }
             }
             ProxyStatsHandle::Redis(s) => {
@@ -1394,7 +1364,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.commands_forwarded,
-                    forwards_blocked:   snap.commands_blocked,
+                    forwards_blocked: snap.commands_blocked,
                 }
             }
             ProxyStatsHandle::Aws(s) => {
@@ -1402,7 +1372,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.credentials_served,
-                    forwards_blocked:   snap.requests_blocked,
+                    forwards_blocked: snap.requests_blocked,
                 }
             }
             ProxyStatsHandle::Gcp(s) => {
@@ -1410,7 +1380,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.credentials_served,
-                    forwards_blocked:   snap.requests_blocked,
+                    forwards_blocked: snap.requests_blocked,
                 }
             }
             ProxyStatsHandle::Azure(s) => {
@@ -1418,7 +1388,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.tokens_served,
-                    forwards_blocked:   snap.requests_blocked,
+                    forwards_blocked: snap.requests_blocked,
                 }
             }
             ProxyStatsHandle::Mysql(s) => {
@@ -1426,7 +1396,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.queries_audited.saturating_sub(snap.queries_blocked),
-                    forwards_blocked:   snap.queries_blocked,
+                    forwards_blocked: snap.queries_blocked,
                 }
             }
             ProxyStatsHandle::Mssql(s) => {
@@ -1434,7 +1404,7 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.queries_audited.saturating_sub(snap.queries_blocked),
-                    forwards_blocked:   snap.queries_blocked,
+                    forwards_blocked: snap.queries_blocked,
                 }
             }
             ProxyStatsHandle::Mongodb(s) => {
@@ -1442,13 +1412,12 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.commands_audited.saturating_sub(snap.commands_blocked),
-                    forwards_blocked:   snap.commands_blocked,
+                    forwards_blocked: snap.commands_blocked,
                 }
             }
         }
     }
 }
-
 
 /// Plain-data view of the counter columns that get serialised into
 /// `CredentialProxyStopped`. Public so tests can read a
@@ -1460,7 +1429,7 @@ pub struct StoppedCounters {
     /// Successfully forwarded queries / requests.
     pub forwards_completed: u32,
     /// Forwards rejected by `Restrictions`.
-    pub forwards_blocked:   u32,
+    pub forwards_blocked: u32,
 }
 
 /// Per-proxy summary from a successful bind. Returned to the caller
@@ -1508,23 +1477,29 @@ pub struct StoppedProxy {
 /// Tests assert that callers always use `shutdown`.
 pub struct SessionProxyHandles {
     session_id: String,
-    proxies:    Vec<ActiveProxy>,
-    audit:      Arc<dyn AuditSink>,
+    proxies: Vec<ActiveProxy>,
+    audit: Arc<dyn AuditSink>,
     /// Once `shutdown` has run, the destructor must NOT emit a
     /// duplicate stop event.
-    drained:    bool,
+    drained: bool,
 }
 
 impl SessionProxyHandles {
     /// Number of bound proxies in this session.
-    pub fn len(&self) -> usize { self.proxies.len() }
+    pub fn len(&self) -> usize {
+        self.proxies.len()
+    }
 
     /// Whether the session has zero declared proxies.
-    pub fn is_empty(&self) -> bool { self.proxies.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.proxies.is_empty()
+    }
 
     /// The session id this bundle belongs to. Useful for tests and
     /// for correlation in the kernel's session map.
-    pub fn session_id(&self) -> &str { &self.session_id }
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
 
     /// Per-proxy summary of every successful bind, in declaration
     /// order. Useful for the kernel session-spawn path which needs
@@ -1533,10 +1508,10 @@ impl SessionProxyHandles {
         self.proxies
             .iter()
             .map(|p| StartedProxy {
-                proxy_type:      p.proxy_type,
+                proxy_type: p.proxy_type,
                 credential_name: p.credential_name.clone(),
-                mount_as:        p.mount_as.clone(),
-                addr:            p.addr,
+                mount_as: p.mount_as.clone(),
+                addr: p.addr,
             })
             .collect()
     }
@@ -1562,10 +1537,7 @@ impl SessionProxyHandles {
         let mut out = BTreeMap::new();
         for p in &self.proxies {
             let url = match p.proxy_type {
-                "postgres" => format!(
-                    "postgresql://raxis@{}/",
-                    p.addr,
-                ),
+                "postgres" => format!("postgresql://raxis@{}/", p.addr,),
                 // SMTP proxies are dialed as a host:port pair (no
                 // scheme). Common SMTP client libraries expect a
                 // bare `host:port`; surface that exactly so the
@@ -1595,22 +1567,23 @@ impl SessionProxyHandles {
             // (or letting tokio shut them down on runtime drop).
             p.join.abort();
             let counters = p.stats.snapshot_counters();
-            self.audit.emit(
-                AuditEventKind::CredentialProxyStopped {
-                    session_id:         self.session_id.clone(),
-                    proxy_type:         p.proxy_type.to_owned(),
-                    credential_name:    p.credential_name.clone(),
-                    connections_served: counters.connections_served,
-                    forwards_completed: counters.forwards_completed,
-                    forwards_blocked:   counters.forwards_blocked,
-                },
-                Some(&self.session_id),
-                None,
-                None,
-            )
-            .map_err(|e| ManagerError::Audit(e.to_string()))?;
+            self.audit
+                .emit(
+                    AuditEventKind::CredentialProxyStopped {
+                        session_id: self.session_id.clone(),
+                        proxy_type: p.proxy_type.to_owned(),
+                        credential_name: p.credential_name.clone(),
+                        connections_served: counters.connections_served,
+                        forwards_completed: counters.forwards_completed,
+                        forwards_blocked: counters.forwards_blocked,
+                    },
+                    Some(&self.session_id),
+                    None,
+                    None,
+                )
+                .map_err(|e| ManagerError::Audit(e.to_string()))?;
             stopped.push(StoppedProxy {
-                proxy_type:      p.proxy_type,
+                proxy_type: p.proxy_type,
                 credential_name: p.credential_name,
                 counters,
             });
@@ -1654,16 +1627,13 @@ pub struct ShutdownReport {
 /// backend and audit sink.
 pub struct CredentialProxyManager {
     backend: Arc<dyn CredentialBackend>,
-    audit:   Arc<dyn AuditSink>,
+    audit: Arc<dyn AuditSink>,
 }
 
 impl CredentialProxyManager {
     /// Construct a manager bound to a credential backend and audit
     /// sink. Both are typically the kernel's production wiring.
-    pub fn new(
-        backend: Arc<dyn CredentialBackend>,
-        audit:   Arc<dyn AuditSink>,
-    ) -> Self {
+    pub fn new(backend: Arc<dyn CredentialBackend>, audit: Arc<dyn AuditSink>) -> Self {
         Self { backend, audit }
     }
 
@@ -1677,8 +1647,8 @@ impl CredentialProxyManager {
     pub async fn start_for_session(
         &self,
         session_id: &str,
-        task_id:    &str,
-        decls:      &[TaskCredentialDecl],
+        task_id: &str,
+        decls: &[TaskCredentialDecl],
     ) -> Result<SessionProxyHandles, ManagerError> {
         // ── Defense-in-depth: mount_as uniqueness ────────────────────
         // The primary check is in `parse_for_task()` at plan
@@ -1692,8 +1662,8 @@ impl CredentialProxyManager {
                 if let Some(first_cred) = seen.get(decl.mount_as.as_str()) {
                     return Err(ManagerError::DuplicateMountAs {
                         mount_as: decl.mount_as.clone(),
-                        first:    first_cred.to_string(),
-                        second:   decl.name.as_str().to_owned(),
+                        first: first_cred.to_string(),
+                        second: decl.name.as_str().to_owned(),
                     });
                 }
                 seen.insert(&decl.mount_as, decl.name.as_str());
@@ -1717,7 +1687,11 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
-                ProxyDecl::Http { auth_mode, upstream_url, restrictions } => {
+                ProxyDecl::Http {
+                    auth_mode,
+                    upstream_url,
+                    restrictions,
+                } => {
                     self.bind_http(
                         session_id,
                         task_id,
@@ -1791,7 +1765,12 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
-                ProxyDecl::Aws { role_arn, lease_seconds, forwarding, restrictions } => {
+                ProxyDecl::Aws {
+                    role_arn,
+                    lease_seconds,
+                    forwarding,
+                    restrictions,
+                } => {
                     self.bind_aws(
                         session_id,
                         task_id,
@@ -1804,7 +1783,13 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
-                ProxyDecl::Gcp { project, numeric_project, lease_seconds, forwarding, restrictions } => {
+                ProxyDecl::Gcp {
+                    project,
+                    numeric_project,
+                    lease_seconds,
+                    forwarding,
+                    restrictions,
+                } => {
                     self.bind_gcp(
                         session_id,
                         task_id,
@@ -1818,7 +1803,13 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
-                ProxyDecl::Azure { tenant_id, client_id, lease_seconds, forwarding, restrictions } => {
+                ProxyDecl::Azure {
+                    tenant_id,
+                    client_id,
+                    lease_seconds,
+                    forwarding,
+                    restrictions,
+                } => {
                     self.bind_azure(
                         session_id,
                         task_id,
@@ -1863,24 +1854,23 @@ impl CredentialProxyManager {
                     .await?
                 }
                 ProxyDecl::Unknown => {
-                    return Err(ManagerError::UnknownProxyType {
-                        credential_name,
-                    });
+                    return Err(ManagerError::UnknownProxyType { credential_name });
                 }
             };
 
-            self.audit.emit(
-                AuditEventKind::CredentialProxyStarted {
-                    session_id:      session_id.to_owned(),
-                    proxy_type:      proxy_type.to_owned(),
-                    credential_name: credential_name.clone(),
-                    addr:            active.addr.to_string(),
-                },
-                Some(session_id),
-                Some(task_id),
-                None,
-            )
-            .map_err(|e| ManagerError::Audit(e.to_string()))?;
+            self.audit
+                .emit(
+                    AuditEventKind::CredentialProxyStarted {
+                        session_id: session_id.to_owned(),
+                        proxy_type: proxy_type.to_owned(),
+                        credential_name: credential_name.clone(),
+                        addr: active.addr.to_string(),
+                    },
+                    Some(session_id),
+                    Some(task_id),
+                    None,
+                )
+                .map_err(|e| ManagerError::Audit(e.to_string()))?;
 
             proxies.push(active);
         }
@@ -1888,38 +1878,35 @@ impl CredentialProxyManager {
         Ok(SessionProxyHandles {
             session_id: session_id.to_owned(),
             proxies,
-            audit:      Arc::clone(&self.audit),
-            drained:    false,
+            audit: Arc::clone(&self.audit),
+            drained: false,
         })
     }
 
     async fn bind_postgres(
         &self,
         session_id: &str,
-        task_id:    &str,
-        name:       &raxis_credentials::CredentialName,
-        mount_as:   &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
         restrictions: &PostgresRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let cfg = PgProxyConfig {
-            listen_addr:     "127.0.0.1:0".to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
-            consumer:        PgOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            consumer: PgOwnedConsumer::new("session", session_id.to_owned()),
             restrictions: PgProxyRestrictions {
                 allow_only_select: restrictions.allow_only_select,
-                allowed_tables:    restrictions.allowed_tables.clone(),
-                forbidden_tables:  restrictions.forbidden_tables.clone(),
-                max_result_rows:   restrictions.max_result_rows,
-                enforce:           restrictions.enforce,
+                allowed_tables: restrictions.allowed_tables.clone(),
+                forbidden_tables: restrictions.forbidden_tables.clone(),
+                max_result_rows: restrictions.max_result_rows,
+                enforce: restrictions.enforce,
             },
         };
         let audit_channel: Arc<dyn PgAuditChannel> = Arc::new(PostgresKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = PostgresProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -1927,20 +1914,22 @@ impl CredentialProxyManager {
                 credential_name: name.as_str().to_owned(),
                 source,
             })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "postgres",
+            proxy_type: "postgres",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Postgres(stats_handle),
+            stats: ProxyStatsHandle::Postgres(stats_handle),
             join,
         })
     }
@@ -1953,29 +1942,27 @@ impl CredentialProxyManager {
     /// dropped before returning.
     fn resolve_kubeconfig_server_url(
         &self,
-        name:       &raxis_credentials::CredentialName,
+        name: &raxis_credentials::CredentialName,
         session_id: &str,
     ) -> Result<String, ManagerError> {
         let consumer = raxis_credentials::ConsumerIdentity::new("session", session_id);
-        let value = self
-            .backend
-            .resolve(name, consumer)
-            .map_err(|e| ManagerError::KubeconfigResolution {
+        let value = self.backend.resolve(name, consumer).map_err(|e| {
+            ManagerError::KubeconfigResolution {
                 credential_name: name.as_str().to_owned(),
-                detail:          format!("backend resolve failed: {e}"),
-            })?;
+                detail: format!("backend resolve failed: {e}"),
+            }
+        })?;
         let url = value
             .as_utf8()
             .ok_or_else(|| ManagerError::KubeconfigResolution {
                 credential_name: name.as_str().to_owned(),
-                detail:          "kubeconfig body is not UTF-8".to_owned(),
+                detail: "kubeconfig body is not UTF-8".to_owned(),
             })
             .and_then(|body| {
                 kubeconfig::extract_first_cluster_server(&body).ok_or_else(|| {
                     ManagerError::KubeconfigResolution {
                         credential_name: name.as_str().to_owned(),
-                        detail:          "no `cluster.server` line found in kubeconfig"
-                            .to_owned(),
+                        detail: "no `cluster.server` line found in kubeconfig".to_owned(),
                     }
                 })
             });
@@ -1988,36 +1975,31 @@ impl CredentialProxyManager {
     async fn bind_http(
         &self,
         session_id: &str,
-        task_id:    &str,
-        name:       &raxis_credentials::CredentialName,
-        mount_as:   &str,
-        auth_mode:  &HttpAuthMode,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
+        auth_mode: &HttpAuthMode,
         upstream_url: &str,
         restrictions: &HttpRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let cfg = HttpProxyConfig {
-            listen_addr:     "127.0.0.1:0".to_owned(),
-            upstream_url:    upstream_url.to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
+            upstream_url: upstream_url.to_owned(),
             credential_name: name.clone(),
             auth_mode: match auth_mode {
                 HttpAuthMode::Bearer => HttpAuthModeImpl::Bearer,
-                HttpAuthMode::Basic { user } => HttpAuthModeImpl::Basic {
-                    user: user.clone(),
-                },
+                HttpAuthMode::Basic { user } => HttpAuthModeImpl::Basic { user: user.clone() },
             },
-            consumer:     HttpOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            consumer: HttpOwnedConsumer::new("session", session_id.to_owned()),
             restrictions: HttpProxyRestrictions {
-                allowed_methods:       restrictions.allowed_methods.clone(),
+                allowed_methods: restrictions.allowed_methods.clone(),
                 allowed_path_prefixes: restrictions.allowed_path_prefixes.clone(),
             },
         };
         let audit_channel: Arc<dyn HttpAuditChannel> = Arc::new(HttpKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = HttpProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2025,20 +2007,22 @@ impl CredentialProxyManager {
                 credential_name: name.as_str().to_owned(),
                 source,
             })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "http",
+            proxy_type: "http",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Http(stats_handle),
+            stats: ProxyStatsHandle::Http(stats_handle),
             join,
         })
     }
@@ -2046,14 +2030,14 @@ impl CredentialProxyManager {
     #[allow(clippy::too_many_arguments)]
     async fn bind_smtp(
         &self,
-        session_id:           &str,
-        task_id:              &str,
-        name:                 &raxis_credentials::CredentialName,
-        mount_as:             &str,
-        auth_mode:            &SmtpAuthMode,
-        upstream_host_port:   &str,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
+        auth_mode: &SmtpAuthMode,
+        upstream_host_port: &str,
         require_upstream_tls: bool,
-        restrictions:         &SmtpRestrictions,
+        restrictions: &SmtpRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         if require_upstream_tls && !raxis_credential_proxy_smtp::wire::Outbound::IS_TLS_WIRED {
             // Defence-in-depth: if a future build ever ships with the
@@ -2069,56 +2053,51 @@ impl CredentialProxyManager {
             });
         }
         let cfg = SmtpProxyConfig {
-            listen_addr:           "127.0.0.1:0".to_owned(),
-            upstream_host_port:    upstream_host_port.to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
+            upstream_host_port: upstream_host_port.to_owned(),
             require_upstream_tls,
-            credential_name:       name.clone(),
+            credential_name: name.clone(),
             auth_mode: match auth_mode {
                 SmtpAuthMode::Plain { user } => SmtpAuthModeImpl::Plain { user: user.clone() },
                 SmtpAuthMode::Login { user } => SmtpAuthModeImpl::Login { user: user.clone() },
             },
-            consumer:              SmtpOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            consumer: SmtpOwnedConsumer::new("session", session_id.to_owned()),
             restrictions: SmtpProxyRestrictions {
-                allowed_sender_address:     restrictions.allowed_sender_address.clone(),
-                allowed_recipient_domains:  restrictions.allowed_recipient_domains.clone(),
+                allowed_sender_address: restrictions.allowed_sender_address.clone(),
+                allowed_recipient_domains: restrictions.allowed_recipient_domains.clone(),
                 max_recipients_per_message: restrictions.max_recipients_per_message,
-                max_message_bytes:          restrictions.max_message_bytes,
-                max_messages_per_minute:    restrictions.max_messages_per_minute,
+                max_message_bytes: restrictions.max_message_bytes,
+                max_messages_per_minute: restrictions.max_messages_per_minute,
             },
         };
         let envelope_sink: Arc<dyn EnvelopeAuditSink> = Arc::new(SmtpKernelAuditAdapter {
-            audit_sink:      Arc::clone(&self.audit),
-            session_id:      session_id.to_owned(),
-            task_id:         task_id.to_owned(),
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
             credential_name: name.as_str().to_owned(),
         });
-        let proxy = SmtpProxy::bind(
-            Arc::clone(&self.backend),
-            cfg,
-            envelope_sink,
-        )
-        .await
-        .map_err(|source| ManagerError::SmtpBind {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let proxy = SmtpProxy::bind(Arc::clone(&self.backend), cfg, envelope_sink)
+            .await
+            .map_err(|source| ManagerError::SmtpBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "smtp",
+            proxy_type: "smtp",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Smtp(stats_handle),
+            stats: ProxyStatsHandle::Smtp(stats_handle),
             join,
         })
     }
@@ -2127,31 +2106,28 @@ impl CredentialProxyManager {
     #[allow(clippy::too_many_arguments)]
     async fn bind_redis(
         &self,
-        session_id:           &str,
-        task_id:              &str,
-        name:                 &raxis_credentials::CredentialName,
-        mount_as:             &str,
-        upstream_host_port:   &str,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
+        upstream_host_port: &str,
         require_upstream_tls: bool,
-        restrictions:         &RedisRestrictions,
+        restrictions: &RedisRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let cfg = RedisProxyConfig {
-            listen_addr:        "127.0.0.1:0".to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
             upstream_host_port: upstream_host_port.to_owned(),
-            credential_name:    name.clone(),
-            consumer:           RedisOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            credential_name: name.clone(),
+            consumer: RedisOwnedConsumer::new("session", session_id.to_owned()),
             restrictions: RedisProxyRestrictions {
                 allowed_commands: restrictions.allowed_commands.clone(),
             },
-            upstream_tls:       require_upstream_tls,
+            upstream_tls: require_upstream_tls,
         };
         let audit_channel: Arc<dyn RedisAuditChannel> = Arc::new(RedisKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = RedisProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2159,20 +2135,22 @@ impl CredentialProxyManager {
                 credential_name: name.as_str().to_owned(),
                 source,
             })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "redis",
+            proxy_type: "redis",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Redis(stats_handle),
+            stats: ProxyStatsHandle::Redis(stats_handle),
             join,
         })
     }
@@ -2180,14 +2158,14 @@ impl CredentialProxyManager {
     #[allow(clippy::too_many_arguments)]
     async fn bind_aws(
         &self,
-        session_id:    &str,
-        task_id:       &str,
-        name:          &raxis_credentials::CredentialName,
-        mount_as:      &str,
-        role_arn:      Option<&str>,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
+        role_arn: Option<&str>,
         lease_seconds: u64,
-        forwarding:    Option<&AwsForwardingDecl>,
-        restrictions:  &AwsRestrictions,
+        forwarding: Option<&AwsForwardingDecl>,
+        restrictions: &AwsRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         // V3 forwarding plumbing — only constructed when the plan
         // declares `[forwarding] enabled = true`. The shared
@@ -2199,55 +2177,57 @@ impl CredentialProxyManager {
             _ => None,
         };
         let cfg = AwsProxyConfig {
-            listen_addr:     "127.0.0.1:0".to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
-            consumer:        AwsOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            consumer: AwsOwnedConsumer::new("session", session_id.to_owned()),
             lease_seconds,
-            role_arn:        role_arn.map(|s| s.to_owned()),
-            forwarding:      v3.as_ref().map(|x| x.fwd.clone()),
+            role_arn: role_arn.map(|s| s.to_owned()),
+            forwarding: v3.as_ref().map(|x| x.fwd.clone()),
             restrictions: AwsProxyRestrictions {
-                allowed_paths:    restrictions.allowed_paths.clone(),
+                allowed_paths: restrictions.allowed_paths.clone(),
                 allowed_services: restrictions.allowed_services.clone(),
-                allowed_regions:  restrictions.allowed_regions.clone(),
+                allowed_regions: restrictions.allowed_regions.clone(),
             },
         };
         let audit_channel: Arc<dyn AwsAuditChannel> = Arc::new(AwsKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = match v3 {
-            Some(v3) => AwsProxy::bind_v3(
-                Arc::clone(&self.backend),
-                cfg,
-                audit_channel,
-                Arc::clone(&self.audit),
-                Arc::new(v3.http),
-                Arc::new(v3.cache),
-            ).await,
+            Some(v3) => {
+                AwsProxy::bind_v3(
+                    Arc::clone(&self.backend),
+                    cfg,
+                    audit_channel,
+                    Arc::clone(&self.audit),
+                    Arc::new(v3.http),
+                    Arc::new(v3.cache),
+                )
+                .await
+            }
             None => AwsProxy::bind(Arc::clone(&self.backend), cfg, audit_channel).await,
         }
         .map_err(|source| ManagerError::AwsBind {
             credential_name: name.as_str().to_owned(),
             source,
         })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "aws",
+            proxy_type: "aws",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Aws(stats_handle),
+            stats: ProxyStatsHandle::Aws(stats_handle),
             join,
         })
     }
@@ -2255,73 +2235,77 @@ impl CredentialProxyManager {
     #[allow(clippy::too_many_arguments)]
     async fn bind_gcp(
         &self,
-        session_id:      &str,
-        task_id:         &str,
-        name:            &raxis_credentials::CredentialName,
-        mount_as:        &str,
-        project:         &str,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
+        project: &str,
         numeric_project: Option<u64>,
-        lease_seconds:   u64,
-        forwarding:      Option<&GcpForwardingDecl>,
-        restrictions:    &GcpRestrictions,
+        lease_seconds: u64,
+        forwarding: Option<&GcpForwardingDecl>,
+        restrictions: &GcpRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let v3 = match forwarding {
             Some(f) if f.enabled => Some(build_gcp_forwarding(
-                name.as_str(), f, &restrictions.allowed_scopes,
+                name.as_str(),
+                f,
+                &restrictions.allowed_scopes,
             )?),
             _ => None,
         };
         let cfg = GcpProxyConfig {
-            listen_addr:        "127.0.0.1:0".to_owned(),
-            credential_name:    name.clone(),
-            consumer:           GcpOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            listen_addr: "127.0.0.1:0".to_owned(),
+            credential_name: name.clone(),
+            consumer: GcpOwnedConsumer::new("session", session_id.to_owned()),
             lease_seconds,
-            project_id:         project.to_owned(),
+            project_id: project.to_owned(),
             numeric_project_id: numeric_project,
-            forwarding:         v3.as_ref().map(|x| x.fwd.clone()),
-            restrictions:       GcpProxyRestrictions {
-                allowed_paths:  restrictions.allowed_paths.clone(),
+            forwarding: v3.as_ref().map(|x| x.fwd.clone()),
+            restrictions: GcpProxyRestrictions {
+                allowed_paths: restrictions.allowed_paths.clone(),
                 allowed_scopes: restrictions.allowed_scopes.clone(),
-                project:        restrictions.project.clone(),
+                project: restrictions.project.clone(),
             },
         };
         let audit_channel: Arc<dyn GcpAuditChannel> = Arc::new(GcpKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = match v3 {
-            Some(v3) => GcpProxy::bind_v3(
-                Arc::clone(&self.backend),
-                cfg,
-                audit_channel,
-                Arc::clone(&self.audit),
-                Arc::new(v3.http),
-                Arc::new(v3.cache),
-            ).await,
+            Some(v3) => {
+                GcpProxy::bind_v3(
+                    Arc::clone(&self.backend),
+                    cfg,
+                    audit_channel,
+                    Arc::clone(&self.audit),
+                    Arc::new(v3.http),
+                    Arc::new(v3.cache),
+                )
+                .await
+            }
             None => GcpProxy::bind(Arc::clone(&self.backend), cfg, audit_channel).await,
         }
         .map_err(|source| ManagerError::GcpBind {
             credential_name: name.as_str().to_owned(),
             source,
         })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "gcp",
+            proxy_type: "gcp",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Gcp(stats_handle),
+            stats: ProxyStatsHandle::Gcp(stats_handle),
             join,
         })
     }
@@ -2329,110 +2313,111 @@ impl CredentialProxyManager {
     #[allow(clippy::too_many_arguments)]
     async fn bind_azure(
         &self,
-        session_id:    &str,
-        task_id:       &str,
-        name:          &raxis_credentials::CredentialName,
-        mount_as:      &str,
-        tenant_id:     &str,
-        client_id:     Option<&str>,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
+        tenant_id: &str,
+        client_id: Option<&str>,
         lease_seconds: u64,
-        forwarding:    Option<&AzureForwardingDecl>,
-        restrictions:  &AzureRestrictions,
+        forwarding: Option<&AzureForwardingDecl>,
+        restrictions: &AzureRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let v3 = match forwarding {
             Some(f) if f.enabled => Some(build_azure_forwarding(name.as_str(), f)?),
             _ => None,
         };
         let cfg = AzureProxyConfig {
-            listen_addr:     "127.0.0.1:0".to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
-            consumer:        AzureOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            consumer: AzureOwnedConsumer::new("session", session_id.to_owned()),
             lease_seconds,
-            tenant_id:       tenant_id.to_owned(),
-            client_id:       client_id.map(|s| s.to_owned()),
-            forwarding:      v3.as_ref().map(|x| x.fwd.clone()),
-            restrictions:    AzureProxyRestrictions {
+            tenant_id: tenant_id.to_owned(),
+            client_id: client_id.map(|s| s.to_owned()),
+            forwarding: v3.as_ref().map(|x| x.fwd.clone()),
+            restrictions: AzureProxyRestrictions {
                 allowed_resources: restrictions.allowed_resources.clone(),
-                allowed_actions:   restrictions
+                allowed_actions: restrictions
                     .allowed_actions
                     .iter()
-                    .map(|ra| raxis_credential_proxy_azure::restriction::ResourceActions {
-                        resource: ra.resource.clone(),
-                        actions:  ra.actions.clone(),
-                    })
+                    .map(
+                        |ra| raxis_credential_proxy_azure::restriction::ResourceActions {
+                            resource: ra.resource.clone(),
+                            actions: ra.actions.clone(),
+                        },
+                    )
                     .collect(),
             },
         };
         let audit_channel: Arc<dyn AzureAuditChannel> = Arc::new(AzureKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = match v3 {
-            Some(v3) => AzureProxy::bind_v3(
-                Arc::clone(&self.backend),
-                cfg,
-                audit_channel,
-                Arc::clone(&self.audit),
-                Arc::new(v3.http),
-                Arc::new(v3.cache),
-            ).await,
+            Some(v3) => {
+                AzureProxy::bind_v3(
+                    Arc::clone(&self.backend),
+                    cfg,
+                    audit_channel,
+                    Arc::clone(&self.audit),
+                    Arc::new(v3.http),
+                    Arc::new(v3.cache),
+                )
+                .await
+            }
             None => AzureProxy::bind(Arc::clone(&self.backend), cfg, audit_channel).await,
         }
         .map_err(|source| ManagerError::AzureBind {
             credential_name: name.as_str().to_owned(),
             source,
         })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "azure",
+            proxy_type: "azure",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Azure(stats_handle),
+            stats: ProxyStatsHandle::Azure(stats_handle),
             join,
         })
     }
 
     async fn bind_mysql(
         &self,
-        session_id:   &str,
-        task_id:      &str,
-        name:         &raxis_credentials::CredentialName,
-        mount_as:     &str,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
         restrictions: &MysqlRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let cfg = MysqlProxyConfig {
-            listen_addr:     "127.0.0.1:0".to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
-            consumer:        MysqlOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
-            server_version:  "8.0.0-raxis-handshake".to_owned(),
+            consumer: MysqlOwnedConsumer::new("session", session_id.to_owned()),
+            server_version: "8.0.0-raxis-handshake".to_owned(),
             restrictions: MysqlProxyRestrictions {
                 allow_only_select: restrictions.allow_only_select,
-                allowed_tables:    restrictions.allowed_tables.clone(),
-                forbidden_tables:  restrictions.forbidden_tables.clone(),
-                max_result_rows:   restrictions.max_result_rows,
-                enforce:           restrictions.enforce,
+                allowed_tables: restrictions.allowed_tables.clone(),
+                forbidden_tables: restrictions.forbidden_tables.clone(),
+                max_result_rows: restrictions.max_result_rows,
+                enforce: restrictions.enforce,
             },
-            log_content:     false,
+            log_content: false,
         };
         let audit_channel: Arc<dyn MysqlAuditChannel> = Arc::new(MysqlKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = MysqlProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2440,53 +2425,52 @@ impl CredentialProxyManager {
                 credential_name: name.as_str().to_owned(),
                 source,
             })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "mysql",
+            proxy_type: "mysql",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Mysql(stats_handle),
+            stats: ProxyStatsHandle::Mysql(stats_handle),
             join,
         })
     }
 
     async fn bind_mssql(
         &self,
-        session_id:   &str,
-        task_id:      &str,
-        name:         &raxis_credentials::CredentialName,
-        mount_as:     &str,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
         restrictions: &MssqlRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let cfg = MssqlProxyConfig {
-            listen_addr:     "127.0.0.1:0".to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
-            consumer:        MssqlOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
-            server_version:  "16.0.1000.6-raxis-handshake".to_owned(),
+            consumer: MssqlOwnedConsumer::new("session", session_id.to_owned()),
+            server_version: "16.0.1000.6-raxis-handshake".to_owned(),
             restrictions: MssqlProxyRestrictions {
                 allow_only_select: restrictions.allow_only_select,
-                allowed_tables:    restrictions.allowed_tables.clone(),
-                forbidden_tables:  restrictions.forbidden_tables.clone(),
-                max_result_rows:   restrictions.max_result_rows,
-                enforce:           restrictions.enforce,
+                allowed_tables: restrictions.allowed_tables.clone(),
+                forbidden_tables: restrictions.forbidden_tables.clone(),
+                max_result_rows: restrictions.max_result_rows,
+                enforce: restrictions.enforce,
             },
-            log_content:     false,
+            log_content: false,
         };
         let audit_channel: Arc<dyn MssqlAuditChannel> = Arc::new(MssqlKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = MssqlProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2494,51 +2478,50 @@ impl CredentialProxyManager {
                 credential_name: name.as_str().to_owned(),
                 source,
             })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "mssql",
+            proxy_type: "mssql",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Mssql(stats_handle),
+            stats: ProxyStatsHandle::Mssql(stats_handle),
             join,
         })
     }
 
     async fn bind_mongodb(
         &self,
-        session_id:   &str,
-        task_id:      &str,
-        name:         &raxis_credentials::CredentialName,
-        mount_as:     &str,
+        session_id: &str,
+        task_id: &str,
+        name: &raxis_credentials::CredentialName,
+        mount_as: &str,
         restrictions: &MongodbRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let cfg = MongodbProxyConfig {
-            listen_addr:     "127.0.0.1:0".to_owned(),
+            listen_addr: "127.0.0.1:0".to_owned(),
             credential_name: name.clone(),
-            consumer:        MongodbOwnedConsumer::new(
-                "session",
-                session_id.to_owned(),
-            ),
+            consumer: MongodbOwnedConsumer::new("session", session_id.to_owned()),
             restrictions: MongodbProxyRestrictions {
-                allow_read_only:        restrictions.allow_read_only,
-                allowed_collections:    restrictions.allowed_collections.clone(),
-                forbidden_collections:  restrictions.forbidden_collections.clone(),
-                max_documents:          restrictions.max_documents,
-                enforce:                restrictions.enforce,
+                allow_read_only: restrictions.allow_read_only,
+                allowed_collections: restrictions.allowed_collections.clone(),
+                forbidden_collections: restrictions.forbidden_collections.clone(),
+                max_documents: restrictions.max_documents,
+                enforce: restrictions.enforce,
             },
         };
         let audit_channel: Arc<dyn MongodbAuditChannel> = Arc::new(MongodbKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
-            task_id:    task_id.to_owned(),
+            task_id: task_id.to_owned(),
         });
         let proxy = MongodbProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2546,20 +2529,22 @@ impl CredentialProxyManager {
                 credential_name: name.as_str().to_owned(),
                 source,
             })?;
-        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
-            credential_name: name.as_str().to_owned(),
-            source,
-        })?;
+        let addr = proxy
+            .local_addr()
+            .map_err(|source| ManagerError::LocalAddr {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
         let stats_handle = proxy.stats_handle();
         let join = tokio::spawn(async move {
             proxy.serve().await;
         });
         Ok(ActiveProxy {
-            proxy_type:      "mongodb",
+            proxy_type: "mongodb",
             credential_name: name.as_str().to_owned(),
-            mount_as:        mount_as.to_owned(),
+            mount_as: mount_as.to_owned(),
             addr,
-            stats:           ProxyStatsHandle::Mongodb(stats_handle),
+            stats: ProxyStatsHandle::Mongodb(stats_handle),
             join,
         })
     }
@@ -2577,24 +2562,26 @@ impl CredentialProxyManager {
 // ---------------------------------------------------------------------------
 
 struct AwsV3 {
-    fwd:   AwsForwardingConfig,
-    http:  CloudHttpClient,
+    fwd: AwsForwardingConfig,
+    http: CloudHttpClient,
     cache: TokenCache<AwsStsCacheValue>,
 }
 
 fn build_aws_forwarding(
     credential_name: &str,
-    decl:            &AwsForwardingDecl,
-    role_arn:        Option<&str>,
+    decl: &AwsForwardingDecl,
+    role_arn: Option<&str>,
 ) -> Result<AwsV3, ManagerError> {
-    let role_arn = role_arn.ok_or_else(|| ManagerError::CloudForwardingConfig {
-        credential_name: credential_name.to_owned(),
-        detail:          "aws forwarding requires `role_arn` on the ProxyDecl".to_owned(),
-    })?.to_owned();
+    let role_arn = role_arn
+        .ok_or_else(|| ManagerError::CloudForwardingConfig {
+            credential_name: credential_name.to_owned(),
+            detail: "aws forwarding requires `role_arn` on the ProxyDecl".to_owned(),
+        })?
+        .to_owned();
     if decl.region.is_empty() {
         return Err(ManagerError::CloudForwardingConfig {
             credential_name: credential_name.to_owned(),
-            detail:          "aws forwarding requires `region`".to_owned(),
+            detail: "aws forwarding requires `region`".to_owned(),
         });
     }
     // Spec §7.1 clamp.
@@ -2608,16 +2595,19 @@ fn build_aws_forwarding(
         });
     }
     let upstream = match decl.endpoint_kind.as_str() {
-        "global"   => CloudUpstreamHost::aws_global(),
-        "regional" => CloudUpstreamHost::aws_regional(&decl.region)
-            .map_err(|e| ManagerError::CloudForwardingConfig {
+        "global" => CloudUpstreamHost::aws_global(),
+        "regional" => CloudUpstreamHost::aws_regional(&decl.region).map_err(|e| {
+            ManagerError::CloudForwardingConfig {
                 credential_name: credential_name.to_owned(),
                 detail: format!("aws regional STS endpoint failed: {e}"),
-            })?,
-        other => return Err(ManagerError::CloudForwardingConfig {
-            credential_name: credential_name.to_owned(),
-            detail: format!("aws endpoint_kind={other:?} not in {{global, regional}}"),
-        }),
+            }
+        })?,
+        other => {
+            return Err(ManagerError::CloudForwardingConfig {
+                credential_name: credential_name.to_owned(),
+                detail: format!("aws endpoint_kind={other:?} not in {{global, regional}}"),
+            })
+        }
     };
     let http = CloudHttpClient::new(upstream.clone()).map_err(|e| {
         ManagerError::CloudForwardingConfig {
@@ -2625,30 +2615,28 @@ fn build_aws_forwarding(
             detail: format!("aws CloudHttpClient construction failed: {e}"),
         }
     })?;
-    let safety_window = std::time::Duration::from_secs(
-        decl.cache_safety_window_seconds.max(60),
-    );
+    let safety_window = std::time::Duration::from_secs(decl.cache_safety_window_seconds.max(60));
     let cache = TokenCache::<AwsStsCacheValue>::new(safety_window);
     let fwd = AwsForwardingConfig {
         upstream,
-        region:              decl.region.clone(),
+        region: decl.region.clone(),
         role_arn,
-        external_id:         decl.external_id.clone(),
-        duration_seconds:    decl.duration_seconds,
+        external_id: decl.external_id.clone(),
+        duration_seconds: decl.duration_seconds,
         cache_safety_window: safety_window,
     };
     Ok(AwsV3 { fwd, http, cache })
 }
 
 struct GcpV3 {
-    fwd:   GcpForwardingConfig,
-    http:  CloudHttpClient,
+    fwd: GcpForwardingConfig,
+    http: CloudHttpClient,
     cache: TokenCache<GcpCacheValue>,
 }
 
 fn build_gcp_forwarding(
     credential_name: &str,
-    decl:            &GcpForwardingDecl,
+    decl: &GcpForwardingDecl,
     fallback_scopes: &[String],
 ) -> Result<GcpV3, ManagerError> {
     let scopes: Vec<String> = match decl.scopes.as_ref() {
@@ -2658,7 +2646,8 @@ fn build_gcp_forwarding(
                 return Err(ManagerError::CloudForwardingConfig {
                     credential_name: credential_name.to_owned(),
                     detail: "gcp forwarding requires `scopes` \
-                             or `restrictions.allowed_scopes` to be non-empty".to_owned(),
+                             or `restrictions.allowed_scopes` to be non-empty"
+                        .to_owned(),
                 });
             }
             fallback_scopes.to_vec()
@@ -2672,28 +2661,26 @@ fn build_gcp_forwarding(
             detail: format!("gcp CloudHttpClient construction failed: {e}"),
         }
     })?;
-    let safety_window = std::time::Duration::from_secs(
-        decl.cache_safety_window_seconds.max(60),
-    );
+    let safety_window = std::time::Duration::from_secs(decl.cache_safety_window_seconds.max(60));
     let cache = TokenCache::<GcpCacheValue>::new(safety_window);
     let fwd = GcpForwardingConfig {
         upstream,
         scopes,
-        jwt_lifetime:        std::time::Duration::from_secs(lifetime),
+        jwt_lifetime: std::time::Duration::from_secs(lifetime),
         cache_safety_window: safety_window,
     };
     Ok(GcpV3 { fwd, http, cache })
 }
 
 struct AzureV3 {
-    fwd:   AzureForwardingConfig,
-    http:  CloudHttpClient,
+    fwd: AzureForwardingConfig,
+    http: CloudHttpClient,
     cache: TokenCache<AzureCacheValue>,
 }
 
 fn build_azure_forwarding(
     credential_name: &str,
-    decl:            &AzureForwardingDecl,
+    decl: &AzureForwardingDecl,
 ) -> Result<AzureV3, ManagerError> {
     let upstream = CloudUpstreamHost::azure_login();
     let http = CloudHttpClient::new(upstream.clone()).map_err(|e| {
@@ -2702,9 +2689,7 @@ fn build_azure_forwarding(
             detail: format!("azure CloudHttpClient construction failed: {e}"),
         }
     })?;
-    let safety_window = std::time::Duration::from_secs(
-        decl.cache_safety_window_seconds.max(60),
-    );
+    let safety_window = std::time::Duration::from_secs(decl.cache_safety_window_seconds.max(60));
     let cache = TokenCache::<AzureCacheValue>::new(safety_window);
     let fwd = AzureForwardingConfig {
         upstream,
@@ -2861,7 +2846,11 @@ mod tests {
         }
     }
 
-    fn build_manager() -> (CredentialProxyManager, Arc<FakeAuditSink>, tempfile::TempDir) {
+    fn build_manager() -> (
+        CredentialProxyManager,
+        Arc<FakeAuditSink>,
+        tempfile::TempDir,
+    ) {
         let tmp = tempfile::tempdir().expect("tmpdir");
         // Provision a single credential the postgres bind path can
         // resolve. The body shape doesn't matter for `start_for_session`
@@ -2918,9 +2907,9 @@ users:
         let (mgr, audit, _tmp) = build_manager();
 
         let decls = vec![TaskCredentialDecl {
-            name:     CredentialName::new("pg-staging"),
+            name: CredentialName::new("pg-staging"),
             mount_as: "DATABASE_URL".to_owned(),
-            proxy:    ProxyDecl::Postgres {
+            proxy: ProxyDecl::Postgres {
                 restrictions: PostgresRestrictions {
                     allow_only_select: false,
                     ..Default::default()
@@ -2949,19 +2938,21 @@ users:
             "expected loopback postgres URL, got {database_url}",
         );
 
-        let started_events: Vec<_> = audit.events()
+        let started_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
             .collect();
         assert_eq!(started_events.len(), 1, "exactly one Started event");
         assert_eq!(started_events[0].session_id.as_deref(), Some("sess-1"));
-        assert_eq!(started_events[0].task_id.as_deref(),    Some("task-1"));
+        assert_eq!(started_events[0].task_id.as_deref(), Some("task-1"));
 
         let report = handles.shutdown().expect("shutdown");
         assert_eq!(report.stopped.len(), 1);
         assert_eq!(report.stopped[0].proxy_type, "postgres");
 
-        let stopped_events: Vec<_> = audit.events()
+        let stopped_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStopped")
             .collect();
@@ -2974,10 +2965,10 @@ users:
         let (mgr, audit, _tmp) = build_manager();
 
         let decls = vec![TaskCredentialDecl {
-            name:     CredentialName::new("api-key"),
+            name: CredentialName::new("api-key"),
             mount_as: "API_BASE_URL".to_owned(),
-            proxy:    ProxyDecl::Http {
-                auth_mode:    HttpAuthMode::Bearer,
+            proxy: ProxyDecl::Http {
+                auth_mode: HttpAuthMode::Bearer,
                 upstream_url: "https://api.example.com/v1".to_owned(),
                 restrictions: HttpRestrictions::default(),
             },
@@ -2989,7 +2980,8 @@ users:
             .expect("start");
         assert_eq!(handles.len(), 1);
 
-        let started_events: Vec<_> = audit.events()
+        let started_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
             .collect();
@@ -3015,13 +3007,15 @@ users:
         );
 
         let decls = vec![TaskCredentialDecl {
-            name:     CredentialName::new("smtp-staging"),
+            name: CredentialName::new("smtp-staging"),
             mount_as: "SMTP_URL".to_owned(),
-            proxy:    ProxyDecl::Smtp {
-                auth_mode:            SmtpAuthMode::Plain { user: "smtp-user".to_owned() },
-                upstream_host_port:   "127.0.0.1:1".to_owned(),
+            proxy: ProxyDecl::Smtp {
+                auth_mode: SmtpAuthMode::Plain {
+                    user: "smtp-user".to_owned(),
+                },
+                upstream_host_port: "127.0.0.1:1".to_owned(),
                 require_upstream_tls: false,
-                restrictions:         SmtpRestrictions {
+                restrictions: SmtpRestrictions {
                     allowed_sender_address: Some("noreply@example.com".to_owned()),
                     allowed_recipient_domains: vec!["customers.example.com".to_owned()],
                     max_recipients_per_message: Some(10),
@@ -3052,7 +3046,8 @@ users:
             "smtp loopback must not embed a scheme, got {smtp_url:?}",
         );
 
-        let started_events: Vec<_> = audit.events()
+        let started_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
             .collect();
@@ -3063,7 +3058,8 @@ users:
         assert_eq!(report.stopped.len(), 1);
         assert_eq!(report.stopped[0].proxy_type, "smtp");
 
-        let stopped_events: Vec<_> = audit.events()
+        let stopped_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStopped")
             .collect();
@@ -3075,9 +3071,9 @@ users:
         let (mgr, audit, _tmp) = build_manager();
 
         let decls = vec![TaskCredentialDecl {
-            name:     CredentialName::new("smtp-creds"),
+            name: CredentialName::new("smtp-creds"),
             mount_as: "SMTP_URL".to_owned(),
-            proxy:    ProxyDecl::Unknown,
+            proxy: ProxyDecl::Unknown,
         }];
 
         let result = mgr.start_for_session("sess-3", "task-3", &decls).await;
@@ -3090,7 +3086,8 @@ users:
         }
         // No partial audit emission when the very first decl is
         // unknown — we error out before the audit call.
-        let started_events: Vec<_> = audit.events()
+        let started_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
             .collect();
@@ -3102,9 +3099,9 @@ users:
         let (mgr, audit, _tmp) = build_manager();
 
         let decls = vec![TaskCredentialDecl {
-            name:     CredentialName::new("k8s-staging"),
+            name: CredentialName::new("k8s-staging"),
             mount_as: "KUBECONFIG".to_owned(),
-            proxy:    ProxyDecl::K8s {
+            proxy: ProxyDecl::K8s {
                 restrictions: HttpRestrictions::default(),
             },
         }];
@@ -3125,7 +3122,8 @@ users:
             "expected loopback http URL, got {kubeconfig_url}",
         );
 
-        let started_events: Vec<_> = audit.events()
+        let started_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
             .collect();
@@ -3140,9 +3138,9 @@ users:
         let (mgr, audit, _tmp) = build_manager();
 
         let decls = vec![TaskCredentialDecl {
-            name:     CredentialName::new("k8s-broken"),
+            name: CredentialName::new("k8s-broken"),
             mount_as: "KUBECONFIG".to_owned(),
-            proxy:    ProxyDecl::K8s {
+            proxy: ProxyDecl::K8s {
                 restrictions: HttpRestrictions::default(),
             },
         }];
@@ -3153,7 +3151,10 @@ users:
             .err()
             .expect("broken kubeconfig should be rejected");
         match err {
-            ManagerError::KubeconfigResolution { credential_name, detail } => {
+            ManagerError::KubeconfigResolution {
+                credential_name,
+                detail,
+            } => {
                 assert_eq!(credential_name, "k8s-broken");
                 assert!(
                     detail.contains("server"),
@@ -3163,7 +3164,8 @@ users:
             other => panic!("expected KubeconfigResolution, got {other:?}"),
         }
         // No audit emission for a failed bind.
-        let started_events: Vec<_> = audit.events()
+        let started_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
             .collect();
@@ -3184,7 +3186,8 @@ users:
         assert!(report.stopped.is_empty());
 
         // No started/stopped events for an empty plan declaration.
-        let cred_events: Vec<_> = audit.events()
+        let cred_events: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str().starts_with("CredentialProxy"))
             .collect();
@@ -3197,9 +3200,9 @@ users:
 
         let decls = vec![
             TaskCredentialDecl {
-                name:     CredentialName::new("pg-staging"),
+                name: CredentialName::new("pg-staging"),
                 mount_as: "DATABASE_URL".to_owned(),
-                proxy:    ProxyDecl::Postgres {
+                proxy: ProxyDecl::Postgres {
                     restrictions: PostgresRestrictions {
                         allow_only_select: true,
                         ..Default::default()
@@ -3207,10 +3210,10 @@ users:
                 },
             },
             TaskCredentialDecl {
-                name:     CredentialName::new("api-key"),
+                name: CredentialName::new("api-key"),
                 mount_as: "API_BASE_URL".to_owned(),
-                proxy:    ProxyDecl::Http {
-                    auth_mode:    HttpAuthMode::Bearer,
+                proxy: ProxyDecl::Http {
+                    auth_mode: HttpAuthMode::Bearer,
                     upstream_url: "https://api.example.com/v1".to_owned(),
                     restrictions: HttpRestrictions::default(),
                 },
@@ -3223,7 +3226,8 @@ users:
             .expect("multi-decl start");
         assert_eq!(handles.len(), 2);
 
-        let started: Vec<&'static str> = audit.events()
+        let started: Vec<&'static str> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
             .map(|e| e.kind.as_str())

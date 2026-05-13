@@ -33,9 +33,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
-use raxis_genesis_tools::{
-    pubkey_fingerprint, render_genesis_audit_record, GenesisAuditInputs,
-};
+use raxis_genesis_tools::{pubkey_fingerprint, render_genesis_audit_record, GenesisAuditInputs};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -198,8 +196,14 @@ mod tests {
         // (an enum, not a Result) — anything else means the genesis writer
         // produced bytes the production reader would reject.
         match quick_chain_check(tmp.path()) {
-            crate::reader::ChainQuickCheck::Ok { last_seq, segment_count } => {
-                assert_eq!(last_seq, 0, "genesis segment has exactly one record (seq=0)");
+            crate::reader::ChainQuickCheck::Ok {
+                last_seq,
+                segment_count,
+            } => {
+                assert_eq!(
+                    last_seq, 0,
+                    "genesis segment has exactly one record (seq=0)"
+                );
                 assert_eq!(segment_count, 1, "genesis writes exactly one segment file");
             }
             other => panic!("genesis segment must pass quick chain check, got: {other:?}"),
