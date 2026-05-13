@@ -162,6 +162,35 @@ mod linux {
         // for AVF; pipe to firecracker's `boot_args` console for
         // Firecracker).
         redirect_stdio_to_console();
+
+        // Bring up the loopback interface (`lo`). The Linux kernel
+        // ships every interface in the `DOWN + !RUNNING` state at
+        // boot; until we explicitly issue `ip link set lo up` the
+        // 127.0.0.0/8 address space has no usable backing device
+        // and any `bind(127.0.0.1:N)` returns `EADDRNOTAVAIL`
+        // (Linux errno 99 — "Cannot assign requested address").
+        //
+        // Three callsites depend on `lo` being up inside the
+        // executor VM:
+        //   * `raxis_tproxy::loopback_forwarder::spawn_forwarder` —
+        //     binds `127.0.0.1:<guest_loopback_port>` for every
+        //     credential proxy. Without `lo` up the executor task
+        //     fails with the same `EADDRNOTAVAIL` cascade that the
+        //     substrate-loopback fix `8a26540` was meant to remove.
+        //   * tools that loopback-spawn a sidecar service (none today,
+        //     but the contract is symmetric with a non-virtualised
+        //     dev host where `lo` is always up).
+        //   * future planner-side health checks that dial
+        //     `127.0.0.1:<port>` to probe their own listeners.
+        //
+        // Failure here is logged but does NOT abort: a substrate
+        // that pre-brings-up `lo` (a future Firecracker variant
+        // that ships an MMDS-stage netlink hook, for example) MUST
+        // not be broken by a duplicate set-flags call. The `lo`
+        // interface tolerates idempotent `IFF_UP | IFF_RUNNING`
+        // sets — the second call returns success without churning
+        // the routing table.
+        bring_up_loopback();
     }
 
     /// Open `/dev/console` and dup it onto fd 0/1/2. Idempotent and
@@ -242,6 +271,115 @@ mod linux {
               \"version\":{:?}}}",
             env!("CARGO_PKG_VERSION"),
         );
+    }
+
+    /// Bring up the loopback interface (`lo`) inside the guest.
+    ///
+    /// Equivalent to `ip link set lo up` / `ifconfig lo up` but
+    /// done via direct `ioctl(SIOCSIFFLAGS)` so the in-VM rootfs
+    /// does not need to ship `iproute2` or `net-tools` — neither
+    /// is in the executor canonical image (`planner-core/Cargo.toml`
+    /// lines 51-58 confirm the rootfs is planner-binary-only).
+    ///
+    /// Pure-libc implementation — no extra crate deps. Idempotent:
+    /// reading the current flags first means a substrate that
+    /// pre-brings-up `lo` reports `iface_already_up` instead of
+    /// re-issuing the set.
+    pub(super) fn bring_up_loopback() {
+        // SAFETY: every libc call below operates on values whose
+        // lifetimes are bounded by this function. The `ifreq`
+        // struct is zeroed before we write the interface name, the
+        // socket fd is closed unconditionally on every exit path,
+        // and `ioctl` is invoked with the canonical SIOC* request
+        // codes documented in `netdevice(7)`.
+        #[allow(unsafe_code)]
+        unsafe {
+            // `socket(AF_INET, SOCK_DGRAM, 0)` — the canonical
+            // "control plane" socket every netdevice ioctl is
+            // dispatched against. We pick AF_INET (not AF_PACKET)
+            // because it's available on the leanest kernel configs;
+            // SIOCSIFFLAGS does not actually read or write any IP
+            // packets, the socket is just the dispatch handle.
+            let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+            if sock < 0 {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"step\":\"guest-init\",\
+                      \"event\":\"loopback_socket_failed\",\
+                      \"errno\":{}}}",
+                    io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(-1),
+                );
+                return;
+            }
+
+            let mut ifr: libc::ifreq = std::mem::zeroed();
+            // Copy "lo" into ifr_name (NUL-terminated). `ifr_name`
+            // is `[c_char; IFNAMSIZ]`; "lo" plus a NUL fits in
+            // 3 bytes which is well under the 16-byte cap.
+            let name = b"lo\0";
+            for (i, &byte) in name.iter().enumerate() {
+                ifr.ifr_name[i] = byte as libc::c_char;
+            }
+
+            // Read current flags via SIOCGIFFLAGS. The libc `ioctl`
+            // request constants for AF_INET netdevice ioctls are
+            // typed as `u64` on aarch64-musl; the syscall takes
+            // `Ioctl` (currently `c_ulong`/`i32` depending on
+            // libc version + target). We round-trip via `c_ulong`
+            // so the cast is platform-correct on every target the
+            // planner ships to.
+            if libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::c_ulong as _, &mut ifr) < 0 {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"step\":\"guest-init\",\
+                      \"event\":\"loopback_ioctl_get_failed\",\
+                      \"errno\":{}}}",
+                    io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(-1),
+                );
+                libc::close(sock);
+                return;
+            }
+
+            // `ifreq` is a C union: the flags live at
+            // `ifr_ifru.ifru_flags` (i16). On Linux's libc binding
+            // the union is exposed via the `ifr_ifru` field with
+            // typed accessors; we read/write the flags slot
+            // directly through the union to keep this dependency-
+            // free of any helper crate.
+            let cur_flags = ifr.ifr_ifru.ifru_flags;
+            let want = cur_flags
+                | (libc::IFF_UP as i16)
+                | (libc::IFF_RUNNING as i16);
+            if cur_flags == want {
+                eprintln!(
+                    "{{\"level\":\"info\",\"step\":\"guest-init\",\
+                      \"event\":\"loopback_already_up\"}}"
+                );
+                libc::close(sock);
+                return;
+            }
+            ifr.ifr_ifru.ifru_flags = want;
+
+            if libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::c_ulong as _, &ifr) < 0 {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"step\":\"guest-init\",\
+                      \"event\":\"loopback_ioctl_set_failed\",\
+                      \"errno\":{}}}",
+                    io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(-1),
+                );
+                libc::close(sock);
+                return;
+            }
+            libc::close(sock);
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"guest-init\",\
+                  \"event\":\"loopback_up\"}}"
+            );
+        }
     }
 
     fn try_mount(target: &str, fs_type: &str, flags: libc::c_ulong) -> io::Result<()> {
