@@ -1,0 +1,110 @@
+/* SessionDetail-page failure-reason rendering. Pinned by
+ * INV-DASHBOARD-FAILURE-VISIBILITY-01 §5.1 + §5.4 + §5.5:
+ *   - Failed session with `failure` populated renders the full
+ *     `<FailureReasonPanel>` body.
+ *   - Failed session with `failure: null` renders the
+ *     "No reason supplied — kernel bug" affordance.
+ *   - Healthy session does NOT render the panel.
+ *
+ * `SessionStream` is mocked because it opens a real EventSource
+ * in jsdom — irrelevant to the failure-panel assertion and
+ * noisy in test output. */
+
+import { describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+
+import { dashboardApi } from "@/api/client";
+import { SessionDetailPage } from "@/pages/SessionDetail";
+import type { FailureInfo, SessionView } from "@/types/api";
+
+vi.mock("@/components/SessionStream", () => ({
+  SessionStream: () => <div data-testid="session-stream-mock" />,
+}));
+
+const FAILURE: FailureInfo = {
+  kind: "SessionVmFailedFinal",
+  message: "VM scaling exhausted retries",
+  fields: [
+    { label: "failure_class", value: "Isolation" },
+    { label: "total_attempts", value: "5" },
+  ],
+  artifacts: [
+    {
+      label: "Kernel log",
+      href: "/var/log/raxis/kernel.stderr.log",
+    },
+  ],
+  event_id: "evt_abc123",
+  seq: 12345,
+  observed_at: 1714500000,
+};
+
+function mockSession(s: Partial<SessionView>) {
+  const session: SessionView = {
+    session_id: "sess_abc",
+    role: "Executor",
+    initiative_id: "init_xyz",
+    task_id: "task_xyz",
+    state: "Failed",
+    provider: "anthropic",
+    model: "claude",
+    input_tokens: 100,
+    output_tokens: 50,
+    created_at: 1714500000,
+    updated_at: 1714500000,
+    failure: null,
+    ...s,
+  };
+  vi.spyOn(dashboardApi.sessions, "get").mockResolvedValue(session);
+  vi.spyOn(dashboardApi.git, "list").mockResolvedValue([]);
+}
+
+function renderAt(sessionId: string) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchInterval: false } },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[`/sessions/${sessionId}`]}>
+        <Routes>
+          <Route path="/sessions/:id" element={<SessionDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+describe("<SessionDetailPage> failure rendering", () => {
+  it("renders the structured failure panel on a Failed session with reason", async () => {
+    mockSession({ state: "Failed", failure: FAILURE });
+    renderAt("sess_abc");
+    expect(await screen.findByTestId("failure-kind")).toHaveTextContent(
+      "SessionVmFailedFinal",
+    );
+    expect(screen.getByTestId("failure-message")).toHaveTextContent(
+      "VM scaling exhausted retries",
+    );
+    expect(screen.getByTestId("failure-fields")).toHaveTextContent(
+      "failure_class",
+    );
+  });
+
+  it("renders the kernel-bug affordance when a Failed session ships failure=null", async () => {
+    mockSession({ state: "Failed", failure: null });
+    renderAt("sess_abc");
+    expect(
+      await screen.findByText(/No reason supplied — kernel bug/),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("failure-kind")).toBeNull();
+  });
+
+  it("renders no failure panel on a Running session", async () => {
+    mockSession({ state: "Running", failure: null });
+    renderAt("sess_abc");
+    expect(await screen.findByTestId("session-stream-mock")).toBeInTheDocument();
+    expect(screen.queryByTestId("failure-kind")).toBeNull();
+    expect(screen.queryByText(/No reason supplied/)).toBeNull();
+  });
+});
