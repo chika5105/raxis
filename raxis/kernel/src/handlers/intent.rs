@@ -1587,7 +1587,29 @@ fn run_phase_c(
 //    Transitions Running → Failed. Requires `justification`."
 //
 // Justification validation: non-empty, max 2048 chars (planner-api.md).
-// Task must be in Running state (Admitted → Failed is not a legal FSM edge).
+//
+// V2.5 — accept both `Admitted` and `Running` states (mirroring
+// `handle_complete_task`'s V2.5 leniency at §2.5.8). The Executor's
+// terminal intent contract permits a single `report_failure` per
+// session as the very first wire message (the planner gives up
+// before submitting any witness). Without this leniency such a
+// session is structurally undeadable: the executor session is
+// revoked on EOF but the task stays `Admitted` forever, blocking
+// the `respawn_orchestrator_for_initiative` trigger that needs a
+// Running → Failed (or Running → Completed) transition to fire.
+// The DAG silently stalls and the operator has no way to retry
+// without aborting the entire initiative.
+//
+// `Admitted → Failed` is not a legal direct FSM edge
+// (`task_transitions::is_legal_transition` rejects it) — the
+// terminal-states-have-no-outbound-edges invariant requires every
+// terminal write to come from `Running`. We honour that by
+// transitioning `Admitted → Running → Failed` inside ONE SQLite
+// transaction so the intermediate `Running` row is never visible
+// to a concurrent reader. This matches the inline Phase A
+// admission path in `handle_complete_task` (lines ~1860-1875),
+// which also wraps `transition_task_in_tx(...Running)` in the
+// same tx as the subsequent state-flip.
 // ---------------------------------------------------------------------------
 
 fn handle_report_failure(
@@ -1598,8 +1620,11 @@ fn handle_report_failure(
     store: &Store,
     policy: &raxis_policy::PolicyBundle,
 ) -> HandlerResult {
-    // Must be Running to self-report failure (spec §8.1 Task FSM).
-    if task_state != TaskState::Running {
+    // Accept Admitted (planner gave up before any witness intent) or
+    // Running (planner gave up mid-task). Any other state — Completed,
+    // Failed, GatesPending, BlockedRecoveryPending, Aborted, Cancelled —
+    // is not a legal source for a self-reported failure.
+    if !matches!(task_state, TaskState::Admitted | TaskState::Running) {
         return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
     }
 
@@ -1612,20 +1637,43 @@ fn handle_report_failure(
         return Err((PlannerErrorCode::InvalidRequest, task_state));
     }
 
-    // FSM: Running → Failed.
+    // FSM: Admitted → Running → Failed (atomic) or Running → Failed (single edge).
     // block_reason carries the planner's justification for operator review.
-    fsm_transition(
-        req.task_id.as_str(),
-        TaskState::Failed,
-        Some(justification.as_str()),
-        TransitionActor::Kernel,
-        store,
-    ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+    if task_state == TaskState::Admitted {
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction()
+            .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        transition_task_in_tx(
+            &tx,
+            req.task_id.as_str(),
+            TaskState::Running,
+            None,
+            TransitionActor::Kernel,
+        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        transition_task_in_tx(
+            &tx,
+            req.task_id.as_str(),
+            TaskState::Failed,
+            Some(justification.as_str()),
+            TransitionActor::Kernel,
+        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        tx.commit()
+            .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+    } else {
+        fsm_transition(
+            req.task_id.as_str(),
+            TaskState::Failed,
+            Some(justification.as_str()),
+            TransitionActor::Kernel,
+            store,
+        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+    }
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"TaskFailed\",\
-         \"task_id\":\"{}\",\"justification\":\"{}\"}}",
+         \"task_id\":\"{}\",\"from_state\":\"{}\",\"justification\":\"{}\"}}",
         req.task_id.as_str(),
+        task_state.as_sql_str(),
         &justification[..justification.len().min(120)]
     );
 
@@ -5037,6 +5085,143 @@ mod tests {
     fn justification_at_2049_chars_is_rejected() {
         let j = "x".repeat(2049);
         assert!(j.len() > 2048); // would trigger InvalidRequest
+    }
+
+    /// Build a minimal `IntentRequest` for `ReportFailure`. The
+    /// handler reads `task_id` and `justification`; every other field
+    /// is a placeholder it ignores.
+    fn make_report_failure_request(task_id: &str, justification: &str) -> IntentRequest {
+        IntentRequest {
+            session_token:   "tok".into(),
+            sequence_number: 1,
+            envelope_nonce:  "0".repeat(32),
+            intent_kind:     IntentKind::ReportFailure,
+            task_id:         raxis_types::TaskId::parse(task_id).unwrap(),
+            base_sha:        None,
+            head_sha:        None,
+            submitted_claims: vec![],
+            justification:   Some(justification.to_owned()),
+            idempotency_key: None,
+            approval_token:  None,
+            approved:        None,
+            critique:        None,
+            resolved_via_escalation: None,
+            tokens_used:     None,
+            structured_output: None,
+        }
+    }
+
+    /// Regression: an Executor that gives up before submitting any
+    /// witness intent (its FIRST wire message is `ReportFailure`)
+    /// must NOT permanently strand the task in `Admitted`. The
+    /// handler accepts the failure, drives `Admitted → Running →
+    /// Failed` atomically, and returns `task_state = Failed` so the
+    /// orchestrator-respawn trigger fires (see `handle_inner`'s
+    /// post-EarlyResponse re-spawn dispatch keyed on `Ok(resp)` for
+    /// `IntentKind::ReportFailure`). Without this leniency the DAG
+    /// silently deadlocks: executor session is revoked on EOF, task
+    /// stays `Admitted`, no respawn is triggered, no operator-visible
+    /// failure is emitted.
+    #[test]
+    fn report_failure_from_admitted_transitions_to_failed() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t-fail-from-admitted");
+        let policy = default_test_policy();
+
+        assert_eq!(
+            task_state_of(&store, "t-fail-from-admitted"),
+            TaskState::Admitted.as_sql_str(),
+            "precondition: task must start in Admitted",
+        );
+
+        let req = make_report_failure_request(
+            "t-fail-from-admitted",
+            "executor surrendered without submitting a witness intent",
+        );
+        let resp = handle_report_failure(
+            req,
+            TaskState::Admitted,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+        )
+        .expect("ReportFailure from Admitted must be Accepted, not stranded");
+
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+        assert_eq!(resp.task_state, TaskState::Failed,
+            "wire response must surface Failed so the orchestrator-respawn dispatcher triggers");
+        assert_eq!(
+            task_state_of(&store, "t-fail-from-admitted"),
+            TaskState::Failed.as_sql_str(),
+            "store must reflect Failed (not Admitted, not Running) after Admitted→Running→Failed",
+        );
+    }
+
+    /// Sibling regression: classic `Running → Failed` path must still
+    /// work — the V2.5 leniency added an `Admitted` arm but must not
+    /// regress the existing edge.
+    #[test]
+    fn report_failure_from_running_transitions_to_failed() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-fail-from-running");
+        let policy = default_test_policy();
+
+        let req = make_report_failure_request(
+            "t-fail-from-running",
+            "policy violation discovered mid-task",
+        );
+        let resp = handle_report_failure(
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+        )
+        .expect("ReportFailure from Running must be Accepted (regression guard)");
+
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+        assert_eq!(resp.task_state, TaskState::Failed);
+        assert_eq!(
+            task_state_of(&store, "t-fail-from-running"),
+            TaskState::Failed.as_sql_str(),
+        );
+    }
+
+    /// Terminal-state guard: ReportFailure on a `Completed` (or any
+    /// other non-Admitted/Running) task must still reject with
+    /// `FailTaskNotRunning`. The leniency is narrow.
+    #[test]
+    fn report_failure_from_completed_is_rejected() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-completed");
+        commit_task_completion("t-completed", &[], None, &store).unwrap();
+        let policy = default_test_policy();
+
+        assert_eq!(
+            task_state_of(&store, "t-completed"),
+            TaskState::Completed.as_sql_str(),
+        );
+
+        let req = make_report_failure_request("t-completed", "too late");
+        let err = handle_report_failure(
+            req,
+            TaskState::Completed,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+        )
+        .expect_err("ReportFailure on Completed must reject");
+
+        assert_eq!(err.0, PlannerErrorCode::FailTaskNotRunning);
+        assert_eq!(err.1, TaskState::Completed);
+        assert_eq!(
+            task_state_of(&store, "t-completed"),
+            TaskState::Completed.as_sql_str(),
+            "Completed row must remain untouched (terminal-states-have-no-outbound-edges)",
+        );
     }
 
     // ── insert_task_intent_range — INV-TASK-PATH-02 substrate ──────────────
