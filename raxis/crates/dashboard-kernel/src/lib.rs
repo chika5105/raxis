@@ -739,12 +739,45 @@ impl DashboardData for KernelDashboardData {
         Ok(task_row_to_view(&conn, &row))
     }
 
-    fn list_sessions(&self, limit: u32) -> Result<Vec<SessionView>, ApiError> {
+    fn list_sessions(
+        &self,
+        limit: u32,
+        initiative_id: Option<&str>,
+    ) -> Result<Vec<SessionView>, ApiError> {
         let conn = self.open_ro()?;
-        let rows = raxis_store::views::sessions::active_list(&conn, limit.min(200) as usize)
-            .map_err(|e| ApiError::Internal { log_only: format!("sessions::active_list: {e}") })?;
+        let cap = limit.min(200) as usize;
+        let rows = raxis_store::views::sessions::active_list(&conn, cap).map_err(|e| {
+            ApiError::Internal {
+                log_only: format!("sessions::active_list: {e}"),
+            }
+        })?;
+        // Resolve the optional `?initiative_id=…` filter by
+        // walking the initiative's tasks and collecting any
+        // `session_id` they reference. The `sessions` catalog
+        // itself does not carry an initiative FK — tasks own
+        // the link — so this is the only consistent way to
+        // narrow without a schema change.
+        let allowed: Option<std::collections::HashSet<String>> = match initiative_id {
+            None => None,
+            Some(i) => {
+                let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
+                    .map_err(|e| ApiError::Internal {
+                        log_only: format!("tasks::list_by_initiative: {e}"),
+                    })?;
+                Some(
+                    tasks
+                        .into_iter()
+                        .filter_map(|t| t.session_id)
+                        .collect(),
+                )
+            }
+        };
         Ok(rows
             .into_iter()
+            .filter(|s| match &allowed {
+                Some(set) => set.contains(&s.session_id),
+                None => true,
+            })
             .map(|s| SessionView {
                 session_id: s.session_id,
                 role: s.role_id,

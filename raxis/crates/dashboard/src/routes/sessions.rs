@@ -23,6 +23,10 @@ pub struct ListQuery {
     /// Page size; clamped to `[1, 200]`. Default 50.
     #[serde(default = "default_limit")]
     pub limit: u32,
+    /// Filter by initiative id — narrows the result to sessions
+    /// that any task on this initiative is linked to.
+    #[serde(default)]
+    pub initiative_id: Option<String>,
 }
 
 fn default_limit() -> u32 { 50 }
@@ -37,7 +41,10 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    Ok(Json(state.data.list_sessions(q.limit.clamp(1, 200))?))
+    Ok(Json(state.data.list_sessions(
+        q.limit.clamp(1, 200),
+        q.initiative_id.as_deref(),
+    )?))
 }
 
 /// `GET /api/sessions/:id`.

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -14,12 +14,21 @@ const ROLES = ["All", "Orchestrator", "Executor", "Reviewer"];
 
 export function SessionsPage() {
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const initiativeId = params.get("initiative_id") ?? undefined;
   const [role, setRole] = useState<string>("All");
   const [search, setSearch] = useState("");
 
   const q = useQuery({
-    queryKey: ["sessions", { limit: 200 }],
-    queryFn: ({ signal }) => dashboardApi.sessions.list(200, signal),
+    queryKey: ["sessions", { limit: 200, initiativeId }],
+    queryFn: ({ signal }) =>
+      dashboardApi.sessions.list(
+        {
+          limit: 200,
+          ...(initiativeId ? { initiative_id: initiativeId } : {}),
+        },
+        signal,
+      ),
     refetchInterval: 3_000,
   });
 
@@ -57,6 +66,19 @@ export function SessionsPage() {
           </select>
         </div>
       </header>
+
+      {initiativeId && (
+        <div className="text-xs text-ink-muted">
+          Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
+          <button
+            type="button"
+            onClick={() => setParams({})}
+            className="text-accent hover:underline ml-2"
+          >
+            clear
+          </button>
+        </div>
+      )}
 
       {q.isPending ? (
         <PageSpinner />

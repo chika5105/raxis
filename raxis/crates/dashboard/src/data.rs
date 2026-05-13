@@ -643,7 +643,16 @@ pub trait DashboardData: Send + Sync + 'static {
     fn get_task(&self, task_id: &str) -> Result<TaskView, ApiError>;
 
     /// Sessions newest first. `limit ≤ 200`.
-    fn list_sessions(&self, limit: u32) -> Result<Vec<SessionView>, ApiError>;
+    /// Active session list. When `initiative_id` is `Some(_)` the
+    /// data layer narrows the result to sessions associated with
+    /// that initiative (via the `tasks.session_id` join — the
+    /// `sessions` catalog itself does not carry initiative FK).
+    /// Routed from `GET /api/sessions?initiative_id=…`.
+    fn list_sessions(
+        &self,
+        limit: u32,
+        initiative_id: Option<&str>,
+    ) -> Result<Vec<SessionView>, ApiError>;
 
     /// One session.
     fn get_session(&self, session_id: &str) -> Result<SessionView, ApiError>;
@@ -1155,8 +1164,22 @@ impl DashboardData for InMemoryDashboardData {
         Err(ApiError::NotFound { kind: "task".into() })
     }
 
-    fn list_sessions(&self, limit: u32) -> Result<Vec<SessionView>, ApiError> {
-        let mut out: Vec<SessionView> = self.inner.read().sessions.clone();
+    fn list_sessions(
+        &self,
+        limit: u32,
+        initiative_id: Option<&str>,
+    ) -> Result<Vec<SessionView>, ApiError> {
+        let mut out: Vec<SessionView> = self
+            .inner
+            .read()
+            .sessions
+            .iter()
+            .filter(|s| match initiative_id {
+                Some(i) => s.initiative_id.as_deref() == Some(i),
+                None => true,
+            })
+            .cloned()
+            .collect();
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         out.truncate(limit.min(200) as usize);
         Ok(out)

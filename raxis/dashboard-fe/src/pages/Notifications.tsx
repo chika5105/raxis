@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -14,13 +14,19 @@ import { notificationDisplaySummary } from "@/lib/notification-summary";
 export function NotificationsPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const [params, setParams] = useSearchParams();
+  const initiativeId = params.get("initiative_id") ?? undefined;
   const [unreadOnly, setUnreadOnly] = useState(false);
 
   const list = useQuery({
-    queryKey: ["notifications", { unreadOnly }],
+    queryKey: ["notifications", { unreadOnly, initiativeId }],
     queryFn: ({ signal }) =>
       dashboardApi.notifications.list(
-        { unread_only: unreadOnly, limit: 200 },
+        {
+          unread_only: unreadOnly,
+          limit: 200,
+          ...(initiativeId ? { initiative_id: initiativeId } : {}),
+        },
         signal,
       ),
     refetchInterval: 5_000,
@@ -77,6 +83,19 @@ export function NotificationsPage() {
           </button>
         </div>
       </header>
+
+      {initiativeId && (
+        <div className="text-xs text-ink-muted">
+          Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
+          <button
+            type="button"
+            onClick={() => setParams({})}
+            className="text-accent hover:underline ml-2"
+          >
+            clear
+          </button>
+        </div>
+      )}
 
       {items.length === 0 ? (
         <Empty title="No notifications." />

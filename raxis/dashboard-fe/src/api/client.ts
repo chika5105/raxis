@@ -233,8 +233,25 @@ export const dashboardApi = {
   },
 
   sessions: {
-    list: (limit = 50, signal?: AbortSignal): Promise<SessionView[]> =>
-      apiFetch<SessionView[]>(`/api/sessions?limit=${limit}`, signal ? { signal } : {}),
+    list: (
+      paramsOrLimit:
+        | number
+        | { limit?: number; initiative_id?: string }
+        = 50,
+      signal?: AbortSignal,
+    ): Promise<SessionView[]> => {
+      const params =
+        typeof paramsOrLimit === "number"
+          ? { limit: paramsOrLimit }
+          : paramsOrLimit;
+      const qs = new URLSearchParams();
+      qs.set("limit", String(params.limit ?? 50));
+      if (params.initiative_id) qs.set("initiative_id", params.initiative_id);
+      return apiFetch<SessionView[]>(
+        `/api/sessions?${qs}`,
+        signal ? { signal } : {},
+      );
+    },
     get: (id: string, signal?: AbortSignal): Promise<SessionView> =>
       apiFetch<SessionView>(`/api/sessions/${encodeURIComponent(id)}`, signal ? { signal } : {}),
   },
