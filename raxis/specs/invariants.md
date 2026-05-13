@@ -1699,6 +1699,268 @@ controls are in `policy.toml [orchestrator]`. See
 
 ---
 
+## §10.5 — Image resolution & operator-published images (INV-IMAGE-*, INV-OPERATOR-CUSTOM-IMAGE-*)
+
+Canonical home: `v2/canonical-images.md` (BYO end-to-end flow) and
+`v2/image-cache.md` (resolver trait + on-disk cache layout). These
+invariants pin the trust contract that binds the kernel's
+`policy.toml [[vm_images]]` admit-list to the bytes the substrate
+actually boots from. They sit alongside the `INV-PLANNER-HARNESS-*`
+canonical-image invariants (`INV-PLANNER-HARNESS-02` /
+`INV-PLANNER-HARNESS-05`) which cover the kernel-bundled Reviewer
+and Orchestrator images: the Operator-Custom-Image invariants below
+say "if you DO let operators ship their own image, here's the trust
+plumbing that survives the supply-chain hop", and the
+Image-Resolution-Per-Role invariant says "no role's image gets
+silently mis-bound to another role's image at activation".
+
+### INV-IMAGE-RESOLUTION-PER-ROLE-01 — Per-role image binding is
+non-substitutable
+
+**Statement.** Every session-spawn admits exactly ONE image-
+resolution path per agent role:
+
+* **Orchestrator activations** resolve through the kernel-canonical
+  `raxis-orchestrator-core` preflight in
+  `kernel/src/canonical_images_preflight.rs` —
+  `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` is compiled into the kernel
+  binary and re-verified at each spawn; mismatch fires
+  `SecurityViolationDetected { violation_kind:
+  "OrchestratorImageDigestMismatch" }` and refuses activation
+  (`INV-PLANNER-HARNESS-05`).
+* **Reviewer activations** resolve through the kernel-canonical
+  `raxis-reviewer-core` preflight, with the analogous compiled-in
+  `EXPECTED_REVIEWER_IMAGE_DIGEST` and
+  `SecurityViolationDetected { violation_kind:
+  "ReviewerImageDigestMismatch" }` taxonomy
+  (`INV-PLANNER-HARNESS-02`).
+* **Executor activations** resolve through one of two paths,
+  selected at admission and stamped on the activation row:
+    1. The operator-published `[[vm_images]]` registry, via
+       `kernel/src/handlers/intent.rs::resolve_vm_image_override`
+       calling
+       `raxis_image_cache::ImageResolver::resolve(oci_digest, …)`.
+       The resolver verifies the on-disk SHA-256 against the
+       policy-declared `oci_digest` and emits
+       `VmImageResolved { agent_role: "Executor", … }` on success
+       OR `SecurityViolationDetected { violation_kind:
+       "OperatorImageDigestMismatch" }` on mismatch
+       (`INV-OPERATOR-CUSTOM-IMAGE-01`,
+       `INV-OPERATOR-CUSTOM-IMAGE-02`).
+    2. The kernel-canonical `raxis-executor-starter` fallback when
+       no `[[vm_images]]` alias is bound to the activation. Same
+       preflight shape as Orchestrator / Reviewer.
+
+Cross-wiring is structurally rejected at policy load:
+`[[vm_images]]` entries declaring `role_restriction` containing
+`"Reviewer"` or `"Orchestrator"` fail with
+`FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` /
+`FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED` (per
+`policy/src/bundle.rs::validate_vm_images` — the
+`role_restriction` field is a `Vec<String>` admit-list, not a
+single role token). At admission,
+`validate_task_vm_images` rejects `[[tasks]] vm_image = "..."`
+on Reviewer-typed tasks with `reviewer_image_not_allowed`. The
+`VmImageResolved` audit event's `agent_role` field is normatively
+constrained to `"Executor"` so an audit-replay reader observing
+any other value is observing a kernel bug.
+
+A stub-fallback path that silently substitutes the canonical
+starter when the BYO resolution fails is structurally absent —
+both admission (`validate_vm_images` /
+`validate_default_executor_image`) and activation
+(`resolve_vm_image_override` returning a structured
+`VmImageResolveError` consumed by the activation handler) fail
+closed with `FAIL_POLICY_VIOLATION`, leaving the activation row
+in `PendingActivation` so the operator observes the failure and
+can repair `policy.toml`.
+
+**Justification.** The four roles (Orchestrator, Reviewer,
+Executor, Verifier) carry distinct trust scopes and distinct
+toolsets. An Executor image silently backing a Reviewer
+activation would surface the entire Executor toolchain (build
+toolchain, package managers, network egress) inside the
+trust-anchor role that `INV-PLANNER-HARNESS-01` forbids from
+running code at all. Conversely, a Reviewer image backing an
+Executor activation would surface as "task fails to invoke
+its language tooling" — a noisy correctness failure rather than
+a silent security failure, but still a correctness regression no
+operator should hit. Fail-closed at admission AND activation
+closes both directions of cross-binding before the substrate
+boots.
+
+**Scenario.** An operator publishes
+`[[vm_images]] name = "ops-shared-rust" oci_digest =
+"sha256:abc..." role_restriction = ["Executor"]` and writes a
+plan with `[[tasks]] task_id = "review-pass-1"
+session_agent_type = "Reviewer" vm_image = "ops-shared-rust"`.
+At `approve_plan`, `validate_task_vm_images` walks the plan,
+hits the Reviewer task with a non-empty `vm_image` field, and
+rejects with `reviewer_image_not_allowed` + remediation message.
+The plan never admits; the kernel-canonical Reviewer image is
+the only image any Reviewer activation can ever boot from
+(`INV-PLANNER-HARNESS-02`).
+
+**Canonical home.** `v2/canonical-images.md §2`.
+
+---
+
+### INV-OPERATOR-CUSTOM-IMAGE-01 — Operator images are digest-pinned, mismatches fail closed
+
+**Statement.** Every operator-published `[[vm_images]]` entry MUST
+declare an `oci_digest` of shape `sha256:<64 lower-hex>`
+(`policy/src/bundle.rs::validate_vm_images`'s
+`FAIL_POLICY_VM_IMAGE_DIGEST_INVALID` rejects any other shape at
+policy load). At every Executor session-spawn that resolves to a
+`[[vm_images]]` alias, the kernel
+(`kernel/src/handlers/intent.rs::resolve_vm_image_override`) calls
+`raxis_image_cache::ImageResolver::resolve(oci_digest, …)`. The
+resolver implementation
+(`raxis_image_cache::PrePopulatedResolver` for offline-staged
+caches; `raxis_image_cache::ProductionResolver` for registry-
+backed pulls) stream-hashes the on-disk rootfs bytes and returns
+`ImageResolverError::DigestMismatch { expected, actual, path }`
+on any divergence. The activation handler maps that error to
+`SecurityViolationDetected { violation_kind:
+"OperatorImageDigestMismatch", expected, actual, path }` AND
+`FAIL_POLICY_VIOLATION` — the activation row stays in
+`PendingActivation` so the operator can either rebuild the
+on-disk artefact to match the declared digest or amend
+`policy.toml` to the digest the bytes actually hash to.
+
+The audit event's `expected` / `actual` carry the canonical
+`sha256:<hex>` strings from
+`raxis_image_cache::OciDigest::to_string()`; `path` carries the
+on-disk path the resolver was hashing
+(`<data_dir>/oci-cache/images/sha256/<aa>/<full>/rootfs.img` for
+the offline-staged path). The dashboard's
+`notification_priority` classifies every
+`SecurityViolationDetected` variant as `Critical` — operators
+are paged immediately.
+
+The trust anchor is the operator's signature on `policy.toml`:
+the kernel verifies (a) the policy bundle's signature chains to
+an active operator certificate, then (b) the `oci_digest` in the
+admitted bundle matches the resolved bytes. There is no
+"unsigned image" path; an `oci_digest` typo at policy-sign time
+surfaces as the same audit event the test asserts on, with the
+operator-typo'd digest in `expected` and the on-disk SHA in
+`actual`.
+
+**Justification.** A signed-policy / unsigned-bytes split would
+let any host-side write to `<data_dir>/oci-cache/` swap a
+trusted image for a malicious one without re-signing the
+operator policy — the kernel would happily boot whatever
+rootfs.img it found at the layout-derived path. Pinning the
+digest at policy-sign time AND re-verifying at every spawn
+collapses that gap into a single trust boundary: tampering the
+on-disk bytes requires also tampering the operator's signed
+policy, which requires the operator's signing key.
+
+**Scenario.** Operator publishes `[[vm_images]] name =
+"executor-rust-v1" oci_digest = "sha256:9c41..."`. A host-side
+attacker with filesystem write access (compromised CI runner
+sharing the data dir) overwrites
+`<data_dir>/oci-cache/images/sha256/9c/9c41…/rootfs.img` with
+a tampered build whose `cargo` silently exfiltrates
+`Cargo.toml` over the egress allowlist. On the next Executor
+session-spawn against this alias, the kernel's resolver
+stream-hashes the new bytes, finds the SHA-256 doesn't match
+`sha256:9c41...`, returns `DigestMismatch { expected: 9c41…,
+actual: <new-hash>, path: …/rootfs.img }`. The activation
+handler emits `SecurityViolationDetected { violation_kind:
+"OperatorImageDigestMismatch", expected: "sha256:9c41…",
+actual: "sha256:<new-hash>", path: "…/rootfs.img" }` and
+fails the activation with `FAIL_POLICY_VIOLATION`. The
+attacker-staged image never boots; the operator is paged via
+the Critical-priority notification.
+
+**Canonical home.** `v2/canonical-images.md §3`.
+
+---
+
+### INV-OPERATOR-CUSTOM-IMAGE-02 — Operator-image plumbing is identical to canonical-image plumbing
+
+**Statement.** The same kernel-side trust contract that pins the
+canonical Orchestrator and Reviewer images
+(`INV-PLANNER-HARNESS-05` / `INV-PLANNER-HARNESS-02`: declare a
+SHA-256, re-verify at every spawn, fail-closed with
+`SecurityViolationDetected` on mismatch) ALSO governs every
+operator-published `[[vm_images]]` entry. There are NOT two
+distinct plumbing paths — the difference between a canonical
+image and a BYO image is WHERE the expected digest lives
+(compiled into the kernel binary for canonical, declared in
+signed `policy.toml` for BYO), not HOW the digest is verified
+or what shape the audit event takes.
+
+Concrete uniformity:
+
+1. **Verification mechanism.** Both paths stream-hash the on-disk
+   rootfs bytes with `sha2::Sha256` (the canonical preflight via
+   `raxis_canonical_images::compute_image_digest`; the BYO path
+   via `raxis_image_cache::PrePopulatedResolver::resolve` →
+   `compute_image_sha256`). Both compare against the
+   policy-declared / kernel-binary-pinned digest as a
+   constant-time equality.
+2. **Failure shape.** Both fail closed with
+   `SecurityViolationDetected { kind / violation_kind: "<...>
+   ImageDigestMismatch", expected, actual, path }`. The variant
+   discriminant is the same (`SecurityViolationDetected`); the
+   `violation_kind` taxonomy distinguishes the role
+   (`ReviewerImageDigestMismatch`,
+   `OrchestratorImageDigestMismatch`,
+   `OperatorImageDigestMismatch`). All three classify as
+   `Critical` at the dashboard layer.
+3. **Success shape.** Canonical images log `canonical_image_ok`
+   from the preflight. BYO images emit `VmImageResolved` from
+   the activation handler. Both fire BEFORE the substrate spawn
+   step proceeds, so the audit chain records the resolution
+   independent of whether the spawn ultimately succeeds — a
+   forensics reader walking the chain can always recover "which
+   bytes booted this session" without re-running the resolver.
+4. **Activation gating.** Both paths refuse the activation on
+   mismatch; both leave the activation row in
+   `PendingActivation` so operator-side recovery is observable.
+5. **Forward compatibility.** A future production registry-pull
+   resolver implementation
+   (`raxis_image_cache::ProductionResolver` per
+   `image-cache.md §6`) preserves the same byte-equality contract
+   on the cached blob, so wiring it in does not change the
+   audit-event surface or the trust anchor — the BYO trust
+   contract is registry-implementation-agnostic.
+
+**Justification.** Two divergent plumbing paths would create
+two divergent failure modes operators have to learn: a
+canonical-image tamper would surface as one taxonomy and one
+remediation, a BYO-image tamper as another. The dashboard,
+SOC playbooks, and `raxis doctor` would each need to handle
+both. A uniform contract collapses the operator-facing surface
+to a single mental model ("digest pinning, fail-closed on
+mismatch, Critical notification, look in `<data_dir>/oci-cache/`
+for BYO or `<install_dir>/images/` for canonical") and makes
+the security guarantee composable: if one path's mechanical
+witness passes, the corresponding witness for the other path
+passes for free.
+
+**Scenario.** A new role added in V3 (e.g. a dedicated
+`Auditor` image) only needs to declare its expected digest in
+the kernel binary (canonical) OR in `policy.toml` (operator-
+published), declare its `[[vm_images]] role_restriction`
+admit-list, and wire its activation handler to call the same
+`ImageResolver::resolve` (or
+`canonical_images_preflight::verify_canonical_image_via_manifest`).
+No new audit-event variant, no new dashboard category, no new
+trust contract surface — the existing
+`SecurityViolationDetected` taxonomy plus the existing
+`VmImageResolved` event extend by adding a new
+`violation_kind` string and a new `agent_role` value
+respectively. `INV-OPERATOR-CUSTOM-IMAGE-02` makes that
+extensibility shape normative.
+
+**Canonical home.** `v2/canonical-images.md §3`.
+
+---
+
 ## §11 — Verifier Processes (INV-VERIFIER-*)
 
 Canonical home: `v2/verifier-processes.md` §13. These invariants
