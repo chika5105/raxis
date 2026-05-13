@@ -367,6 +367,23 @@ pub enum MetricName {
     /// `raxis.gateway.upstream.duration` — Histogram (ms).
     GatewayUpstreamDuration,
 
+    // ── V3 §3 expansions — admit / deny / default-grant / stall ─────
+    //
+    // Mirror the audit events emitted by `worker/reviewer-orch-egress-defaults`
+    // and `worker/secrets-model-realignment`. Surfaced on dashboards
+    // `60-egress.json` (admit / deny / stall by chokepoint) and
+    // `50-credential-proxies.json` (substitution by service).
+    /// `raxis.egress.admit.total` — Counter (chokepoint).
+    EgressAdmitTotal,
+    /// `raxis.egress.deny.total` — Counter (chokepoint, reason).
+    EgressDenyTotal,
+    /// `raxis.egress.default_provider_grant.total` — Counter (provider_kind).
+    EgressDefaultProviderGrantTotal,
+    /// `raxis.egress.stall_detected.total` — Counter (chokepoint, reason).
+    EgressStallDetectedTotal,
+    /// `raxis.credential_proxy.substitution.total` — Counter (service).
+    CredentialProxySubstitutionTotal,
+
     // ── Operator dashboard ──────────────────────────────────────────
     /// `raxis.dashboard.http.request.duration` — Histogram (ms).
     DashboardHttpRequestDuration,
@@ -461,6 +478,12 @@ impl MetricName {
             Self::EgressAllowlistBlockTotal            => "raxis.egress.allowlist.block.total",
             Self::GatewayUpstreamDuration              => "raxis.gateway.upstream.duration",
 
+            Self::EgressAdmitTotal                     => "raxis.egress.admit.total",
+            Self::EgressDenyTotal                      => "raxis.egress.deny.total",
+            Self::EgressDefaultProviderGrantTotal      => "raxis.egress.default_provider_grant.total",
+            Self::EgressStallDetectedTotal             => "raxis.egress.stall_detected.total",
+            Self::CredentialProxySubstitutionTotal     => "raxis.credential_proxy.substitution.total",
+
             Self::DashboardHttpRequestDuration         => "raxis.dashboard.http.request.duration",
             Self::DashboardSseConnectionActive         => "raxis.dashboard.sse.connection.active",
             Self::DashboardSseEventTotal               => "raxis.dashboard.sse.event.total",
@@ -541,6 +564,11 @@ impl MetricName {
             | Self::CredentialProxyBytesTotal
             | Self::CredentialProxyPolicyBlockTotal
             | Self::EgressAllowlistBlockTotal
+            | Self::EgressAdmitTotal
+            | Self::EgressDenyTotal
+            | Self::EgressDefaultProviderGrantTotal
+            | Self::EgressStallDetectedTotal
+            | Self::CredentialProxySubstitutionTotal
             | Self::DashboardSseEventTotal
             | Self::ReviewerOutcomeTotal
             | Self::ReviewerDisagreementTotal

@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError};
+use raxis_observability::ObservabilityHub;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
@@ -51,6 +52,13 @@ pub struct NotifyingAuditSink {
     data_dir:         PathBuf,
     sidecar_registry: Option<Arc<SidecarRegistry>>,
     store:            Option<Arc<Store>>,
+    /// Optional `ObservabilityHub` reference. When present, every
+    /// successful inner emit ALSO bumps the matching V3 §3 metric
+    /// (egress admit / deny / default-grant / stall, credential-proxy
+    /// substitution). When absent (e.g. in legacy unit tests that
+    /// never wire a hub), the bridge is a noop. The hub is the
+    /// dashboard fast path; the audit log remains the source of truth.
+    obs_hub:          Option<Arc<ObservabilityHub>>,
 }
 
 impl NotifyingAuditSink {
@@ -63,7 +71,14 @@ impl NotifyingAuditSink {
         policy:   Arc<ArcSwap<PolicyBundle>>,
         data_dir: PathBuf,
     ) -> Self {
-        Self { inner, policy, data_dir, sidecar_registry: None, store: None }
+        Self {
+            inner,
+            policy,
+            data_dir,
+            sidecar_registry: None,
+            store: None,
+            obs_hub: None,
+        }
     }
 
     /// Builder-style: attach the per-kernel `SidecarRegistry` so
@@ -79,6 +94,65 @@ impl NotifyingAuditSink {
         self.store = Some(store);
         self
     }
+
+    /// Builder-style: attach the kernel's [`ObservabilityHub`] so that
+    /// every audit event whose variant has a paired metric (V3 §3
+    /// expansion) bumps the matching counter at the same moment the
+    /// audit record lands. The bridge is intentionally one-way:
+    /// metric-emit failure (e.g. hub disabled, redactor reject) is
+    /// silent at this layer; the dispatcher already increments
+    /// `raxis.observability.dropped.total` for any rejected frame.
+    pub fn with_observability(mut self, hub: Arc<ObservabilityHub>) -> Self {
+        self.obs_hub = Some(hub);
+        self
+    }
+}
+
+/// Returns `Some(clone)` for variants the metric bridge cares about,
+/// `None` for everything else. Lets the audit hot-path skip cloning
+/// the (sometimes-large) `AuditEventKind` enum when the variant has
+/// no counter — only the five V3 §3 expansion variants get cloned.
+fn bridge_kind_if_relevant(kind: &AuditEventKind) -> Option<AuditEventKind> {
+    matches!(
+        kind,
+        AuditEventKind::TransparentProxyAdmitted { .. }
+            | AuditEventKind::TransparentProxyDenied { .. }
+            | AuditEventKind::DefaultProviderEgressApplied { .. }
+            | AuditEventKind::SessionEgressStallDetected { .. }
+            | AuditEventKind::CredentialProxySubstituted { .. }
+    )
+    .then(|| kind.clone())
+}
+
+/// Bump V3 §3 counters at the same moment the matching audit event
+/// is emitted. Mapping is exhaustive over the (currently five)
+/// variants the dashboards reference; everything else is a no-op so
+/// adding a new audit variant doesn't accidentally leak through this
+/// bridge unless someone adds a deliberate arm here.
+///
+/// Kept private to this module so the mapping table lives next to
+/// the only call site (`NotifyingAuditSink::emit`); the per-metric
+/// helpers continue to live in `kernel/src/observability.rs`.
+fn bridge_audit_to_metric(hub: &ObservabilityHub, kind: &AuditEventKind) {
+    use crate::observability as obs;
+    match kind {
+        AuditEventKind::TransparentProxyAdmitted { .. } => {
+            obs::record_egress_admit(hub, "tproxy");
+        }
+        AuditEventKind::TransparentProxyDenied { reason, .. } => {
+            obs::record_egress_deny(hub, "tproxy", reason);
+        }
+        AuditEventKind::DefaultProviderEgressApplied { provider_kind, .. } => {
+            obs::record_egress_default_provider_grant(hub, provider_kind);
+        }
+        AuditEventKind::SessionEgressStallDetected { source, reason, .. } => {
+            obs::record_egress_stall_detected(hub, source, reason);
+        }
+        AuditEventKind::CredentialProxySubstituted { proxy_type, .. } => {
+            obs::record_credential_proxy_substitution(hub, proxy_type);
+        }
+        _ => { /* no metric counterpart — audit log carries it alone */ }
+    }
 }
 
 impl AuditSink for NotifyingAuditSink {
@@ -93,7 +167,28 @@ impl AuditSink for NotifyingAuditSink {
         //    if it fails, no notification dispatch happens (the spec
         //    forbids notifications without a corresponding audit
         //    record per cli-readonly.md §5.6.2).
+        //
+        //    We snapshot a clone of `kind` for the metric bridge step
+        //    BEFORE moving `kind` into `inner.emit`, but only when an
+        //    `ObservabilityHub` is wired AND the variant is one the
+        //    bridge cares about. Skipping the clone for bridge-irrelevant
+        //    variants keeps the high-volume audit hot-path's per-emit
+        //    allocation count unchanged from before the bridge landed.
+        let bridge_kind = self
+            .obs_hub
+            .as_ref()
+            .and_then(|_| bridge_kind_if_relevant(&kind));
         let event = self.inner.emit(kind, session_id, task_id, initiative_id)?;
+
+        // 1a. Bridge to the V3 §3 metric counter (egress admit/deny/
+        //     default-grant/stall, credential-proxy substitution). The
+        //     hub bump runs only after the inner emit succeeded, so
+        //     metric and audit always agree on what landed. Hub may
+        //     be `None` in legacy unit-test paths; bridge is a noop
+        //     when missing.
+        if let (Some(hub), Some(bk)) = (self.obs_hub.as_ref(), bridge_kind) {
+            bridge_audit_to_metric(hub, &bk);
+        }
 
         // 2. Snapshot the bundle once. Holding the reference across
         //    the dispatch is fine because `ArcSwap::load_full` returns
@@ -215,6 +310,122 @@ mod tests {
         let raw   = std::fs::read_to_string(&inbox).unwrap_or_default();
         assert!(raw.contains("EscalationApproved"),
             "inbox MUST carry the dispatched event; got: {raw:?}");
+    }
+
+    /// V3 §3 expansion bridge: when an `ObservabilityHub` is wired
+    /// into the sink, emitting one of the five bridged audit variants
+    /// MUST also emit exactly one matching counter into the hub. The
+    /// other variants MUST NOT touch the hub's metric channel.
+    #[tokio::test]
+    async fn bridge_bumps_metric_for_observed_variants() {
+        use raxis_observability::{
+            exporter::{InMemoryExporter, ObservabilityExporter},
+            hub::HubConfig,
+            ObservabilityHub,
+        };
+        use std::sync::Arc;
+
+        // Hub wired with an in-memory exporter we can introspect after
+        // flush — same pattern the observability crate's own tests use.
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled:             true,
+            max_queue_depth:     1024,
+            sample_rate:         1.0,
+            max_attrs_per_span:  32,
+            max_events_per_span: 16,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            Arc::clone(&exp) as Arc<dyn ObservabilityExporter>,
+        ));
+
+        let tmp     = tempfile::tempdir().unwrap();
+        let inner   = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = inner.clone();
+        let sink    = NotifyingAuditSink::new(
+            Arc::clone(&inner_dyn),
+            bundle(),
+            tmp.path().to_path_buf(),
+        )
+        .with_observability(Arc::clone(&hub));
+
+        // Bridged variant: TransparentProxyDenied → raxis.egress.deny.total.
+        sink.emit(
+            AuditEventKind::TransparentProxyDenied {
+                session_id:        "sess-1".into(),
+                host_or_sni:       Some("forbidden.example.com".into()),
+                original_dst_ip:   "10.0.0.1".into(),
+                original_dst_port: 443,
+                protocol:          "https".into(),
+                reason:            "host_not_in_allowlist".into(),
+            },
+            Some("sess-1"), None, None,
+        ).unwrap();
+
+        // Non-bridged variant: KernelStarted should NOT touch metrics.
+        sink.emit(
+            AuditEventKind::KernelStarted {
+                data_dir:        "/tmp".into(),
+                policy_epoch:    1,
+                schema_version:  1,
+            },
+            None, None, None,
+        ).unwrap();
+
+        hub.flush();
+
+        let metrics = exp.metrics();
+        assert_eq!(metrics.len(), 1,
+            "exactly one bridged metric expected; got {metrics:#?}");
+        assert_eq!(
+            metrics[0].name.as_otel_name(),
+            "raxis.egress.deny.total",
+        );
+        assert_eq!(
+            metrics[0].labels.get("chokepoint").map(|v| match v {
+                raxis_observability::AttrValue::Str(s) => s.as_str(),
+                _ => panic!("chokepoint label must be Str"),
+            }),
+            Some("tproxy"),
+        );
+        assert_eq!(
+            metrics[0].labels.get("reason").map(|v| match v {
+                raxis_observability::AttrValue::Str(s) => s.as_str(),
+                _ => panic!("reason label must be Str"),
+            }),
+            Some("host_not_in_allowlist"),
+        );
+    }
+
+    /// If `with_observability` is NOT called, the bridge stays cold —
+    /// confirms the legacy code path (unit tests, embedded harnesses
+    /// that never wire a hub) keeps emitting cleanly with no metric
+    /// side-effect and no panics.
+    #[tokio::test]
+    async fn bridge_is_inert_when_no_hub_attached() {
+        let tmp     = tempfile::tempdir().unwrap();
+        let inner   = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = inner.clone();
+        let sink    = NotifyingAuditSink::new(
+            Arc::clone(&inner_dyn),
+            bundle(),
+            tmp.path().to_path_buf(),
+        );
+
+        sink.emit(
+            AuditEventKind::TransparentProxyAdmitted {
+                session_id:        "sess-A".into(),
+                host_or_sni:       Some("api.example.com".into()),
+                original_dst_ip:   "10.0.0.2".into(),
+                original_dst_port: 443,
+                protocol:          "https".into(),
+            },
+            Some("sess-A"), None, None,
+        ).unwrap();
+
+        assert_eq!(inner.events().len(), 1, "inner sink still observes the emit");
     }
 
     /// If the inner sink returns Err, the wrapper MUST propagate the

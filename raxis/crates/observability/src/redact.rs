@@ -132,6 +132,13 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     ("streaming",         AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
     ("initiative_class",  AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
     ("phase",             AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    // ---- V3 §3 expansion: egress admit/deny/default-grant/stall + cred-proxy substitution
+    // (see worker/reviewer-orch-egress-defaults @ 4d8f5dc and
+    //  worker/secrets-model-realignment @ 6114f49). The values are
+    //  closed lexicons of operational chokepoint / provider-kind labels;
+    //  no PII flows through these keys (they describe code-paths, not data).
+    ("chokepoint",        AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    ("provider_kind",     AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
 ];
 
 /// Explicit denylist. Defense-in-depth: even if a key accidentally

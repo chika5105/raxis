@@ -679,3 +679,101 @@ pub fn record_kernel_uptime(hub: &ObservabilityHub, uptime_secs: i64) {
         uptime_secs.max(0) as f64,
     );
 }
+
+// ---------------------------------------------------------------------------
+// V3 §3 expansions — egress admit/deny/default-grant/stall + cred-proxy substitution
+//
+// Companion audit events (defined in `crates/audit/src/event.rs`) and
+// dashboards (`grafana/dashboards/{50-credential-proxies,60-egress}.json`)
+// landed before the metric counters did; the bridge between the two is
+// `kernel/src/notifications/sink.rs::NotifyingAuditSink`, which calls
+// each helper below at the same moment it forwards the audit event to
+// listeners. That keeps the audit log (durable, ordered) the source of
+// truth and makes the metric a redundant fast-path for dashboards —
+// dropping the metric never silently loses operational data.
+// ---------------------------------------------------------------------------
+
+/// `raxis.egress.admit.total` — counter, one bump per admission
+/// decision the egress chokepoint accepts. Called from the
+/// `NotifyingAuditSink` bridge when it observes a
+/// `TransparentProxyAdmitted` event (chokepoint = `tproxy`) or any
+/// kernel-side egress code-path that emits an admit (future
+/// chokepoint = `kernel_mediated_fetch`).
+///
+/// `chokepoint` is one of the closed lexicon `{ "tproxy",
+/// "kernel_mediated_fetch" }` — values defined in the dashboard
+/// taxonomy at `grafana/dashboards/60-egress.json`.
+pub fn record_egress_admit(hub: &ObservabilityHub, chokepoint: &str) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([("chokepoint", chokepoint)]);
+    hub.record_counter(MetricName::EgressAdmitTotal, labels, 1.0);
+}
+
+/// `raxis.egress.deny.total` — counter, one bump per admission
+/// decision the egress chokepoint rejects. `reason` MUST be a stable
+/// lexicon (e.g. `"host_not_allowlisted"`, `"port_blocked"`,
+/// `"policy_strict_egress"`) — the redactor caps it at 64 bytes but
+/// emit-site convention pins it to a small enumerated set.
+pub fn record_egress_deny(
+    hub:        &ObservabilityHub,
+    chokepoint: &str,
+    reason:     &str,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([
+        ("chokepoint", chokepoint),
+        ("reason",     reason),
+    ]);
+    hub.record_counter(MetricName::EgressDenyTotal, labels, 1.0);
+}
+
+/// `raxis.egress.default_provider_grant.total` — counter, one bump
+/// each time the policy manager's reviewer-orchestrator default-egress
+/// path applies a `DefaultProviderEgressApplied` grant. `provider_kind`
+/// matches the audit event's `provider_kind` field (`"openai"`,
+/// `"anthropic"`, `"gemini"`, etc.).
+pub fn record_egress_default_provider_grant(
+    hub:           &ObservabilityHub,
+    provider_kind: &str,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([("provider_kind", provider_kind)]);
+    hub.record_counter(MetricName::EgressDefaultProviderGrantTotal, labels, 1.0);
+}
+
+/// `raxis.egress.stall_detected.total` — counter, one bump per
+/// `SessionEgressStallDetected` audit event. The egress-admission
+/// stall watchdog and the planner-fetch idle-timeout path each emit
+/// one of these; they label themselves with the originating
+/// `chokepoint` and a stall `reason` (`"idle_timeout"`,
+/// `"planner_fetch_no_progress"`).
+pub fn record_egress_stall_detected(
+    hub:        &ObservabilityHub,
+    chokepoint: &str,
+    reason:     &str,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([
+        ("chokepoint", chokepoint),
+        ("reason",     reason),
+    ]);
+    hub.record_counter(MetricName::EgressStallDetectedTotal, labels, 1.0);
+}
+
+/// `raxis.credential_proxy.substitution.total` — counter, one bump
+/// per `CredentialProxySubstituted` audit event. The credential
+/// proxy substitutes a tenant secret in-line and emits both an audit
+/// event (durable) and this counter (dashboard).
+///
+/// `service` is the closed lexicon of supported back-ends
+/// (`"postgres"`, `"mysql"`, `"mssql"`, `"mongo"`, `"redis"`,
+/// `"smtp"`, …) — keep aligned with `crates/credential-proxy/src/`'s
+/// per-service modules.
+pub fn record_credential_proxy_substitution(
+    hub:     &ObservabilityHub,
+    service: &str,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([("service", service)]);
+    hub.record_counter(MetricName::CredentialProxySubstitutionTotal, labels, 1.0);
+}

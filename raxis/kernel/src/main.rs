@@ -338,12 +338,30 @@ async fn main() {
             }
         };
 
+    // Hoist the observability hub construction so the
+    // `NotifyingAuditSink` can hold a reference and bridge V3 §3
+    // metrics (egress admit/deny/default-grant/stall, credential-proxy
+    // substitution) at the same moment the matching audit event lands.
+    // `build_obs_hub` is a pure function of `policy`, `data_dir`,
+    // and the `CARGO_PKG_VERSION` constant — all available here —
+    // so this hoist costs only a single re-clone of the resulting
+    // `Arc` at the original construction site below. The previous
+    // `kernel_version` binding stays where it is (a few hundred lines
+    // down) so other call sites that already use it don't have to
+    // move; we re-derive the literal here from the same `env!` macro.
+    let observability_hub: Arc<raxis_observability::ObservabilityHub> =
+        observability_boot::build_obs_hub(
+            &policy,
+            &data_dir,
+            env!("CARGO_PKG_VERSION"),
+        );
+
     // Chain the streaming-audit bridge on top of the notifying
     // decorator so:
     //   1. every audit emit reaches the JSONL writer first
     //      (FileAuditSink, innermost) — durability;
     //   2. then fans into the notification dispatcher
-    //      (NotifyingAuditSink) — inbox + sidecars;
+    //      (NotifyingAuditSink) — inbox + sidecars + V3 §3 metric bridge;
     //   3. then mirrors per-session events onto the dashboard
     //      capture (StreamingAuditSink, outermost) — live SSE.
     let notifying_audit: Arc<dyn AuditSink> = Arc::new(
@@ -353,7 +371,8 @@ async fn main() {
             data_dir.clone(),
         )
         .with_sidecar_registry(Arc::clone(&sidecar_registry))
-        .with_store(Arc::clone(&store)),
+        .with_store(Arc::clone(&store))
+        .with_observability(Arc::clone(&observability_hub)),
     );
     let audit: Arc<dyn AuditSink> = match dashboard_stream_capture.as_ref() {
         Some(cap) => Arc::new(raxis_dashboard_kernel::StreamingAuditSink::new(
@@ -1016,14 +1035,11 @@ async fn main() {
         crate::elastic::ScalingRateLimiter::new(),
     );
 
-    // V3 `specs/v3/observability-prometheus.md` — hoisted hub
-    // construction. The observability hub is built BEFORE the
-    // orchestrator-spawn service so the SessionSpawnService can
-    // stamp the four-tier VM cold-boot histograms from the very
-    // first spawn. The same Arc is reused below when wiring the
-    // HandlerContext (no second hub is built).
-    let observability_hub: Arc<raxis_observability::ObservabilityHub> =
-        observability_boot::build_obs_hub(&policy, &data_dir, kernel_version);
+    // V3 `specs/v3/observability-prometheus.md` — observability hub
+    // was built earlier (above the audit-sink wiring) so the
+    // `NotifyingAuditSink` can bridge audit→metric events. The same
+    // `Arc` flows into the SessionSpawnService below for the four-tier
+    // VM cold-boot histograms; no second hub is built.
 
     // V2 reviewer-egress-defaults-decision.md §7 — hoisted shared
     // `EgressStallTracker`. The same `Arc` is wired into:
