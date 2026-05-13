@@ -1,0 +1,451 @@
+# RAXIS V2 — Canonical Images & Operator-Published (BYO) Images
+
+> **Companion specs.**
+>
+> - `image-cache.md` — on-disk cache layout (`<data_dir>/oci-cache/`),
+>   the `ImageResolver` trait surface, pull-and-verify pipeline, GC,
+>   and failure-mode taxonomy. This document treats `ImageResolver`
+>   as a black box and only specifies how the kernel binds the
+>   resolved bytes to a particular role-trust contract.
+> - `release-and-distribution.md §4.2` — how the canonical
+>   `<role>.manifest.toml` files get signed by the kernel signing
+>   key and shipped alongside the kernel binary.
+> - `planner-harness.md §4.7` (Reviewer) and `§4.8` (Orchestrator) —
+>   the per-role harness contracts that anchor
+>   `INV-PLANNER-HARNESS-02` and `INV-PLANNER-HARNESS-05`.
+> - `invariants.md §10.5` — the three normative trust contracts
+>   (`INV-IMAGE-RESOLUTION-PER-ROLE-01`,
+>   `INV-OPERATOR-CUSTOM-IMAGE-01`, `INV-OPERATOR-CUSTOM-IMAGE-02`).
+> - `audit-paired-writes.md §4.3` — the single-class roster that
+>   classifies `VmImageResolved` and `SecurityViolationDetected`.
+> - `kernel/src/canonical_images_preflight.rs` — the
+>   compiled-in-digest preflight invoked by Reviewer / Orchestrator
+>   activations.
+> - `kernel/src/handlers/intent.rs::resolve_vm_image_override` —
+>   the operator-image resolution path invoked by Executor
+>   activations.
+
+---
+
+## §1 — Why this spec exists
+
+A RAXIS deployment boots VM rootfs images for four agent roles
+(Orchestrator, Reviewer, Executor, Verifier). Two of those roles
+(Orchestrator, Reviewer) are kernel-canonical: the rootfs is
+shipped as part of the RAXIS release, the expected SHA-256 is
+compiled into the kernel binary at build time
+(`crates/canonical-images/build.rs`), and the operator cannot
+substitute a different image without rebuilding the kernel from
+source. The other two roles (Executor, Verifier) are
+**operator-publishable**: the operator can declare arbitrary
+`[[vm_images]]` entries in `policy.toml`, pin each to a specific
+`oci_digest`, and target them per-task or wire one to the default
+Executor / Verifier slot.
+
+Several places in the tree (`audit-paired-writes.md §4.3`,
+`release-and-distribution.md §9.2`, `cli/src/commands/setup.rs`,
+the new `INV-IMAGE-*` / `INV-OPERATOR-CUSTOM-IMAGE-*`
+invariants) cross-reference "the canonical images spec" for the
+trust contract that binds operator-declared digests to the
+substrate-spawned bytes. This document IS that spec. It exists to
+codify, in one place:
+
+1. **What "canonical" means** for a RAXIS image (kernel-bundled,
+   digest pinned at build time, manifest signature chains to
+   `EXPECTED_KERNEL_SIGNING_KEY_BYTES`).
+2. **Per-role binding** — which roles can be operator-published
+   and which cannot, plus the structural rejection rules that
+   prevent cross-binding (`INV-IMAGE-RESOLUTION-PER-ROLE-01`).
+3. **The Bring-Your-Own-Image (BYO) flow** — how an operator
+   ships a custom Executor / Verifier image and how the kernel
+   re-verifies it at every spawn
+   (`INV-OPERATOR-CUSTOM-IMAGE-01`).
+4. **Plumbing uniformity** — the same audit-event surface and
+   fail-closed semantics govern canonical and BYO paths
+   (`INV-OPERATOR-CUSTOM-IMAGE-02`).
+5. **The end-to-end test surface** that pins (1)–(4) against
+   kernel regressions
+   (`extended_e2e_byo_executor_image.rs` and the harness helpers
+   in `extended_e2e_support/byo_image.rs`).
+
+What this spec does NOT cover:
+
+* The on-disk cache layout, the OCI pull pipeline, and the
+  `ImageResolver` trait surface — those live in `image-cache.md`.
+* The release pipeline that bakes the canonical kernel signing
+  key and produces `<role>.manifest.toml` — that lives in
+  `release-and-distribution.md`.
+* The Reviewer and Orchestrator harness contracts (no-egress,
+  no-code-exec) — those live in `planner-harness.md`.
+
+---
+
+## §2 — Per-role image binding
+
+### §2.1 — Role inventory
+
+| Role         | Bundled? | Operator-publishable? | Trust pin                                         | Preflight                                              |
+| ------------ | -------- | --------------------- | ------------------------------------------------- | ------------------------------------------------------ |
+| Orchestrator | yes      | no                    | `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` (kernel bin) | `canonical_images_preflight.rs`                        |
+| Reviewer     | yes      | no                    | `EXPECTED_REVIEWER_IMAGE_DIGEST` (kernel bin)     | `canonical_images_preflight.rs`                        |
+| Executor     | yes\*    | yes                   | `[[vm_images]] oci_digest` in `policy.toml`       | `handlers/intent.rs::resolve_vm_image_override`        |
+| Verifier     | yes\*    | yes                   | `[[vm_images]] oci_digest` in `policy.toml`       | (verifier-side, see `verifier-processes.md §13`)       |
+
+\* The kernel ships a canonical `executor-starter` and
+`verifier-starter` image as a default; operators who want a richer
+toolchain bind their own `[[vm_images]]` and either reference it
+per-task (`[[plan.tasks]] vm_image = "..."`) or wire it as
+`[default_executor_image] name = "..."`. The starter is the
+kernel-canonical fallback if neither override is present.
+
+### §2.2 — Per-role image binding is non-substitutable
+(`INV-IMAGE-RESOLUTION-PER-ROLE-01`)
+
+The kernel REFUSES, at three independent layers, to bind a
+`[[vm_images]]` entry to a role its `role_restriction` field does
+not permit. The three layers are:
+
+1. **Policy load** (`crates/policy/src/bundle.rs::validate_vm_images`).
+   Every `[[vm_images]]` entry MUST declare a non-empty
+   `role_restriction: Vec<String>` admit-list. The valid tokens
+   are `"Executor"` and `"Verifier"`. Any entry containing
+   `"Reviewer"` is rejected with
+   `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`; any entry containing
+   `"Orchestrator"` is rejected with
+   `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED`. The operator cannot
+   load a policy bundle that even attempts to substitute a
+   custom image for the kernel-canonical roles.
+2. **Plan admission** (`validate_task_vm_images`,
+   `validate_default_executor_image`). Plan tasks with
+   `session_agent_type = "Reviewer"` and a non-empty `vm_image`
+   field are rejected with `reviewer_image_not_allowed` +
+   remediation. The `[default_executor_image]` block is only
+   resolved if its `name` references a `[[vm_images]]` entry
+   whose `role_restriction` admits `"Executor"`; otherwise
+   `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE`.
+3. **Activation** (`handlers/intent.rs::handle_activate_sub_task`).
+   Orchestrator and Reviewer activations route through
+   `canonical_images_preflight::verify_canonical_image_via_manifest`
+   which checks the compiled-in
+   `EXPECTED_{ORCHESTRATOR,REVIEWER}_IMAGE_DIGEST` against the
+   on-disk rootfs. There is no code path that substitutes a
+   `[[vm_images]]`-resolved blob for a canonical-role activation —
+   the canonical preflight runs BEFORE the activation handler
+   ever consults `[[vm_images]]`, and the substitute would be
+   silently invisible to the audit chain.
+
+There is **no stub-fallback substitute**. The `VmImageResolved`
+audit event's `agent_role` field is therefore normatively
+constrained to the string `"Executor"` (Verifier activations,
+once landed, will use `"Verifier"`). An audit-replay reader that
+observes any other value is observing a kernel bug. This
+constraint is what lets `INV-IMAGE-RESOLUTION-PER-ROLE-01`
+publish a single audit-event surface that distinguishes "BYO
+image was bound to an Executor" from "BYO image was bound to
+something else" without ambiguity.
+
+### §2.3 — Why per-role pinning is non-negotiable
+
+The four roles carry distinct trust scopes:
+
+* **Orchestrator** plans the initiative; it has the kernel's full
+  KSB read view and can revoke / mutate sessions. Code execution
+  inside an Orchestrator VM would let a planner LLM mutate the
+  initiative graph through escape hatches its harness contract
+  forbids.
+* **Reviewer** evaluates plans and grants approvals (per
+  `INV-PLANNER-HARNESS-01`). The Reviewer contract structurally
+  forbids tool execution. A toolchain-rich image bound to a
+  Reviewer activation would surface the entire build-toolchain
+  attack surface inside the role that gates approvals.
+* **Executor** runs operator code. Tool execution is the point.
+  This is the only role where operator-published toolchains make
+  sense.
+* **Verifier** runs gates against witness submissions. The
+  Verifier image is a more constrained Executor — it sees
+  witness inputs but never the initiative repo's writeable
+  worktree.
+
+A silent cross-bind (e.g. a Reviewer activation that booted from
+the operator's `executor-rust-v1` BYO image) would either (a)
+defeat `INV-PLANNER-HARNESS-01` by surfacing a Bash toolchain in
+the Reviewer's VM, or (b) fail noisily ("the Reviewer has no
+language tooling") — the latter is a correctness regression no
+operator should hit, and the former is an irrecoverable security
+failure. Fail-closed at admission AND activation closes both
+directions of cross-binding before the substrate boots.
+
+---
+
+## §3 — Bring-Your-Own-Image (BYO) flow
+
+### §3.1 — Operator-side authoring
+
+An operator who wants to ship a custom Executor (or Verifier)
+toolchain authors:
+
+1. **A Containerfile** (sample:
+   `live-e2e/seed/byoi-executor/Containerfile`). Any container
+   build tool that produces an OCI image works
+   (`docker build`, `podman build`, `buildah bud`); the kernel
+   does not depend on the build pipeline.
+2. **A signed `policy.toml`** with two new blocks:
+   ```toml
+   [[vm_images]]
+   name                     = "byo-executor-py312-node22"
+   oci_digest               = "sha256:<64 lower-hex>"
+   role_restriction         = ["Executor"]
+   linux_kernel_version_min = "5.14"
+
+   [default_executor_image]
+   name = "byo-executor-py312-node22"
+   ```
+   The `oci_digest` is the SHA-256 of the rootfs blob the
+   operator stages on the host. The `name` is the alias plans /
+   `[default_executor_image]` use to reference this image.
+   `role_restriction` is the admit-list (§2.2 layer 1);
+   `linux_kernel_version_min` is the floor below which the
+   substrate refuses to boot this image.
+3. **An on-disk staging step** that places the rootfs + sidecar
+   manifests under
+   `<data_dir>/oci-cache/images/sha256/<aa>/<full>/` per
+   `image-cache.md §4`. The harness helper
+   `extended_e2e_support/byo_image.rs::stage_byo_image_in_oci_cache`
+   demonstrates the layout (`rootfs.img`, synthesised
+   `manifest.json`, synthesised `config.json`).
+
+The operator's signing key on `policy.toml` is the trust anchor
+for this entire flow. The kernel verifies (a) the policy bundle's
+signature chains to an active operator certificate, then (b) the
+declared `oci_digest` matches the rootfs the substrate is about
+to boot from.
+
+### §3.2 — Kernel-side resolution
+(`INV-OPERATOR-CUSTOM-IMAGE-01`)
+
+When `handle_activate_sub_task` admits an Executor task whose
+activation row carries a non-empty `vm_image_alias` (from either
+`[[plan.tasks]] vm_image = "..."` or
+`[default_executor_image] name = "..."`), it calls
+`resolve_vm_image_override(policy, alias, ctx)`. That function:
+
+1. Looks up the `[[vm_images]]` entry by `name`. A missing alias
+   returns `VmImageResolveError::AliasDropped` and fails the
+   activation with `FAIL_POLICY_VIOLATION` (the bundle was
+   re-signed without the entry while the activation was
+   in-flight).
+2. Parses the entry's `oci_digest` as a `raxis_image_cache::OciDigest`.
+   Malformed digests return `VmImageResolveError::MalformedDigest`
+   (this is also gated at policy load by
+   `FAIL_POLICY_VM_IMAGE_DIGEST_INVALID`; the activation-side
+   check is a defence-in-depth re-validation).
+3. Calls `ImageResolver::resolve(&oci_digest, registry_hint)`. The
+   resolver implementation
+   (`PrePopulatedResolver` for offline-staged caches;
+   `ProductionResolver` for registry-backed pulls per
+   `image-cache.md §6`) stream-hashes the on-disk rootfs and
+   compares against `oci_digest`. A divergence returns
+   `ImageResolverError::DigestMismatch { expected, actual, path }`.
+4. Maps the resolver error to `VmImageResolveError::DigestMismatch`
+   (carrying `expected`, `actual`, `path`) and returns it.
+
+The activation handler pattern-matches the result:
+
+* **Success.** Emits
+  `AuditEventKind::VmImageResolved { session_id, task_id,
+  initiative_id, alias, oci_digest, agent_role: "Executor" }`
+  and proceeds to spawn. The audit event fires BEFORE the spawn
+  step, so the chain records "which bytes booted this session"
+  independent of whether the spawn ultimately succeeds.
+* **`DigestMismatch`.** Emits
+  `AuditEventKind::SecurityViolationDetected { violation_kind:
+  "OperatorImageDigestMismatch", expected, actual, path }` and
+  returns `(FAIL_POLICY_VIOLATION, TaskState::Admitted)`. The
+  activation row stays in `PendingActivation`. The substrate
+  never boots from the tampered bytes. The dashboard's
+  `notification_priority` classifies every
+  `SecurityViolationDetected` variant as `Critical` —
+  operators are paged immediately.
+* **Other variants** (`AliasDropped`, `MalformedDigest`,
+  `ResolverFailure`). Logged to stderr with the alias / task-id
+  context; activation fails with `FAIL_POLICY_VIOLATION`. These
+  are configuration errors, not security violations, so they
+  do NOT emit `SecurityViolationDetected`.
+
+### §3.3 — Plumbing uniformity
+(`INV-OPERATOR-CUSTOM-IMAGE-02`)
+
+The same trust contract that pins the canonical Reviewer and
+Orchestrator images (compiled-in digest, re-verified at every
+spawn, fail-closed on mismatch with `SecurityViolationDetected`)
+ALSO governs every operator-published `[[vm_images]]` entry.
+There are NOT two distinct plumbing paths. The differences are
+WHERE the expected digest lives (kernel binary vs. signed
+`policy.toml`) and WHICH `violation_kind` taxonomy the failure
+event carries. The verification mechanism, the failure shape,
+the success shape, the activation gating, and the
+forward-compatibility for V3 registry pulls are all uniform.
+
+| Axis                       | Canonical (Orchestrator / Reviewer)              | BYO (Executor / Verifier)                                |
+| -------------------------- | ------------------------------------------------ | -------------------------------------------------------- |
+| Expected-digest source     | `EXPECTED_*_IMAGE_DIGEST` (compiled into kernel) | `[[vm_images]] oci_digest` (signed `policy.toml`)        |
+| Hashing implementation     | `raxis_canonical_images::compute_image_digest`   | `raxis_image_cache::compute_image_sha256` (resolver)     |
+| Comparison semantics       | constant-time byte-equality                       | constant-time byte-equality                              |
+| Failure event              | `SecurityViolationDetected { ReviewerImageDigestMismatch / OrchestratorImageDigestMismatch }` | `SecurityViolationDetected { OperatorImageDigestMismatch }` |
+| Failure event severity     | `Critical`                                       | `Critical`                                               |
+| Success event              | preflight log line `canonical_image_ok`           | `VmImageResolved { agent_role: "Executor" }`             |
+| Activation gating          | activation refused, row stays `PendingActivation`| activation refused, row stays `PendingActivation`        |
+| Future registry-pull path  | n/a (kernel-bundled blob)                        | `ProductionResolver` (per `image-cache.md §6`)           |
+
+Adding a new role in V3 (e.g. a dedicated `Auditor` image) only
+requires extending the `SecurityViolationDetected` `violation_kind`
+taxonomy AND the `VmImageResolved` `agent_role` enum — not a new
+trust contract surface. That extensibility shape is what
+`INV-OPERATOR-CUSTOM-IMAGE-02` makes normative.
+
+---
+
+## §4 — Test surface
+
+### §4.1 — Smoke mode (always-on)
+
+`raxis/kernel/tests/extended_e2e_byo_executor_image.rs` runs in
+two modes. The default mode runs unconditionally on every
+`cargo test` against `raxis-kernel`. It:
+
+1. Bakes a small synthetic rootfs with a deterministic SHA-256
+   via `byo_image::bake_byo_executor_image_synthetic`.
+2. Stages the rootfs in the OCI cache layout
+   (`<data_dir>/oci-cache/images/sha256/<aa>/<full>/...`) via
+   `byo_image::stage_byo_image_in_oci_cache`.
+3. Verifies the SHA-256 the staging step computed equals the
+   SHA-256 the bake step asserted — closes the
+   bake-vs-stage drift loop that BYO trust depends on
+   (`INV-OPERATOR-CUSTOM-IMAGE-01`).
+4. Constructs the policy snippet
+   `inject_byo_executor_image_in_policy` writes and asserts:
+   * `[[vm_images]] name = "byo-executor-py312-node22"
+     oci_digest = "sha256:..." role_restriction = ["Executor"]
+     linux_kernel_version_min = "5.14"`.
+   * `[default_executor_image] name = "byo-executor-py312-node22"`.
+5. Constructs an `AuditEventKind::VmImageResolved` and asserts
+   `notification_priority` returns `None` (routine event, not
+   surfaced in the operator inbox).
+6. Constructs an `AuditEventKind::SecurityViolationDetected
+   { violation_kind: "OperatorImageDigestMismatch", … }` and
+   asserts `notification_priority` returns `Critical`.
+7. Asserts `live-e2e/seed/byoi-executor/Containerfile` exists,
+   so a downstream live-mode invocation can find it.
+
+The smoke mode requires no Docker daemon, no LLM, no kernel
+process — it exercises the harness primitives and the audit
+contract surface directly.
+
+### §4.2 — Live mode (gated)
+
+When `RAXIS_LIVE_E2E=1` AND `RAXIS_LIVE_E2E_BYO=1` are both
+set, the test escalates to a full live-e2e invocation:
+
+1. **Bake.** `byo_image::bake_byo_executor_image_full`
+   `docker build --platform linux/<arch> -f
+   live-e2e/seed/byoi-executor/Containerfile` and exports the
+   rootfs to a tempdir. Computes the SHA-256 of the exported
+   rootfs.
+2. **Stage.** `stage_byo_image_in_oci_cache` copies the rootfs
+   into the live-e2e harness's `<data_dir>/oci-cache/...`
+   layout.
+3. **Inject.** `inject_byo_executor_image_in_policy` amends
+   the harness-generated `policy.toml` with the `[[vm_images]]`
+   and `[default_executor_image]` blocks.
+4. **Boot.** Spin up the live-e2e stack (kernel + LLM +
+   isolation backend) per `extended_e2e_realistic_scenario`'s
+   pattern.
+5. **Submit.** Submit a one-task initiative whose Executor task
+   runs `bash -c 'python3.12 --version && node --version'`.
+6. **Poll.** Wait for completion; collect BashTool stdout from
+   the worktree.
+7. **Assert (Tier 1, mechanical witness).** The audit
+   directory contains a `VmImageResolved` event with
+   `agent_role = "Executor"` and `oci_digest = sha256:<...>`
+   matching the bake step's SHA-256.
+8. **Assert (Tier 2, semantic witness).** BashTool stdout
+   contains `Python 3.12.` AND `v22.`.
+9. **Assert (Tier 3, artefact paths).** On either success or
+   failure, print the kernel log path, the audit directory
+   path, the worktree path, and the dashboard URL per the
+   standing live-e2e structure.
+
+A separate gated test exercises the negative path:
+`stage_byo_image_in_oci_cache(tamper = true)` flips the last
+byte of the rootfs after staging, causing the on-disk SHA-256
+to diverge from the policy-declared digest. The activation
+attempt fires
+`SecurityViolationDetected { OperatorImageDigestMismatch, … }`,
+the activation stays in `PendingActivation`, and the test
+asserts the audit-event taxonomy.
+
+### §4.3 — What this test pins
+
+The test surface above is the mechanical witness for all three
+new invariants:
+
+* `INV-IMAGE-RESOLUTION-PER-ROLE-01` — the smoke test asserts
+  `VmImageResolved.agent_role = "Executor"`; the live test
+  observes the same event and asserts the policy declared
+  `role_restriction = ["Executor"]`. The cross-wiring rejection
+  is pinned by `crates/policy`'s existing
+  `validate_vm_images` tests
+  (`FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` /
+  `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED`).
+* `INV-OPERATOR-CUSTOM-IMAGE-01` — the negative-path live test
+  is the digest-mismatch witness; the smoke test pins the
+  `notification_priority = Critical` classification of the
+  resulting `SecurityViolationDetected` event.
+* `INV-OPERATOR-CUSTOM-IMAGE-02` — the smoke test asserts the
+  uniform audit-event shape (canonical preflight emits
+  `canonical_image_ok` + on mismatch
+  `SecurityViolationDetected { ReviewerImageDigestMismatch }`;
+  BYO emits `VmImageResolved` + on mismatch
+  `SecurityViolationDetected { OperatorImageDigestMismatch }`).
+
+---
+
+## §5 — Operator recipes
+
+For copy-pasteable end-to-end recipes, see:
+
+* `guides/recipes/ops/10-publish-executor-image.md` — declaring a
+  `[[vm_images]]` entry and computing its digest.
+* `guides/recipes/ops/11-bring-your-own-image.md` — full BYO
+  walkthrough (Containerfile authoring, `docker build`, digest
+  computation, `oci-cache/` staging, policy declaration), with
+  the BYO live-e2e test cited as a worked example.
+* `guides/recipes/setup/09-default-executor-image.md` — wiring
+  a BYO image as the `[default_executor_image]`.
+
+---
+
+## §6 — Open questions / future work
+
+* **V3 registry-pull resolver.** The current `PrePopulatedResolver`
+  requires the operator to stage the rootfs on every host
+  out-of-band. `image-cache.md §6` sketches the
+  `ProductionResolver` that pulls from a registry. This spec's
+  trust contract is forward-compatible: the resolver-side
+  digest re-hash and the activation-side audit-event surface
+  do not change. The only new surface is the registry-side
+  authentication / TLS contract, which `image-cache.md` owns.
+* **Verifier-side BYO.** Verifier activations currently route
+  through `verifier-processes.md §13`'s gate-runner harness,
+  not through `handle_activate_sub_task`. A Verifier-side BYO
+  flow would emit `VmImageResolved { agent_role: "Verifier" }`
+  from the verifier-runner activation path; this spec's per-role
+  contract already admits the `"Verifier"` value but the audit
+  emit-site does not exist yet.
+* **Operator-image GC.** `image-cache.md §8`'s GC walks the
+  set of digests referenced by the live policy bundle. When the
+  operator rotates a BYO image (re-signs `policy.toml` with a
+  new digest), the old rootfs becomes GC-eligible after the
+  policy epoch carrying the old digest is fully drained. The
+  current `prune_unreferenced` implementation handles this; a
+  future stress-test should pin the no-double-free contract.
