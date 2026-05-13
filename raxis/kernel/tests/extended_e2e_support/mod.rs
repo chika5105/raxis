@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 pub mod audit_chain;
+pub mod byo_image;
 pub mod concurrency;
 pub mod crash_recovery;
 pub mod credential_substitution_evidence;
