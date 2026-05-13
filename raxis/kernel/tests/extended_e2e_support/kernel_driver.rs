@@ -530,17 +530,25 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
             img.display(),
         );
 
+        // The harness identifies roles by their `images/<subdir>/`
+        // (orchestrator-core / reviewer-core / executor-starter) so
+        // diagnostics line up with `cpio_passes_preflight` and the
+        // `<install_dir>/images/raxis-<role>-<v>.img` filenames. The
+        // xtask CLI uses the planner-crate-short name (orchestrator
+        // / reviewer / executor-starter). Translate once here.
+        let xtask_role = xtask_cli_role_for(role);
+
         // ── 1. bake-rootfs ───────────────────────────────────────
-        // Roles with `required_binaries_for_canonical_role` empty
-        // (orch / reviewer today) ship binary-only by current spec
-        // — no Containerfile bake required, dev-stage's binary-only
-        // rootfs is sufficient. Skip the docker bake for those roles
-        // so the pipeline does not require docker on every harness
-        // run when only the executor image is at risk.
-        if !required_binaries_for_canonical_role(role).is_empty() {
+        // Only `executor-starter` needs a Docker rootfs bake today
+        // (its planner LLM shells out to `bash`/`python3`/`git`).
+        // Orch + reviewer ship binary-only per INV-PLANNER-HARNESS-02
+        // minimalism; their `required_binaries_for_canonical_role`
+        // contains only the planner binary, which `dev-stage`
+        // produces, so no Containerfile bake is required.
+        if role_needs_rootfs_bake(role) {
             run_xtask_or_panic(
                 &cargo, &workspace_root, role, "bake-rootfs",
-                &["--role", role],
+                &["--role", xtask_role],
             );
         } else {
             eprintln!(
@@ -553,10 +561,10 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
         // For binary-only roles, pass --allow-stub so the post-stage
         // guard does not fire; for executor-starter (which DID just
         // bake the rootfs) the guard validates the bake worked.
-        let stage_args: Vec<&str> = if required_binaries_for_canonical_role(role).is_empty() {
-            vec!["--role", role, "--allow-stub"]
+        let stage_args: Vec<&str> = if role_needs_rootfs_bake(role) {
+            vec!["--role", xtask_role]
         } else {
-            vec!["--role", role]
+            vec!["--role", xtask_role, "--allow-stub"]
         };
         run_xtask_or_panic(
             &cargo, &workspace_root, role, "dev-stage",
@@ -568,12 +576,66 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
         run_xtask_or_panic(
             &cargo, &workspace_root, role, "build-all",
             &[
-                "--role",        role,
+                "--role",        xtask_role,
                 "--install-dir", install_dir.to_str().unwrap_or_else(|| panic!(
                     "install_dir contains non-utf8 bytes: {}", install_dir.display(),
                 )),
             ],
         );
+    }
+}
+
+/// Map the harness-internal `images/<subdir>` role name to the
+/// `cargo xtask images <sub> --role <…>` CLI name.
+///
+/// The harness uses the directory-style name everywhere (so it
+/// composes cleanly with `cpio_passes_preflight`, the
+/// `<install_dir>/images/raxis-<role>-<v>.img` filenames, and the
+/// `[live-e2e auto-bake] <role>: …` diagnostic lines). The xtask
+/// CLI uses the planner-crate-short name (`orchestrator` instead
+/// of `orchestrator-core`, `reviewer` instead of `reviewer-core`,
+/// and the unchanged `executor-starter`). Drift between these two
+/// surfaced as iter-46 where auto-bake invoked
+/// `cargo xtask images bake-rootfs --role orchestrator-core` and
+/// xtask rejected the role with an `unsupported --role` error.
+///
+/// Rather than teach `xtask::Role::parse` a second name per role,
+/// we keep the CLI surface minimal (each role has exactly one
+/// stable `--role` value) and translate in the harness — this is
+/// the lone caller that ever hits xtask with the directory-style
+/// name, and a one-line translation here is cheaper than expanding
+/// the public xtask CLI vocabulary.
+fn xtask_cli_role_for(image_subdir_role: &str) -> &'static str {
+    match image_subdir_role {
+        "orchestrator-core" => "orchestrator",
+        "reviewer-core"     => "reviewer",
+        "executor-starter"  => "executor-starter",
+        other => panic!(
+            "unknown canonical role {other:?}; \
+             expected one of: orchestrator-core, executor-starter, reviewer-core"
+        ),
+    }
+}
+
+/// Whether the role needs a Docker rootfs bake (`bake-rootfs`)
+/// before `dev-stage`.
+///
+/// Orchestrator + reviewer are binary-only by current spec
+/// (INV-PLANNER-HARNESS-02 minimalism) — their canonical cpio
+/// contains only the planner binary, which `dev-stage` produces
+/// directly. The Docker rootfs bake is reserved for roles whose
+/// LLM shells out to OS tooling (`bash` / `python3` / `git` for
+/// executor-starter). Branch B will enrich orch / reviewer
+/// Containerfiles and flip the corresponding entries here.
+fn role_needs_rootfs_bake(image_subdir_role: &str) -> bool {
+    match image_subdir_role {
+        "executor-starter"  => true,
+        "orchestrator-core" => false,
+        "reviewer-core"     => false,
+        other => panic!(
+            "unknown canonical role {other:?}; \
+             expected one of: orchestrator-core, executor-starter, reviewer-core"
+        ),
     }
 }
 
