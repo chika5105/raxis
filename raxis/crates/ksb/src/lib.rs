@@ -42,6 +42,20 @@
 //!   [`assemble_system_prompt`] helper joins the role-specific NNSP
 //!   with the rendered KSB so every dispatch-loop caller produces
 //!   the exact same prompt shape.
+//! * **Role-scoped capabilities envelope (V2.6).** Slice C added
+//!   the [`Capabilities`] enum carrying the kernel-side admission
+//!   predicate verdicts (notably
+//!   [`TaskCapabilityView::retry_admissible`]) so the LLM can
+//!   pre-evaluate inadmissible intents BEFORE submitting them.
+//!   Pins:
+//!     - `INV-KSB-CAPABILITIES-PARITY-01` (the boolean is computed
+//!       from `raxis_types::intent_admit::admit_retry_subtask_check`,
+//!       the same pub fn the IPC handler runs).
+//!     - `INV-KSB-CAPABILITIES-ROLE-SCOPED-01` (the three enum
+//!       variants are disjoint; the type system enforces it).
+//!     - `INV-KSB-CAPABILITIES-TURN-COHERENT-01` (the kernel-side
+//!       assembler reads from a single `&Connection` so SQLite's
+//!       per-connection consistency model gives a stable snapshot).
 //!
 //! ## V2 limits (declared so future work has a target)
 //!
@@ -242,6 +256,191 @@ pub struct KsbSnapshot {
     /// credential decls.
     #[serde(default)]
     pub credential_ports: Vec<CredentialPort>,
+
+    /// Role-scoped capabilities envelope (slice C —
+    /// `INV-KSB-CAPABILITIES-PARITY-01`,
+    /// `INV-KSB-CAPABILITIES-ROLE-SCOPED-01`,
+    /// `INV-KSB-CAPABILITIES-TURN-COHERENT-01`). Carries the
+    /// kernel-side admit-predicate verdicts the LLM needs to
+    /// stop blind-asking for inadmissible intents. `None` ⇒ the
+    /// kernel did not project a capabilities envelope (legacy
+    /// path / boot race / fixture); the renderer omits the
+    /// `capabilities=` block and the LLM's NNSP fallback applies.
+    /// See [`Capabilities`].
+    ///
+    /// Non-breaking addition (per the field-shape contract above).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities envelope — slice C role-scoped capability projection
+// ---------------------------------------------------------------------------
+//
+// V2.6 capabilities envelope. Three role-scoped variants enforce the
+// `INV-KSB-CAPABILITIES-ROLE-SCOPED-01` contract by construction —
+// the type system literally cannot let an Executor's KSB carry the
+// orchestrator's per-initiative respawn counter or peer-task review
+// trajectory because the variant doesn't have a field for it.
+//
+// `INV-KSB-CAPABILITIES-PARITY-01`: `retry_admissible` is computed
+// kernel-side from the same `admit_retry_subtask_check` pub fn the
+// `RetrySubTask` IPC handler calls (see `kernel/src/intent_admit.rs`).
+// Both call sites MUST get the same answer for the same `(prior_state,
+// crash_retry_count, review_reject_count, max_crash_retries,
+// max_review_rejections)` tuple — the parity witness test pins this.
+//
+// `INV-KSB-CAPABILITIES-TURN-COHERENT-01`: the assembler MUST source
+// every capability field from the SAME `&Connection` it uses for the
+// rest of the KSB projection — there's no separate `BEGIN`/`COMMIT`
+// because SQLite's read consistency model already gives us a stable
+// snapshot for the duration of a single connection's read sequence
+// (the assembler holds the lock for the whole projection). The
+// witness test asserts this by checking that a concurrent writer's
+// committed change CANNOT race into a partially-projected snapshot.
+
+/// Role-scoped capabilities envelope. Each variant carries ONLY the
+/// fields the role's decision surface needs, enforced by the type
+/// system per `INV-KSB-CAPABILITIES-ROLE-SCOPED-01`.
+///
+/// JSON wire shape uses an internally-tagged representation
+/// (`{"role": "orchestrator", "session": …, "initiative": …, "tasks": …}`)
+/// so the driver-side deserializer can dispatch on `role` without
+/// ambiguity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum Capabilities {
+    /// Orchestrator's view: per-session + per-initiative budget +
+    /// per-task admit-predicate verdicts for every task in the DAG.
+    /// The orchestrator is the only role that sees the per-task
+    /// retry-admissibility envelope because it is the only role
+    /// authorised to issue `RetrySubTask`.
+    Orchestrator(OrchestratorCapabilities),
+
+    /// Executor's view: per-session + the SINGLE assigned task. Does
+    /// NOT carry orchestrator's respawn counter or peer-task review
+    /// trajectories — the executor's decision surface is its own
+    /// task; cross-DAG visibility would leak review state across
+    /// sibling executors.
+    Executor(ExecutorCapabilities),
+
+    /// Reviewer's view: per-session + the artifact under review
+    /// (identity only, no counters). The reviewer's verdict MUST be
+    /// on the artifact, not on the executor's prior trajectory —
+    /// surfacing `crash_retry_count` / `review_reject_count` would
+    /// bias the reviewer toward "approve, the executor is already
+    /// burning retries" or "reject, the executor has been failing"
+    /// reasoning that the contract explicitly forbids.
+    Reviewer(ReviewerCapabilities),
+}
+
+/// Per-session view fields shared across all three role envelopes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionCapabilityView {
+    /// Session id this capability projection was built against.
+    pub session_id: String,
+    /// Role string (`"orchestrator"` / `"executor"` / `"reviewer"`).
+    /// Mirrors [`KsbSnapshot::role`].
+    pub role:       String,
+}
+
+/// Orchestrator's per-initiative view. Carries the orchestrator
+/// no-progress respawn counter (slice B,
+/// `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) plus the ceiling /
+/// remaining-quota derivation so the LLM can pre-emptively
+/// `request_escalation` rather than blind-respawning into the
+/// kernel's auto-escalation backstop.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InitiativeCapabilityView {
+    /// Initiative id.
+    pub initiative_id:                          String,
+    /// Current value of
+    /// `initiatives.orchestrator_no_progress_respawn_count`.
+    pub orchestrator_no_progress_respawn_count: u32,
+    /// Kernel-side ceiling default
+    /// (`MAX_ORCH_NO_PROGRESS_RESPAWNS`).
+    pub max_orchestrator_no_progress_respawns:  u32,
+    /// `max - count` saturated at zero. When `0`, the next
+    /// orchestrator post-exit respawn trigger will exceed the
+    /// ceiling and auto-escalate.
+    pub orchestrator_respawns_remaining:        u32,
+}
+
+/// Per-task admit-predicate view. The orchestrator carries one row
+/// per executor task in the DAG; the executor carries exactly one
+/// row (its own task). The `retry_admissible` boolean is computed
+/// from the SAME `admit_retry_subtask_check` predicate the
+/// `RetrySubTask` IPC handler runs (parity contract).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskCapabilityView {
+    /// Task id this view describes.
+    pub task_id:                  String,
+    /// Most-recent activation's `crash_retry_count` (the executor's
+    /// crash / `ReportFailure` count for THIS task).
+    pub crash_retry_count:        u32,
+    /// Most-recent activation's `review_reject_count` (cross-Reviewer
+    /// terminal `AtLeastOneRejected` count for THIS task).
+    pub review_reject_count:      u32,
+    /// Plan-declared crash-retry ceiling (effective: plan override OR
+    /// kernel default).
+    pub max_crash_retries:        u32,
+    /// Plan-declared review-rejection ceiling.
+    pub max_review_rejections:    u32,
+    /// `max_crash_retries - crash_retry_count` saturated at zero.
+    pub crash_retries_remaining:  u32,
+    /// `max_review_rejections - review_reject_count` saturated at
+    /// zero.
+    pub review_retries_remaining: u32,
+    /// `true` iff `RetrySubTask` for this task would be ADMITTED by
+    /// the kernel RIGHT NOW per `admit_retry_subtask_check`. This
+    /// is the load-bearing field for slice C — the orchestrator's
+    /// NNSP teaches the LLM to consult this BEFORE issuing a
+    /// `retry_subtask` intent so the kernel doesn't have to keep
+    /// rejecting blind-asks (which is what the iter44 leading-
+    /// indicator metric `IntentAdmitPredicateEvaluatedTotal{
+    /// admissible="false"}` was tracking).
+    pub retry_admissible:           bool,
+    /// Human-readable reason when `retry_admissible == false`. Empty
+    /// (`None`) when the retry would be admissible. Stable lexemes:
+    /// `"prior state {state}; need Failed or Completed-with-rejection"`,
+    /// `"crash_retry_count {n} >= max_crash_retries {m}"`,
+    /// `"review_reject_count {n} >= max_review_rejections {m}"`,
+    /// `"no prior activation"`. The strings are lexeme-stable across
+    /// kernel revisions because the planner-core driver is allowed
+    /// to substring-match against them in the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_inadmissible_reason: Option<String>,
+}
+
+/// Orchestrator's full envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrchestratorCapabilities {
+    pub session:    SessionCapabilityView,
+    pub initiative: InitiativeCapabilityView,
+    /// One row per executor task in the initiative's DAG. Reviewer
+    /// rows are intentionally omitted — the orchestrator does not
+    /// `retry_subtask` on a reviewer (reviewers are
+    /// reactivate-only).
+    pub tasks:      Vec<TaskCapabilityView>,
+}
+
+/// Executor's envelope. Single task — the one this executor session
+/// was spawned for. Does NOT carry orchestrator's respawn counter
+/// or peer-task views.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorCapabilities {
+    pub session: SessionCapabilityView,
+    pub task:    TaskCapabilityView,
+}
+
+/// Reviewer's envelope. Identity-only artifact view — no counters
+/// (the reviewer must verdict on the artifact, not the executor's
+/// trajectory).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewerCapabilities {
+    pub session:          SessionCapabilityView,
+    /// Task id of the executor artifact under review.
+    pub artifact_task_id: String,
 }
 
 /// One DAG row visible in the KSB.
@@ -506,6 +705,9 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
             }
         }
     }
+    if let Some(caps) = &snapshot.capabilities {
+        check_capabilities_delimiter(caps)?;
+    }
 
     let mut buf = String::with_capacity(512 + snapshot.task_description.len());
     buf.push_str(KSB_DELIMITER_OPEN);
@@ -649,9 +851,136 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
         }
     }
 
+    if let Some(caps) = &snapshot.capabilities {
+        push_capabilities(&mut buf, caps);
+    }
+
     buf.push_str(KSB_DELIMITER_CLOSE);
     buf.push('\n');
     Ok(buf)
+}
+
+/// Validate every text field of a [`Capabilities`] envelope against
+/// the `KSB_DELIMITER_CLOSE` injection guard. Centralised here so
+/// the `render_ksb` chokepoint inherits the same defence-in-depth
+/// the existing field-by-field scan applies to the rest of the
+/// snapshot (INV-KSB-01).
+fn check_capabilities_delimiter(caps: &Capabilities) -> Result<(), KsbError> {
+    let session = match caps {
+        Capabilities::Orchestrator(o) => &o.session,
+        Capabilities::Executor(e)     => &e.session,
+        Capabilities::Reviewer(r)     => &r.session,
+    };
+    for s in [&session.session_id, &session.role] {
+        if s.contains(KSB_DELIMITER_CLOSE) {
+            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+        }
+    }
+    let task_iter: Box<dyn Iterator<Item = &TaskCapabilityView>> = match caps {
+        Capabilities::Orchestrator(o) => Box::new(o.tasks.iter()),
+        Capabilities::Executor(e)     => Box::new(std::iter::once(&e.task)),
+        Capabilities::Reviewer(_)     => Box::new(std::iter::empty()),
+    };
+    for t in task_iter {
+        if t.task_id.contains(KSB_DELIMITER_CLOSE) {
+            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+        }
+        if let Some(reason) = &t.retry_inadmissible_reason {
+            if reason.contains(KSB_DELIMITER_CLOSE) {
+                return Err(KsbError::DelimiterInjection { field: "capabilities" });
+            }
+        }
+    }
+    if let Capabilities::Orchestrator(o) = caps {
+        if o.initiative.initiative_id.contains(KSB_DELIMITER_CLOSE) {
+            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+        }
+    }
+    if let Capabilities::Reviewer(r) = caps {
+        if r.artifact_task_id.contains(KSB_DELIMITER_CLOSE) {
+            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+        }
+    }
+    Ok(())
+}
+
+/// Append the `capabilities=` block to the rendered KSB. The block
+/// is role-keyed so the LLM's NNSP can dispatch on the visible
+/// `role=` field above. Layout is line-oriented + indentation-fixed
+/// per the rest of the renderer.
+///
+/// Wire shape (orchestrator example):
+///
+/// ```text
+/// capabilities=
+///   role=orchestrator session=ses-7
+///   initiative=init-3 orch_no_progress_respawns=1/3 remaining=2
+///   tasks=
+///     - task=task-a crash=0/3 review=1/2 retry_admissible=true
+///     - task=task-b crash=2/3 review=0/2 retry_admissible=false reason="crash_retry_count 2 >= max_crash_retries 3"
+/// ```
+fn push_capabilities(buf: &mut String, caps: &Capabilities) {
+    buf.push_str("capabilities=\n");
+    match caps {
+        Capabilities::Orchestrator(o) => {
+            buf.push_str("  role=orchestrator session=");
+            buf.push_str(&o.session.session_id);
+            buf.push('\n');
+            buf.push_str("  initiative=");
+            buf.push_str(&o.initiative.initiative_id);
+            buf.push_str(" orch_no_progress_respawns=");
+            buf.push_str(&o.initiative.orchestrator_no_progress_respawn_count.to_string());
+            buf.push('/');
+            buf.push_str(&o.initiative.max_orchestrator_no_progress_respawns.to_string());
+            buf.push_str(" remaining=");
+            buf.push_str(&o.initiative.orchestrator_respawns_remaining.to_string());
+            buf.push('\n');
+            buf.push_str("  tasks=\n");
+            if o.tasks.is_empty() {
+                buf.push_str("    <empty>\n");
+            } else {
+                for t in &o.tasks {
+                    push_task_capability_row(buf, t);
+                }
+            }
+        }
+        Capabilities::Executor(e) => {
+            buf.push_str("  role=executor session=");
+            buf.push_str(&e.session.session_id);
+            buf.push('\n');
+            buf.push_str("  task=\n");
+            push_task_capability_row(buf, &e.task);
+        }
+        Capabilities::Reviewer(r) => {
+            buf.push_str("  role=reviewer session=");
+            buf.push_str(&r.session.session_id);
+            buf.push('\n');
+            buf.push_str("  artifact_task_id=");
+            buf.push_str(&r.artifact_task_id);
+            buf.push('\n');
+        }
+    }
+}
+
+fn push_task_capability_row(buf: &mut String, t: &TaskCapabilityView) {
+    buf.push_str("    - task=");
+    buf.push_str(&t.task_id);
+    buf.push_str(" crash=");
+    buf.push_str(&t.crash_retry_count.to_string());
+    buf.push('/');
+    buf.push_str(&t.max_crash_retries.to_string());
+    buf.push_str(" review=");
+    buf.push_str(&t.review_reject_count.to_string());
+    buf.push('/');
+    buf.push_str(&t.max_review_rejections.to_string());
+    buf.push_str(" retry_admissible=");
+    buf.push_str(if t.retry_admissible { "true" } else { "false" });
+    if let Some(reason) = &t.retry_inadmissible_reason {
+        buf.push_str(" reason=\"");
+        buf.push_str(reason);
+        buf.push('"');
+    }
+    buf.push('\n');
 }
 
 fn push_kv(buf: &mut String, key: &str, value: &str) {
@@ -738,6 +1067,7 @@ mod tests {
             reviewer_verdicts:             vec![],
             pending_escalations:           vec![],
             credential_ports:              vec![],
+            capabilities:                  None,
         }
     }
 

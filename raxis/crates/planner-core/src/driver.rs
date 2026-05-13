@@ -1048,7 +1048,37 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                           \n\
                           You MUST call one of these tools before the turn ends. \
                           Free-form text without a tool call leaves the session \
-                          stuck and the kernel will record an Idle failure.",
+                          stuck and the kernel will record an Idle failure.\n\
+                          \n\
+                          ## Capabilities envelope (`capabilities=` block)\n\
+                          \n\
+                          Your KSB carries a `capabilities=` block that surfaces \
+                          the kernel's view of YOUR task's retry budget. The \
+                          executor variant has shape:\n\
+                          \n\
+                          ```\n\
+                          capabilities=\n\
+                            role=executor session=<session-id>\n\
+                            task=\n\
+                              - task=<your-task-id> crash=<n>/<max> \
+                          review=<n>/<max> retry_admissible=<true|false> \
+                          [reason=\"…\"]\n\
+                          ```\n\
+                          \n\
+                          The block is FOR INFORMATION — the executor cannot \
+                          itself call `retry_subtask` (that intent is reserved \
+                          for the orchestrator). Consult the `crash=n/max` \
+                          counter to understand how much budget you have spent: \
+                          if `n` is close to `max` you should NOT call \
+                          `report_failure` casually for transient noise — the \
+                          kernel will respect the retry budget either way, but \
+                          burning the last attempt on a recoverable error \
+                          forecloses honest retries on the next round. The \
+                          `review=` counter tells you how many prior rounds \
+                          this task has been Reviewer-rejected; pivot your \
+                          implementation strategy if it is non-zero (look for \
+                          critique text the orchestrator passed in via the task \
+                          prompt).",
         Role::Reviewer => "You are the RAXIS reviewer for task `{TASK}` of \
                           initiative `{INIT}`. Read the executor's commit \
                           (via `read_file` / `grep_search`) and evaluate it \
@@ -1735,6 +1765,7 @@ mod tests {
             reviewer_verdicts:             vec![],
             pending_escalations:           vec![],
             credential_ports:              vec![],
+            capabilities:                  None,
         };
 
         let _ = run_role_session_with_model(

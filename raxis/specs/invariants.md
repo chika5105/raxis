@@ -88,7 +88,8 @@
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
 | Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01, INV-OBS-OPERATOR-IPC-COVERAGE-01 | 3 |
-| **Total** | | **108** |
+| KSB capabilities envelope — V2.6 | INV-KSB-CAPABILITIES-PARITY-01, INV-KSB-CAPABILITIES-ROLE-SCOPED-01, INV-KSB-CAPABILITIES-TURN-COHERENT-01 | 3 |
+| **Total** | | **111** |
 
 ---
 
@@ -1574,6 +1575,264 @@ a regression specific to this plan's `policy.toml`; etc.).
   * `kernel/tests/orch_respawn_ceiling_escalation.rs` — witness
     test (7 cases) covering schema, class round-trip, audit
     priority, ceiling auto-create, approve, deny, FSM idempotency.
+
+---
+
+## §6.7 — KSB capabilities envelope (INV-KSB-CAPABILITIES-*)
+
+V2.6 extension. The KSB historically surfaced raw kernel state
+(DAG, reviewer verdicts, base SHA, …) but left the **admission
+predicates** invisible to the LLM — the planner had to learn-by-
+rejection that e.g. `RetrySubTask` against a `Completed` activation
+with `review_reject_count = 0` is inadmissible. The iter44
+leading-indicator metric `IntentAdmitPredicateEvaluatedTotal{
+admissible="false"}` measures exactly this rate of LLM blind-asks.
+
+The capabilities envelope (added to [`raxis_ksb::KsbSnapshot`] as
+the `Option<Capabilities>` field) projects the admission predicate
+verdicts into the system prompt so the LLM consults them BEFORE
+issuing the intent. The envelope is role-scoped — the orchestrator
+sees per-task admit verdicts (it's the only role authorised to
+issue `RetrySubTask`); the executor sees its own task envelope
+only; the reviewer sees identity-only artifact context. The shape
+is enforced by the type system ([`raxis_ksb::Capabilities`] is an
+enum with three disjoint variants).
+
+Invariant body covers:
+
+  * Predicate-parity: the KSB row's `retry_admissible` boolean is
+    derived from the SAME pub fn the kernel handler calls
+    (`raxis_types::intent_admit::admit_retry_subtask_check`).
+  * Role-scope: each role's envelope variant carries ONLY the
+    fields its decision surface needs; the type system enforces
+    disjointness.
+  * Turn-coherence: every capabilities field is read from the
+    SAME `&Connection` the rest of `assemble_ksb_snapshot` uses,
+    inheriting SQLite's per-connection read-consistency model.
+
+---
+
+### INV-KSB-CAPABILITIES-PARITY-01 — KSB admit-predicate verdicts mirror the IPC handler
+
+**Statement.** The `retry_admissible` boolean stamped into every
+[`raxis_ksb::TaskCapabilityView`] in the projected KSB snapshot
+MUST equal the verdict
+[`raxis_types::intent_admit::admit_retry_subtask_check`] returns
+for the same inputs (`prior_activation_state`, `crash_retry_count`,
+`review_reject_count`, `max_crash_retries`, `max_review_rejections`).
+The kernel's `RetrySubTask` IPC handler MUST route its eligibility
+cascade through the SAME `admit_retry_subtask_check` pub fn.
+
+The `retry_inadmissible_reason` (when present) MUST carry the
+output of [`raxis_types::intent_admit::RetryInadmissibleReason::
+human()`] for the matching variant; the leading lexemes (`"no prior
+activation"`, `"prior state {state}"`, `"crash_retry_count {n}"`,
+`"review_reject_count {n}"`) are substring-stable across kernel
+revisions because the orchestrator NNSP pattern-matches against
+them.
+
+**Justification.** Without parity, the LLM can (a) pre-evaluate
+the KSB row to "admissible" and submit an intent the kernel
+rejects (false-negative blind-ask), or (b) pre-evaluate the KSB
+row to "inadmissible" and choose an alternative path
+(`request_escalation`) when the kernel would actually have
+admitted (false-positive escalation). Both classes of drift
+silently degrade orchestrator throughput; parity makes them
+unrepresentable.
+
+The predicate is intentionally a pure function (takes primitives,
+returns a structured outcome — no SQL, no I/O, no async) so both
+call sites can run it inside their own transaction without
+coupling on a shared `&Connection`. Side effects (the IPC
+handler's eprintln + observability counter increment + audit
+emit) belong to the call site; the predicate owns the BOOLEAN
+decision only.
+
+**Scenario.** A future revision tightens the retry-admission
+gate (e.g. adds a "no retry within 30 s of the prior failure"
+rule) and updates `handle_retry_sub_task` to enforce it but
+forgets to update the KSB assembly. The orchestrator's KSB
+shows `retry_admissible=true` for a task whose retry is now
+blocked by the new gate; the orchestrator submits the intent;
+the kernel rejects it with `FAIL_INVALID_REQUEST`. The parity
+witness (`kernel/tests/ksb_capabilities_parity.rs`) catches this
+class of regression before it lands by asserting both call sites
+return the same verdict for the matrix of admit / reject
+inputs.
+
+**Canonical home.** `crates/types/src/intent_admit.rs` (the
+predicate); `crates/ksb/src/lib.rs` `Capabilities` /
+`TaskCapabilityView` (the wire shape).
+
+**Implementation references.**
+
+  * `crates/types/src/intent_admit.rs` — `admit_retry_subtask_check`,
+    `AdmitOutcome`, `RetryInadmissibleReason`, `RetryAdmitInputs`.
+  * `kernel/src/handlers/intent.rs` — `handle_retry_sub_task`
+    eligibility cascade (uses `raxis_types::intent_admit::*`).
+  * `kernel/src/initiatives/ksb_assembly.rs` — `assemble_capabilities`,
+    `build_task_capability_view` (uses `raxis_types::intent_admit::*`
+    via `admit_retry_subtask_check` to populate the KSB).
+  * `kernel/tests/ksb_capabilities_parity.rs` — witness (3
+    cases) covering matrix parity, leading-lexeme stability,
+    observability-axis stability.
+
+---
+
+### INV-KSB-CAPABILITIES-ROLE-SCOPED-01 — Each role's envelope carries only its decision-surface fields
+
+**Statement.** [`raxis_ksb::Capabilities`] has exactly three
+variants (`Orchestrator`, `Executor`, `Reviewer`) whose field
+sets are disjoint:
+
+  * `Orchestrator` carries `session: SessionCapabilityView`,
+    `initiative: InitiativeCapabilityView` (per-initiative respawn
+    budget), `tasks: Vec<TaskCapabilityView>` (per-executor-task
+    admit verdicts).
+  * `Executor` carries `session: SessionCapabilityView`,
+    `task: TaskCapabilityView` (the SINGLE task the executor was
+    spawned for) — and nothing else.
+  * `Reviewer` carries `session: SessionCapabilityView`,
+    `artifact_task_id: String` (identity-only artifact pointer)
+    — and nothing else. No counters; the reviewer's verdict MUST
+    be on the artifact, not on the executor's prior trajectory.
+
+The wire shape (serde-tagged JSON) MUST mirror this disjointness:
+serialising a non-orchestrator envelope MUST NOT include
+`initiative` or `tasks` keys; serialising a non-reviewer envelope
+MUST NOT include `artifact_task_id`; serialising a non-executor
+envelope MUST NOT include the executor's `task` key.
+
+**Justification.** The role-scope contract is the kernel-side
+mitigation against three classes of LLM error:
+
+  * **Orchestrator over-reach** — surfacing per-task admit
+    verdicts only to the orchestrator means the executor cannot
+    "go behind the orchestrator's back" by attempting a sibling
+    task's retry (the executor has no API for this, but the
+    type-level disjointness means the executor's KSB doesn't
+    even surface the field).
+  * **Executor cross-DAG visibility** — withholding the
+    orchestrator's per-initiative respawn counter from the
+    executor means the executor cannot correlate its own
+    activation against orchestrator structural failures (which
+    would invite reasoning like "the orchestrator is unstable;
+    I should rush my commit").
+  * **Reviewer trajectory bias** — the reviewer's verdict
+    contract (`v1/peripherals.md §reviewer`) is "verdict on the
+    artifact, not on the executor". Surfacing
+    `crash_retry_count` / `review_reject_count` to the reviewer
+    would invite "approve, the executor has burned 2/2 budget;
+    rejecting again now leaves the operator stuck" reasoning the
+    contract explicitly forbids.
+
+The disjointness is enforced at the **type system** level (Rust
+enum variants with disjoint field sets), so a future field
+addition that crosses the role boundary (e.g. adding
+`crash_retry_count` to `ReviewerCapabilities`) is caught at
+compile time by the structural contract. The wire-shape witness
+(`kernel/tests/ksb_capabilities_role_scoped.rs`) additionally
+pins the JSON serialisation so a serde-rename or
+`#[serde(flatten)]` regression that smuggles a forbidden field
+across roles is caught at the wire level.
+
+**Scenario.** A planner-side dashboard PR adds a
+`peer_task_states: Vec<DagRow>` field to `ExecutorCapabilities`
+(intent: surface peer review state to the executor for
+better self-coordination). The witness fires:
+`executor_envelope_omits_orchestrator_and_peer_state` asserts
+the executor's serialised JSON does NOT contain the field. The
+PR author either justifies the change (and updates the
+invariant's body to widen the contract), or scopes the field
+to the orchestrator's envelope where it belongs.
+
+**Canonical home.** `crates/ksb/src/lib.rs` `Capabilities`
+docstring + `kernel-mechanics-prompt.md §"KSB schema"`.
+
+**Implementation references.**
+
+  * `crates/ksb/src/lib.rs` — `Capabilities`,
+    `OrchestratorCapabilities`, `ExecutorCapabilities`,
+    `ReviewerCapabilities`, `SessionCapabilityView`,
+    `InitiativeCapabilityView`, `TaskCapabilityView`.
+  * `kernel/src/initiatives/ksb_assembly.rs` —
+    `assemble_capabilities` dispatches per `KsbRole` and
+    constructs only the matching variant.
+  * `kernel/tests/ksb_capabilities_role_scoped.rs` — witness (5
+    cases) covering wire-shape disjointness and rendered-text
+    role-keying.
+
+---
+
+### INV-KSB-CAPABILITIES-TURN-COHERENT-01 — Capabilities snapshot reads share the assembler's connection
+
+**Statement.** The kernel-side
+[`assemble_ksb_snapshot`] MUST read every capabilities-envelope
+field from the SAME `&Connection` it uses for the rest of the
+KSB projection (DAG rows, reviewer verdicts, pending escalations,
+base SHA). The capabilities envelope assembly
+(`assemble_capabilities`) takes the `&Connection` argument and
+runs all SQL against it; no separate connection or transaction
+is opened.
+
+**Justification.** SQLite's read-consistency model on a single
+connection guarantees a stable snapshot for the duration of a
+read sequence (autocommit reads see a transaction-scoped
+snapshot per
+`https://www.sqlite.org/isolation.html`). The kernel-side
+spawn paths assemble the KSB inside a `spawn_blocking` closure
+that holds `Store::lock_sync()` (the per-store mutex around the
+shared `Connection`) for the whole assembly, inheriting that
+guarantee. Splitting the capabilities envelope read across a
+SECOND connection would risk drift: an operator-side write
+landing between connection-A's `dag_rows` read and
+connection-B's `tasks.crash_retry_count` read would surface a
+torn snapshot whose `retry_admissible` boolean was computed
+from a different store revision than the DAG row the LLM is
+reasoning against.
+
+The same property makes the kernel's auto-escalation
+paired-write (slice B,
+`INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01`) safe under
+concurrent KSB assembly: the assembler will see either the
+BEFORE state (initiative `Executing`, no escalation row) or the
+AFTER state (initiative `Failed`, escalation row present),
+never a torn snapshot in between (the paired write is one
+SQLite transaction).
+
+**Scenario.** A future refactor moves the per-task counter
+read into a separate `Store::lock_sync()` block "for
+performance" (each call would acquire / release the per-store
+mutex independently). Under concurrent operator load, an
+intervening `subtask_activations` UPDATE between the
+DAG-row read and the counter read produces a KSB snapshot whose
+`dag_rows[i].state` and `tasks[i].crash_retry_count` come from
+different store revisions. The orchestrator's NNSP scans
+`aggregate=AtLeastOneRejected` rows against
+`retry_admissible=true` — the divergence shows up as a transient
+"the kernel says retry is admissible but the activation row was
+already advanced" race the witness
+(`kernel/tests/ksb_capabilities_turn_coherent.rs`) catches by
+pinning the per-connection snapshot guarantees the assembler
+relies on.
+
+**Canonical home.** `kernel/src/initiatives/ksb_assembly.rs`
+`assemble_capabilities` docstring +
+`v2/v2-deep-spec.md §V2.6 KSB capabilities envelope`.
+
+**Implementation references.**
+
+  * `kernel/src/initiatives/ksb_assembly.rs` —
+    `assemble_capabilities` (single `&Connection` arg);
+    `assemble_ksb_snapshot` (caller threads the connection
+    through).
+  * `kernel/src/session_spawn_orchestrator.rs` — both spawn
+    paths wrap the assembler in `spawn_blocking` with
+    `Store::lock_sync()` for the whole call.
+  * `kernel/tests/ksb_capabilities_turn_coherent.rs` — witness
+    (3 cases) covering single-connection self-write
+    observation, sibling-connection committed-write visibility,
+    and uncommitted-write opacity to concurrent readers.
 
 ---
 

@@ -38,11 +38,18 @@ use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
 use raxis_ksb::{
-    CredentialPort, DagRow, KsbSnapshot, PendingEscalation, ReviewerVerdict,
-    KSB_SCHEMA_VERSION,
+    Capabilities, CredentialPort, DagRow, ExecutorCapabilities,
+    InitiativeCapabilityView, KsbSnapshot, OrchestratorCapabilities,
+    PendingEscalation, ReviewerCapabilities, ReviewerVerdict,
+    SessionCapabilityView, TaskCapabilityView, KSB_SCHEMA_VERSION,
 };
 use raxis_store::Table;
 use raxis_types::SessionAgentType;
+
+use raxis_types::intent_admit::{
+    admit_retry_subtask_check, AdmitOutcome, RetryAdmitInputs,
+};
+use crate::orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS;
 
 use crate::initiatives::plan_registry::{PlanRegistry, TaskKey};
 use crate::initiatives::review_aggregation::compute_aggregate_review_outcome_with_conn;
@@ -114,6 +121,14 @@ pub struct KsbInputs<'a> {
     /// reviewer (which cannot consume credentials —
     /// `INV-PLANNER-HARNESS-02`) and for tasks with no decls.
     pub credential_ports: Vec<CredentialPort>,
+    /// Session id the spawn path is provisioning the planner role
+    /// against. Stamped into the `capabilities.session.session_id`
+    /// projection so the LLM has wire-stable identity for the
+    /// envelope. Empty (`""`) ⇒ the spawn path did not yet have a
+    /// session id (boot race / fixture); the assembler still
+    /// populates the rest of the capabilities envelope but emits
+    /// the literal empty string for `session_id`.
+    pub session_id: &'a str,
 }
 
 /// Assemble the KSB snapshot the kernel will stamp into
@@ -233,6 +248,13 @@ pub fn assemble_ksb_snapshot(
     let base_sha = read_initiative_anchor_base_sha(conn, inputs.initiative_id)?
         .unwrap_or_default();
 
+    // Slice C — `INV-KSB-CAPABILITIES-TURN-COHERENT-01`: the
+    // capabilities envelope is read from the SAME `&Connection` as
+    // every other field above (no separate `BEGIN`/`COMMIT` —
+    // SQLite serialises reads on a single connection so all reads
+    // in this function see the same store snapshot).
+    let capabilities = Some(assemble_capabilities(conn, registry, inputs)?);
+
     Ok(KsbSnapshot {
         version:                       KSB_SCHEMA_VERSION,
         initiative_id:                 inputs.initiative_id.to_owned(),
@@ -249,6 +271,7 @@ pub fn assemble_ksb_snapshot(
         reviewer_verdicts,
         pending_escalations,
         credential_ports:              inputs.credential_ports.clone(),
+        capabilities,
     })
 }
 
@@ -562,6 +585,242 @@ fn read_pending_escalations(
     Ok(rows)
 }
 
+// ---------------------------------------------------------------------------
+// Slice C — capabilities envelope assembly
+// ---------------------------------------------------------------------------
+//
+// `INV-KSB-CAPABILITIES-PARITY-01`  — the per-task `retry_admissible`
+//   boolean is computed via `intent_admit::admit_retry_subtask_check`,
+//   the SAME pub fn the `RetrySubTask` IPC handler routes its
+//   eligibility cascade through. Parity is mechanical: same inputs ⇒
+//   same answer.
+//
+// `INV-KSB-CAPABILITIES-ROLE-SCOPED-01` — enforced by the type system
+//   (orchestrator / executor / reviewer are distinct enum variants
+//   with disjoint field sets); the assembler picks the variant per
+//   `KsbRole` and cannot accidentally cross-pollinate.
+//
+// `INV-KSB-CAPABILITIES-TURN-COHERENT-01` — every read here uses the
+//   SAME `&Connection` the rest of `assemble_ksb_snapshot` uses; the
+//   single-connection serialisation guarantees a stable snapshot for
+//   the duration of the assembly.
+
+/// Assemble the per-role capabilities envelope. Called from
+/// `assemble_ksb_snapshot` while it holds the same `&Connection`
+/// used for every other field.
+fn assemble_capabilities(
+    conn:     &Connection,
+    registry: &PlanRegistry,
+    inputs:   &KsbInputs<'_>,
+) -> Result<Capabilities, KsbAssemblyError> {
+    let session = SessionCapabilityView {
+        session_id: inputs.session_id.to_owned(),
+        role:       inputs.role.as_str().to_owned(),
+    };
+
+    match inputs.role {
+        KsbRole::Orchestrator => {
+            let orch_count = read_orchestrator_no_progress_respawn_count(
+                conn, inputs.initiative_id,
+            )?;
+            let initiative = build_initiative_view(
+                inputs.initiative_id, orch_count,
+            );
+            let tasks = read_executor_task_capability_views(
+                conn, registry, inputs.initiative_id,
+            )?;
+            Ok(Capabilities::Orchestrator(OrchestratorCapabilities {
+                session,
+                initiative,
+                tasks,
+            }))
+        }
+        KsbRole::Executor => {
+            let task_id = inputs.task_id.unwrap_or("");
+            let task = build_task_capability_view_for_single(
+                conn, registry, inputs.initiative_id, task_id,
+            )?;
+            Ok(Capabilities::Executor(ExecutorCapabilities {
+                session,
+                task,
+            }))
+        }
+        KsbRole::Reviewer => {
+            // Reviewer's `artifact_task_id` is the executor task
+            // whose commit the reviewer is verdicting against. We
+            // resolve it via `task_dag_edges`: the reviewer's
+            // *predecessor* with a matching evaluation_sha is the
+            // executor under review. When the lookup fails (boot
+            // race / fixture without the join row), we fall back
+            // to the reviewer's own task_id so the envelope still
+            // carries a wire-stable identity.
+            let reviewer_task_id = inputs.task_id.unwrap_or("");
+            let artifact_task_id = read_reviewer_artifact_task_id(
+                conn, inputs.initiative_id, reviewer_task_id,
+            )?
+                .unwrap_or_else(|| reviewer_task_id.to_owned());
+            Ok(Capabilities::Reviewer(ReviewerCapabilities {
+                session,
+                artifact_task_id,
+            }))
+        }
+    }
+}
+
+fn build_initiative_view(initiative_id: &str, orch_count: u32) -> InitiativeCapabilityView {
+    let max = MAX_ORCH_NO_PROGRESS_RESPAWNS;
+    InitiativeCapabilityView {
+        initiative_id:                          initiative_id.to_owned(),
+        orchestrator_no_progress_respawn_count: orch_count,
+        max_orchestrator_no_progress_respawns:  max,
+        orchestrator_respawns_remaining:        max.saturating_sub(orch_count),
+    }
+}
+
+/// Read the per-initiative orchestrator no-progress respawn counter
+/// (slice B's column added by migration 0019). Returns 0 if the
+/// initiative row does not exist (defensive — the caller still
+/// surfaces a coherent envelope for boot-race / fixture cases).
+fn read_orchestrator_no_progress_respawn_count(
+    conn:          &Connection,
+    initiative_id: &str,
+) -> Result<u32, rusqlite::Error> {
+    let sql = "SELECT orchestrator_no_progress_respawn_count \
+                 FROM initiatives WHERE initiative_id = ?1";
+    let v: Option<i64> = conn.query_row(sql, rusqlite::params![initiative_id],
+        |r| r.get::<_, i64>(0)).optional()?;
+    Ok(v.map(|n| u32::try_from(n).unwrap_or(0)).unwrap_or(0))
+}
+
+/// For the orchestrator: build one [`TaskCapabilityView`] per
+/// **executor** task in the initiative (reviewer tasks are
+/// reactivate-only — the orchestrator does not `retry_subtask` on
+/// a reviewer, so surfacing reviewer rows would be noise).
+fn read_executor_task_capability_views(
+    conn:          &Connection,
+    registry:      &PlanRegistry,
+    initiative_id: &str,
+) -> Result<Vec<TaskCapabilityView>, KsbAssemblyError> {
+    let sql = format!(
+        "SELECT task_id FROM {tasks} \
+         WHERE initiative_id = ?1 \
+         ORDER BY admitted_at ASC, task_id ASC",
+        tasks = Table::Tasks.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let task_ids: Vec<String> = stmt
+        .query_map(rusqlite::params![initiative_id], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut out = Vec::with_capacity(task_ids.len());
+    for task_id in task_ids {
+        let key = TaskKey::new(initiative_id.to_owned(), task_id.clone());
+        let fields = match registry.get(&key) {
+            Some(f) => f,
+            None    => continue,
+        };
+        // Only project executor rows — reviewers are not retry-eligible.
+        if fields.session_agent_type != SessionAgentType::Executor {
+            continue;
+        }
+        out.push(build_task_capability_view(
+            conn,
+            &task_id,
+            fields.effective_max_crash_retries(),
+            fields.effective_max_review_rejections(),
+        )?);
+    }
+    Ok(out)
+}
+
+/// For the executor: build the [`TaskCapabilityView`] for the single
+/// task this executor session was spawned for. When the task lookup
+/// fails the assembler returns a defensive view with zero counters
+/// and the inadmissible-NoPriorActivation reason — the LLM sees
+/// `retry_admissible=false reason="no prior activation"` and the
+/// NNSP teaches it not to call `retry_subtask` from an executor
+/// session anyway (only the orchestrator can).
+fn build_task_capability_view_for_single(
+    conn:          &Connection,
+    registry:      &PlanRegistry,
+    initiative_id: &str,
+    task_id:       &str,
+) -> Result<TaskCapabilityView, KsbAssemblyError> {
+    let key = TaskKey::new(initiative_id.to_owned(), task_id.to_owned());
+    let (max_crash, max_review) = registry.get(&key)
+        .map(|f| (f.effective_max_crash_retries(), f.effective_max_review_rejections()))
+        // Defensive defaults — match the kernel-side defaults applied
+        // when a plan omits the field. See
+        // `plan_registry::TaskPlanFields::effective_*`.
+        .unwrap_or((3, 2));
+    build_task_capability_view(conn, task_id, max_crash, max_review)
+}
+
+/// Build a [`TaskCapabilityView`] for `task_id`, sourcing the
+/// counters from the most-recent `subtask_activations` row. Calls
+/// [`raxis_types::intent_admit::admit_retry_subtask_check`] to populate
+/// `retry_admissible` (parity with the IPC handler).
+fn build_task_capability_view(
+    conn:        &Connection,
+    task_id:     &str,
+    max_crash:   u32,
+    max_review:  u32,
+) -> Result<TaskCapabilityView, KsbAssemblyError> {
+    let sql = format!(
+        "SELECT activation_state, crash_retry_count, review_reject_count \
+           FROM {acts} WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1",
+        acts = Table::SubtaskActivations.as_str(),
+    );
+    let row: Option<(String, i64, i64)> = conn.query_row(
+        &sql, rusqlite::params![task_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional()?;
+    let (prior_state, crash, review) = match row {
+        Some(t) => t,
+        None    => (String::new(), 0_i64, 0_i64),
+    };
+    let crash_u = u32::try_from(crash).unwrap_or(0);
+    let review_u = u32::try_from(review).unwrap_or(0);
+    let admit_inputs = RetryAdmitInputs {
+        prior_activation_state:
+            if prior_state.is_empty() { None } else { Some(prior_state.as_str()) },
+        crash_retry_count:      crash_u,
+        review_reject_count:    review_u,
+        max_crash_retries:      max_crash,
+        max_review_rejections:  max_review,
+    };
+    let (retry_admissible, retry_inadmissible_reason) =
+        match admit_retry_subtask_check(&admit_inputs) {
+            AdmitOutcome::Admissible              => (true, None),
+            AdmitOutcome::Inadmissible(r)         => (false, Some(r.human())),
+        };
+    Ok(TaskCapabilityView {
+        task_id:                  task_id.to_owned(),
+        crash_retry_count:        crash_u,
+        review_reject_count:      review_u,
+        max_crash_retries:        max_crash,
+        max_review_rejections:    max_review,
+        crash_retries_remaining:  max_crash.saturating_sub(crash_u),
+        review_retries_remaining: max_review.saturating_sub(review_u),
+        retry_admissible,
+        retry_inadmissible_reason,
+    })
+}
+
+/// For the reviewer: walk `task_dag_edges` to find the predecessor
+/// executor task whose commit this reviewer is verdicting against.
+fn read_reviewer_artifact_task_id(
+    conn:             &Connection,
+    initiative_id:    &str,
+    reviewer_task_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    let sql = "SELECT predecessor_task_id FROM task_dag_edges \
+               WHERE initiative_id = ?1 AND successor_task_id = ?2 \
+               LIMIT 1";
+    conn.query_row(sql, rusqlite::params![initiative_id, reviewer_task_id],
+        |r| r.get::<_, String>(0)).optional()
+}
+
 /// V2 `v2_extended_gaps.md §2.4` — placeholder used by the spawn
 /// paths when the assembler returns an error: a minimum-bootable
 /// snapshot whose required fields are populated and whose optional
@@ -591,6 +850,12 @@ pub fn fallback_snapshot(
         reviewer_verdicts:             Vec::new(),
         pending_escalations:           Vec::new(),
         credential_ports:              Vec::new(),
+        // Slice C — fallback snapshot omits the capabilities
+        // envelope; the LLM falls through to its NNSP defaults.
+        // The spawn path's primary code path (real
+        // `assemble_ksb_snapshot` call) populates the envelope
+        // when the SQL read succeeds.
+        capabilities:                  None,
     }
 }
 
@@ -647,6 +912,7 @@ mod tests {
                 token_budget_remaining: 12_345,
                 wallclock_budget_remaining_s: 600,
                 credential_ports: Vec::new(),
+                session_id:       "",
             },
         ).expect("assemble snapshot");
 
@@ -684,6 +950,7 @@ mod tests {
                 token_budget_remaining: 0,
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
+                session_id:       "",
             },
         ).expect("assemble orchestrator snapshot");
 
@@ -713,6 +980,7 @@ mod tests {
                 token_budget_remaining: 0,
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
+                session_id:       "",
             },
         ).expect("assemble snapshot");
         drop(conn);
@@ -758,6 +1026,7 @@ mod tests {
                 token_budget_remaining: 0,
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
+                session_id:       "",
             },
         ).expect("assemble snapshot");
 
@@ -860,6 +1129,7 @@ mod tests {
                 token_budget_remaining: 0,
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
+                session_id:       "",
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);
@@ -1013,6 +1283,7 @@ mod tests {
                 token_budget_remaining: 0,
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
+                session_id:       "",
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);

@@ -18,6 +18,7 @@ pub mod host_preflight;
 pub mod id;
 pub mod initiative_event;
 pub mod intent;
+pub mod intent_admit;
 pub mod operator;
 pub mod operator_cert;
 pub mod operator_wire;

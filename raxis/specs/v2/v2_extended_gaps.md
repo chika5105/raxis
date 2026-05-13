@@ -516,6 +516,68 @@ Kernel binary tests (750) and integration tests stay green.
 KSB is read-only, stamped into the guest env at spawn time, and the
 agent cannot modify it.
 
+#### V2.6 extension — role-scoped capabilities envelope
+
+Slice C (commit landing alongside this note) extends the KSB
+projection with a role-scoped capabilities envelope. The envelope
+surfaces the kernel-side admit-predicate verdicts to the LLM so
+the planner can pre-evaluate inadmissible intents BEFORE
+submitting them — the iter44 leading-indicator metric
+`IntentAdmitPredicateEvaluatedTotal{admissible="false"}` measures
+the rate of LLM blind-asks; the envelope is the structural
+mitigation that drives that rate toward zero.
+
+Three invariants pin the contract:
+
+1. `INV-KSB-CAPABILITIES-PARITY-01`. The envelope's
+   `retry_admissible` boolean is computed from
+   `raxis_types::intent_admit::admit_retry_subtask_check` — the
+   SAME pub fn the `RetrySubTask` IPC handler runs. Same inputs ⇒
+   same answer. The IPC handler keeps its eprintln /
+   observability emission per rejection branch; the predicate
+   owns the boolean decision only.
+2. `INV-KSB-CAPABILITIES-ROLE-SCOPED-01`. The envelope is a Rust
+   enum with three disjoint variants (`Orchestrator`, `Executor`,
+   `Reviewer`); the type system prevents an executor's KSB from
+   carrying the orchestrator's per-initiative respawn counter or
+   peer-task review trajectories. The reviewer's variant is
+   identity-only (`session` + `artifact_task_id`) — counters MUST
+   NOT appear; the reviewer's verdict is on the artifact, not on
+   the executor's prior trajectory.
+3. `INV-KSB-CAPABILITIES-TURN-COHERENT-01`. `assemble_capabilities`
+   reads from the SAME `&Connection` `assemble_ksb_snapshot`
+   uses for the rest of the projection, inheriting SQLite's
+   per-connection read-consistency model.
+
+Implementation surface:
+
+  * `crates/types/src/intent_admit.rs` — the shared predicate +
+    structured outcome (`AdmitOutcome` /
+    `RetryInadmissibleReason`). Pure function — takes primitives,
+    returns primitives, no I/O.
+  * `crates/ksb/src/lib.rs` — `Capabilities` enum +
+    `OrchestratorCapabilities` / `ExecutorCapabilities` /
+    `ReviewerCapabilities` + `SessionCapabilityView` /
+    `InitiativeCapabilityView` / `TaskCapabilityView` types;
+    extended `KsbSnapshot` with `Option<Capabilities>` field
+    (additive, non-breaking); renderer extension for the
+    `capabilities=` block.
+  * `kernel/src/handlers/intent.rs::handle_retry_sub_task` —
+    routes its eligibility cascade through
+    `raxis_types::intent_admit::admit_retry_subtask_check`; each
+    rejection branch keeps its eprintln / observability emit so
+    dashboards stay byte-stable.
+  * `kernel/src/initiatives/ksb_assembly.rs::assemble_capabilities`
+    — per-role envelope construction with single-`&Connection`
+    reads (turn-coherent contract).
+  * `crates/planner-core/src/driver.rs` — orchestrator NNSP
+    extended with rule 3a guidance to consult the
+    `capabilities=` block BEFORE issuing `retry_subtask`.
+  * `kernel/tests/ksb_capabilities_parity.rs`,
+    `kernel/tests/ksb_capabilities_role_scoped.rs`,
+    `kernel/tests/ksb_capabilities_turn_coherent.rs` — three
+    witness tests pinning the three invariants.
+
 **Original problem statement (preserved for context).** The planner's
 system prompt was previously a hardcoded string template in
 `crates/planner-core/src/driver.rs:400-422`. It said "you are the

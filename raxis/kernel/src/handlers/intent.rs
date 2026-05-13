@@ -4969,50 +4969,71 @@ async fn handle_retry_sub_task(
             // `review_reject_count = 0` MUST be rejected with
             // `FAIL_INVALID_REQUEST` so accidental "retry a
             // successful task" intents stay closed off.
-            let allow_from_completed_review_rejection =
-                prior_state == "Completed" && review_reject_count > 0;
-            if prior_state != "Failed" && !allow_from_completed_review_rejection {
-                eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"RetrySubTaskRejectedNotRetryable\",\
-                     \"task_id\":\"{task_id_clone}\",\
-                     \"prior_activation_id\":\"{prior_activation_id}\",\
-                     \"prior_state\":\"{prior_state}\",\
-                     \"review_reject_count\":{review_reject_count}}}",
-                );
-                emit_admit(false, crate::observability::ADMIT_REASON_RETRY_INADMISSIBLE);
-                return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
-            }
-
-            // 2b. Ceiling check. Both ceilings are checked: a task
-            //      may have failed once via crash and once via review,
-            //      so the next retry must respect BOTH budgets.
-            //      `effective_*` already substitutes the kernel
-            //      default when the plan omitted the field.
+            // Slice C: route the eligibility cascade through the
+            // shared `admit_retry_subtask_check` predicate so the
+            // KSB capabilities envelope (which calls the same
+            // predicate) cannot drift from this handler. Parity is
+            // load-bearing for `INV-KSB-CAPABILITIES-PARITY-01`.
             //
-            //      Spec wire surface: `FAIL_INVALID_REQUEST`
-            //      (`crates/types/src/intent.rs::RetrySubTask` doc
-            //      comment line 71).
-            if crash_retry_count >= i64::from(max_crash_retries) {
-                eprintln!(
-                    "{{\"level\":\"warn\",\
-                     \"event\":\"RetrySubTaskRejectedCrashCeiling\",\
-                     \"task_id\":\"{task_id_clone}\",\
-                     \"crash_retry_count\":{crash_retry_count},\
-                     \"max_crash_retries\":{max_crash_retries}}}",
-                );
-                emit_admit(false, crate::observability::ADMIT_REASON_BUDGET_EXHAUSTED);
-                return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
-            }
-            if review_reject_count >= i64::from(max_review_rejections) {
-                eprintln!(
-                    "{{\"level\":\"warn\",\
-                     \"event\":\"RetrySubTaskRejectedReviewCeiling\",\
-                     \"task_id\":\"{task_id_clone}\",\
-                     \"review_reject_count\":{review_reject_count},\
-                     \"max_review_rejections\":{max_review_rejections}}}",
-                );
-                emit_admit(false, crate::observability::ADMIT_REASON_BUDGET_EXHAUSTED);
-                return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+            // Each rejection branch keeps its existing eprintln /
+            // observability emission so dashboards stay byte-stable;
+            // the predicate just owns the BOOLEAN decision.
+            let admit_inputs = raxis_types::intent_admit::RetryAdmitInputs {
+                prior_activation_state: Some(prior_state.as_str()),
+                crash_retry_count:      u32::try_from(crash_retry_count).unwrap_or(u32::MAX),
+                review_reject_count:    u32::try_from(review_reject_count).unwrap_or(u32::MAX),
+                max_crash_retries,
+                max_review_rejections,
+            };
+            match raxis_types::intent_admit::admit_retry_subtask_check(&admit_inputs) {
+                raxis_types::intent_admit::AdmitOutcome::Admissible => {}
+                raxis_types::intent_admit::AdmitOutcome::Inadmissible(reason) => {
+                    use raxis_types::intent_admit::RetryInadmissibleReason as R;
+                    match &reason {
+                        R::NoPriorActivation => {
+                            // Unreachable here — the prior-row read
+                            // above already returned `FailUnknownTask`
+                            // when no row existed. Kept for
+                            // exhaustiveness; code path is dead in
+                            // this transaction.
+                            emit_admit(false, crate::observability::ADMIT_REASON_UNKNOWN_LANE);
+                            return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted));
+                        }
+                        R::NotRetryable { .. } => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\"event\":\"RetrySubTaskRejectedNotRetryable\",\
+                                 \"task_id\":\"{task_id_clone}\",\
+                                 \"prior_activation_id\":\"{prior_activation_id}\",\
+                                 \"prior_state\":\"{prior_state}\",\
+                                 \"review_reject_count\":{review_reject_count}}}",
+                            );
+                            emit_admit(false, crate::observability::ADMIT_REASON_RETRY_INADMISSIBLE);
+                            return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+                        }
+                        R::CrashCeiling { .. } => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\
+                                 \"event\":\"RetrySubTaskRejectedCrashCeiling\",\
+                                 \"task_id\":\"{task_id_clone}\",\
+                                 \"crash_retry_count\":{crash_retry_count},\
+                                 \"max_crash_retries\":{max_crash_retries}}}",
+                            );
+                            emit_admit(false, crate::observability::ADMIT_REASON_BUDGET_EXHAUSTED);
+                            return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+                        }
+                        R::ReviewCeiling { .. } => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\
+                                 \"event\":\"RetrySubTaskRejectedReviewCeiling\",\
+                                 \"task_id\":\"{task_id_clone}\",\
+                                 \"review_reject_count\":{review_reject_count},\
+                                 \"max_review_rejections\":{max_review_rejections}}}",
+                            );
+                            emit_admit(false, crate::observability::ADMIT_REASON_BUDGET_EXHAUSTED);
+                            return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+                        }
+                    }
+                }
             }
 
             // 2c. Revoke the prior bound session (if any) so the
@@ -5123,7 +5144,7 @@ async fn handle_retry_sub_task(
                 new_activation_id,
                 crash_retry_count,
                 review_reject_count,
-                from_review_rejection: allow_from_completed_review_rejection,
+                from_review_rejection: prior_state == "Completed" && review_reject_count > 0,
             })
         })
         .await

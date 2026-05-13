@@ -657,6 +657,7 @@ async fn spawn_orchestrator_for_initiative(
         let store_for_ksb     = Arc::clone(store);
         let registry_for_ksb  = Arc::clone(plan_registry);
         let initiative_owned  = initiative_id.to_owned();
+        let session_owned     = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = store_for_ksb.lock_sync();
             crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
@@ -669,6 +670,11 @@ async fn spawn_orchestrator_for_initiative(
                     token_budget_remaining:        0,
                     wallclock_budget_remaining_s:  0,
                     credential_ports:              Vec::new(),
+                    // Slice C — capabilities envelope identity. The
+                    // orchestrator session_id is the row this spawn
+                    // path is provisioning against and is stamped
+                    // verbatim into `capabilities.session.session_id`.
+                    session_id:                    &session_owned,
                 },
             )
         })
@@ -3479,6 +3485,7 @@ pub async fn spawn_executor_for_task(
         let registry_for_ksb  = Arc::clone(plan_registry);
         let initiative_owned  = initiative_id.to_owned();
         let task_owned        = task_id.to_owned();
+        let session_owned     = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = store_for_ksb.lock_sync();
             crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
@@ -3491,6 +3498,10 @@ pub async fn spawn_executor_for_task(
                     token_budget_remaining:        0,
                     wallclock_budget_remaining_s:  0,
                     credential_ports:              Vec::new(),
+                    // Slice C — stamp the executor / reviewer
+                    // session id (already minted at this call
+                    // site) into the capabilities envelope.
+                    session_id:                    &session_owned,
                 },
             )
         })
