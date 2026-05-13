@@ -1321,7 +1321,29 @@ pub fn spawn_planner_dispatcher(
                         |_| Ok(true),
                     )
                     .unwrap_or(false);
-                if pending_exists {
+                let active_exists: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT 1 FROM {sa} \
+                               WHERE initiative_id   = ?1 \
+                                 AND activation_state = 'Active' \
+                               LIMIT 1",
+                            sa = Table::SubtaskActivations.as_str(),
+                        ),
+                        rusqlite::params![&initiative_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                // INV-RESPAWN-STORM: only respawn from post-exit hook
+                // when there is at least one PendingActivation AND
+                // NO Active worker. An Active worker's terminal
+                // intent (CompleteTask / SubmitReview / ReportFailure)
+                // will trigger an EarlyResponse respawn anyway, and
+                // letting both paths fire ends up in a respawn-storm
+                // when an LLM session keeps emitting rejected
+                // ActivateSubTask intents (live e2e iter 7 reproduced
+                // ~30 respawns in 90s with the unconditional version).
+                if pending_exists && !active_exists {
                     Some(initiative_id)
                 } else {
                     None
