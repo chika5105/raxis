@@ -30,7 +30,8 @@ name = "raxis-tproxy"
 path = "src/main.rs"
 
 [dependencies]
-raxis-tproxy-protocol = { workspace = true }
+raxis-tproxy-protocol  = { workspace = true }
+raxis-vsock-loopback   = { workspace = true }
 
 tokio       = { workspace = true }
 serde       = { workspace = true }
@@ -40,6 +41,13 @@ thiserror   = { workspace = true }
 # Linux-only — `nix` for `getsockopt(SO_ORIGINAL_DST)` and AF_VSOCK
 # helpers. Pinned to `=` for reproducibility of the in-VM image.
 nix = { version = "0.27", features = ["socket", "net"] }
+# AF_VSOCK on Linux for the in-guest credential-proxy loopback
+# forwarder. The substrate dials `VMADDR_CID_HOST` over per-VM
+# vsock to reach host-side credential proxies; the host listener is
+# wired by `crates/isolation-apple-vz` and the env var carrying the
+# port plan is `RAXIS_VSOCK_LOOPBACK_PLAN`. Linux-only at the build
+# level — `tokio-vsock` does not compile on macOS / Windows.
+tokio-vsock = { workspace = true }
 
 [dev-dependencies]
 raxis-test-support     = { path = "../crates/test-support" }

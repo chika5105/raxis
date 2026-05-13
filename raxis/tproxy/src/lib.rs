@@ -28,6 +28,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod loopback_forwarder;
 pub mod peek;
 pub mod shuttle;
 
