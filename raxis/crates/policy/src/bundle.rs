@@ -1885,11 +1885,28 @@ pub struct ClaimRule {
 ///
 /// ```toml
 /// [egress]
-/// max_fetches_per_window = 100
-/// domains  = ["api.openai.com"]
-/// patterns = ["*.github.com"]
+/// max_fetches_per_window   = 100
+/// domains                  = ["api.openai.com"]
+/// patterns                 = ["*.github.com"]
+///
+/// # V2 — implicit provider grants
+/// # (specs/v2/reviewer-egress-defaults-decision.md).
+/// implicit_provider_grants = true              # default
+/// deny_provider            = ["openai-staging"]
 /// ```
-#[derive(Debug, Default, Deserialize)]
+///
+/// **`implicit_provider_grants` and `deny_provider`** add the
+/// declarative default-include behaviour for inference-provider
+/// FQDNs derived from `[[providers]]` entries. With
+/// `implicit_provider_grants = true` (the default), the kernel
+/// auto-grants the provider FQDN(s) to both the gateway URL
+/// allowlist and the Tier-1 transparent-proxy SNI allowlist; the
+/// operator never has to keep `[[providers]]` and `[egress]` in
+/// lock-step. Set `implicit_provider_grants = false` to fall back
+/// to V1 explicit-only behaviour. List `provider_id` values in
+/// `deny_provider` to suppress the implicit grant per-provider
+/// (e.g. when a deprecated provider entry is being phased out).
+#[derive(Debug, Deserialize)]
 pub struct EgressSection {
     #[serde(default = "default_max_fetches")]
     pub max_fetches_per_window: u32,
@@ -1897,9 +1914,157 @@ pub struct EgressSection {
     pub domains: Vec<String>,
     #[serde(default)]
     pub patterns: Vec<String>,
+    /// V2 — when `true` (default), the kernel synthesises egress
+    /// allowlist entries for every `[[providers]]` entry's
+    /// canonical FQDN at policy-load time. See
+    /// `specs/v2/reviewer-egress-defaults-decision.md §5`.
+    #[serde(default = "default_implicit_provider_grants")]
+    pub implicit_provider_grants: bool,
+    /// V2 — `provider_id` values to EXCLUDE from
+    /// `implicit_provider_grants`. Validated at policy-load time:
+    /// every entry MUST resolve to a declared `[[providers]]
+    /// provider_id`. Empty (the default) means "grant every
+    /// provider's FQDN".
+    #[serde(default)]
+    pub deny_provider: Vec<String>,
 }
 
 fn default_max_fetches() -> u32 { 100 }
+fn default_implicit_provider_grants() -> bool { true }
+
+/// Hand-rolled `Default` so the all-fields-defaulted form
+/// (triggered by `#[serde(default)] egress: EgressSection` when
+/// the whole `[egress]` section is omitted from `policy.toml`)
+/// matches the per-field `#[serde(default = "...")]` overrides.
+/// `#[derive(Default)]` would silently set
+/// `implicit_provider_grants = false` and `max_fetches_per_window
+/// = 0`, which both flip critical defaults.
+impl Default for EgressSection {
+    fn default() -> Self {
+        Self {
+            max_fetches_per_window:   default_max_fetches(),
+            domains:                  Vec::new(),
+            patterns:                 Vec::new(),
+            implicit_provider_grants: default_implicit_provider_grants(),
+            deny_provider:            Vec::new(),
+        }
+    }
+}
+
+/// V2 — one auto-derived provider FQDN grant. Materialised at
+/// `PolicyBundle::load` from the `[[providers]]` array when
+/// `[egress] implicit_provider_grants = true` (the default) and the
+/// provider's `provider_id` is NOT listed in
+/// `[egress] deny_provider`.
+///
+/// Carried separately from the operator-declared `[egress] domains`
+/// list so audit events (`DefaultProviderEgressApplied`) can carry
+/// the originating `provider_id` and `kind` for full traceability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultProviderEgressGrant {
+    /// The provider entry's `provider_id` (e.g. `"anthropic-prod"`).
+    pub provider_id:   String,
+    /// The provider entry's `kind` string (e.g. `"Anthropic"`).
+    pub provider_kind: String,
+    /// The FQDN auto-added to the egress allowlist (e.g.
+    /// `"api.anthropic.com"`).
+    pub fqdn:          String,
+}
+
+/// V2 — canonical mapping from a `[[providers]] kind` to the
+/// inference FQDN(s) the provider's client dials. Pinned by the
+/// `provider_kind_fqdn_table_in_sync_with_planner_core` test in the
+/// `provider_model` registry to catch silent drift.
+///
+/// Kept in this crate (rather than depending on
+/// `raxis-planner-core`) to keep the dependency graph minimal —
+/// `raxis-policy` is consumed by the kernel boot path before any
+/// planner-core code is touched, and pulling planner-core in here
+/// would invert the dependency direction.
+fn fqdn_for_provider_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "Anthropic"    => Some("api.anthropic.com"),
+        "OpenAI"       => Some("api.openai.com"),
+        "Gemini"       => Some("generativelanguage.googleapis.com"),
+        "Bedrock"      => Some("bedrock-runtime.us-east-1.amazonaws.com"),
+        // Sidecar providers carry their host on
+        // `ProviderEntry::sidecar_endpoint`; resolved separately by
+        // `derive_default_provider_egress_grants`.
+        "http_sidecar" => None,
+        _              => None,
+    }
+}
+
+/// Extract the host component from a sidecar endpoint URL like
+/// `"http://127.0.0.1:9100"` or `"https://sidecar.internal:443"`.
+/// Returns `None` for malformed values; the policy validator already
+/// rejects malformed sidecar endpoints elsewhere so this is a
+/// best-effort defensive check.
+fn extract_sidecar_host(endpoint: &str) -> Option<String> {
+    let after_scheme = endpoint.split_once("://")?.1;
+    let host_with_path = after_scheme.split('/').next()?;
+    let host = host_with_path.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_owned())
+    }
+}
+
+/// V2 — derive the `Vec<DefaultProviderEgressGrant>` projection
+/// from the `[[providers]]` array, honouring
+/// `[egress] implicit_provider_grants` and `[egress] deny_provider`.
+/// Returns an empty vector when the implicit-grant switch is off.
+///
+/// Made `pub(crate)` so unit tests in this crate can exercise the
+/// projection directly; consumers (kernel, gateway) read the
+/// pre-computed `PolicyBundle::default_provider_egress_grants()`
+/// accessor.
+pub(crate) fn derive_default_provider_egress_grants(
+    providers:                 &[ProviderEntry],
+    implicit_provider_grants:  bool,
+    deny_provider:             &[String],
+) -> Vec<DefaultProviderEgressGrant> {
+    if !implicit_provider_grants {
+        return Vec::new();
+    }
+    let deny: std::collections::HashSet<&str> =
+        deny_provider.iter().map(String::as_str).collect();
+    let mut out = Vec::with_capacity(providers.len());
+    for p in providers {
+        if deny.contains(p.provider_id.as_str()) {
+            continue;
+        }
+        if let Some(fqdn) = fqdn_for_provider_kind(&p.kind) {
+            out.push(DefaultProviderEgressGrant {
+                provider_id:   p.provider_id.clone(),
+                provider_kind: p.kind.clone(),
+                fqdn:          fqdn.to_owned(),
+            });
+            continue;
+        }
+        // Sidecar provider — carry the operator-declared endpoint host.
+        if p.kind == "http_sidecar" {
+            if let Some(host) = p
+                .sidecar_endpoint
+                .as_deref()
+                .and_then(extract_sidecar_host)
+            {
+                out.push(DefaultProviderEgressGrant {
+                    provider_id:   p.provider_id.clone(),
+                    provider_kind: p.kind.clone(),
+                    fqdn:          host,
+                });
+            }
+        }
+        // Other / unknown kinds: no implicit grant. The validator
+        // already rejects truly unknown kinds at admission time;
+        // any kind that survives the validator without a known
+        // FQDN simply doesn't get a default grant (operator must
+        // declare explicitly under `[egress] domains/patterns`).
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Gateway supervisor config — `[gateway]`
@@ -3624,6 +3789,27 @@ pub struct PolicyBundle {
     egress_patterns: Vec<String>,
     egress_max_fetches_per_window: u32,
 
+    /// V2 — `[egress] implicit_provider_grants`. When `true` (default),
+    /// `effective_egress_domains()` / `effective_egress_patterns()` /
+    /// `default_provider_egress_grants()` add the FQDNs derived from
+    /// `[[providers]]` to the operator-declared allowlist. See
+    /// `specs/v2/reviewer-egress-defaults-decision.md`.
+    egress_implicit_provider_grants: bool,
+
+    /// V2 — `[egress] deny_provider`. `provider_id` values explicitly
+    /// excluded from the implicit grant. Validated at load time —
+    /// every entry MUST resolve to a declared `[[providers]]
+    /// provider_id`.
+    egress_deny_provider: Vec<String>,
+
+    /// V2 — pre-computed default provider egress grants
+    /// (`provider_id`, `provider_kind`, `fqdn`). Materialised at
+    /// `PolicyBundle::load` time so callers don't need the planner
+    /// crate's `ProviderId` enum and don't have to re-walk the
+    /// `[[providers]]` array. Empty when `implicit_provider_grants =
+    /// false` or when `[[providers]]` is empty.
+    default_provider_egress_grants: Vec<DefaultProviderEgressGrant>,
+
     /// Optional `[gateway]` config. `None` = kernel runs without a
     /// gateway subprocess (no inference / fetch capability).
     gateway: Option<GatewaySection>,
@@ -4249,6 +4435,67 @@ impl PolicyBundle {
             &raw.integration_merge_verifiers,
         )?;
 
+        // V2 — validate `[egress] deny_provider` against the
+        // `[[providers]]` array. Every entry MUST resolve to a
+        // declared `provider_id`; an unresolved entry is almost
+        // always a typo or a stale config that would otherwise
+        // silently pass without disabling anything (and would also
+        // suggest the operator BELIEVES they've opted out when they
+        // haven't). See `specs/v2/reviewer-egress-defaults-decision
+        // .md §6 Validation Tightening`.
+        if !raw.egress.deny_provider.is_empty() {
+            let known: std::collections::HashSet<&str> = raw
+                .providers
+                .iter()
+                .map(|p| p.provider_id.as_str())
+                .collect();
+            for id in &raw.egress.deny_provider {
+                if !known.contains(id.as_str()) {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_POLICY_EGRESS_DENY_PROVIDER_UNKNOWN: \
+                         [egress] deny_provider entry {id:?} does not \
+                         match any [[providers]] provider_id (V2 \
+                         reviewer-egress-defaults-decision.md §6)"
+                    )));
+                }
+            }
+        }
+
+        // V2 — warn-as-error on configs that disable implicit
+        // grants AND declare zero explicit egress: an agent under
+        // such a policy CANNOT reach any provider, which is almost
+        // certainly a misconfiguration rather than an intentional
+        // air-gapped policy (intentional air-gap configs declare
+        // explicit `[egress] domains/patterns` for the
+        // gateway/loopback grant). See decision spec §6.
+        if !raw.egress.implicit_provider_grants
+            && raw.egress.domains.is_empty()
+            && raw.egress.patterns.is_empty()
+            && !raw.providers.is_empty()
+        {
+            return Err(PolicyError::MalformedArtifact(
+                "FAIL_POLICY_EGRESS_NO_REACHABLE_PROVIDER: \
+                 [egress] implicit_provider_grants = false with no \
+                 explicit [egress] domains or patterns and at least \
+                 one [[providers]] entry leaves every agent unable \
+                 to reach its provider. Either set \
+                 implicit_provider_grants = true (the default) or \
+                 declare the provider FQDN(s) explicitly under \
+                 [egress] domains. (V2 \
+                 reviewer-egress-defaults-decision.md §6)"
+                    .to_owned(),
+            ));
+        }
+
+        // V2 — pre-compute the implicit-provider-grant projection
+        // ahead of the `Self` move (`raw.providers` is consumed by
+        // the struct expression below).
+        let default_provider_egress_grants = derive_default_provider_egress_grants(
+            &raw.providers,
+            raw.egress.implicit_provider_grants,
+            &raw.egress.deny_provider,
+        );
+
         Ok(Self {
             epoch: raw.meta.epoch,
             authority_pubkey_hex: raw.authority.authority_pubkey,
@@ -4278,6 +4525,9 @@ impl PolicyBundle {
             egress_domains: raw.egress.domains,
             egress_patterns: raw.egress.patterns,
             egress_max_fetches_per_window: raw.egress.max_fetches_per_window,
+            egress_implicit_provider_grants: raw.egress.implicit_provider_grants,
+            egress_deny_provider: raw.egress.deny_provider,
+            default_provider_egress_grants,
             gateway: raw.gateway,
             providers: raw.providers,
             plan_signing: {
@@ -4780,6 +5030,9 @@ impl PolicyBundle {
             egress_domains: Vec::new(),
             egress_patterns: Vec::new(),
             egress_max_fetches_per_window: 0,
+            egress_implicit_provider_grants: true,
+            egress_deny_provider: Vec::new(),
+            default_provider_egress_grants: Vec::new(),
             // No default channels — inbox.jsonl + SQLite are
             // unconditional. Tests that need explicit channels
             // configure them individually.
@@ -5055,6 +5308,69 @@ impl PolicyBundle {
     /// Max fetches per session per window.
     pub fn egress_max_fetches_per_window(&self) -> u32 {
         self.egress_max_fetches_per_window
+    }
+
+    /// V2 — true when `[egress] implicit_provider_grants` is enabled
+    /// (the default). When `false`, the operator opts out of the
+    /// implicit-provider-FQDN grant entirely; `effective_egress_*`
+    /// returns the operator-declared values verbatim.
+    pub fn egress_implicit_provider_grants(&self) -> bool {
+        self.egress_implicit_provider_grants
+    }
+
+    /// V2 — operator-declared `[egress] deny_provider` list.
+    /// `provider_id` values that MUST be excluded from the implicit
+    /// grant.
+    pub fn egress_deny_provider(&self) -> &[String] {
+        &self.egress_deny_provider
+    }
+
+    /// V2 — pre-computed default provider egress grants. Each entry
+    /// is a `(provider_id, kind, fqdn)` triple the kernel auto-adds
+    /// to the egress allowlist. Empty when
+    /// `implicit_provider_grants = false` or when no `[[providers]]`
+    /// is declared. Used by the kernel/gateway to emit
+    /// `DefaultProviderEgressApplied` audit events at policy install.
+    pub fn default_provider_egress_grants(&self) -> &[DefaultProviderEgressGrant] {
+        &self.default_provider_egress_grants
+    }
+
+    /// V2 — the **effective** exact-match domain allowlist consumed
+    /// by the gateway URL allowlist and the Tier-1 transparent-proxy
+    /// admission service. Computes the union of operator-declared
+    /// `[egress] domains` with the implicit provider FQDNs, in
+    /// declaration order, with duplicates suppressed (case-
+    /// insensitive). Operator-declared entries always come first so
+    /// the implicit grants never alter operator-visible ordering.
+    pub fn effective_egress_domains(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(
+            self.egress_domains.len() + self.default_provider_egress_grants.len(),
+        );
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for d in &self.egress_domains {
+            let key = d.to_ascii_lowercase();
+            if seen.insert(key) {
+                out.push(d.clone());
+            }
+        }
+        for grant in &self.default_provider_egress_grants {
+            let key = grant.fqdn.to_ascii_lowercase();
+            if seen.insert(key) {
+                out.push(grant.fqdn.clone());
+            }
+        }
+        out
+    }
+
+    /// V2 — the **effective** glob-match pattern allowlist.
+    /// Identical contract to [`Self::effective_egress_domains`] but
+    /// for `[egress] patterns`. The implicit-provider grants always
+    /// land in the *exact-match* list (they are FQDNs, never globs)
+    /// so this method returns operator-declared patterns verbatim.
+    /// Provided as a parallel accessor so callers don't have to
+    /// know the implicit grants only target the exact-match side.
+    pub fn effective_egress_patterns(&self) -> Vec<String> {
+        self.egress_patterns.clone()
     }
 
     // ── Gateway supervisor config ───────────────────────────────────────────
@@ -5372,6 +5688,9 @@ mod tests {
             egress_domains: Vec::new(),
             egress_patterns: Vec::new(),
             egress_max_fetches_per_window: 0,
+            egress_implicit_provider_grants: true,
+            egress_deny_provider: Vec::new(),
+            default_provider_egress_grants: Vec::new(),
             notification_channels: vec![],
             notification_routes: HashMap::new(),
             default_notification_channels: vec![],
@@ -8223,5 +8542,331 @@ mod environment_tests {
                 .contains("FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE"),
             "{err}"
         );
+    }
+}
+
+// ── V2 Reviewer / Orchestrator / Executor egress defaults ────────────
+//
+// `specs/v2/reviewer-egress-defaults-decision.md` Option C —
+// implicit-provider-FQDN grants. These tests pin the
+// `derive_default_provider_egress_grants` projection AND the
+// `effective_egress_*` accessor surface that the kernel + gateway
+// consume at allowlist-build time.
+
+#[cfg(test)]
+mod implicit_provider_grants_tests {
+    use super::*;
+    use crate::bundle::gateway_providers_tests::minimal_policy_toml_for_tests;
+    use crate::load_policy;
+
+    /// 32-byte hex secret used by sidecar-provider fixtures.
+    const SIDECAR_TEST_SECRET: &str =
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    /// LLM pricing block — every `LLM_PROVIDER_KINDS` entry MUST
+    /// declare pricing or the validator rejects it.
+    const LLM_PRICING_BLOCK: &str =
+        "  pricing.input_tokens_per_dollar  = 200000\n\
+          pricing.output_tokens_per_dollar = 50000\n";
+
+    fn write_and_load(toml_str: &str) -> Result<PolicyBundle, PolicyError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_str).unwrap();
+        load_policy(tmp.path()).map(|(b, _, _)| b)
+    }
+
+    fn provider_block(provider_id: &str, kind: &str) -> String {
+        format!(
+            "\n[[providers]]\n\
+             provider_id      = \"{provider_id}\"\n\
+             kind             = \"{kind}\"\n\
+             credentials_file = \"{provider_id}.toml\"\n\
+             {LLM_PRICING_BLOCK}",
+        )
+    }
+
+    fn sidecar_block(provider_id: &str, endpoint: &str) -> String {
+        format!(
+            "\n[[providers]]\n\
+             provider_id              = \"{provider_id}\"\n\
+             kind                     = \"http_sidecar\"\n\
+             credentials_file         = \"{provider_id}.toml\"\n\
+             sidecar_endpoint         = \"{endpoint}\"\n\
+             sidecar_hmac_secret      = \"{SIDECAR_TEST_SECRET}\"\n\
+             sidecar_health_check_path = \"/health\"\n\
+             {LLM_PRICING_BLOCK}",
+        )
+    }
+
+    // ─── Projection: kind → FQDN ──────────────────────────────────────────
+
+    #[test]
+    fn anthropic_provider_synthesises_api_anthropic_com_grant() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 1, "exactly one provider → one grant");
+        assert_eq!(grants[0].provider_id,   "anthropic-prod");
+        assert_eq!(grants[0].provider_kind, "Anthropic");
+        assert_eq!(grants[0].fqdn,          "api.anthropic.com");
+    }
+
+    #[test]
+    fn openai_provider_synthesises_api_openai_com_grant() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&provider_block("openai-prod", "OpenAI"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].fqdn, "api.openai.com");
+    }
+
+    #[test]
+    fn gemini_provider_synthesises_generativelanguage_grant() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&provider_block("gemini-prod", "Gemini"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].fqdn, "generativelanguage.googleapis.com");
+    }
+
+    #[test]
+    fn bedrock_provider_synthesises_bedrock_runtime_grant() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&provider_block("bedrock-prod", "Bedrock"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 1);
+        // Bedrock is region-bound; canonical default is us-east-1.
+        // Operators in other regions MUST declare an explicit
+        // `[egress] domains` entry — documented in the decision spec.
+        assert!(grants[0].fqdn.starts_with("bedrock-runtime."));
+    }
+
+    #[test]
+    fn http_sidecar_provider_synthesises_endpoint_host_grant() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&sidecar_block("kombai", "http://127.0.0.1:9100"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].fqdn, "127.0.0.1");
+        assert_eq!(grants[0].provider_kind, "http_sidecar");
+    }
+
+    #[test]
+    fn unknown_provider_kind_synthesises_no_grant() {
+        // Forward-compat: validator accepts unknown kinds; the
+        // implicit grant just skips them. Operator MUST add an
+        // explicit `[egress] domains` entry.
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"future-vendor\"\n\
+             kind             = \"NotAValidKindYet\"\n\
+             credentials_file = \"future.toml\"\n",
+        );
+        let bundle = write_and_load(&t).expect("policy must load");
+        assert!(
+            bundle.default_provider_egress_grants().is_empty(),
+            "unknown kind must NOT auto-grant",
+        );
+    }
+
+    // ─── Multi-provider + ordering ───────────────────────────────────────
+
+    #[test]
+    fn multiple_providers_yield_one_grant_per_provider() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        t.push_str(&provider_block("openai-prod",    "OpenAI"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 2);
+        assert_eq!(grants[0].provider_id, "anthropic-prod");
+        assert_eq!(grants[1].provider_id, "openai-prod");
+    }
+
+    // ─── effective_egress_domains union semantics ────────────────────────
+
+    #[test]
+    fn effective_domains_union_explicit_first_then_implicit() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             domains = [\"explicit.example.com\"]\n\
+             patterns = [\"*.cdn.example.com\"]\n",
+        );
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let domains = bundle.effective_egress_domains();
+        assert_eq!(domains[0], "explicit.example.com",
+            "operator-declared domains MUST come first");
+        assert_eq!(domains[1], "api.anthropic.com",
+            "implicit grant follows");
+        // Patterns are operator-declared verbatim; implicit grants
+        // never land in the pattern list.
+        assert_eq!(bundle.effective_egress_patterns(),
+                   vec!["*.cdn.example.com".to_owned()]);
+    }
+
+    #[test]
+    fn effective_domains_dedupes_when_operator_already_declared_provider_fqdn() {
+        // Operator double-declares api.anthropic.com explicitly +
+        // via implicit grant — effective list has it ONCE, in the
+        // operator-declared position.
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             domains = [\"api.anthropic.com\"]\n",
+        );
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let domains = bundle.effective_egress_domains();
+        assert_eq!(domains, vec!["api.anthropic.com".to_owned()]);
+    }
+
+    #[test]
+    fn effective_domains_dedup_is_case_insensitive() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             domains = [\"API.Anthropic.COM\"]\n",
+        );
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let domains = bundle.effective_egress_domains();
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0], "API.Anthropic.COM",
+            "operator's exact casing wins");
+    }
+
+    // ─── Opt-out: implicit_provider_grants = false ───────────────────────
+
+    #[test]
+    fn implicit_provider_grants_false_yields_empty_grants() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             implicit_provider_grants = false\n\
+             domains = [\"explicit.example.com\"]\n",
+        );
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        assert!(bundle.default_provider_egress_grants().is_empty());
+        assert_eq!(bundle.effective_egress_domains(),
+                   vec!["explicit.example.com".to_owned()]);
+    }
+
+    #[test]
+    fn implicit_provider_grants_false_with_no_explicit_egress_is_rejected() {
+        // Opt-out + zero explicit egress + at least one provider =
+        // unreachable provider. Validator rejects at load time.
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             implicit_provider_grants = false\n",
+        );
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let err = write_and_load(&t).expect_err("validator MUST reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FAIL_POLICY_EGRESS_NO_REACHABLE_PROVIDER"),
+            "expected unreachable-provider error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn implicit_provider_grants_false_with_no_providers_is_allowed() {
+        // Air-gapped policy: zero providers, opt-out, zero explicit
+        // egress. Nothing to grant, nothing to reject.
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             implicit_provider_grants = false\n",
+        );
+        let bundle = write_and_load(&t).expect("air-gapped policy MUST load");
+        assert!(bundle.default_provider_egress_grants().is_empty());
+        assert!(bundle.effective_egress_domains().is_empty());
+    }
+
+    // ─── Per-provider opt-out: deny_provider ─────────────────────────────
+
+    #[test]
+    fn deny_provider_excludes_named_provider_from_grants() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             deny_provider = [\"openai-prod\"]\n",
+        );
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        t.push_str(&provider_block("openai-prod",    "OpenAI"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].provider_id, "anthropic-prod",
+            "openai-prod MUST be excluded by deny_provider");
+    }
+
+    #[test]
+    fn deny_provider_referencing_unknown_id_is_rejected() {
+        // Typo in deny_provider would silently fail to opt out;
+        // validator must catch this at load time.
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             deny_provider = [\"typo-not-a-real-provider\"]\n",
+        );
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let err = write_and_load(&t).expect_err("validator MUST reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FAIL_POLICY_EGRESS_DENY_PROVIDER_UNKNOWN"),
+            "expected unknown-provider error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn deny_provider_with_zero_providers_loads_cleanly() {
+        // No providers + empty deny_provider — vacuous case.
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(
+            "\n[egress]\n\
+             deny_provider = []\n",
+        );
+        let bundle = write_and_load(&t).expect("vacuous deny_provider MUST load");
+        assert!(bundle.egress_deny_provider().is_empty());
+        assert!(bundle.default_provider_egress_grants().is_empty());
+    }
+
+    // ─── Defaults: missing [egress] section ──────────────────────────────
+
+    #[test]
+    fn missing_egress_section_implies_implicit_grants_enabled() {
+        // The most common operator config: declare `[[providers]]`
+        // without ever writing an `[egress]` block. Defaults MUST
+        // grant the provider FQDN.
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&provider_block("anthropic-prod", "Anthropic"));
+        let bundle = write_and_load(&t).expect("default-egress policy must load");
+        assert!(bundle.egress_implicit_provider_grants(),
+            "missing [egress] MUST default to implicit_provider_grants = true");
+        assert_eq!(bundle.default_provider_egress_grants().len(), 1);
+        assert_eq!(bundle.effective_egress_domains(),
+                   vec!["api.anthropic.com".to_owned()]);
+    }
+
+    // ─── Sidecar endpoint host extraction ────────────────────────────────
+
+    #[test]
+    fn sidecar_endpoint_extraction_handles_https_and_paths() {
+        let mut t = minimal_policy_toml_for_tests();
+        t.push_str(&sidecar_block("vendor", "https://sidecar.internal.example/api"));
+        let bundle = write_and_load(&t).expect("policy must load");
+        let grants = bundle.default_provider_egress_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].fqdn, "sidecar.internal.example");
     }
 }
