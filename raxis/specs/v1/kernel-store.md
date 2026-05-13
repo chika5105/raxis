@@ -2590,12 +2590,45 @@ The snapshot insert is part of the same store transaction as the `tasks.status =
 > (steps 4a–4b), `path_scope::check_paths` (steps 5–6), then
 > `compute_export_set(touched, path_export_globs)` and
 > `commit_task_completion(task_id, exports, store)` for step 7. The
-> latter wraps the `Running → Completed` UPDATE and every
-> `INSERT OR IGNORE INTO task_exported_path_snapshots` row in a
-> single SQLite transaction (INV-STORE-02). The export glob matcher
-> uses the same `require_literal_separator = true` glob semantics as
-> `path_scope::AllowSet::matches` so `*` does not cross `/` —
-> matching the §2.5.8 normative glob rule.
+> latter wraps the `Running → Completed` UPDATE, every
+> `INSERT OR IGNORE INTO task_exported_path_snapshots` row, AND the
+> matching `subtask_activations` Active-row close-out cascade
+> (`UPDATE subtask_activations SET activation_state = 'Completed',
+> terminated_at = ?1 WHERE task_id = ?2 AND activation_state = 'Active'`)
+> in a single SQLite transaction (INV-STORE-02). The export glob
+> matcher uses the same `require_literal_separator = true` glob
+> semantics as `path_scope::AllowSet::matches` so `*` does not
+> cross `/` — matching the §2.5.8 normative glob rule.
+>
+> **Activation-row cascade contract (V2.5+).** The cascade close
+> mirrors the `c986e6d` side-effect on `transition_task_in_tx`
+> (terminal task transitions Failed / Aborted / Cancelled — see
+> `kernel-core.md §4.6 task_transitions.rs`) into
+> `commit_task_completion`'s explicit `Running → Completed` raw-SQL
+> path, which bypasses `transition_task_in_tx`. Without the
+> cascade here the activation row remains `Active` after a
+> Completed task — that stale row trips
+> `spawn_planner_dispatcher`'s post-exit storm-guard
+> (`pending_exists && !active_exists`, `aafd4f2`) for any
+> *subsequent* RetrySubTask in the same initiative (e.g. an
+> already-Completed predecessor leaves a stale `Active` row that
+> blocks orchestrator continuation on a sibling task). The
+> `WHERE activation_state = 'Active'` filter is the idempotency
+> guard: a recovery-sweep re-emit on top of an already-terminal
+> row is a no-op. PendingActivation rows are intentionally
+> untouched (NULL `activated_at` → CHECK constraint forbids
+> stamping them as terminal directly; the `RetrySubTask` happy
+> path inserts a fresh PendingActivation row anyway).
+>
+> Best-effort on the cascade: SQL errors on the UPDATE log on
+> stderr but do NOT roll back the Running → Completed transition
+> — the activation-history is forensic, not on the audit-required
+> path, and a dropped close-out leaves a stale row that the
+> recovery sweep can re-reconcile rather than a stuck task.
+> Reference code: `kernel/src/handlers/intent.rs::commit_task_completion`
+> and `kernel/src/initiatives/task_transitions.rs::transition_task_in_tx`
+> (the cross-call-site contract that keeps activation FSM in
+> lock-step with task FSM on every terminal edge).
 
 ---
 
