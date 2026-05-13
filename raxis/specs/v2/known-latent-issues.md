@@ -167,7 +167,104 @@ invariant audit. Rationale:
 
 ---
 
-## L-2. (placeholder)
+## L-2. `executor-starter` Containerfile assumed `linux/amd64`-only and shipped no `ca-certificates`
+
+* **Class:** P0 — fixed in iter-13 (`<this commit>`); recorded for
+  audit completeness so a future Containerfile rewrite does not
+  regress the same three patterns simultaneously.
+* **Production file:** `raxis/images/executor-starter/Containerfile`
+  (lines 37–55, 57–60, 97–98, 101–107 pre-fix).
+
+### Defect
+
+Iter-13's first auto-bake invocation on an `aarch64-apple-darwin`
+host (Apple Silicon dev workstation) failed at stage `[3/9]` with:
+
+```
+#6 0.256 curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt
+#6 0.268 E: Unable to locate package nodejs
+ERROR: failed to build: process "/bin/sh -c curl -fsSL
+https://deb.nodesource.com/setup_20.x | bash - && apt-get install
+... nodejs ..." did not complete successfully: exit code: 100
+```
+
+Three independent issues compounded into a single "bake fails on
+arm64 host" symptom:
+
+1. **No `ca-certificates`** — the first apt-get layer installed
+   `curl` + `gnupg` + `wget` without the `ca-certificates` package.
+   Every subsequent stage that does `curl https://…` (NodeSource
+   bootstrapper, rustup installer, Go tarball, GitHub CLI keyring)
+   fails with curl exit 77 because there is no system CA bundle to
+   validate against. The first failure is loud (NodeSource exit 100);
+   the rest would have cascaded if execution had continued.
+
+2. **Hardcoded `linux-amd64` Go tarball** — line 98 fetched
+   `go1.22.0.linux-amd64.tar.gz` unconditionally. On an arm64 host
+   that returns a `404 Not Found` HTML body that curl streams into
+   tar (because curl was missing `--fail` to exit non-zero on a 404
+   *with* a body), and tar then fails with `This does not look like
+   a tar archive`.
+
+3. **Hardcoded `[arch=amd64]` GitHub CLI apt source** — lines 102-107
+   pinned the apt source's `arch=` token to `amd64`. On an arm64
+   builder `apt-get update` silently surfaces an empty package list
+   for the GitHub CLI repo and `apt-get install gh` errors with
+   `Unable to locate package gh`.
+
+### Why it WAS latent
+
+* The pipeline had only ever been exercised on Linux x86_64 CI
+  workers; the realistic-scenario harness (`extended_e2e_realistic_
+  scenario.rs`) had been pre-staged with operator-managed canonical
+  images on the developer workstations that ran it most often.
+  Iter-13 was the first invocation where (a) auto-bake fired and
+  (b) the host architecture was arm64.
+* The TLS issue alone would have surfaced even on x86_64 once the
+  apt-get cache eventually purged a ca-certs leftover from the base
+  image, but the base layer (`debian:bookworm-slim`) ships *no*
+  ca-certificates by default, so the latency window was tiny.
+
+### Fix (landed in this iter-13 commit)
+
+Single-commit Containerfile patch:
+
+* Add `ca-certificates` to the first `apt-get install` layer so
+  every subsequent `curl https://…` has a CA bundle.
+* Wrap the Go tarball fetch in `GOARCH="$(dpkg --print-architecture)"`
+  and interpolate `linux-${GOARCH}` so the URL resolves to
+  `linux-amd64.tar.gz` on amd64 builders and `linux-arm64.tar.gz`
+  on arm64 builders.
+* Wrap the GitHub CLI apt source `arch=` value in
+  `GH_ARCH="$(dpkg --print-architecture)"` so the source line reads
+  `arch=amd64` on amd64 builders and `arch=arm64` on arm64 builders.
+
+`dpkg --print-architecture` is the canonical Debian tooling for
+build-platform detection and aligns with the apt-source `arch=`
+identifier *and* the upstream Go release filename convention.
+
+### Why this is recorded as L-2 even though it is fixed
+
+The cleanup-sweep auditor needs a single ledger row covering the
+"Containerfile fails on arm64 / no system CA bundle" failure family
+so a future Containerfile rewrite (e.g. a pivot to
+`debian:trixie-slim` or a buildah-based pipeline) is forced to
+re-prove all three properties together. Without this row a partial
+rewrite that only tested on x86_64 would silently re-introduce
+issues 2 + 3.
+
+### Owners
+
+* **Discovery / fix:** `worker/live-e2e-fix-loop` (iter-13).
+* **Audit / regression test:** Final-cleanup-sweep — should add a
+  per-arch matrix CI lane that runs `cargo xtask images bake-rootfs
+  --role executor-starter --platform linux/amd64` AND
+  `--platform linux/arm64` so a regression on either is caught at
+  PR time.
+
+---
+
+## L-3. (placeholder)
 
 No additional latent issues recorded as of this audit window. Future
 entries should follow the L-1 template:

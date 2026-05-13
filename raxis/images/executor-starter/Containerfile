@@ -36,6 +36,7 @@ ENV LANG=C.UTF-8
 
 RUN apt-get update && apt-get install --no-install-recommends -y \
     bash \
+    ca-certificates \
     coreutils \
     curl \
     findutils \
@@ -94,14 +95,29 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH=/root/.cargo/bin:$PATH
 
-# Go 1.22.
-RUN curl -fsSL https://go.dev/dl/go1.22.0.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+# Go 1.22 — fetch the upstream tarball matching the build platform.
+# `dpkg --print-architecture` returns the Debian arch identifier
+# (`amd64` / `arm64` / ...), which lines up with Google's Go release
+# filenames (`go1.22.0.linux-amd64.tar.gz`,
+# `go1.22.0.linux-arm64.tar.gz`). Hardcoding `amd64` would break the
+# arm64 bake (Apple Silicon dev hosts + arm64 CI workers) with a
+# silent `tar: This does not look like a tar archive` past a
+# 404 HTML body that curl happily streamed in.
+RUN GOARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://go.dev/dl/go1.22.0.linux-${GOARCH}.tar.gz" \
+        | tar -C /usr/local -xzf -
 ENV PATH=/usr/local/go/bin:$PATH
 
-# GitHub CLI.
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+# GitHub CLI — pin the apt source's `arch=` to the build platform so
+# `apt-get install gh` resolves the matching binary. NodeSource +
+# rustup + Go each handle arch internally; the GitHub CLI Debian
+# repo gates by `arch=` so an `arch=amd64` line on an arm64 builder
+# silently surfaces an empty package list and `Unable to locate
+# package gh`.
+RUN GH_ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | gpg --dearmor -o /etc/apt/trusted.gpg.d/githubcli.gpg \
-    && echo "deb [arch=amd64] https://cli.github.com/packages stable main" \
+    && echo "deb [arch=${GH_ARCH}] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install --no-install-recommends -y gh \
     && rm -rf /var/lib/apt/lists/*
