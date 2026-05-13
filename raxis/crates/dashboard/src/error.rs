@@ -66,6 +66,18 @@ pub enum ApiError {
         /// Entity kind name (e.g. `"initiative"`, `"task"`).
         kind: String,
     },
+    /// Caller asked for an entity that **did** exist but has been
+    /// archived / purged on disk and can no longer be served. Maps
+    /// to HTTP 410 Gone — distinct from 404 because the absence is
+    /// an intentional retention outcome rather than a bad path. The
+    /// canonical instance is the dashboard plan-view endpoint when
+    /// an initiative's `plan_bundle_artifacts` row was sweep-purged
+    /// (see `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`).
+    #[error("gone: {kind}")]
+    Gone {
+        /// Entity kind name (e.g. `"plan"`).
+        kind: String,
+    },
     /// Caller-supplied input failed validation. `detail` is safe
     /// to surface to the browser.
     #[error("bad request: {detail}")]
@@ -104,6 +116,7 @@ impl ApiError {
             Self::SignatureInvalid => (StatusCode::UNAUTHORIZED, "FAIL_DASHBOARD_SIGNATURE"),
             Self::UnknownOperator => (StatusCode::UNAUTHORIZED, "FAIL_DASHBOARD_OPERATOR"),
             Self::NotFound { .. } => (StatusCode::NOT_FOUND, "FAIL_DASHBOARD_NOT_FOUND"),
+            Self::Gone { .. } => (StatusCode::GONE, "FAIL_DASHBOARD_GONE"),
             Self::BadRequest { .. } => (StatusCode::BAD_REQUEST, "FAIL_DASHBOARD_BAD_REQUEST"),
             Self::PolicyInvalid { .. } => (StatusCode::BAD_REQUEST, "FAIL_DASHBOARD_POLICY_INVALID"),
             Self::Internal { log_only } => {
@@ -156,5 +169,23 @@ mod tests {
     fn not_found_yields_404() {
         let r = ApiError::NotFound { kind: "initiative".into() }.into_response();
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `Gone` is structurally distinct from `NotFound` so the FE
+    /// can render an "archived" copy instead of "not found". The
+    /// dashboard plan-view endpoint surfaces this when the
+    /// `plan_bundle_artifacts` row for an initiative was sweep-
+    /// purged (`INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`).
+    #[test]
+    fn gone_yields_410_with_distinct_code() {
+        let r = ApiError::Gone { kind: "plan".into() }.into_response();
+        assert_eq!(r.status(), StatusCode::GONE);
+    }
+
+    #[test]
+    fn gone_carries_distinct_code_string() {
+        let (status, code) = ApiError::Gone { kind: "plan".into() }.status_and_code();
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(code, "FAIL_DASHBOARD_GONE");
     }
 }

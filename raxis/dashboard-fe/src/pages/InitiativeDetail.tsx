@@ -12,6 +12,7 @@ import {
   FailurePill,
   FailureReasonPanel,
 } from "@/components/FailureReasonPanel";
+import { InitiativePlanView } from "@/components/InitiativePlanView";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
@@ -47,6 +48,19 @@ export function InitiativeDetailPage() {
     () => parseStatusParam(searchParams.get("status")),
     [searchParams],
   );
+
+  // Plan-panel open/closed state. Driven by `?plan=open` so the
+  // "Plan TOML" affordance is link-shareable: an operator can
+  // paste a URL with the panel pre-expanded into a postmortem.
+  // Default-collapsed keeps the page light for operators who are
+  // mostly here for the DAG / task tables.
+  const planPanelOpen = searchParams.get("plan") === "open";
+  const togglePlanPanel = () => {
+    const sp = new URLSearchParams(searchParams);
+    if (planPanelOpen) sp.delete("plan");
+    else sp.set("plan", "open");
+    setSearchParams(sp, { replace: true });
+  };
   const writeStatuses = (next: string[]) => {
     const sp = new URLSearchParams(searchParams);
     if (next.length === 0) sp.delete("status");
@@ -398,6 +412,38 @@ export function InitiativeDetailPage() {
           )}
         </aside>
       </div>
+
+      {/* Plan TOML — collapsible panel surfacing the original
+       * submitted plan.toml byte-for-byte. Spec:
+       * `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`. */}
+      <section className="card p-0 overflow-hidden">
+        <button
+          type="button"
+          onClick={togglePlanPanel}
+          aria-expanded={planPanelOpen}
+          aria-controls="plan-toml-panel"
+          data-testid="plan-toml-toggle"
+          className="w-full flex items-center justify-between px-4 py-3 hover:bg-panel-high transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <span aria-hidden className="text-ink-subtle">
+              {planPanelOpen ? "▾" : "▸"}
+            </span>
+            <h2 className="text-sm font-semibold text-ink">Plan TOML</h2>
+            <span className="text-[11px] text-ink-subtle">
+              · {planPanelOpen ? "Hide" : "Show"} the original submitted plan
+            </span>
+          </div>
+          <span className="text-[11px] text-ink-subtle">
+            {planPanelOpen ? "click to collapse" : "click to expand"}
+          </span>
+        </button>
+        {planPanelOpen && (
+          <div id="plan-toml-panel" className="border-t border-edge p-4">
+            <InitiativePlanView initiativeId={init.initiative_id} />
+          </div>
+        )}
+      </section>
     </div>
   );
 }

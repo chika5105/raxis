@@ -75,9 +75,10 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 | 8 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
-| **Total** | | **77** |
+| **Total** | | **85** |
 
 ---
 
@@ -3796,6 +3797,69 @@ operator and the engineering team see the same red badge they'd
 see for any other failure.
 
 **Canonical home.** `v2/dashboard-hardening.md §5`.
+
+### INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 — Approved plans surface their original sealed TOML
+
+**Statement.** For every initiative the dashboard lists, an
+operator with the `read` role MUST be able to retrieve the
+**original submitted** `plan.toml` byte-for-byte through
+`GET /api/initiatives/:initiative_id/plan`, with no
+re-parse / re-serialize step between
+`signed_plan_artifacts.plan_bytes` (V1) /
+`plan_bundle_artifacts.artifact_bytes` (V2.1) and the wire
+body. The endpoint MUST:
+
+  * Return 200 with the bytes embedded as a UTF-8 string in
+    the response's `submitted_toml` field within 60 s of
+    initiative approval.
+  * Return 404 `FAIL_DASHBOARD_NOT_FOUND` when the
+    `initiative_id` is unknown, never a 5xx.
+  * Return 410 `FAIL_DASHBOARD_GONE` when the initiative
+    exists but its plan blob has been archived / purged,
+    never a 5xx and never a 404 (the distinction lets the
+    frontend render "Plan archived" rather than "Initiative
+    not found").
+  * Carry `Cache-Control: private, max-age=60` for plans
+    whose `approval_status == "approved"` (immutable post-
+    approval per `plan-bundle-sealing.md §8.2`) and
+    `Cache-Control: private, no-store` otherwise (Draft
+    bytes are still mutable; client caching them across
+    refreshes leaks stale plans).
+
+The frontend's `useInitiativePlan` hook MUST hold a 60-second
+TanStack Query `staleTime` so the React cache and the HTTP
+cache stay aligned (a plan re-fetch never out-paces the
+server-side cache).
+
+**Justification.** The original sealed `plan.toml` is the
+single source of operator intent for an initiative — it
+cryptographically binds the planner's permitted scope, the
+elastic budget, the path allowlist, and the credential-proxy
+shape. Dashboards that re-serialize the bytes via TOML
+encoders silently lose ordering, spacing, and comments
+(operators routinely embed `# why this lane` annotations in
+the TOML to disambiguate later operator review); a re-encoded
+view actively hides operator intent and breaks deep audit
+forensics. The 404-vs-410 split keeps "wrong link" (operator
+typo / stale URL) and "plan gone" (purge / archival) as
+distinct operator actions: a 410 is an operational event the
+dashboard surfaces with a "Plan archived" banner; a 404 is a
+client-side mistake. Folding both into 5xx — or both into 404 —
+collapses two operationally distinct paths the operator MUST
+be able to tell apart.
+
+**Scenario.** An operator clicks an `Executing` initiative,
+opens the **Plan** panel, and sees the same `plan.toml` bytes
+they signed and submitted (preserved comments, blank lines,
+trailing whitespace). They click **Copy**, paste into a fresh
+file, run the kernel's `raxis plan verify` against it, and the
+plan signature verifies — because the dashboard surfaced the
+literal sealed bytes, not a TOML round-trip. A second operator
+opens the same panel for an archived (`Aborted`) initiative
+whose plan bundle was purged; the panel renders "Plan archived
+or purged" inline (410), not a generic 5xx toast.
+
+**Canonical home.** `v2/dashboard-hardening.md §plan-view`.
 
 ---
 

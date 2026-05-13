@@ -116,6 +116,38 @@ open devtools, screenshot the console.
 - [ ] Focused-task aside refreshes when a task is clicked.
 - [ ] "Open task page" button works.
 - [ ] "Full DAG view →" link goes to `/initiatives/:id/dag`.
+- [ ] **Plan TOML panel** (`INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`):
+      - [ ] Click the "Plan TOML" header → panel expands and
+            URL gains `?plan=open` (refresh keeps it open).
+      - [ ] Approved initiative renders the **original**
+            `plan.toml` byte-for-byte in the Monaco editor
+            (preserved comments, blank lines, trailing
+            whitespace). Compare against the live-e2e
+            checked-in `plan_primary.toml` for the most-recent
+            green iter — must match.
+      - [ ] Header shows `Submitted by <fingerprint>`,
+            `Submitted at <ts>`, approval badge with status
+            colour matching the initiative's FSM state.
+      - [ ] **Copy** button copies the TOML to the clipboard
+            and surfaces a transient "Copied!" status (no
+            page-level toast).
+      - [ ] **Download** button writes
+            `<initiative_id>.plan.toml` to the operator's
+            Downloads dir; opening it in a TOML-aware editor
+            shows the same bytes the panel rendered.
+      - [ ] Light + dark mode: Monaco theme follows the
+            dashboard toggle; WCAG-AA contrast for keywords,
+            comments, and string literals.
+      - [ ] Plan panel scrolls vertically inside its
+            `max-height: 60vh` container; never spawns a
+            horizontal scrollbar.
+      - [ ] Open `/initiatives/init-does-not-exist?plan=open`
+            → panel renders an inline "Initiative not found"
+            message (NOT a 5xx toast).
+      - [ ] Click into a known archived / `Aborted`
+            initiative whose plan blob was purged → panel
+            renders an inline "Plan archived or purged"
+            message (HTTP 410, NOT 5xx, NOT 404).
 
 ### 3.7 Initiative DAG (`/initiatives/:id/dag`)
 

@@ -128,6 +128,46 @@ pub fn reveal_for_task(
     parse_plan_path_fields(&plan_toml, &initiative_id, task_id)
 }
 
+/// Read the **original submitted** `plan.toml` bytes for one
+/// initiative, byte-for-byte as the operator sealed them.
+///
+/// Walks the same V1 → V2.1 fallback chain as [`reveal_for_task`]:
+///   1. V1 path: `signed_plan_artifacts.plan_bytes` keyed by
+///      `initiative_id`.
+///   2. V2.1 path: `initiatives.plan_bundle_sha256` →
+///      `plan_bundle_artifacts` row whose `artifact_name = 'plan.toml'`
+///      (per `plan-bundle-sealing.md §8.3`).
+///
+/// Returns:
+///   * `Ok(Some(bytes))` — the canonical sealed bytes. The dashboard
+///     does NOT re-parse / re-serialize these (forensic fidelity per
+///     `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`).
+///   * `Ok(None)` — the initiative exists in some indirect way (e.g.
+///     the caller already validated existence) but has no
+///     `signed_plan_artifacts` row AND no `plan_bundle_artifacts`
+///     `plan.toml` row. Distinct from the underlying initiative's
+///     existence — callers MUST check `views::initiatives::by_id`
+///     to disambiguate "unknown initiative" (404) from "plan
+///     archived" (410).
+///   * `Err(_)` — sqlite trouble.
+///
+/// Why a sibling of [`reveal_initiative_meta`] / [`reveal_for_task`]
+/// rather than an inline helper inside the dashboard glue: the
+/// V1 → V2.1 lookup is already encapsulated in this module's
+/// private `lookup_plan_bytes`; exposing it once at the views
+/// boundary keeps every caller consistent (no second ad-hoc SQL
+/// path drifting against `lookup_plan_bytes`).
+pub fn submitted_toml_for_initiative(
+    conn:          &RoConn,
+    initiative_id: &str,
+) -> Result<Option<Vec<u8>>, PlanFieldsError> {
+    match lookup_plan_bytes(conn, initiative_id, initiative_id) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(PlanFieldsError::PlanArtifactMissing { .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Read the `[plan.initiative]` block (`title`, `description`) out
 /// of the plan TOML for `initiative_id`. Same V1 → V2.1 fallback
 /// chain as [`reveal_for_task`], same fail-soft default — a plan
@@ -536,5 +576,49 @@ mod tests {
             }
             other => panic!("expected TaskNotInPlan; got {other:?}"),
         }
+    }
+
+    // ── submitted_toml_for_initiative ──────────────────────────────────
+
+    /// `submitted_toml_for_initiative` MUST return the V1 plan bytes
+    /// byte-for-byte. The dashboard plan-view endpoint surfaces these
+    /// directly to the operator (no re-parse / re-serialize) per
+    /// `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`.
+    #[test]
+    fn submitted_toml_returns_v1_plan_bytes_byte_for_byte() {
+        let plan = "[plan.initiative]\ntitle = \"original\"\n[[tasks]]\ntask_id = \"t-1\"\n";
+        let (tmp, init, _task) = fresh_store_with_plan(plan);
+        let conn = open_ro(tmp.path()).unwrap();
+        let bytes = submitted_toml_for_initiative(&conn, &init).unwrap();
+        assert_eq!(bytes.as_deref(), Some(plan.as_bytes()));
+    }
+
+    /// `Ok(None)` when no plan row exists for the initiative — the
+    /// caller (kernel-side glue) MUST translate this to `Gone {kind:
+    /// "plan"}` rather than `NotFound`, distinguishing
+    /// "archived/purged" from "unknown initiative".
+    #[test]
+    fn submitted_toml_returns_none_when_no_plan_artifact_row_exists() {
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        let tmp = TempDir::new().unwrap();
+        let db  = tmp.path().join("kernel.db");
+        {
+            let store = Store::open(&db).unwrap();
+            let guard = store.lock_sync();
+            guard.execute(
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, \
+                      plan_artifact_sha256, created_at) \
+                     VALUES ('init-empty', 'Draft', '{{}}', 'sha-x', 1)"
+                ),
+                [],
+            ).unwrap();
+        }
+        let conn = open_ro(tmp.path()).unwrap();
+        assert_eq!(
+            submitted_toml_for_initiative(&conn, "init-empty").unwrap(),
+            None,
+        );
     }
 }

@@ -253,6 +253,70 @@ pub struct DagEdge {
     pub to: String,
 }
 
+// ---------------------------------------------------------------------------
+// Initiative plan view — `GET /api/initiatives/:id/plan`
+//
+// `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`: the dashboard surfaces
+// the **original submitted** `plan.toml` for any approved initiative
+// (V1: `signed_plan_artifacts.plan_bytes`; V2.1: the
+// `plan_bundle_artifacts` row at `artifact_seq=0`,
+// `artifact_name='plan.toml'`). The wire shape carries the bytes
+// verbatim — the dashboard does NOT re-parse / re-serialize the TOML
+// (forensic fidelity: a re-serialized plan would not match the
+// audit-chain hash the operator pre-approved).
+// ---------------------------------------------------------------------------
+
+/// `GET /api/initiatives/:id/plan` response body.
+///
+/// `submitted_toml` is the byte-for-byte TOML the operator submitted
+/// (decoded as UTF-8 — every plan TOML is UTF-8 by construction; a
+/// malformed-UTF-8 row surfaces as
+/// [`ApiError::Internal`] rather than mojibake on the wire).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InitiativePlanView {
+    /// Owning initiative id.
+    pub initiative_id: String,
+    /// SHA-256 of the on-disk plan artifact (mirrors
+    /// `InitiativeView::plan_sha256`). `None` for legacy V1 rows
+    /// where the `plan_artifact_sha256` column was empty.
+    pub plan_sha256: Option<String>,
+    /// SHA-256 of the V2.1 plan bundle the operator sealed and
+    /// submitted, lowercase hex. `None` for V1 plans (which used
+    /// `signed_plan_artifacts` and did not seal a bundle).
+    pub bundle_sha256: Option<String>,
+    /// The original submitted `plan.toml` bytes decoded as UTF-8.
+    /// **Byte-for-byte identical** to what the operator submitted —
+    /// the dashboard does NOT re-parse or re-serialize the TOML.
+    pub submitted_toml: String,
+    /// Number of bytes in the submitted TOML (helps the FE size
+    /// the editor + decide whether to virtualize).
+    pub submitted_toml_bytes: u64,
+    /// Unix-seconds timestamp the plan was submitted (V2.1: the
+    /// bundle's `signed_at_unix_secs`; V1: `created_at` on the
+    /// initiative row, since V1 had no separate sealed-at field).
+    pub submitted_at_unix: i64,
+    /// Operator pubkey fingerprint (lowercase hex, 16 bytes / 32
+    /// hex chars) of whoever sealed the bundle. `None` for V1
+    /// plans (which carried a detached signature on
+    /// `signed_plan_artifacts.plan_sig` but not a separated
+    /// fingerprint).
+    pub submitted_by: Option<String>,
+    /// Approval verdict:
+    ///   * `"approved"` — initiative state has advanced past
+    ///     `Draft` (`ApprovedPlan` / `Executing` / `Blocked` /
+    ///     terminal). The plan is immutable from this point on,
+    ///     and the FE caches aggressively (60 s).
+    ///   * `"pending"` — initiative is still in `Draft`. The plan
+    ///     can change; the FE should not aggressively cache.
+    ///   * `"rejected"` — initiative reached a terminal-failure
+    ///     state without ever advancing past `Draft` (e.g. the
+    ///     plan failed admission validation).
+    pub approval_status: String,
+    /// Unix-seconds timestamp the plan was approved (initiative
+    /// row's `approved_at`). `None` until approval lands.
+    pub approved_at_unix: Option<i64>,
+}
+
 /// Task detail view.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskView {
@@ -866,6 +930,25 @@ pub trait DashboardData: Send + Sync + 'static {
     /// Initiative detail (with task list + DAG edges).
     fn get_initiative(&self, id: &str) -> Result<InitiativeView, ApiError>;
 
+    /// Original submitted `plan.toml` for one initiative.
+    /// `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`.
+    ///
+    /// Implementations:
+    ///   * MUST return the **byte-for-byte original** TOML the
+    ///     operator submitted (no re-parse / re-serialize).
+    ///   * MUST return `Err(ApiError::NotFound { kind: "initiative" })`
+    ///     when the initiative id does not exist.
+    ///   * MUST return `Err(ApiError::Gone { kind: "plan" })` when
+    ///     the initiative exists but the on-disk plan artifact has
+    ///     been archived / purged — distinct from 404 so the FE
+    ///     can render an "archived" copy rather than "not found".
+    ///   * MUST return `Err(ApiError::Internal { .. })` ONLY for
+    ///     genuine infrastructure failures (DB read, malformed
+    ///     UTF-8 in a column the DDL pinned to TEXT). Errors on
+    ///     this path are forensically loud — the operator action
+    ///     route layer surfaces a structured envelope.
+    fn get_initiative_plan(&self, id: &str) -> Result<InitiativePlanView, ApiError>;
+
     /// Tasks for one initiative.
     fn list_tasks(&self, initiative_id: &str) -> Result<Vec<TaskView>, ApiError>;
 
@@ -1135,6 +1218,13 @@ pub struct InMemoryDashboardData {
 struct InMemoryInner {
     operators: HashMap<String, OperatorAuthResolution>,
     initiatives: Vec<InitiativeView>,
+    /// Per-initiative original-plan TOML seeded by tests via
+    /// [`InMemoryDashboardData::push_initiative_plan`]. Keyed by
+    /// `initiative_id`. The fixture mirrors the production rule:
+    /// missing entry ⇒ `ApiError::Gone { kind: "plan" }` so route
+    /// tests can exercise the 410 path without standing up a real
+    /// `plan_bundle_artifacts` table.
+    initiative_plans: HashMap<String, InitiativePlanView>,
     sessions: Vec<SessionView>,
     escalations: Vec<EscalationView>,
     audit: Vec<AuditEntryView>,
@@ -1208,6 +1298,21 @@ impl InMemoryDashboardData {
     /// Push an initiative into the fixture.
     pub fn push_initiative(self: &Arc<Self>, view: InitiativeView) -> &Arc<Self> {
         self.inner.write().initiatives.push(view);
+        self
+    }
+
+    /// Seed the original submitted plan TOML for an initiative so
+    /// `get_initiative_plan` returns it (rather than 410 Gone).
+    /// Mirrors the production write path: tests that exercise the
+    /// happy path of `GET /api/initiatives/:id/plan` MUST seed
+    /// here, while tests that exercise the 410-on-purge branch
+    /// MUST leave the entry absent.
+    pub fn push_initiative_plan(
+        self: &Arc<Self>,
+        view: InitiativePlanView,
+    ) -> &Arc<Self> {
+        let id = view.initiative_id.clone();
+        self.inner.write().initiative_plans.insert(id, view);
         self
     }
 
@@ -1375,6 +1480,21 @@ impl DashboardData for InMemoryDashboardData {
             .find(|i| i.summary.initiative_id == id)
             .cloned()
             .ok_or(ApiError::NotFound { kind: "initiative".into() })
+    }
+
+    fn get_initiative_plan(&self, id: &str) -> Result<InitiativePlanView, ApiError> {
+        let g = self.inner.read();
+        // Mirror production: 404 when the initiative itself is
+        // absent, 410 when the initiative exists but the plan
+        // artifact was archived/purged.
+        let known = g.initiatives.iter().any(|i| i.summary.initiative_id == id);
+        if !known {
+            return Err(ApiError::NotFound { kind: "initiative".into() });
+        }
+        g.initiative_plans
+            .get(id)
+            .cloned()
+            .ok_or(ApiError::Gone { kind: "plan".into() })
     }
 
     fn list_tasks(&self, initiative_id: &str) -> Result<Vec<TaskView>, ApiError> {
@@ -1785,6 +1905,7 @@ pub mod operator_outcome {
             | CertRejected { .. } => REJECTED_PERMISSION,
             Forbidden { .. } => REJECTED_PERMISSION,
             NotFound { .. } => REJECTED_VALIDATION,
+            Gone { .. } => REJECTED_VALIDATION,
             BadRequest { .. } => REJECTED_VALIDATION,
             PolicyInvalid { .. } => REJECTED_VALIDATION,
             Internal { .. } => INTERNAL_ERROR,
@@ -1975,6 +2096,43 @@ mod tests {
         assert_eq!(v["failure"]["message"], "reviewer flagged path scope");
         assert_eq!(v["failure"]["event_id"], "ev-9");
         assert_eq!(v["blocked_downstream"][0], "t-2");
+    }
+
+    /// `get_initiative_plan` (fixture path) MUST return 404 when
+    /// the initiative is unknown, 410 when the initiative exists
+    /// but the plan was purged, and the seeded view byte-for-byte
+    /// when the plan is present. Mirrors the production contract
+    /// per `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`.
+    #[test]
+    fn get_initiative_plan_distinguishes_404_410_and_present() {
+        let d = InMemoryDashboardData::new();
+        d.push_initiative(sample_initiative("init1"));
+
+        // No plan seeded yet → 410 Gone (initiative exists).
+        let err = d.get_initiative_plan("init1").unwrap_err();
+        assert!(matches!(err, ApiError::Gone { ref kind } if kind == "plan"));
+
+        // Unknown initiative → 404.
+        let err = d.get_initiative_plan("missing").unwrap_err();
+        assert!(matches!(err, ApiError::NotFound { ref kind } if kind == "initiative"));
+
+        // Seed → byte-for-byte round-trip.
+        let plan_toml = "# original\n[plan.initiative]\ntitle = \"x\"\n";
+        d.push_initiative_plan(InitiativePlanView {
+            initiative_id:        "init1".into(),
+            plan_sha256:          Some("deadbeef".into()),
+            bundle_sha256:        Some("a".repeat(64)),
+            submitted_toml:       plan_toml.into(),
+            submitted_toml_bytes: plan_toml.len() as u64,
+            submitted_at_unix:    1_700_000_000,
+            submitted_by:         Some("op-fingerprint".into()),
+            approval_status:      "approved".into(),
+            approved_at_unix:     Some(1_700_000_001),
+        });
+        let got = d.get_initiative_plan("init1").unwrap();
+        assert_eq!(got.submitted_toml, plan_toml);
+        assert_eq!(got.submitted_toml_bytes, plan_toml.len() as u64);
+        assert_eq!(got.approval_status, "approved");
     }
 
     #[test]

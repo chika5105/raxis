@@ -601,6 +601,169 @@ Cross-reference: `INV-HOST-HYGIENE-01`
 (`specs/invariants.md §11.11`),
 `guides/operator/18-host-hygiene.md`.
 
+## 5.8 Plan visibility — `plan-view` (`INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`)
+
+The dashboard surfaces every initiative's **original
+submitted** `plan.toml` byte-for-byte through a dedicated
+endpoint so operators can review, audit, copy, and
+forensically reproduce the exact bytes the planner
+operator sealed at admission.
+
+### 5.8.1 Endpoint
+
+`GET /api/initiatives/:initiative_id/plan` — read-role JWT
+required (same auth gate as `GET /api/initiatives/:id`).
+
+**Wire shape.**
+
+```json
+{
+  "initiative_id":        "init-019e228a-…",
+  "plan_sha256":          "ab12…",         // hex; from initiatives.plan_artifact_sha256
+  "bundle_sha256":        "cd34…",         // hex; null for V1 plans (no bundle)
+  "submitted_toml":       "[orchestrator]\n…",
+  "submitted_toml_bytes": 1234,            // server-computed byte length
+  "submitted_at_unix":    1_700_000_690,
+  "submitted_by":         "deadbeefdeadbeef", // operator fingerprint hex
+  "approval_status":      "approved" | "pending" | "rejected",
+  "approved_at_unix":     1_700_000_777    // null when not approved
+}
+```
+
+`approval_status` is derived from the initiative FSM row:
+
+| `initiatives.state`                                | `approved_at` | `approval_status` |
+|----------------------------------------------------|---------------|-------------------|
+| `Draft`                                            | any           | `pending`         |
+| `Executing` / `Completed` / `Failed` / `Aborted`   | `Some(_)`     | `approved`        |
+| `Executing` / `Completed` / `Failed` / `Aborted`   | `None`        | `rejected`        |
+
+The `rejected` row is operationally rare — it only appears
+when an FSM transition advanced past `Draft` without the
+admission path setting `approved_at` (a kernel bug). The
+dashboard surfaces it as a distinct copy so the operator
+can correlate against the originating audit row.
+
+### 5.8.2 Status code mapping
+
+| Status | Code                          | When                                                             |
+|--------|-------------------------------|------------------------------------------------------------------|
+| 200    | —                             | Plan present (approved or pending).                              |
+| 401    | `FAIL_DASHBOARD_UNAUTHORIZED` | Missing / invalid JWT (shared with every endpoint).              |
+| 403    | `FAIL_DASHBOARD_FORBIDDEN`    | Operator lacks the `read` role.                                  |
+| 404    | `FAIL_DASHBOARD_NOT_FOUND`    | Initiative id does not exist.                                    |
+| 410    | `FAIL_DASHBOARD_GONE`         | Initiative exists but its plan blob was archived / purged.       |
+| 500    | `FAIL_DASHBOARD_INTERNAL`     | DB read failure or non-UTF-8 plan bytes (the latter is a kernel bug — every production producer pins UTF-8 at write time). |
+
+**404 vs 410 is load-bearing.** A 404 means "wrong link"
+(operator typo / stale URL); the frontend renders
+"Initiative not found" with a back-link to the list. A 410
+means "plan gone" (forensic archival has run, or the
+initiative pre-dates V2 storage paths and its blob was
+swept); the frontend renders "Plan archived or purged"
+inline with the rest of the panel still chrome-loaded so
+the operator sees what the initiative was even if the
+bytes are no longer accessible. Folding both into 5xx —
+or both into 404 — collapses two operationally distinct
+paths.
+
+### 5.8.3 Cache-Control
+
+| Approval status   | Header                          | Rationale                                                 |
+|-------------------|---------------------------------|-----------------------------------------------------------|
+| `approved`        | `Cache-Control: private, max-age=60` | Approved plans are immutable post-approval (`plan-bundle-sealing.md §8.2`); 60 s of client-side caching dramatically reduces dashboard ↔ kernel round-trips when an operator clicks back-and-forth between tabs. `private` (not `public`) means no proxy-side caching — operator JWT context is per-request and operator-bound; never share the response across operators. |
+| `pending` / `rejected` | `Cache-Control: private, no-store` | Draft bytes are still mutable (the operator may re-seal); caching them across refreshes leaks stale plans to the frontend. |
+
+The frontend's `useInitiativePlan` TanStack Query hook
+holds a 60-second `staleTime` so the React cache and the
+HTTP cache stay aligned (a plan re-fetch never out-paces
+the server-side cache).
+
+### 5.8.4 Byte-for-byte fidelity
+
+The kernel-data layer
+(`raxis-dashboard-kernel::KernelDashboardData::get_initiative_plan`)
+walks the V1 → V2.1 fallback chain through
+`raxis_store::views::plan_fields::submitted_toml_for_initiative`:
+
+1. **V1 path.** `signed_plan_artifacts.plan_bytes` keyed
+   by `initiative_id`.
+2. **V2.1 path.** `initiatives.plan_bundle_sha256` →
+   `plan_bundle_artifacts` row whose
+   `artifact_name = 'plan.toml'`.
+
+Neither path runs the bytes through a TOML parser. The
+endpoint MUST surface the literal bytes (preserved
+comments, blank lines, trailing whitespace, byte-order
+markers). A re-encoded view actively hides operator
+intent — operators routinely embed `# why this lane`
+annotations in TOML to disambiguate later operator review,
+and the plan signature verifies against the literal sealed
+bytes (a TOML round-trip would invalidate the signature).
+The byte-for-byte requirement is the load-bearing claim of
+`INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`.
+
+### 5.8.5 Frontend contract
+
+* **Component.** `dashboard-fe/src/components/InitiativePlanView.tsx`.
+  Renders the TOML in a read-only Monaco editor with
+  syntax highlighting (Monaco's `ini` mode — closest
+  built-in language to TOML), theme-aware (`vs` / `vs-dark`
+  follows the dashboard's light / dark-mode toggle).
+* **Page integration.** Collapsible "Plan TOML" panel on
+  `dashboard-fe/src/pages/InitiativeDetail.tsx`. Open /
+  closed state is mirrored to the URL (`?plan=open`) so
+  operators can share a deep-link to the panel. The Monaco
+  editor mounts only when the panel is open (avoids
+  paying the editor's startup cost on initiative pages
+  where the operator does not click in).
+* **Header surface.** Submission metadata: operator
+  fingerprint, submitted-at (Unix → operator-local
+  timestamp), approval badge with colour mapped to
+  `approval_status`, plan / bundle SHA-256 chips
+  (truncated, hover for full hex).
+* **Actions.** "Copy" (clipboard API + transient "Copied!"
+  status) and "Download" (Blob → `<initiative_id>.plan.toml`).
+* **Loading.** Skeleton spinner while the React Query is
+  pending (`q.isPending`).
+* **Error states.** 404 ⇒ inline "Initiative not found"
+  with a back-link; 410 ⇒ inline "Plan archived or purged
+  (the initiative still exists; only the original sealed
+  TOML has been archived)"; other errors ⇒ shared
+  `<ErrorBox>` component with `code` + `detail`.
+* **Scroll discipline.** `max-height: 60vh`, vertical
+  scroll only — no horizontal overflow. Operator can resize
+  the panel by dragging Monaco's bottom edge if their plan
+  is large.
+* **WCAG-AA contrast.** Monaco's `vs-dark` theme ships at
+  AAA contrast for the default token colours; the panel
+  chrome (header, badges, buttons) inherits the dashboard's
+  shared design tokens which the dashboard's QA pass
+  already checks.
+
+### 5.8.6 Witness coverage
+
+| Surface                                           | Test                                                                                  |
+|---------------------------------------------------|---------------------------------------------------------------------------------------|
+| Backend HTTP path (V1 + V2.1 + 404 + 410 + auth)  | `raxis/kernel/tests/dashboard_initiative_plan_endpoint.rs` (4 cases)                  |
+| Store helper (V1 lookup + 404 fallback)           | `raxis/crates/store/src/views/plan_fields.rs::tests::submitted_toml_returns_v1_*`     |
+| Dashboard data layer (in-memory fixture)          | `raxis/crates/dashboard/src/data.rs::tests::in_memory_get_initiative_plan_*`          |
+| `ApiError::Gone` envelope mapping                 | `raxis/crates/dashboard/src/error.rs::tests::gone_yields_410_with_distinct_code`      |
+| Frontend component (loading / loaded / 404 / 410 / copy / download) | `raxis/dashboard-fe/src/test/initiative-plan-view.test.tsx` (6 cases) |
+
+### 5.8.7 Cross-reference with `worker/live-e2e-examples`
+
+The dashboard reads the original sealed TOML from the
+kernel store (V1 or V2.1 path); the live-e2e harness
+materialises `plan_primary.toml` / `plan_sibling.toml` as
+repo-checked-in files. Both surfaces SHOULD agree
+byte-for-byte for the most-recent green iter — if they
+diverge, the kernel's admission path has been changing the
+bytes between submission and seal (which would break plan
+signature verification). The dashboard panel is the
+operator-facing witness; the checked-in files are the
+developer-facing fixture.
+
 ## 6. Rationale (why these bounds)
 
 * **30 s handler timeout.** Gives the audit-chain walk

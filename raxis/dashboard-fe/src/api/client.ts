@@ -21,6 +21,7 @@ import type {
   EscalationView,
   HealthSnapshot,
   InitiativeListEntry,
+  InitiativePlanView,
   InitiativeView,
   MarkAllReadResponse,
   MarkReadResponse,
@@ -223,6 +224,17 @@ export const dashboardApi = {
       apiFetch<DagView>(`/api/initiatives/${encodeURIComponent(id)}/dag`, signal ? { signal } : {}),
     tasks: (id: string, signal?: AbortSignal): Promise<TaskView[]> =>
       apiFetch<TaskView[]>(`/api/initiatives/${encodeURIComponent(id)}/tasks`, signal ? { signal } : {}),
+    /// `GET /api/initiatives/:id/plan` — original submitted
+    /// plan.toml for the initiative. The kernel returns a
+    /// `Cache-Control: private, max-age=60` header for approved
+    /// plans (immutable post-approval); pending plans are
+    /// served as `no-store`. The FE's React Query staleTime
+    /// matches the 60s cache to avoid double-caching.
+    plan: (id: string, signal?: AbortSignal): Promise<InitiativePlanView> =>
+      apiFetch<InitiativePlanView>(
+        `/api/initiatives/${encodeURIComponent(id)}/plan`,
+        signal ? { signal } : {},
+      ),
   },
 
   tasks: {

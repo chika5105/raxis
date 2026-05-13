@@ -52,7 +52,7 @@ use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
     AuditEntryView, ChainStatusView, DagEdge, DashboardData, EscalationView, HealthCheck,
-    HealthSnapshot, InitiativeListEntry, InitiativeView, NotificationView,
+    HealthSnapshot, InitiativeListEntry, InitiativePlanView, InitiativeView, NotificationView,
     OperatorAuthResolution, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
     ReviewerVerdictView, SessionView, StructuredOutputView, SubsystemDetailRow,
     SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
@@ -757,6 +757,120 @@ impl DashboardData for KernelDashboardData {
         let rows = raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
             .map_err(|e| ApiError::Internal { log_only: format!("tasks::list_by_initiative: {e}") })?;
         Ok(rows.iter().map(|t| task_row_to_view(&conn, t)).collect())
+    }
+
+    /// `GET /api/initiatives/:id/plan` —
+    /// `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`.
+    ///
+    /// Walks the production V1 → V2.1 fallback chain via
+    /// [`raxis_store::views::plan_fields::submitted_toml_for_initiative`]
+    /// so the dashboard surfaces the EXACT bytes the operator
+    /// sealed (no re-parse / re-serialize). 404 vs 410 is the
+    /// distinction between "unknown initiative" and "plan
+    /// archived" — the FE renders different copy for each.
+    fn get_initiative_plan(&self, id: &str) -> Result<InitiativePlanView, ApiError> {
+        let conn = self.open_ro()?;
+
+        // Step 1 — initiative existence (404 vs 410 disambiguation).
+        let init_row = raxis_store::views::initiatives::by_id(&conn, id)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("initiatives::by_id: {e}"),
+            })?
+            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+
+        // Step 2 — original submitted TOML (V1 + V2.1 fallback).
+        let raw = raxis_store::views::plan_fields::submitted_toml_for_initiative(
+            &conn, id,
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("plan_fields::submitted_toml_for_initiative: {e}"),
+        })?
+        .ok_or(ApiError::Gone { kind: "plan".into() })?;
+
+        // The DDL pins both `signed_plan_artifacts.plan_bytes` and
+        // `plan_bundle_artifacts.artifact_bytes` to BLOB; every
+        // production producer writes UTF-8 (the codec validates).
+        // A non-UTF-8 row is a kernel bug — surface it as a
+        // structured 500 rather than corrupt the wire body.
+        let toml_string = String::from_utf8(raw).map_err(|e| ApiError::Internal {
+            log_only: format!(
+                "plan TOML for initiative {id} is not valid UTF-8: {e}",
+            ),
+        })?;
+        let toml_len = toml_string.len() as u64;
+
+        // Step 3 — V2.1 bundle metadata (best-effort; V1 plans
+        // return None and we fall through to the V1 header).
+        let mut bundle_sha256_hex: Option<String> = None;
+        let mut submitted_at_unix: i64 = init_row.created_at as i64;
+        let mut submitted_by: Option<String> = None;
+        if let Some(sha) = raxis_store::views::initiatives::plan_bundle_sha256_by_id(&conn, id)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("initiatives::plan_bundle_sha256_by_id: {e}"),
+            })?
+        {
+            bundle_sha256_hex = Some(hex::encode(sha.as_bytes()));
+            if let Some(header) = raxis_store::views::plan_bundles::header_by_sha256(&conn, &sha)
+                .map_err(|e| ApiError::Internal {
+                    log_only: format!("plan_bundles::header_by_sha256: {e}"),
+                })?
+            {
+                // Prefer the operator-supplied signed_at_unix_secs
+                // (V2.1 envelope) when present; fall back to the
+                // store-side sealed_at otherwise. Either is a real
+                // wall-clock timestamp the operator can correlate
+                // against the audit chain.
+                submitted_at_unix = header
+                    .signed_at_unix_secs
+                    .unwrap_or(header.sealed_at_unix_secs);
+                submitted_by = Some(hex::encode(header.signed_by.as_bytes()));
+            }
+        } else {
+            // V1 fallback — read the signed_plan_artifacts header
+            // for the stored_at + fingerprint surface. The plan
+            // itself was already loaded above; this is only for
+            // forensic metadata.
+            if let Some(header) = raxis_store::views::signed_plan_artifacts::header_by_initiative(
+                &conn, id,
+            )
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("signed_plan_artifacts::header_by_initiative: {e}"),
+            })?
+            {
+                submitted_at_unix = header.stored_at;
+                submitted_by = header.signed_by_fingerprint;
+            }
+        }
+
+        // Step 4 — approval verdict from the FSM state. Mirrors
+        // kernel-store.md §2.5.1 Table 2: `Draft` is the only
+        // pre-approval state; everything else means the kernel
+        // accepted the plan (terminal `Failed` / `Aborted` stay
+        // approved unless the failure happened in admission, in
+        // which case `approved_at` is None and we surface
+        // "rejected" so the FE can render a distinct copy).
+        let approval_status = match (init_row.state.as_str(), init_row.approved_at) {
+            ("Draft", _) => "pending",
+            (_, Some(_)) => "approved",
+            (_, None) => "rejected",
+        }
+        .to_owned();
+
+        Ok(InitiativePlanView {
+            initiative_id:        init_row.initiative_id,
+            plan_sha256:          if init_row.plan_artifact_sha256.is_empty() {
+                None
+            } else {
+                Some(init_row.plan_artifact_sha256)
+            },
+            bundle_sha256:        bundle_sha256_hex,
+            submitted_toml:       toml_string,
+            submitted_toml_bytes: toml_len,
+            submitted_at_unix,
+            submitted_by,
+            approval_status,
+            approved_at_unix:     init_row.approved_at.map(|v| v as i64),
+        })
     }
 
     fn get_task(&self, task_id: &str) -> Result<TaskView, ApiError> {

@@ -152,6 +152,38 @@ export interface InitiativeView extends InitiativeListEntry {
   failure?: FailureInfo | null;
 }
 
+/// `GET /api/initiatives/:id/plan` response body — the original
+/// submitted `plan.toml` for one initiative byte-for-byte.
+///
+/// Source of truth: `raxis_dashboard::data::InitiativePlanView`.
+/// `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`: the FE renders
+/// `submitted_toml` verbatim (no re-parse / re-serialize) so the
+/// operator-visible bytes match the audit-chain hash they
+/// pre-approved.
+export type ApprovalStatus = "approved" | "pending" | "rejected";
+
+export interface InitiativePlanView {
+  initiative_id: string;
+  /// Lowercase-hex SHA-256 of the on-disk plan artifact. `null`
+  /// for legacy V1 rows where the column was empty.
+  plan_sha256: string | null;
+  /// Lowercase-hex SHA-256 of the V2.1 plan bundle the operator
+  /// sealed. `null` for V1 plans (which used
+  /// `signed_plan_artifacts` and did not seal a bundle).
+  bundle_sha256: string | null;
+  /// The original submitted plan TOML. Byte-for-byte identical
+  /// to what the operator submitted (forensic fidelity).
+  submitted_toml: string;
+  submitted_toml_bytes: number;
+  submitted_at_unix: number;
+  /// Operator pubkey fingerprint (lowercase hex) of whoever
+  /// sealed the bundle. `null` for V1 plans (no separated
+  /// fingerprint at the artifact layer).
+  submitted_by: string | null;
+  approval_status: ApprovalStatus;
+  approved_at_unix: number | null;
+}
+
 export interface DagNode {
   task_id: string;
   title: string;

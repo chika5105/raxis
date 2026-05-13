@@ -318,6 +318,11 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/initiatives/:id",             get(initiatives::detail::<D>))
         .route("/api/initiatives/:id/dag",         get(initiatives::dag::<D>))
         .route("/api/initiatives/:id/tasks",       get(initiatives::tasks::<D>))
+        // Original submitted plan TOML — INV-DASHBOARD-
+        // INITIATIVE-PLAN-VISIBLE-01. Read-role suffices; the
+        // handler emits a 60s `Cache-Control: private` header
+        // for approved plans and `no-store` for pending ones.
+        .route("/api/initiatives/:id/plan",        get(initiatives::plan::<D>))
         // Tasks.
         .route("/api/tasks/:id",                   get(tasks::detail::<D>))
         .route("/api/tasks/:id/outputs",           get(tasks::outputs::<D>))
