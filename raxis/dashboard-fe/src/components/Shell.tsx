@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 
 import { authApi, dashboardApi } from "@/api/client";
+import { HostHygieneBanner } from "@/components/banners/HostHygieneBanner";
 import {
   CommandPalette,
   type PaletteCommand,
@@ -285,7 +286,15 @@ export function Shell({ children }: ShellProps) {
           </div>
         </header>
         <div className="flex-1 overflow-y-auto scroll-thin">
-          <div className="px-5 py-5 max-w-[1600px] mx-auto w-full">
+          <div className="px-5 py-5 max-w-[1600px] mx-auto w-full space-y-3">
+            {/*
+              Top-of-page operator-attention strip
+              (INV-HOST-HYGIENE-01 / INV-DASHBOARD-FAILURE-VISIBILITY-01).
+              Renders nothing when there's no active disk-pressure
+              event so the chrome cost is exactly zero on the
+              happy path.
+            */}
+            <HostHygieneBanner />
             {children}
           </div>
         </div>
