@@ -12,6 +12,7 @@ mod dev_keys;
 mod dev_prereqs;
 mod dev_reset;
 mod hygiene;
+mod hygiene_install;
 mod images;
 mod license_check;
 mod linux_microvm;
@@ -134,6 +135,22 @@ fn main() -> anyhow::Result<()> {
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             hygiene::run(&tail).context("hygiene")
         }
+        Some("hygiene-install-timer") => {
+            // `cargo xtask hygiene-install-timer
+            //                 [--system] [--uninstall] [--dry-run]`
+            // — install the periodic hygiene-sweep timer.
+            //   * macOS: per-user LaunchAgent at
+            //     `~/Library/LaunchAgents/com.raxis.hygiene.plist`
+            //     bootstrapped via `launchctl bootstrap gui/$UID`.
+            //   * Linux: systemd user-scope (default) or system
+            //     (`--system`) at `~/.config/systemd/user/` or
+            //     `/etc/systemd/system/`, enabled with
+            //     `systemctl [--user] enable --now raxis-hygiene.timer`.
+            //   * `--dry-run` prints every write/exec without
+            //     touching disk.
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            hygiene_install::run(&tail).context("hygiene-install-timer")
+        }
         Some("hygiene-check") => {
             // `cargo xtask hygiene-check [--threshold-pct N]`
             // — read-only `df -P` probe across the repo volume,
@@ -163,8 +180,9 @@ fn main() -> anyhow::Result<()> {
             "unknown xtask target: {other:?}\n\
              available: spec-graph [--strict], license-check [--strict], \
              dev-keys, dev-codesign, dev-prereqs, dev-reset, hygiene, \
-             hygiene-check, images, linux-microvm, linux-prereqs, \
-             macos-firewall-prereq, macos-firewall-status, perf, observability"
+             hygiene-check, hygiene-install-timer, images, linux-microvm, \
+             linux-prereqs, macos-firewall-prereq, macos-firewall-status, \
+             perf, observability"
         ),
         None => anyhow::bail!(
             "usage: cargo xtask <target> [flags]\n\
@@ -176,6 +194,7 @@ fn main() -> anyhow::Result<()> {
              dev-prereqs    [--install]                 — verify / install AVF demo prerequisites\n                 [--scope user|workspace]   (Homebrew, musl-cross, openssl@3,\n                 [--arch aarch64|x86_64]    rustup musl target, codesign, cargo);\n                 [--skip-cargo-config]     idempotently patches\n                                                 ~/.cargo/config.toml linker pin.\n                                                 (demo-e2e-sample/AVF_DEMO.md §0)\n  \
              hygiene        [--dry-run]                — prune parent-side `git worktree`s whose\n                 [--max-age-days N]                       branch tip has landed to origin/main\n                 [--keep BRANCH ...]                      AND whose files are not actively held\n                                                          open. Skips the main checkout, anything\n                                                          on --keep, and the worktree the xtask\n                                                          itself was invoked from. Prints disk-\n                                                          before / disk-after to stderr.\n                                                          (INV-HOST-HYGIENE-01)\n  \
              hygiene-check  [--threshold-pct N]         — read-only `df -P` probe across the repo\n                                                          volume, /private/tmp, and /var/folders/*.\n                                                          Exits non-zero when any volume exceeds\n                                                          --threshold-pct (default 85). Used as\n                                                          live-e2e preflight at 90%.\n                                                          (INV-HOST-HYGIENE-01)\n  \
+             hygiene-install-timer                      — install the periodic hygiene-sweep timer\n                 [--system]                                  (every 6h via launchd on macOS or\n                 [--uninstall]                               systemd on Linux; user-scope by default,\n                 [--dry-run]                                 --system for shared hosts).\n                                                          (INV-HOST-HYGIENE-01,\n                                                           guides/operator/18-host-hygiene.md)\n  \
              dev-reset notifications                    — wipe the operator-notifications inbox\n                 [--data-dir <PATH>]                       projection (kernel.db::notifications\n                 [--dry-run]                               table + notifications/inbox.jsonl)\n                                                           so the next kernel boot starts empty\n                                                           AFTER the notification_priority\n                                                           filter took effect. The audit chain\n                                                           at <data_dir>/audit/ is NEVER touched\n                                                           (INV-NOTIF-SCOPE-01).\n  \
              images dev-kernel                          — stage Linux guest-kernel binary at\n                 (--from-file <PATH> | --url <URL> --sha256 <HEX>) \n                 [--install-dir <PATH>] [--arch <ARCH>] [--force]\n                                                 <install_dir>/kernel/vmlinux\n                                                 (system-requirements.md §11)\n  \
              images bake-rootfs --role <ROLE>           — docker build per-role Containerfile\n                 [--builder docker|podman|buildah]         and extract OCI rootfs into\n                 [--platform <PLAT>] [--keep]              images/<role>/rootfs/. Auto-detects\n                                                           docker → podman → buildah on $PATH;\n                                                           --platform defaults to the OCI shape\n                                                           of `default_target_triple()`. Run\n                                                           BEFORE dev-stage; dev-stage overlays\n                                                           the planner binary on top.\n  \

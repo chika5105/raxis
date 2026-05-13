@@ -1,0 +1,45 @@
+# raxis-hygiene.service — periodic worktree hygiene sweep.
+#
+# Companion to raxis-hygiene.timer (which schedules invocations
+# every 6 hours). See INV-HOST-HYGIENE-01 in
+# raxis/specs/invariants.md and the operator recipe at
+# raxis/guides/operator/18-host-hygiene.md.
+#
+# Installation
+# ------------
+#   cargo xtask hygiene-install-timer --dry-run    # preview
+#   cargo xtask hygiene-install-timer              # user-scope
+#   sudo cargo xtask hygiene-install-timer --system  # system-wide
+#
+# The installer substitutes __REPO_ROOT__, __CARGO_BIN__, and
+# __OPERATOR_USER__ with the live values before copying into the
+# user (or system) systemd unit directory.
+
+[Unit]
+Description=Raxis worktree hygiene sweep (INV-HOST-HYGIENE-01)
+Documentation=file://__REPO_ROOT__/raxis/guides/operator/18-host-hygiene.md
+Documentation=file://__REPO_ROOT__/raxis/specs/invariants.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_ROOT__
+ExecStart=__CARGO_BIN__ xtask hygiene --max-age-days 1
+
+# Be a polite citizen on shared hosts: run the sweep at low
+# priority so it never starves a live build.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# The sweep is read-mostly + git/lsof/df, no kernel-level state
+# changes; locked to PrivateTmp=false because the whole point of
+# this unit is to inspect /tmp.
+PrivateTmp=false
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.raxis.hygiene — periodic worktree hygiene sweep (INV-HOST-HYGIENE-01).
+
+  Runs `cargo xtask hygiene --max-age-days 1` every 6 hours
+  (00:00 / 06:00 / 12:00 / 18:00 local time).
+
+  Installation
+  ------------
+    cargo xtask hygiene-install-timer --dry-run     # preview
+    cargo xtask hygiene-install-timer               # apply
+
+  The installer copies this file to ~/Library/LaunchAgents/, runs
+  `launchctl bootstrap`, and substitutes the placeholders below
+  with the actual repo root + cargo path. RunAtLoad is FALSE on
+  purpose: the operator must run a manual `cargo xtask hygiene
+  --dry-run` first to confirm the sweep matches their mental
+  model.
+
+  Logs land at:
+    ~/Library/Logs/raxis-hygiene.out.log
+    ~/Library/Logs/raxis-hygiene.err.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.raxis.hygiene</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CARGO_BIN__</string>
+    <string>xtask</string>
+    <string>hygiene</string>
+    <string>--max-age-days</string>
+    <string>1</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>0</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>6</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>12</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>18</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/raxis-hygiene.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/raxis-hygiene.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>
