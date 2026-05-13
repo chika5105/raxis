@@ -603,3 +603,99 @@ correctly flipped between "Switch to dark mode" and
   realistic scenario, confirm R3-1 (`(no summary)`) status,
   refresh the visual screenshots, push to `main`, report
   DONE.
+
+### Run 4 — extended_e2e_realistic_scenario (kernel @ port
+19820, JWT exp 19:50 PDT 2026-05-12)
+
+Tour driver: `cursor-ide-browser` MCP against the kernel's
+test-mounted dashboard with the FE proxied through Vite at
+`http://127.0.0.1:5173` (Vite serves the freshly-edited
+`dashboard-fe/src/...` so this same run also verified
+end-to-end the **R3-1 fix** landed earlier in this loop —
+see "Issue resolved" below).
+
+Snapshot of kernel state at tour time (via REST):
+- 2 in-flight initiatives (`019e1f0d-…6124c785dabc` w/ 10
+  tasks + `019e1f0d-…613c3c05a8a9` sibling lane w/ 1 task)
+- 3+ active sessions across `executor` / `planner`
+  (`5825afd0`, `9bdf2e2f`, `354d98ba`, …) — count climbed
+  to 7+ during the audit-stream observation window as the
+  realistic harness span fresh executors per task
+- Audit chain at attach time: 47 events; grew to 60+ within
+  ~30 s under realistic-scenario load — no UI staleness or
+  buffer back-pressure visible in the dashboard
+- 36 unread notifications at attach, climbing to 60 during
+  the tour as the live audit chain fanned out into the
+  notification table
+
+Per-view results (this run focused on the views the R3-1
+fix touches — Notifications, Audit, Overview — re-verified
+in BOTH dark + light):
+
+- Notifications / `/notifications`        PASS (every row
+  now renders a payload-derived one-liner instead of the
+  `<EventKind> (no summary)` placeholder; toned event
+  badges remained correct; "Mark read" + "Mark all read"
+  CTAs still functional; row click still navigates to
+  the linked initiative / task)
+- Audit Chain / `/audit`                  PASS (60+ rows
+  streaming live with task-id breadcrumbs; toned badges
+  legible in both themes; row expansion still reveals
+  the JSON payload; "Load more" CTA present)
+- Overview / `/`                          PASS (KPI tiles
+  + Recent activity stream still render with toned badges)
+- Theme toggle (mid-page)                 PASS (light
+  toggle from dark mid-tour did not reflow the
+  notification list, badge contrast remained legible
+  for every tone in both modes)
+
+Console messages during the tour: clean. Vite HMR connect /
+React-DevTools install hint only. No 401s, no React
+warnings, no audit-stream backpressure noise.
+
+#### Issue resolved
+
+- **R3-1 — payload-derived notification summary fallback**
+  Commit `50d69ff` (`dashboard-fe(notifications):
+  payload-derived summary fallback for V2/V3 events`)
+  introduces `lib/notification-summary.ts` with an
+  `isPlaceholderSummary()` guard + per-kind summarizers
+  for the V2 service-evidence chain
+  (`MongoCommandExecuted`, `DatabaseQueryCompleted`,
+  `CredentialAccessed`, `CredentialProxy*`,
+  `DatabaseQueryExecuted`) and the V3 cloud-credential +
+  reviewer-egress kinds (`CloudCredential*`,
+  `DefaultProviderEgressApplied`,
+  `SessionEgressStallDetected`). Wired into
+  `pages/Notifications.tsx` via `notificationDisplaySummary`
+  — kernel-rendered summaries are still preserved verbatim
+  whenever the backend returns one. 21 unit tests cover
+  every derived kind + the placeholder-detection +
+  fallback branches; full vitest + tsc clean.
+
+  Confirmed live in this run: zero "(no summary)"
+  occurrences on the Notifications page (browser_search
+  returned 0 matches), and operator-grade lines like:
+  - `mongodb proxy "test-mongo-dev" connected to 127.0.0.1:27399 in 110 ms`
+  - `postgres "test-pg-dev" returned 25 rows, 2.7 KiB in 1 ms`
+  - `mongodb "test-mongo-dev" ran isMaster`
+  - `session 9bdf2e2f accessed credential "test-pg-dev" (file backend)`
+  - `Initiative 019e1f0d created (plan 6380a6c2), signed by f8dda844`
+  - `Plan approved for 019e1f0d (9 tasks)`
+  - `Plan approved for 019e1f0d (1 task)`  ← pluralisation
+  - `Session 9bdf2e2f VM spawned for sibling-materialize-records (backend=apple-vz-14.x, egress=Tier1Tproxy, 2 cred proxies)`
+  - `Gateway spawned (attempt 1, token 0c08e52c…)`
+
+  Follow-up commit `67a35cb`
+  (`dashboard-fe(notifications): pluralise cred-proxy
+  count correctly in VM-spawned summary`) corrects a
+  malformed `proxyies` plural caught during the live
+  verification — `1 cred proxy` / `2 cred proxies` now
+  pin both branches.
+
+#### Outstanding
+
+- None from this run. The dashboard rendered every kind
+  the V2 service-evidence chain emits with a meaningful
+  one-liner, theme toggling stayed clean, and the audit
+  stream kept up with the realistic-scenario load.
