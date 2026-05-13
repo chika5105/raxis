@@ -77,6 +77,7 @@ use common::kernel_harness::acquire_test_lock;
 use extended_e2e_support::{
     audit_chain::AuditChainWitness,
     crash_recovery::CrashRecoveryWitness,
+    docker_stack::ensure_extended_stack_up_or_panic,
     kernel_driver::{
         bootstrap_with_custom_cert, build_operator_key,
         enable_gateway_in_policy, locate_executor_worktree_via_chain,
@@ -162,6 +163,14 @@ fn realistic_session_lifecycle() {
     let _build_lock = acquire_test_lock();
 
     // ── Preflight ─────────────────────────────────────────────
+    //
+    // Bring up the docker-compose backing stack BEFORE any other
+    // preflight or seed step. Auto-bring-up is the operator-
+    // ergonomic default; opt out via `RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1`.
+    // Spec: `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` —
+    // every external-process spawn is bounded; the bring-up
+    // itself runs through `harness_timeout::run_command_output_timeout`.
+    ensure_extended_stack_up_or_panic();
     require_tcp_reachable(PG_HOST_PORT,    "Postgres docker container");
     require_tcp_reachable(MONGO_HOST_PORT, "MongoDB docker container");
     require_anthropic_dev_key();

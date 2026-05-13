@@ -15,6 +15,7 @@ pub mod byo_image;
 pub mod concurrency;
 pub mod crash_recovery;
 pub mod credential_substitution_evidence;
+pub mod docker_stack;
 pub mod harness_timeout;
 pub mod health_probe;
 pub mod injection;
