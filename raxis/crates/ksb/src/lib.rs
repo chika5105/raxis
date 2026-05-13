@@ -115,6 +115,19 @@ pub const PLANNER_KSB_GUEST_MOUNT: &str = "/raxis-meta";
 /// `RAXIS_PLANNER_KSB_PATH=<PLANNER_KSB_GUEST_MOUNT>/<PLANNER_KSB_FILE_NAME>`.
 pub const PLANNER_KSB_FILE_NAME: &str = "ksb.json";
 
+/// Conventional file name of the operator-authored task-prompt
+/// inside the sidecar mount. The kernel writes
+/// `<host meta dir>/<PLANNER_TASK_PROMPT_FILE_NAME>` and stamps
+/// `RAXIS_PLANNER_TASK_PROMPT_PATH=<PLANNER_KSB_GUEST_MOUNT>/<PLANNER_TASK_PROMPT_FILE_NAME>`
+/// (per `raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV`).
+///
+/// Co-locating the prompt in the same mount as the KSB JSON reuses
+/// a single virtiofs share (no per-file mount), keeps the host
+/// teardown story identical (one meta dir per session), and lets
+/// the substrate's existing `RAXIS_VIRTIOFS_MOUNTS` enumeration
+/// stay byte-stable.
+pub const PLANNER_TASK_PROMPT_FILE_NAME: &str = "task-prompt.txt";
+
 /// Current schema version. Incremented when a field is *removed* or
 /// *renamed*. Adding a field is non-breaking.
 pub const KSB_SCHEMA_VERSION: u32 = 1;

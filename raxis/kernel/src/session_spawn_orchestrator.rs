@@ -820,7 +820,11 @@ async fn spawn_orchestrator_for_initiative(
             sock.display().to_string(),
         );
     }
-    env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), task_prompt);
+    // The task prompt is folded into the meta sidecar below
+    // (`provision_meta_sidecar`) when a `data_dir` is available so
+    // it stays out of the AVF cmdline budget. We hold the value
+    // here and stamp the right channel after the sidecar attempt.
+    let task_prompt_for_sidecar = task_prompt;
 
     // V2 `v2_extended_gaps.md §2.5` — stamp per-session LLM token
     // caps from `policy.budget.token_caps` into the guest env. The
@@ -857,25 +861,45 @@ async fn spawn_orchestrator_for_initiative(
     let ksb_json = serde_json::to_string(&ksb_snapshot)
         .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
     // Prefer the virtiofs sidecar channel (small `RAXIS_PLANNER_KSB_PATH`
-    // env, KSB JSON in a per-session file) so the AVF cmdline budget
-    // is not consumed by the snapshot bytes; fall back to the legacy
-    // inline `RAXIS_PLANNER_KSB` env when there is no on-disk meta
-    // dir to write into (in-process tests with `data_dir = None`).
-    let ksb_sidecar = provision_ksb_sidecar(
+    // env, KSB JSON in a per-session file) for both the KSB and the
+    // operator-authored task prompt so the AVF cmdline budget is not
+    // consumed by the snapshot bytes. Falls back to the legacy inline
+    // `RAXIS_PLANNER_KSB` / `RAXIS_PLANNER_TASK_PROMPT` envs when
+    // there is no on-disk meta dir to write into (in-process tests
+    // with `data_dir = None`). See `provision_meta_sidecar` for the
+    // cmdline-overflow rationale.
+    let meta_sidecar = provision_meta_sidecar(
         spawn_ctx.data_dir.as_deref(),
         session_id,
-        &ksb_json,
+        Some(&ksb_json),
+        Some(&task_prompt_for_sidecar),
     );
-    let extra_workspace_mounts: Vec<raxis_isolation::WorkspaceMount> = match &ksb_sidecar {
-        Some((mount, guest_path)) => {
-            env.insert(
-                raxis_ksb::PLANNER_KSB_PATH_ENV.to_owned(),
-                guest_path.clone(),
-            );
-            vec![mount.clone()]
+    let extra_workspace_mounts: Vec<raxis_isolation::WorkspaceMount> = match &meta_sidecar {
+        Some(s) => {
+            if let Some(p) = &s.ksb_guest_path {
+                env.insert(raxis_ksb::PLANNER_KSB_PATH_ENV.to_owned(), p.clone());
+            } else {
+                env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json.clone());
+            }
+            if let Some(p) = &s.task_prompt_guest_path {
+                env.insert(
+                    raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV.to_owned(),
+                    p.clone(),
+                );
+            } else {
+                env.insert(
+                    PLANNER_TASK_PROMPT_ENV.to_owned(),
+                    task_prompt_for_sidecar.clone(),
+                );
+            }
+            vec![s.mount.clone()]
         }
         None => {
             env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
+            env.insert(
+                PLANNER_TASK_PROMPT_ENV.to_owned(),
+                task_prompt_for_sidecar.clone(),
+            );
             Vec::new()
         }
     };
@@ -1528,48 +1552,74 @@ pub async fn respawn_orchestrator_for_initiative(
 // `workspace_mounts`. Pinned by `raxis_ksb::PLANNER_KSB_PATH_ENV`.
 // ---------------------------------------------------------------------------
 
-/// Provision the per-session KSB sidecar.
+/// Per-session sidecar provisioning result. The mount is shared
+/// between the KSB JSON file and the task-prompt file (both live
+/// under `<data_dir>/guests/<session_id>/meta/` on the host and
+/// surface as `/raxis-meta/<filename>` inside the guest), so the
+/// substrate only ever sees a single virtiofs share entry per
+/// session for kernel-injected metadata.
+struct MetaSidecar {
+    /// One read-only virtiofs mount carrying every meta file the
+    /// kernel writes. Always present when this struct is returned.
+    mount: raxis_isolation::WorkspaceMount,
+
+    /// Guest-visible absolute path of the KSB JSON file when the
+    /// caller asked for one. Stamped into
+    /// `RAXIS_PLANNER_KSB_PATH`.
+    ksb_guest_path: Option<String>,
+
+    /// Guest-visible absolute path of the task-prompt file when
+    /// the caller asked for one. Stamped into
+    /// `RAXIS_PLANNER_TASK_PROMPT_PATH`.
+    task_prompt_guest_path: Option<String>,
+}
+
+/// Provision the per-session metadata sidecar — the single virtiofs
+/// share that carries the kernel-projected KSB snapshot AND the
+/// operator-authored task prompt out of the AVF cmdline budget.
 ///
-/// The Apple-VZ substrate lacks a `Command::env` analogue and folds
-/// every `VmSpec::env` entry into the Linux `/proc/cmdline` as a
-/// single base64-encoded `raxis.envb64=<base64>` token. Linux's
-/// `COMMAND_LINE_SIZE` ceiling on aarch64 (default 2048 bytes)
-/// silently truncates anything past that boundary, including the
-/// `-- --task-id <ID> --initiative-id <ID>` argv tail the planner
-/// binary needs to boot. Once the KSB JSON crosses ~1 KiB (the
-/// reviewer's per-initiative DAG snapshot is the first projection
-/// that consistently does so) the cmdline overflow drops the argv
-/// entirely and the planner aborts at boot with
-/// `MissingValue("--initiative-id")`.
+/// **Why a sidecar.** The Apple-VZ substrate lacks a `Command::env`
+/// analogue and folds every `VmSpec::env` entry into the Linux
+/// `/proc/cmdline` as a single base64-encoded `raxis.envb64=<b64>`
+/// token. Linux's `COMMAND_LINE_SIZE` ceiling on aarch64 (default
+/// 2048 bytes) silently truncates anything past that boundary,
+/// including the trailing `-- --task-id <ID> --initiative-id <ID>`
+/// argv tail the planner binary needs to boot. Two payload classes
+/// historically blew the budget:
 ///
-/// Routing the KSB through a dedicated virtiofs file removes it from
-/// the cmdline budget entirely — only a tiny
-/// `RAXIS_PLANNER_KSB_PATH=/raxis-meta/ksb.json` env stays in the
-/// payload (~40 bytes). The driver reads from the path when
-/// `RAXIS_PLANNER_KSB_PATH` is set and falls back to the legacy
-/// inline `RAXIS_PLANNER_KSB` env when only that channel is
-/// populated (subprocess-isolation tests, older kernel revisions).
+///   * the reviewer's per-initiative KSB JSON (~1 KiB once the DAG
+///     view lands), and
 ///
-/// Returns `Some((mount, path_env_value))` when:
+///   * the executor's operator-authored task prompt (the realistic
+///     scenario's `materializer.md` / `service_round_trip.md` /
+///     `transparent_proxy_real_scripts.md` are 2.7–6.9 KiB which
+///     after base64 expansion (4/3 + delimiter) reliably exceeds
+///     2048 bytes on its own — every other env axis is incidental).
 ///
-///   * `data_dir` is `Some` (every production spawn — the boot path
-///     populates `OrchestratorSpawnContext::data_dir` /
-///     `ExecutorSpawnContext::data_dir` from
-///     `KernelInstance::data_dir`).
-///   * The host meta dir + file write both succeeded.
+/// Both classes are now routed through a per-session virtiofs file
+/// under `<data_dir>/guests/<session_id>/meta/` mounted read-only at
+/// [`raxis_ksb::PLANNER_KSB_GUEST_MOUNT`] (`/raxis-meta`). The env
+/// payload then carries only the tiny `…_PATH=/raxis-meta/<name>`
+/// pointers (~40 bytes each) plus the substrate-default keys —
+/// well under the 2048-byte ceiling regardless of prompt size.
 ///
-/// Returns `None` for the in-process tests that construct a spawn
-/// context with `data_dir = None`, in which case the caller
-/// stamps the legacy inline env unchanged.
+/// **Driver-side fallback.** Both the KSB and the task prompt have
+/// matching legacy inline env vars ([`raxis_ksb::PLANNER_KSB_ENV`]
+/// and `RAXIS_PLANNER_TASK_PROMPT`). The driver
+/// (`raxis-planner-core::driver::run_role_session_with_env_fn`)
+/// prefers the `…_PATH` channel when set and falls back to the
+/// inline env, so subprocess-isolation tests with `data_dir = None`
+/// and pre-sidecar kernel revisions keep working unchanged.
 ///
 /// **Idempotency.** Repeated calls for the same session reuse the
-/// existing meta dir; the file write is a fresh truncate so a
-/// retried spawn always observes the latest snapshot.
-fn provision_ksb_sidecar(
-    data_dir:   Option<&Path>,
-    session_id: &str,
-    ksb_json:   &str,
-) -> Option<(raxis_isolation::WorkspaceMount, String)> {
+/// existing meta dir; each file write is a fresh truncate so a
+/// retried spawn always observes the latest projection.
+fn provision_meta_sidecar(
+    data_dir:    Option<&Path>,
+    session_id:  &str,
+    ksb_json:    Option<&str>,
+    task_prompt: Option<&str>,
+) -> Option<MetaSidecar> {
     let data_dir = data_dir?;
     let meta_dir = data_dir
         .join("guests")
@@ -1577,33 +1627,60 @@ fn provision_ksb_sidecar(
         .join("meta");
     if let Err(e) = std::fs::create_dir_all(&meta_dir) {
         eprintln!(
-            "{{\"level\":\"warn\",\"event\":\"planner_ksb_sidecar_mkdir_failed\",\
+            "{{\"level\":\"warn\",\"event\":\"planner_meta_sidecar_mkdir_failed\",\
              \"session_id\":\"{session_id}\",\"path\":\"{path}\",\"err\":\"{e}\"}}",
             path = meta_dir.display(),
         );
         return None;
     }
-    let file_path = meta_dir.join(raxis_ksb::PLANNER_KSB_FILE_NAME);
-    if let Err(e) = std::fs::write(&file_path, ksb_json.as_bytes()) {
-        eprintln!(
-            "{{\"level\":\"warn\",\"event\":\"planner_ksb_sidecar_write_failed\",\
-             \"session_id\":\"{session_id}\",\"path\":\"{path}\",\"err\":\"{e}\"}}",
-            path = file_path.display(),
-        );
-        return None;
+
+    let mut ksb_guest_path = None;
+    if let Some(json) = ksb_json {
+        let file_path = meta_dir.join(raxis_ksb::PLANNER_KSB_FILE_NAME);
+        if let Err(e) = std::fs::write(&file_path, json.as_bytes()) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_ksb_sidecar_write_failed\",\
+                 \"session_id\":\"{session_id}\",\"path\":\"{path}\",\"err\":\"{e}\"}}",
+                path = file_path.display(),
+            );
+            return None;
+        }
+        ksb_guest_path = Some(format!(
+            "{mount}/{file}",
+            mount = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+            file  = raxis_ksb::PLANNER_KSB_FILE_NAME,
+        ));
     }
+
+    let mut task_prompt_guest_path = None;
+    if let Some(prompt) = task_prompt {
+        let file_path = meta_dir.join(raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME);
+        if let Err(e) = std::fs::write(&file_path, prompt.as_bytes()) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_task_prompt_sidecar_write_failed\",\
+                 \"session_id\":\"{session_id}\",\"path\":\"{path}\",\"err\":\"{e}\"}}",
+                path = file_path.display(),
+            );
+            return None;
+        }
+        task_prompt_guest_path = Some(format!(
+            "{mount}/{file}",
+            mount = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+            file  = raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME,
+        ));
+    }
+
     let mount = raxis_isolation::WorkspaceMount {
         host_path:    meta_dir,
         guest_path:   raxis_ksb::PLANNER_KSB_GUEST_MOUNT.to_owned(),
         mode:         raxis_isolation::MountMode::ReadOnly,
         content_hash: None,
     };
-    let guest_path = format!(
-        "{mount}/{file}",
-        mount = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
-        file  = raxis_ksb::PLANNER_KSB_FILE_NAME,
-    );
-    Some((mount, guest_path))
+    Some(MetaSidecar {
+        mount,
+        ksb_guest_path,
+        task_prompt_guest_path,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2729,25 +2806,55 @@ pub async fn spawn_executor_for_task(
         .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
     // Same channel selection as the orchestrator path: prefer the
     // virtiofs sidecar so the AVF cmdline budget stays under
-    // `COMMAND_LINE_SIZE` for reviewers (whose KSB carries the
-    // per-initiative DAG and reliably exceeds the inline budget).
-    // Fall back to the legacy inline env when no `data_dir` is
-    // available (in-process subprocess-isolation tests).
-    let ksb_sidecar = provision_ksb_sidecar(
+    // `COMMAND_LINE_SIZE`. Two payload classes blow the budget
+    // when inlined: the reviewer KSB (per-initiative DAG, ~1 KiB),
+    // and the operator-authored task prompt the caller stamped
+    // into `extra_env` under `RAXIS_PLANNER_TASK_PROMPT` (the
+    // realistic-scenario `materializer.md` / `service_round_trip.md`
+    // / `transparent_proxy_real_scripts.md` are 2.7–6.9 KiB which
+    // after base64 (4/3) consistently truncates the
+    // `-- --task-id <ID> --initiative-id <ID>` argv tail and
+    // produces guest-side `bad-env-token` + `missing value for
+    // flag: --initiative-id` boot failures). We move the prompt
+    // into the same per-session meta sidecar that already holds
+    // the KSB so a single virtiofs share covers both, and stamp
+    // the corresponding `…_PATH` env values back into `env`.
+    //
+    // Falls back to the legacy inline channels when no `data_dir`
+    // is available (in-process subprocess-isolation tests).
+    let task_prompt_for_sidecar =
+        env.remove(PLANNER_TASK_PROMPT_ENV);
+    let meta_sidecar = provision_meta_sidecar(
         spawn_ctx.data_dir.as_deref(),
         session_id,
-        &ksb_json,
+        Some(&ksb_json),
+        task_prompt_for_sidecar.as_deref(),
     );
-    match &ksb_sidecar {
-        Some((mount, guest_path)) => {
-            env.insert(
-                raxis_ksb::PLANNER_KSB_PATH_ENV.to_owned(),
-                guest_path.clone(),
-            );
-            workspace_mounts.push(mount.clone());
+    match &meta_sidecar {
+        Some(s) => {
+            if let Some(p) = &s.ksb_guest_path {
+                env.insert(raxis_ksb::PLANNER_KSB_PATH_ENV.to_owned(), p.clone());
+            } else {
+                env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json.clone());
+            }
+            if let Some(p) = &s.task_prompt_guest_path {
+                env.insert(
+                    raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV.to_owned(),
+                    p.clone(),
+                );
+            } else if let Some(prompt) = &task_prompt_for_sidecar {
+                // Sidecar attempt skipped task prompt write (caller
+                // passed `None` or the file write failed silently).
+                // Keep the inline env so the planner still boots.
+                env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), prompt.clone());
+            }
+            workspace_mounts.push(s.mount.clone());
         }
         None => {
             env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
+            if let Some(prompt) = task_prompt_for_sidecar {
+                env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), prompt);
+            }
         }
     }
     let vm_spec = VmSpec {
@@ -3342,5 +3449,92 @@ mod tests {
         assert_eq!(ctx.executor_mem_mib, 2048);
         assert_eq!(ctx.reviewer_vcpu_count, 1);
         assert_eq!(ctx.reviewer_mem_mib, 1024);
+    }
+
+    /// `provision_meta_sidecar` writes BOTH the KSB JSON and the
+    /// task prompt into a single per-session meta dir, returns one
+    /// virtiofs mount, and surfaces guest-visible `/raxis-meta/<name>`
+    /// paths for both. This is the kernel-side half of the
+    /// cmdline-overflow workaround documented on
+    /// [`raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV`].
+    #[test]
+    fn provision_meta_sidecar_writes_both_files_into_one_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_id = "test-session-7";
+        let s = provision_meta_sidecar(
+            Some(dir.path()),
+            session_id,
+            Some("{\"version\":1}"),
+            Some("operator-prompt-bytes"),
+        )
+        .expect("sidecar provisioning succeeds against a real tempdir");
+        let host_meta = dir.path()
+            .join("guests")
+            .join(session_id)
+            .join("meta");
+        assert_eq!(s.mount.host_path, host_meta);
+        assert_eq!(s.mount.guest_path, raxis_ksb::PLANNER_KSB_GUEST_MOUNT);
+        assert!(matches!(s.mount.mode, raxis_isolation::MountMode::ReadOnly));
+
+        let ksb_file = host_meta.join(raxis_ksb::PLANNER_KSB_FILE_NAME);
+        let prompt_file = host_meta.join(raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME);
+        assert_eq!(std::fs::read_to_string(&ksb_file).unwrap(), "{\"version\":1}");
+        assert_eq!(std::fs::read_to_string(&prompt_file).unwrap(), "operator-prompt-bytes");
+
+        assert_eq!(
+            s.ksb_guest_path.as_deref(),
+            Some(format!(
+                "{m}/{f}",
+                m = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+                f = raxis_ksb::PLANNER_KSB_FILE_NAME,
+            ).as_str()),
+        );
+        assert_eq!(
+            s.task_prompt_guest_path.as_deref(),
+            Some(format!(
+                "{m}/{f}",
+                m = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+                f = raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME,
+            ).as_str()),
+        );
+    }
+
+    /// Asking for only the task prompt (KSB = None) still produces
+    /// the mount and writes only the prompt file. Pins the
+    /// independent-channel contract — the orchestrator path uses
+    /// both, but a future caller could request just one.
+    #[test]
+    fn provision_meta_sidecar_supports_partial_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = provision_meta_sidecar(
+            Some(dir.path()),
+            "session-prompt-only",
+            None,
+            Some("just the prompt"),
+        )
+        .expect("sidecar provisioning succeeds with prompt-only");
+        assert!(s.ksb_guest_path.is_none());
+        assert!(s.task_prompt_guest_path.is_some());
+        let host_meta = dir.path()
+            .join("guests")
+            .join("session-prompt-only")
+            .join("meta");
+        assert!(host_meta.join(raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME).exists());
+        assert!(!host_meta.join(raxis_ksb::PLANNER_KSB_FILE_NAME).exists());
+    }
+
+    /// `data_dir = None` ⇒ `None` ⇒ caller falls back to inline
+    /// envs. Pins the subprocess-isolation test contract: those
+    /// tests construct a spawn context without a data_dir and
+    /// expect the legacy inline env channels to keep working.
+    #[test]
+    fn provision_meta_sidecar_returns_none_without_data_dir() {
+        let s = provision_meta_sidecar(
+            None,
+            "session-none",
+            Some("ignored"),
+            Some("ignored"),
+        );
+        assert!(s.is_none());
     }
 }

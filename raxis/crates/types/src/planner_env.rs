@@ -26,6 +26,35 @@
 /// the planner boots.
 pub const PLANNER_TASK_PROMPT_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT";
 
+/// V2 `v2_extended_gaps.md §1.1` — guest-visible absolute path of a
+/// virtiofs sidecar file containing the operator-authored seed
+/// prompt (the same byte-shape [`PLANNER_TASK_PROMPT_ENV`] would
+/// carry inline).
+///
+/// Why a sidecar exists. The Apple-VZ substrate has no
+/// `Command::env` analogue and folds [`raxis_isolation::VmSpec::env`]
+/// into the Linux `/proc/cmdline` as a single base64-encoded token
+/// (`raxis.envb64=<base64>`). Linux's `COMMAND_LINE_SIZE` ceiling on
+/// aarch64 (default 2048 bytes) means a task prompt of more than
+/// ~1 KiB can push the cmdline past the boot loader's truncation
+/// point — which silently drops the trailing
+/// `-- --task-id <ID> --initiative-id <ID>` argv tail and produces
+/// a guest-side `bad-env-token: base64 decode: Invalid padding`
+/// followed by `missing value for flag: --initiative-id`. The
+/// realistic-scenario executor prompts (`materializer.md`,
+/// `service_round_trip.md`, …) are 2–7 KiB which after base64
+/// expansion (4/3) reliably exceeds the budget.
+///
+/// The sidecar shifts the prompt out of the cmdline into the same
+/// per-session virtiofs mount that already carries the KSB
+/// snapshot ([`PLANNER_KSB_PATH_ENV`] / [`raxis_ksb::
+/// PLANNER_KSB_GUEST_MOUNT`]). The driver reads from the path when
+/// present and falls back to [`PLANNER_TASK_PROMPT_ENV`] when only
+/// the env var is set, so legacy callers (subprocess-isolation
+/// tests with `data_dir = None`, older kernel revisions) keep
+/// working.
+pub const PLANNER_TASK_PROMPT_PATH_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT_PATH";
+
 /// V2 `v2_extended_gaps.md §2.4` — JSON-encoded
 /// `raxis_ksb::KsbSnapshot` carrying the per-turn kernel state
 /// block. Kernel assembles via `crate::initiatives::ksb_assembly`;
@@ -101,6 +130,7 @@ mod tests {
     #[test]
     fn env_names_are_stable_wire() {
         assert_eq!(PLANNER_TASK_PROMPT_ENV,            "RAXIS_PLANNER_TASK_PROMPT");
+        assert_eq!(PLANNER_TASK_PROMPT_PATH_ENV,       "RAXIS_PLANNER_TASK_PROMPT_PATH");
         assert_eq!(PLANNER_KSB_ENV,                    "RAXIS_PLANNER_KSB");
         assert_eq!(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV, "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL");
         assert_eq!(PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,"RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL");

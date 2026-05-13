@@ -342,15 +342,27 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let var = |k: &str| f(k).filter(|v| !v.is_empty());
-    let task_prompt = match var("RAXIS_PLANNER_TASK_PROMPT") {
+    // V2 `v2_extended_gaps.md §1.1` — resolve the task prompt from
+    // either the virtiofs sidecar file
+    // (`RAXIS_PLANNER_TASK_PROMPT_PATH`, preferred) or the legacy
+    // inline env (`RAXIS_PLANNER_TASK_PROMPT`). The sidecar exists
+    // because Apple-VZ's `COMMAND_LINE_SIZE`-bounded env channel
+    // truncates prompts > ~1.5 KiB (after base64 expansion), which
+    // also drops the trailing `-- --task-id <ID> --initiative-id
+    // <ID>` argv tail and produces guest-side `bad-env-token` +
+    // `missing value for flag: --initiative-id` boot failures.
+    // See `raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV`
+    // for the full rationale.
+    //
+    // INV-DRIVER-01: scaffold/park is the *only* behaviour for a
+    // session whose seed prompt was not stamped via either channel.
+    // We MUST NOT synthesise a default prompt here — that would let
+    // a mis-configured kernel boot a planner against a runaway
+    // model with no operator-supplied instructions, which is
+    // exactly what the env-contract defends against.
+    let task_prompt = match read_task_prompt(&f) {
         Some(p) => p,
-        // INV-DRIVER-01: scaffold/park is the *only* behaviour for
-        // a session whose seed prompt was not stamped. We MUST NOT
-        // synthesise a default prompt here — that would let a
-        // mis-configured kernel boot a planner against a runaway
-        // model with no operator-supplied instructions, which is
-        // exactly what the env-contract defends against.
-        None => return Ok(DriverOutcome::Scaffold),
+        None    => return Ok(DriverOutcome::Scaffold),
     };
 
     // Resolve the kernel transport config from the same env-reader
@@ -586,6 +598,69 @@ where
             )?)
         }
     })
+}
+
+/// Helper for `run_role_session_with_env_fn` — read the
+/// kernel-stamped task prompt using whichever delivery channel the
+/// kernel chose for this spawn.
+///
+/// Channel priority:
+///
+///   1. **`RAXIS_PLANNER_TASK_PROMPT_PATH` (sidecar file).** When
+///      set, read the bytes from the path as a UTF-8 string. The
+///      path resolves under the per-session `/raxis-meta` virtiofs
+///      mount (`raxis_ksb::PLANNER_KSB_GUEST_MOUNT` /
+///      `raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME`). A non-empty
+///      env value but a missing / unreadable / empty file surfaces
+///      a structured-log warn and returns `None` — the driver
+///      falls back to scaffold/park rather than booting against an
+///      empty / inconsistent prompt.
+///
+///   2. **`RAXIS_PLANNER_TASK_PROMPT` (inline env).** Legacy
+///      in-process delivery, used by subprocess-isolation tests
+///      and pre-V2.6 kernel revisions. Empty → `None` (treated
+///      same as unset per pre-existing
+///      `var = |k| f(k).filter(|v| !v.is_empty())` semantics).
+///
+///   3. Neither set → `None` (driver returns
+///      [`DriverOutcome::Scaffold`] without contacting the kernel).
+fn read_task_prompt<F: Fn(&str) -> Option<String>>(f: &F) -> Option<String> {
+    let var = |k: &str| f(k).filter(|v| !v.is_empty());
+
+    if let Some(path) = var(raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV) {
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"planner_task_prompt_sidecar_read_failed\",\
+                     \"path\":{:?},\"err\":\"{e}\"}}",
+                    path,
+                );
+                return None;
+            }
+        };
+        if bytes.is_empty() {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_task_prompt_sidecar_empty\",\
+                 \"path\":{:?}}}",
+                path,
+            );
+            return None;
+        }
+        match String::from_utf8(bytes) {
+            Ok(s) => return Some(s),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"planner_task_prompt_sidecar_invalid_utf8\",\
+                     \"path\":{:?},\"err\":\"{e}\"}}",
+                    path,
+                );
+                return None;
+            }
+        }
+    }
+
+    var(raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV)
 }
 
 /// Helper for `run_role_session_with_env_fn` — read the
@@ -1603,6 +1678,79 @@ mod tests {
                 .await
                 .unwrap();
         assert!(matches!(outcome, DriverOutcome::Scaffold));
+    }
+
+    /// `read_task_prompt` prefers the `…_PATH` sidecar channel
+    /// over the inline env. Pins the kernel-faithful behaviour
+    /// for the cmdline-overflow workaround documented on
+    /// [`raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV`].
+    #[test]
+    fn read_task_prompt_prefers_sidecar_path_over_inline_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_path = dir.path().join("task-prompt.txt");
+        std::fs::write(&prompt_path, b"FROM_SIDECAR_FILE").unwrap();
+        let path_string = prompt_path.display().to_string();
+        let env_fn = |k: &str| match k {
+            "RAXIS_PLANNER_TASK_PROMPT_PATH" => Some(path_string.clone()),
+            "RAXIS_PLANNER_TASK_PROMPT"      => Some("FROM_INLINE_ENV".to_owned()),
+            _ => None,
+        };
+        let got = read_task_prompt(&env_fn).expect("sidecar channel resolves");
+        assert_eq!(got, "FROM_SIDECAR_FILE");
+    }
+
+    /// `read_task_prompt` falls back to the inline env when the
+    /// `…_PATH` channel is unset — preserves the legacy
+    /// subprocess-isolation contract for callers that haven't
+    /// migrated to the sidecar.
+    #[test]
+    fn read_task_prompt_falls_back_to_inline_env() {
+        let env_fn = |k: &str| match k {
+            "RAXIS_PLANNER_TASK_PROMPT" => Some("FROM_INLINE_ENV".to_owned()),
+            _ => None,
+        };
+        let got = read_task_prompt(&env_fn).expect("inline channel resolves");
+        assert_eq!(got, "FROM_INLINE_ENV");
+    }
+
+    /// `read_task_prompt` returns `None` when both channels are
+    /// unset — surfaces as `DriverOutcome::Scaffold` upstream.
+    #[test]
+    fn read_task_prompt_returns_none_when_both_channels_unset() {
+        assert!(read_task_prompt(&|_: &str| None).is_none());
+    }
+
+    /// Empty sidecar file is a kernel-side regression we refuse
+    /// to mask — return `None` so the driver scaffolds rather than
+    /// boots against an empty user message.
+    #[test]
+    fn read_task_prompt_returns_none_for_empty_sidecar_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_path = dir.path().join("task-prompt.txt");
+        std::fs::write(&prompt_path, b"").unwrap();
+        let path_string = prompt_path.display().to_string();
+        let env_fn = |k: &str| match k {
+            "RAXIS_PLANNER_TASK_PROMPT_PATH" => Some(path_string.clone()),
+            // No inline fallback — the `_PATH` env is set so the
+            // sidecar channel is authoritative; the empty file
+            // is a hard error and we MUST NOT silently fall back
+            // to the inline channel (would mask a kernel bug).
+            _ => None,
+        };
+        assert!(read_task_prompt(&env_fn).is_none());
+    }
+
+    /// Missing sidecar file (env points at a path that does not
+    /// exist) returns `None`. Defensive — better to scaffold than
+    /// to boot against a guessed prompt.
+    #[test]
+    fn read_task_prompt_returns_none_for_missing_sidecar_file() {
+        let env_fn = |k: &str| match k {
+            "RAXIS_PLANNER_TASK_PROMPT_PATH" =>
+                Some("/nonexistent/path/to/raxis-meta/task-prompt.txt".to_owned()),
+            _ => None,
+        };
+        assert!(read_task_prompt(&env_fn).is_none());
     }
 
     /// End-to-end driver test: pinned `MockModelClient` drives the
