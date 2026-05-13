@@ -242,6 +242,26 @@ impl Tier3Reporter {
         }
         if self.surface_observability_urls {
             emit_observability_block(self.test_label);
+            // `RAXIS_E2E_OPEN_OBSERVABILITY=1` (documented in
+            // `live-e2e/README.md` since the `observability(v3)`
+            // landing at commit `07ad9be`) was previously a
+            // no-op marker. Wire it into the new browser dispatch
+            // so an operator who opts in gets the Grafana home +
+            // the `raxis-00-overview` deep-link opened at
+            // end-of-run alongside the existing artifact-path
+            // block — same Cursor-vs-system handling as the
+            // dashboard autologin URL above.
+            if std::env::var("RAXIS_E2E_OPEN_OBSERVABILITY").as_deref() == Ok("1") {
+                let urls = [
+                    format!("http://127.0.0.1:{OBS_GRAFANA_PORT}/"),
+                    format!(
+                        "http://127.0.0.1:{OBS_GRAFANA_PORT}/d/{OBS_OVERVIEW_DASHBOARD}"
+                    ),
+                ];
+                for url in urls {
+                    let _ = super::browser::open_in_best_browser(&url);
+                }
+            }
         }
         eprintln!(
             "[{label}] (set RAXIS_E2E_OPEN_REPO=1 to open the worktree(s) in the default editor)",
@@ -363,6 +383,10 @@ fn emit_observability_block(label: &str) {
     );
     eprintln!(
         "[{label}] (run `cargo xtask observability up` if any line above shows `(down)`)"
+    );
+    eprintln!(
+        "[{label}] (RAXIS_E2E_OPEN_OBSERVABILITY=1 opens Grafana home + raxis-00-overview \
+         at end-of-run; RAXIS_E2E_BROWSER=cursor|system|none overrides which browser)"
     );
 }
 

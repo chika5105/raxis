@@ -12,6 +12,7 @@
 //! Migrating that file is a separate, easily-reverted change tracked as
 //! follow-up work.
 
+pub mod browser;
 pub mod dashboard;
 pub mod kernel_harness;
 pub mod tier3_artifacts;

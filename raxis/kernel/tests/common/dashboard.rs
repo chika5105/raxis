@@ -303,38 +303,26 @@ pub fn build_autologin_url(port: u16, session: &DashboardSession) -> String {
     )
 }
 
-/// Spawn the platform-native URL opener. Returns `Ok(())` when
-/// the binary spawned (we don't wait for it — `open(1)` /
-/// `xdg-open(1)` exit immediately after handing the URL to the
-/// resolver). Returns `Err(reason)` when the binary couldn't even
-/// be invoked (CI / SSH / headless host).
-#[cfg(target_os = "macos")]
+/// Open a URL in the best-available browser for the current
+/// host. Delegates to [`super::browser::open_in_best_browser`]
+/// which performs the Cursor-vs-system dispatch + per-OS
+/// fallback. Returns `Ok(())` when the URL reached an opener (or
+/// was explicitly suppressed via `RAXIS_E2E_BROWSER=none`), and
+/// `Err(reason)` when no opener could be invoked AND the URL was
+/// only printed.
+///
+/// Pinned as a thin wrapper instead of an inline migration so
+/// every other call site that already imports
+/// `dashboard::spawn_url_opener` keeps working — the new Cursor
+/// integration lands transparently for them.
 pub fn spawn_url_opener(url: &str) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("spawn open: {e}"))
-}
-
-#[cfg(target_os = "linux")]
-pub fn spawn_url_opener(url: &str) -> Result<(), String> {
-    std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("spawn xdg-open: {e}"))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn spawn_url_opener(_url: &str) -> Result<(), String> {
-    Err("no URL opener supported on this platform".to_owned())
+    use super::browser::{open_in_best_browser, OpenOutcome};
+    match open_in_best_browser(url) {
+        OpenOutcome::Cursor | OpenOutcome::System { .. } | OpenOutcome::Suppressed => Ok(()),
+        OpenOutcome::Printed => Err(
+            "no URL opener could be invoked on this host (URL was printed)".to_owned(),
+        ),
+    }
 }
 
 /// End-to-end glue called from the test driver after the kernel
