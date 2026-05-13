@@ -84,8 +84,8 @@ use extended_e2e_support::{
         realistic_lifecycle_deadline, require_anthropic_dev_key,
         require_canonical_images, require_gateway_binary, require_gcp_adc,
         require_tcp_reachable, seed_realistic_main_repository,
-        spawn_kernel_normal, walk_chain_or_panic, write_credentials,
-        write_provider_credentials, OperatorIpc,
+        spawn_kernel_normal, spawn_otel_pusher_or_warn, walk_chain_or_panic,
+        write_credentials, write_provider_credentials, OperatorIpc,
         LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
         SHUTDOWN_DEADLINE,
     },
@@ -257,6 +257,19 @@ fn realistic_session_lifecycle() {
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[realism-e2e] kernel daemon up, accepting operator IPC");
+
+    // ── Spawn `raxis-otel-pusher` (V3 §12) — kernel emits JSONL
+    //    frames into `<data_dir>/observability/`; the pusher reads
+    //    them and ships to the OTel collector at 127.0.0.1:4318.
+    //    Best-effort: skipped (with a loud Tier-3 line) when the
+    //    pusher binary isn't pre-built. Held in an RAII guard so
+    //    a panic mid-test SIGKILLs the child.
+    let _otel_pusher_guard = OtelPusherGuard::spawn(kernel.data_dir());
+    eprintln!(
+        "[realism-e2e] observability: kernel pushing OTLP to \
+         http://127.0.0.1:4318 — live metrics flowing to Grafana \
+         http://127.0.0.1:3000/d/raxis-00-overview"
+    );
 
     // ── (visual-debug) — open the operator dashboard with an
     //    autologin URL so the QA worker can attach a browser to
@@ -823,3 +836,43 @@ fn seed_minimal_tasks_db(
 // see the kernel's actual layout. The git-based seed below is
 // kernel-faithful and race-free.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// `raxis-otel-pusher` lifetime guard.
+//
+// Holds the spawned pusher's `Child` handle and SIGKILLs it on
+// drop. Without this RAII guard a panic mid-test (OR a normal
+// completion) would leak the pusher process, which would then
+// fight the next run for the same `<data_dir>/observability/`
+// cursor file. Drop is best-effort — every error path logs and
+// continues.
+// ---------------------------------------------------------------------------
+
+struct OtelPusherGuard {
+    child: Option<std::process::Child>,
+}
+
+impl OtelPusherGuard {
+    fn spawn(data_dir: &Path) -> Self {
+        Self { child: spawn_otel_pusher_or_warn(data_dir) }
+    }
+}
+
+impl Drop for OtelPusherGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let pid = child.id();
+            // SIGKILL — racing the test teardown deadline against
+            // a graceful SIGTERM isn't worth it: the pusher's only
+            // state is a cursor file the next run reconciles, and
+            // the kernel's JSONL ring is the source of truth.
+            if let Err(e) = child.kill() {
+                eprintln!(
+                    "[realism-e2e] observability: failed to kill \
+                     raxis-otel-pusher pid={pid}: {e}",
+                );
+            }
+            let _ = child.wait();
+        }
+    }
+}

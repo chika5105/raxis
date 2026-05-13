@@ -262,6 +262,7 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
         gw = gateway_binary.display(),
     );
     body.push_str(&injected);
+    body.push_str(&observability_policy_block());
     std::fs::write(&policy_path, body)
         .unwrap_or_else(|e| panic!("rewrite {}: {e}", policy_path.display()));
 }
@@ -502,6 +503,170 @@ fn realism_workspace_root() -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .expect("CARGO_MANIFEST_DIR for kernel integration tests has a parent (workspace root)")
+}
+
+/// V3 `otel-observability.md §5` — `[observability]` policy section
+/// the live-e2e harness appends so the kernel boots with a real
+/// `ObservabilityHub` (not the disabled `disabled_default()` hub).
+///
+/// The endpoint, ports, and admin credentials mirror
+/// `live-e2e/docker-compose.e2e.yml` (kept in lockstep by the
+/// `tier3_artifacts::observability_urls_match_compose_file` test).
+/// Field names mirror `crates/policy/src/observability.rs`
+/// `ObservabilityConfig` exactly — anything off-shape is rejected
+/// at policy load with a `FAIL_OBS_*` code.
+fn observability_policy_block() -> String {
+    // The kernel writes JSONL frames into `<data_dir>/observability/`
+    // (see `kernel/src/observability_boot.rs::build_obs_hub`); the
+    // out-of-process `raxis-otel-pusher` (spawned later via
+    // `spawn_otel_pusher_or_warn`) reads those frames and ships
+    // them to the OTel collector at 127.0.0.1:4318.
+    "\n# ── [observability] (realism-e2e — V3 OTel push) ──\n\
+     [observability]\n\
+     enabled = true\n\
+     \n\
+     [observability.ring]\n\
+     segment_max_bytes = 16777216\n\
+     max_total_bytes   = 268435456\n\
+     max_queue_depth   = 4096\n\
+     \n\
+     [observability.metrics]\n\
+     enabled         = true\n\
+     export_interval = \"5s\"\n\
+     \n\
+     [observability.resource]\n\
+     service_name = \"raxis-kernel-live-e2e\"\n\
+     environment  = \"live-e2e\"\n\
+     \n\
+     [observability.resource.extra]\n\
+     run_kind = \"realistic-scenario\"\n\
+     \n\
+     [observability.pusher]\n\
+     otlp_endpoint       = \"http://127.0.0.1:4318\"\n\
+     otlp_protocol       = \"http\"\n\
+     otlp_compression    = \"gzip\"\n\
+     otlp_export_timeout = \"10s\"\n\
+     otlp_batch_size     = 256\n\
+     otlp_flush_interval = \"1s\"\n\
+     otlp_max_inflight   = 4\n"
+        .to_owned()
+}
+
+/// Spawn `raxis-otel-pusher --config <policy.toml> --data-dir
+/// <data_dir>` in the background so kernel-emitted JSONL frames are
+/// shipped to the OTel collector at 127.0.0.1:4318.
+///
+/// Best-effort: when `RAXIS_OTEL_PUSHER_BINARY` is unset OR the
+/// binary cannot be located via `cargo build -p raxis-otel-pusher`
+/// the function logs a Tier-3-style line to stderr and returns
+/// `None`. The realistic-scenario test does NOT panic on absence —
+/// the kernel still emits to its in-process JSONL ring (per
+/// `INV-OTEL-03`) so the run continues; only the dashboards stay
+/// empty until the operator brings the pusher up themselves.
+///
+/// Stderr is captured to `<data_dir>/otel-pusher.stderr.log` so
+/// post-mortem inspection is possible without re-running.
+pub fn spawn_otel_pusher_or_warn(data_dir: &Path) -> Option<std::process::Child> {
+    let policy_path = data_dir.join("policy").join("policy.toml");
+    if !policy_path.exists() {
+        eprintln!(
+            "[realism-e2e] observability: policy.toml missing at {}; \
+             skipping raxis-otel-pusher spawn",
+            policy_path.display(),
+        );
+        return None;
+    }
+    let pusher_bin = match locate_raxis_otel_pusher_binary() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[realism-e2e] observability: raxis-otel-pusher binary not located \
+                 (set RAXIS_OTEL_PUSHER_BINARY or run `cargo build -p raxis-otel-pusher`); \
+                 kernel will emit to its in-process JSONL ring but Grafana panels will \
+                 stay empty for this run"
+            );
+            return None;
+        }
+    };
+    let log_path = data_dir.join("otel-pusher.stderr.log");
+    let log_file = match std::fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "[realism-e2e] observability: cannot create {}: {e}; \
+                 skipping pusher spawn",
+                log_path.display(),
+            );
+            return None;
+        }
+    };
+    let stderr_handle = match log_file.try_clone() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!(
+                "[realism-e2e] observability: cannot dup pusher log handle: {e}; \
+                 skipping pusher spawn"
+            );
+            return None;
+        }
+    };
+    match Command::new(&pusher_bin)
+        .arg("--config").arg(&policy_path)
+        .arg("--data-dir").arg(data_dir)
+        // Disable the pusher's `/healthz` HTTP server — collisions on
+        // 9501 from a prior aborted run would prevent spawn.
+        .arg("--health-port").arg("0")
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(stderr_handle))
+        .spawn()
+    {
+        Ok(child) => {
+            eprintln!(
+                "[realism-e2e] observability: raxis-otel-pusher spawned pid={} bin={} \
+                 log={}",
+                child.id(),
+                pusher_bin.display(),
+                log_path.display(),
+            );
+            Some(child)
+        }
+        Err(e) => {
+            eprintln!(
+                "[realism-e2e] observability: failed to spawn raxis-otel-pusher \
+                 (bin={}): {e}",
+                pusher_bin.display(),
+            );
+            None
+        }
+    }
+}
+
+/// Locate the `raxis-otel-pusher` binary. Resolution order:
+/// 1. `RAXIS_OTEL_PUSHER_BINARY` env var (operator override).
+/// 2. `<workspace>/target/{debug,release}/raxis-otel-pusher`.
+/// 3. The first match alongside the kernel binary
+///    (`require_gateway_binary`'s parent).
+fn locate_raxis_otel_pusher_binary() -> Option<PathBuf> {
+    if let Ok(raw) = std::env::var("RAXIS_OTEL_PUSHER_BINARY") {
+        let p = PathBuf::from(raw);
+        if p.is_absolute() && p.exists() {
+            return Some(p);
+        }
+    }
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    for profile in ["debug", "release"] {
+        let candidate = workspace
+            .join("target")
+            .join(profile)
+            .join("raxis-otel-pusher");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub fn write_credentials(data_dir: &Path) {
@@ -1020,4 +1185,70 @@ pub fn first_spawn_seq(chain: &[AuditEvent], task_id: &str) -> Option<u64> {
             _ => None,
         })
         .min()
+}
+
+// ---------------------------------------------------------------------------
+// Tests.
+//
+// Live-e2e support code is normally exercised only by the gated
+// integration tests (`RAXIS_LIVE_E2E_REALISTIC=1`). The unit tests
+// below cover the pure-data helpers — most importantly
+// [`observability_policy_block`], which MUST round-trip cleanly
+// through `toml::from_str` so the kernel doesn't reject our
+// injected `[observability]` section at policy-load time. A
+// regression here means empty Grafana panels in every subsequent
+// fix-loop iteration.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The injected block must be a valid TOML document standalone
+    /// (no other sections required) AND its `[observability]`
+    /// surface must satisfy `ObservabilityConfig::validate` so the
+    /// kernel boots with `enabled = true`. If this fails, the
+    /// realistic-scenario harness writes a policy.toml the kernel
+    /// rejects before opening the operator IPC socket.
+    #[test]
+    fn observability_policy_block_parses_and_validates() {
+        let block = observability_policy_block();
+
+        // 1. Document-level: must parse as TOML.
+        let doc: toml::Value = toml::from_str(&block).unwrap_or_else(|e| panic!(
+            "observability_policy_block did not parse as TOML: {e}\n\
+             ── block ──\n{block}",
+        ));
+
+        // 2. Spec-level: every required field is present.
+        let obs = doc.get("observability").and_then(|v| v.as_table())
+            .expect("[observability] table present");
+        assert_eq!(
+            obs.get("enabled").and_then(|v| v.as_bool()),
+            Some(true),
+            "[observability].enabled must be true",
+        );
+        assert!(
+            doc.get("observability")
+                .and_then(|o| o.get("pusher"))
+                .and_then(|p| p.as_table())
+                .and_then(|p| p.get("otlp_endpoint"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.starts_with("http://"))
+                .unwrap_or(false),
+            "[observability.pusher].otlp_endpoint must be an http:// URL",
+        );
+
+        // 3. The block does NOT contain the legacy fields the
+        //    validator-recommended block in the live-e2e brief
+        //    (`exporter`, `endpoint`, `resource_attributes`) which
+        //    `RawPolicy` does not understand — those would parse as
+        //    unknown fields the kernel rejects in strict mode.
+        assert!(!block.contains("\nexporter "),
+            "block must not include legacy `exporter = ...`");
+        assert!(!block.contains("\nendpoint "),
+            "block must not include legacy `endpoint = ...`");
+        assert!(!block.contains("resource_attributes"),
+            "block must not include legacy `resource_attributes = {{...}}`");
+    }
 }
