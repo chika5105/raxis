@@ -357,6 +357,10 @@ path_allowlist     = ["out/services/"]
 description = """
 "#;
 
+// `upstream_host_port` for the redis + smtp variants is mandatory in
+// `raxis-plan-credentials::ProxyDecl::{Redis, Smtp}`; the values
+// pin to `live-e2e/docker-compose.extended.e2e.yml`'s loopback bindings
+// (mirrored as constants in `extended_e2e_support::service_evidence::SE_*`).
 const REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS: &str = r#"
   [[tasks.credentials]]
   name       = "test-pg-dev"
@@ -369,14 +373,16 @@ const REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS: &str = r#"
   mount_as   = "MONGO_URL"
 
   [[tasks.credentials]]
-  name       = "test-redis-dev"
-  proxy_type = "redis"
-  mount_as   = "REDIS_URL"
+  name               = "test-redis-dev"
+  proxy_type         = "redis"
+  mount_as           = "REDIS_URL"
+  upstream_host_port = "127.0.0.1:63799"
 
   [[tasks.credentials]]
-  name       = "test-smtp-dev"
-  proxy_type = "smtp"
-  mount_as   = "SMTP_URL""#;
+  name               = "test-smtp-dev"
+  proxy_type         = "smtp"
+  mount_as           = "SMTP_URL"
+  upstream_host_port = "127.0.0.1:25199""#;
 
 const REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD: &str = r#"# -- Transparent-proxy real-scripts Executor (P3-10) ------
 [[tasks]]
@@ -388,6 +394,7 @@ path_allowlist     = ["out/services/", "scripts/last_run_summary.txt"]
 description = """
 "#;
 
+// `upstream_host_port` mirrors `REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS`.
 const REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS: &str = r#"
   [[tasks.credentials]]
   name       = "test-pg-dev"
@@ -400,14 +407,16 @@ const REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS: &str = r#"
   mount_as   = "MONGO_URL"
 
   [[tasks.credentials]]
-  name       = "test-redis-dev"
-  proxy_type = "redis"
-  mount_as   = "REDIS_URL"
+  name               = "test-redis-dev"
+  proxy_type         = "redis"
+  mount_as           = "REDIS_URL"
+  upstream_host_port = "127.0.0.1:63799"
 
   [[tasks.credentials]]
-  name       = "test-smtp-dev"
-  proxy_type = "smtp"
-  mount_as   = "SMTP_URL""#;
+  name               = "test-smtp-dev"
+  proxy_type         = "smtp"
+  mount_as           = "SMTP_URL"
+  upstream_host_port = "127.0.0.1:25199""#;
 
 /// Credential-substitution-canary executor task block. Runs last in
 /// the dependency graph, predecessors include the upstream

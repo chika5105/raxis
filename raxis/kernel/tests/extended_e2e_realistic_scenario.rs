@@ -70,7 +70,6 @@ mod common;
 mod extended_e2e_support;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use raxis_audit_tools::{AuditEvent, AuditEventKind};
 
@@ -80,12 +79,13 @@ use extended_e2e_support::{
     crash_recovery::CrashRecoveryWitness,
     kernel_driver::{
         bootstrap_with_custom_cert, build_operator_key,
-        enable_gateway_in_policy, locate_executor_worktree,
+        enable_gateway_in_policy, locate_executor_worktree_via_chain,
         locate_session_id_for_task, poll_for_dual_lifecycle_completion,
         realistic_lifecycle_deadline, require_anthropic_dev_key,
         require_canonical_images, require_gateway_binary, require_gcp_adc,
-        require_tcp_reachable, spawn_kernel_normal, walk_chain_or_panic,
-        write_credentials, write_provider_credentials, OperatorIpc,
+        require_tcp_reachable, seed_realistic_main_repository,
+        spawn_kernel_normal, walk_chain_or_panic, write_credentials,
+        write_provider_credentials, OperatorIpc,
         LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
         SHUTDOWN_DEADLINE,
     },
@@ -95,7 +95,7 @@ use extended_e2e_support::{
     },
     path_allowlist::PathAllowlistPositiveWitness,
     plan_realistic::{
-        realistic_plan_toml, SEED_SCENARIO_ID, TASK_ALLOWLIST_POSITIVE,
+        realistic_plan_toml, TASK_ALLOWLIST_POSITIVE,
         TASK_CREDENTIAL_SUBSTITUTION_CANARY, TASK_LINT_DEFECT,
         TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
         TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
@@ -189,6 +189,19 @@ fn realistic_session_lifecycle() {
     mutate_dashboard_block_in_policy(&data_dir);
     write_credentials(&data_dir);
     write_provider_credentials(&data_dir);
+    // Seed `<data_dir>/repositories/main` with the rich-multilang-001
+    // history (11 commits, feature-branch merge, cross-language
+    // rename) AND the per-task overlays the realistic plan needs:
+    // the bait `.env` (FAKE credential canaries inspected by the
+    // credential-substitution-canary task's witness) and the
+    // stock-Python service-integrity scripts the
+    // transparent-proxy-realscripts task runs. Committing them on
+    // `refs/heads/main` BEFORE plan submission means every executor
+    // worktree (a `gix::clone --full` of the orchestrator's clone
+    // of `main`) inherits the seed deterministically — no timing
+    // race against the executor VM boot, no overlay path that has
+    // to match the kernel's actual `worktrees/<session_id>/` layout.
+    seed_realistic_main_repository(&data_dir);
 
     let install_dir = PathBuf::from(
         std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR"),
@@ -281,33 +294,18 @@ fn realistic_session_lifecycle() {
         conn.approve_plan(&initiative_sibling, &fingerprint);
     }
 
-    // ── Materialise the rich-multilang seed into the primary
-    //    materializer's worktree. The kernel creates
-    //    `<data_dir>/worktrees/<initiative>/<task>/` lazily; we poll
-    //    for it and overlay the seed once present, before the
-    //    executor's first IntentAccepted{CommitDelta} lands.
-    materialise_realistic_seed(
-        kernel.data_dir(),
-        &initiative_primary,
-        TASK_XFILE_REFACTOR,
-    );
-
-    // ── Stage the stock-Python scripts into the
-    //    transparent-proxy executor's worktree. The kernel will
-    //    eventually materialise that worktree once the upstream
-    //    `service-round-trip` task completes; we poll for the
-    //    directory to appear (gated by the same long deadline as
-    //    `materialise_realistic_seed`) and then copy the seed
-    //    scripts in. The scripts have no raxis-specific symbols;
-    //    they simply consume the env vars (`DATABASE_URL`,
-    //    `MONGO_URL`, …) the credential-proxy manager injects.
-    stage_transparent_proxy_scripts(
-        kernel.data_dir(),
-        &initiative_primary,
-        TASK_TRANSPARENT_PROXY_REALSCRIPTS,
-    );
-
     // ── Wait for both initiatives to merge ───────────────────
+    //
+    // Note: the rich-multilang seed and per-task overlays
+    // (bait `.env`, transparent-proxy scripts) were committed to
+    // `<data_dir>/repositories/main` BEFORE plan submission via
+    // `seed_realistic_main_repository`. Every executor worktree
+    // inherits them via the orchestrator's clone of `main`, so we
+    // do NOT need a poll-based overlay step here — the prior
+    // helpers (`materialise_realistic_seed`,
+    // `stage_transparent_proxy_scripts`) were polling a layout
+    // (`worktrees/<initiative>/<task>/`) the kernel never
+    // materialises and have been removed.
     let chain = poll_for_dual_lifecycle_completion(
         kernel.data_dir(),
         [&initiative_primary, &initiative_sibling],
@@ -319,11 +317,11 @@ fn realistic_session_lifecycle() {
     );
 
     // ── Apply every realism witness ──────────────────────────
-    let primary_workdir = locate_executor_worktree(
-        kernel.data_dir(), &initiative_primary, TASK_XFILE_REFACTOR,
+    let primary_workdir = locate_executor_worktree_via_chain(
+        kernel.data_dir(), &chain, TASK_XFILE_REFACTOR,
     );
-    let positive_workdir = locate_executor_worktree(
-        kernel.data_dir(), &initiative_primary, TASK_ALLOWLIST_POSITIVE,
+    let positive_workdir = locate_executor_worktree_via_chain(
+        kernel.data_dir(), &chain, TASK_ALLOWLIST_POSITIVE,
     );
     let lint_session_id = locate_session_id_for_task(&chain, TASK_LINT_DEFECT)
         .unwrap_or_else(|| {
@@ -360,8 +358,8 @@ fn realistic_session_lifecycle() {
     eprintln!("[realism-e2e] all chain-side + on-disk witnesses satisfied");
 
     // ── Service-evidence per-protocol round-trip ─────────────
-    let service_workdir = locate_executor_worktree(
-        kernel.data_dir(), &initiative_primary, TASK_SERVICE_ROUND_TRIP,
+    let service_workdir = locate_executor_worktree_via_chain(
+        kernel.data_dir(), &chain, TASK_SERVICE_ROUND_TRIP,
     );
     let service_scope = WitnessScope::new(
         initiative_primary.clone(),
@@ -401,9 +399,9 @@ fn realistic_session_lifecycle() {
     // upstream egress (proxy is the only path). Together with the
     // service-evidence pass above this proves the transparency
     // contract end-to-end.
-    let tp_workdir = locate_executor_worktree(
+    let tp_workdir = locate_executor_worktree_via_chain(
         kernel.data_dir(),
-        &initiative_primary,
+        &chain,
         TASK_TRANSPARENT_PROXY_REALSCRIPTS,
     );
     let tp_scope = WitnessScope::new(
@@ -439,9 +437,9 @@ fn realistic_session_lifecycle() {
     // The witness asserts the real credential canary
     // (`raxis_test_pass`) does NOT appear anywhere in the
     // executor's worktree post-run.
-    let cred_sub_workdir = locate_executor_worktree(
+    let cred_sub_workdir = locate_executor_worktree_via_chain(
         kernel.data_dir(),
-        &initiative_primary,
+        &chain,
         TASK_CREDENTIAL_SUBSTITUTION_CANARY,
     );
     let cred_sub_scope = WitnessScope::new(
@@ -808,141 +806,20 @@ fn seed_minimal_tasks_db(
 // ---------------------------------------------------------------------------
 // Seed-overlay helper.
 //
-// The kernel creates `<data_dir>/worktrees/<initiative>/<task>/`
-// lazily, after PlanApproved + OrchestratorSpawned. The realistic
-// scenario needs the rich-multilang-001 seed history to be present
-// in the worktree BEFORE the xfile-refactor executor first reads
-// the tree. We poll for the worktree to exist and then invoke
-// `materialize_seed.sh` against it.
-//
-// TIMING CAVEAT: the kernel may have already started the executor
-// VM between our poll and our overlay write. In practice the
-// realistic plan dependency chain (Orchestrator plans before
-// `xfile-refactor` admits) gives us a few hundred milliseconds of
-// slack; the executor's first `cargo metadata` read happens after
-// the worktree-provisioning step completes. A future commit on
-// this branch should wire a `pre-task` hook so the seed overlay
-// can run *inside* the provisioning step deterministically.
+// The realistic-scenario seed (rich-multilang-001 history + bait
+// `.env` + transparent-proxy scripts) is committed to
+// `<data_dir>/repositories/main` BEFORE plan submission via
+// `seed_realistic_main_repository` (in `kernel_driver`). Every
+// downstream worktree (orchestrator clone of `main`, executor
+// clone of orchestrator, reviewer clone of orchestrator) inherits
+// the seed via `gix::clone --full`. The previous polling-based
+// overlay helpers (`materialise_realistic_seed`,
+// `stage_transparent_proxy_scripts`) targeted a worktree layout
+// (`<data_dir>/worktrees/<initiative>/<task>/`) that the kernel's
+// `worktree_provisioning` module never materialises (executor /
+// reviewer worktrees live at `worktrees/<session_id>/`,
+// orchestrator at `worktrees/orch-<initiative>/`), so the polls
+// timed out unconditionally — they were structurally unable to
+// see the kernel's actual layout. The git-based seed below is
+// kernel-faithful and race-free.
 // ---------------------------------------------------------------------------
-
-fn materialise_realistic_seed(
-    data_dir: &Path,
-    initiative_id: &str,
-    task_id: &str,
-) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let workdir: PathBuf = loop {
-        if std::time::Instant::now() > deadline {
-            panic!(
-                "timed out waiting for worktree at \
-                 <data_dir>/worktrees/{initiative_id}/{task_id}/",
-            );
-        }
-        let candidate = data_dir.join("worktrees")
-            .join(initiative_id)
-            .join(task_id);
-        if candidate.exists() {
-            break candidate;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    eprintln!("[realism-e2e] worktree appeared at {}; overlaying seed",
-        workdir.display());
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let seed_script = manifest_dir
-        .parent()
-        .map(|p| p.join("live-e2e/seed/repo")
-                    .join(SEED_SCENARIO_ID)
-                    .join("scripts/materialize_seed.sh"))
-        .expect("workspace parent dir present");
-
-    let status = std::process::Command::new(&seed_script)
-        .arg(&workdir)
-        .status()
-        .expect("invoke materialize_seed.sh");
-    assert!(
-        status.success(),
-        "materialize_seed.sh exited non-zero: {status:?}",
-    );
-
-    // Stage the bait `.env` containing the FAKE-credential canaries
-    // for the downstream credential-substitution-canary task. The
-    // file propagates through the lane head to every successor task
-    // via git, which is exactly where the cred-sub task's executor
-    // expects to find it. See `credential_substitution_evidence`
-    // module docs / `specs/v2/secrets-model.md §2.5`.
-    cred_sub_evidence::stage_fake_creds_env(&workdir).unwrap_or_else(|e| {
-        panic!("stage bait `.env` for credential-substitution canary: {e}");
-    });
-
-    eprintln!("[realism-e2e] seed materialised into {}", workdir.display());
-}
-
-// ---------------------------------------------------------------------------
-// Transparent-proxy script overlay.
-//
-// The `transparent-proxy-realscripts` executor task expects the
-// stock-Python service-integrity scripts to be present at
-// `<worktree>/scripts/` BEFORE it wakes up. The scripts live
-// under `live-e2e/seed/scripts/transparent_proxy/` in the
-// repository; this helper polls for the executor's worktree to
-// materialise, then asks the witness module to copy every pinned
-// script into it.
-//
-// We delegate to `tp_evidence::stage_scripts_into_worktree` so the
-// list of staged files lives in exactly ONE place (the witness's
-// `STAGED_SCRIPT_NAMES` constant) — the staging path and the
-// witness-side test both consult the same source-of-truth list.
-// ---------------------------------------------------------------------------
-
-fn stage_transparent_proxy_scripts(
-    data_dir: &Path,
-    initiative_id: &str,
-    task_id: &str,
-) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    let workdir: PathBuf = loop {
-        if std::time::Instant::now() > deadline {
-            panic!(
-                "timed out waiting for transparent-proxy worktree at \
-                 <data_dir>/worktrees/{initiative_id}/{task_id}/ — \
-                 the kernel never materialised the executor's tree; \
-                 staging the stock-Python scripts is impossible",
-            );
-        }
-        let candidate = data_dir.join("worktrees")
-            .join(initiative_id)
-            .join(task_id);
-        if candidate.exists() {
-            break candidate;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    eprintln!(
-        "[realism-e2e] transparent-proxy worktree appeared at {}; \
-         staging stock-Python check_*.py + run_all_services.sh + requirements.txt",
-        workdir.display(),
-    );
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .expect("workspace parent dir present")
-        .to_path_buf();
-
-    let staged = tp_evidence::stage_scripts_into_worktree(
-        &workdir,
-        &workspace_root,
-    ).unwrap_or_else(|e| {
-        panic!(
-            "failed to stage transparent-proxy scripts into {}: {e}",
-            workdir.display(),
-        )
-    });
-    eprintln!(
-        "[realism-e2e] staged {} stock-Python file(s) into {}/scripts/",
-        staged.len(),
-        workdir.display(),
-    );
-}

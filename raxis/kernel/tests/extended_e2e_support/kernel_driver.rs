@@ -266,6 +266,244 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
         .unwrap_or_else(|e| panic!("rewrite {}: {e}", policy_path.display()));
 }
 
+/// Seed `<data_dir>/repositories/main` as a real (non-bare) git
+/// repository with `refs/heads/main` pointing at an initial empty
+/// commit. The orchestrator-spawn path's
+/// `worktree_provisioning::provision_orchestrator_worktree` clones
+/// from this repository at the initiative's `target_ref`
+/// (defaults to `refs/heads/main`) into
+/// `<data_dir>/worktrees/<initiative>/orch-<task>`. Without this
+/// seed every `ApprovePlan` succeeds at the IPC boundary but the
+/// orchestrator never spawns: the kernel's `orchestrator_spawn_failed`
+/// path logs `does not appear to be a git repository` and the
+/// downstream worktree under `<data_dir>/worktrees/<initiative>/<task>`
+/// is never created — the realistic-scenario test then times out
+/// in `materialise_realistic_seed`.
+///
+/// Mirrors `full_e2e_session_lifecycle::seed_main_repository`. The
+/// helper lives in `kernel_driver` so every shared `RAXIS_LIVE_E2E`
+/// driver (realistic scenario, future scenarios that adopt the
+/// `kernel_driver` module) gets a single source of truth.
+///
+/// Idempotent: a re-entry into a populated `repositories/main`
+/// short-circuits because the bootstrap creates the data dir fresh
+/// per run, but a future test that re-uses the same data_dir is not
+/// punished for it.
+pub fn seed_main_repository(data_dir: &Path) {
+    let repos_root = data_dir.join("repositories");
+    std::fs::create_dir_all(&repos_root)
+        .unwrap_or_else(|e| panic!("mkdir {}: {e}", repos_root.display()));
+
+    let main_repo = repos_root.join("main");
+    if main_repo.join(".git").exists() {
+        return;
+    }
+    std::fs::create_dir_all(&main_repo)
+        .unwrap_or_else(|e| panic!("mkdir {}: {e}", main_repo.display()));
+
+    // `git init -b main` is git 2.28+; older host gits (e.g. macOS
+    // XCode CLT 2.24) reject `-b`. We `git init` then explicitly
+    // point HEAD at refs/heads/main.
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .arg(&main_repo)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git init: {e}"));
+    assert!(init.success(), "git init failed at {}", main_repo.display());
+
+    let head_set = Command::new("git")
+        .current_dir(&main_repo)
+        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git symbolic-ref: {e}"));
+    assert!(
+        head_set.success(),
+        "git symbolic-ref HEAD refs/heads/main failed in {}",
+        main_repo.display(),
+    );
+
+    // Stamp deterministic author / committer identity so the seed
+    // commit's hash is reproducible across developer machines (no
+    // `~/.gitconfig` dependency, no UID-derived defaults).
+    let env: &[(&str, &str)] = &[
+        ("GIT_AUTHOR_NAME",     "raxis-e2e"),
+        ("GIT_AUTHOR_EMAIL",    "e2e@raxis.invalid"),
+        ("GIT_COMMITTER_NAME",  "raxis-e2e"),
+        ("GIT_COMMITTER_EMAIL", "e2e@raxis.invalid"),
+        ("GIT_AUTHOR_DATE",     "2026-01-01T00:00:00Z"),
+        ("GIT_COMMITTER_DATE",  "2026-01-01T00:00:00Z"),
+    ];
+    let commit = Command::new("git")
+        .current_dir(&main_repo)
+        .envs(env.iter().copied())
+        .args(["commit", "-q", "--allow-empty", "-m", "raxis-e2e: seed repository"])
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git commit: {e}"));
+    assert!(commit.success(), "git commit failed in {}", main_repo.display());
+
+    let rev = Command::new("git")
+        .current_dir(&main_repo)
+        .args(["rev-parse", "refs/heads/main"])
+        .output()
+        .unwrap_or_else(|e| panic!("spawn git rev-parse: {e}"));
+    assert!(
+        rev.status.success(),
+        "git rev-parse refs/heads/main failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&rev.stdout),
+        String::from_utf8_lossy(&rev.stderr),
+    );
+    eprintln!(
+        "[realism-e2e] seeded main repo at {} -> {}",
+        main_repo.display(),
+        String::from_utf8_lossy(&rev.stdout).trim(),
+    );
+}
+
+/// Seed `<data_dir>/repositories/main` with the **rich-multilang-001
+/// fixture history** (11 commits, including a feature-branch merge
+/// and a cross-language rename), then layer on the realistic
+/// scenario's per-task overlays — the bait `.env` carrying the FAKE
+/// credential canaries the credential-substitution-canary task
+/// inspects, plus the stock-Python service-integrity scripts the
+/// transparent-proxy-realscripts task runs — and commit them as a
+/// single 12th commit.
+///
+/// **Why bake the per-task overlays into `repositories/main`.** The
+/// kernel's worktree provisioner uses the layout
+/// `<data_dir>/worktrees/orch-<initiative_id>/` for the
+/// orchestrator's clone of `main` and `<data_dir>/worktrees/<session_id>/`
+/// for each per-session executor / reviewer clone. None of these
+/// layouts match `<data_dir>/worktrees/<initiative_id>/<task_id>/`,
+/// so a poll-based "wait for the executor's worktree to appear and
+/// then drop a fixture into it" overlay cannot succeed (the path
+/// the test driver was polling never existed). Committing the
+/// overlay into `repositories/main` BEFORE plan submission is the
+/// kernel-faithful equivalent: every downstream worktree is a
+/// `gix::clone` (full history) of `main`, so each executor inherits
+/// the seed history + bait `.env` + proxy scripts deterministically
+/// the moment the orchestrator finishes its own clone — with zero
+/// timing race against the executor VM boot.
+///
+/// `materialize_seed.sh` itself wipes the target dir if it exists
+/// (idempotent contract documented in the script header), then
+/// `git init` + 11 commits. After it returns we add the bait `.env`
+/// + proxy scripts at the worktree root and commit them with a
+/// pinned identity / date so HEAD is byte-stable across developer
+/// machines (no `~/.gitconfig` dependency).
+///
+/// **Replaces** `seed_main_repository` for the realistic-scenario
+/// driver. `seed_main_repository` (single empty commit) remains for
+/// `full_e2e_session_lifecycle`, which neither needs the rich
+/// history nor the per-task overlays.
+pub fn seed_realistic_main_repository(data_dir: &Path) {
+    let repos_root = data_dir.join("repositories");
+    std::fs::create_dir_all(&repos_root)
+        .unwrap_or_else(|e| panic!("mkdir {}: {e}", repos_root.display()));
+    let main_repo = repos_root.join("main");
+
+    // `materialize_seed.sh` insists on either an empty target or a
+    // previously-seeded target marked by `.seed-head-sha`. The
+    // tempdir bootstrap leaves `repositories/main` non-existent,
+    // but a re-entry into the same data_dir (rare but possible
+    // for ad-hoc local debug) would have a populated dir. Wipe it
+    // unconditionally — the helper is single-purpose, the dir is
+    // always under the per-test tempdir.
+    if main_repo.exists() {
+        std::fs::remove_dir_all(&main_repo).unwrap_or_else(|e| {
+            panic!("wipe {}: {e}", main_repo.display())
+        });
+    }
+
+    let workspace_root = realism_workspace_root();
+    let seed_script = workspace_root
+        .join("live-e2e/seed/repo/rich-multilang-001/scripts/materialize_seed.sh");
+    assert!(
+        seed_script.exists(),
+        "rich-multilang seed script missing at {}; \
+         is `live-e2e/seed/repo/rich-multilang-001/` present in the worktree?",
+        seed_script.display(),
+    );
+
+    let status = Command::new(&seed_script)
+        .arg(&main_repo)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", seed_script.display()));
+    assert!(
+        status.success(),
+        "{} exited non-zero: {status:?}",
+        seed_script.display(),
+    );
+
+    // Stage the bait `.env` (FAKE credential canaries the
+    // credential-substitution-canary task's witness scans for) and
+    // the stock-Python service-integrity scripts (the
+    // transparent-proxy-realscripts task runs them).
+    crate::extended_e2e_support::credential_substitution_evidence
+        ::stage_fake_creds_env(&main_repo)
+        .unwrap_or_else(|e| panic!("stage_fake_creds_env in main repo: {e}"));
+    crate::extended_e2e_support::transparent_proxy_evidence
+        ::stage_scripts_into_worktree(&main_repo, &workspace_root)
+        .unwrap_or_else(|e| panic!("stage_scripts_into_worktree in main repo: {e}"));
+
+    // Commit the overlay as the 12th commit on `main`. Use a
+    // pinned identity / date for byte-stable HEAD across machines.
+    let env: &[(&str, &str)] = &[
+        ("GIT_AUTHOR_NAME",     "raxis-realistic-seed"),
+        ("GIT_AUTHOR_EMAIL",    "realistic@raxis.invalid"),
+        ("GIT_COMMITTER_NAME",  "raxis-realistic-seed"),
+        ("GIT_COMMITTER_EMAIL", "realistic@raxis.invalid"),
+        ("GIT_AUTHOR_DATE",     "2026-01-02T00:00:00Z"),
+        ("GIT_COMMITTER_DATE",  "2026-01-02T00:00:00Z"),
+    ];
+    let add = Command::new("git")
+        .current_dir(&main_repo)
+        .args(["add", "-A", "."])
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git add: {e}"));
+    assert!(add.success(), "git add failed in {}", main_repo.display());
+    let commit = Command::new("git")
+        .current_dir(&main_repo)
+        .envs(env.iter().copied())
+        .args([
+            "commit",
+            "-q",
+            "-m",
+            "test(realistic): bait .env + transparent-proxy scripts overlay",
+        ])
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git commit: {e}"));
+    assert!(commit.success(), "git commit failed in {}", main_repo.display());
+
+    let rev = Command::new("git")
+        .current_dir(&main_repo)
+        .args(["rev-parse", "refs/heads/main"])
+        .output()
+        .unwrap_or_else(|e| panic!("spawn git rev-parse: {e}"));
+    assert!(
+        rev.status.success(),
+        "git rev-parse refs/heads/main failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&rev.stdout),
+        String::from_utf8_lossy(&rev.stderr),
+    );
+    eprintln!(
+        "[realism-e2e] seeded rich-multilang main repo at {} -> {}",
+        main_repo.display(),
+        String::from_utf8_lossy(&rev.stdout).trim(),
+    );
+}
+
+/// Resolve the workspace root (the `raxis/` directory containing
+/// the integration-test crate, the `live-e2e/` tree with the seed
+/// scripts, etc.). `CARGO_MANIFEST_DIR` for the integration-test
+/// binary points at `raxis/kernel/`, so the workspace root is its
+/// parent.
+fn realism_workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .expect("CARGO_MANIFEST_DIR for kernel integration tests has a parent (workspace root)")
+}
+
 pub fn write_credentials(data_dir: &Path) {
     let cred_dir = data_dir.join("credentials");
     std::fs::create_dir_all(&cred_dir).expect("mkdir credentials");
@@ -661,6 +899,62 @@ pub fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
 // Worktree locator.
 // ---------------------------------------------------------------------------
 
+/// Resolve the on-disk path of the executor / reviewer worktree
+/// for `task_id` by walking the audit chain to the matching
+/// `SessionVmSpawned.session_id`.
+///
+/// **Why audit-chain-based.** The kernel's worktree provisioner
+/// writes per-session worktrees at the flat
+/// `<data_dir>/worktrees/<session_id>/` layout
+/// (`worktree_provisioning::provision_executor_worktree` /
+/// `provision_reviewer_worktree`). Orchestrator worktrees use
+/// `<data_dir>/worktrees/orch-<initiative_id>/`. The hypothetical
+/// `<data_dir>/worktrees/<initiative_id>/<task_id>/` layout the
+/// previous helper assumed does not exist on disk and never has —
+/// the assumption was a documentation drift carried into the
+/// realistic-scenario harness from an earlier V2 prototype.
+///
+/// This helper takes the resolved audit chain (from
+/// `poll_for_dual_lifecycle_completion` / `walk_chain_or_panic`)
+/// and resolves `task_id -> session_id` via
+/// `locate_session_id_for_task`, then returns the matching
+/// worktree path. Panics with a precise diagnostic if either step
+/// fails.
+pub fn locate_executor_worktree_via_chain(
+    data_dir: &Path,
+    chain:    &[AuditEvent],
+    task_id:  &str,
+) -> PathBuf {
+    let session_id = locate_session_id_for_task(chain, task_id).unwrap_or_else(|| {
+        panic!(
+            "no SessionVmSpawned event for task_id={task_id} in audit chain \
+             ({} events); cannot locate executor worktree without a session_id",
+            chain.len(),
+        )
+    });
+    let candidate = data_dir.join("worktrees").join(&session_id);
+    assert!(
+        candidate.exists(),
+        "session_id={session_id} for task_id={task_id} found in chain but \
+         worktree directory {} does not exist on disk",
+        candidate.display(),
+    );
+    assert!(
+        candidate.join(".git").exists(),
+        "worktree {} for session_id={session_id} (task_id={task_id}) is not \
+         a git repository — kernel-side `provision_executor_worktree` should \
+         leave a `.git/` directory behind",
+        candidate.display(),
+    );
+    candidate
+}
+
+/// Legacy path-based locator. Retained for callers that pre-date
+/// the audit-chain-based locator above. New callers should prefer
+/// `locate_executor_worktree_via_chain`. This still searches the
+/// historic `<data_dir>/worktrees/<initiative_id>/<task_id>/`
+/// layout for compatibility with non-realistic e2e drivers that
+/// have not yet migrated.
 pub fn locate_executor_worktree(
     data_dir: &Path,
     initiative_id: &str,
@@ -678,7 +972,8 @@ pub fn locate_executor_worktree(
     }
     panic!(
         "could not locate executor worktree for initiative={initiative_id} \
-         task={task_id}; tried {:?}",
+         task={task_id}; tried {:?}; if this is the realistic-scenario test, \
+         migrate the call site to `locate_executor_worktree_via_chain`",
         candidates,
     );
 }
