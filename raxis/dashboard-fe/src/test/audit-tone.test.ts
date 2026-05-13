@@ -52,6 +52,8 @@ describe("auditTone", () => {
     expect(auditTone("PolicyEpochAdvanced")).toBe("info");
     expect(auditTone("AwsCredentialServed")).toBe("info");
     expect(auditTone("DatabaseQueryExecuted")).toBe("info");
+    expect(auditTone("DefaultProviderEgressApplied")).toBe("info");
+    expect(auditTone("PathScopeOverrideApplied")).toBe("info");
   });
 
   it("classifies throttle / admission events as block", () => {

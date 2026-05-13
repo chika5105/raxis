@@ -47,7 +47,7 @@ const SUFFIX_RULES: ReadonlyArray<readonly [RegExp, AuditTone]> = [
   // Lifecycle creates / starts / spawns / advances. Catch-all for
   // the high-volume "kernel ticked" events.
   [
-    /(Created|Started|Spawned|Submitted|Installed|Registered|Updated|Advanced|Selected|Admitted|Enqueued|Granted|Rotated|Emitted|Pushed|Scaled|Served|Used|Executed|Read|Accessed|Forwarded|Refreshed|Hit)$/,
+    /(Created|Started|Spawned|Submitted|Installed|Registered|Updated|Advanced|Selected|Admitted|Enqueued|Granted|Rotated|Emitted|Pushed|Scaled|Served|Used|Executed|Read|Accessed|Forwarded|Refreshed|Hit|Applied)$/,
     "info",
   ],
 ];
