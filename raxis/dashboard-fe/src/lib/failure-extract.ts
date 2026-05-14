@@ -108,7 +108,15 @@ export function failureFromAuditEvent(
     case "ReplayRejected":
     case "GatewayQuarantined":
     case "NotificationDeliveryFailed": {
-      message = str(obj, "reason") ?? str(obj, "detail") ?? "(no reason)";
+      // `INV-FAILURE-REASON-CONCRETE-01` — leave `message`
+      // empty when neither `reason` nor `detail` is populated.
+      // The panel's `(no message)` / `⚠ KERNEL BUG` empty-
+      // state then fires, surfacing the gap as a kernel bug
+      // instead of hiding it behind a hedged fallback
+      // placeholder. The forbidden-phrase regex in the
+      // kernel sweep test treats the hedged fallback as a
+      // concrete-reason violation.
+      message = str(obj, "reason") ?? str(obj, "detail") ?? "";
       pushField(fields, "reviewer_session_id", str(obj, "reviewer_session_id"));
       pushField(fields, "verdict", str(obj, "verdict"));
       pushField(fields, "initiative_id", str(obj, "initiative_id"));

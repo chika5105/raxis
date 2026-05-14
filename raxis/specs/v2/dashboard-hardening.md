@@ -867,22 +867,77 @@ the runtime debug_assert — file an immediate kernel bug citing
 `INV-FAILURE-REASON-MANDATORY-01` and the violating entity's
 `event_id` from the audit chain.
 
-**iter56 — clean-exit-no-terminal-intent sub-case.** The kernel's
+**iter56 — clean-exit-no-terminal-intent sub-case (P2 layer).** The kernel's
 Mode-B post-exit synthesis path
 (`kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`)
-now writes a non-generic `tasks.block_reason` even when the
-planner-side dispatch loop returned `Ok(())` (clean EOF) without
-landing a terminal intent — the previous fall-back to the generic
-`"MaxTurnsExceeded / TokensExceeded / DispatchIdle / process death"`
-umbrella violated the operator-experience contract above. The
-two new templates (with-activity and without-activity, see
-`specs/invariants.md §INV-FAILURE-REASON-MANDATORY-01` for the
-canonical text) are operationally distinct so the
-`<FailureReasonPanel>` surfaces a row that lets the operator
-disambiguate a runaway-loop exit (planner ran for N turns then
-hit `MaxTurnsExceeded`) from a boot-failure exit (planner died
+first received per-session activity-tracker breadcrumbs (the
+P2 patch landed in `4f661a5`) so even a clean `Ok(_)` return
+from `drive_planner_stream` carried `(last_intent_kind, seq,
+outcome, ts)` into the synthesis arm. The `<FailureReasonPanel>`
+now surfaces a row that lets the operator disambiguate a
+runaway-loop exit (planner ran for N turns then hit
+`MaxTurnsExceeded`) from a boot-failure exit (planner died
 before its first model turn) at a glance, with no kernel-log
 spelunking required.
+
+#### 5.5.2 Concrete-reason mandate — `INV-FAILURE-REASON-CONCRETE-01`
+
+`INV-FAILURE-REASON-MANDATORY-01` requires the reason be
+*non-empty*; `INV-FAILURE-REASON-CONCRETE-01` adds the
+*concreteness* gate: the reason MUST name the SPECIFIC cause
+and (where applicable) the operator-actionable remedy.
+Multi-option umbrella strings of the form
+`<Cause1> / <Cause2> / <Cause3>` (the canonical iter56
+regression baseline) and opaque placeholders like
+`(no reason)` / `see logs` / `unknown reason` / `unspecified
+reason` / `something went wrong` are violations — see
+`specs/invariants.md` for the verbatim forbidden-phrase set.
+
+**Pre-fix dashboard symptom.** The `<FailureReasonPanel>`
+rendered the iter56 umbrella verbatim — `"executor VM exited
+without submitting a terminal intent (MaxTurnsExceeded /
+TokensExceeded / DispatchIdle / process death). Kernel
+synthesised Running → Failed …"`. The P2 iter56 patch (`4f661a5`)
+replaced this with the activity-tracker template but STILL
+hedged the cause as `(likely MaxTurnsExceeded / TokensExceeded
+/ DispatchIdle)` — a structurally identical multi-option
+umbrella that `INV-FAILURE-REASON-CONCRETE-01` forbids. The
+panel's kernel-bug empty-state fired ONLY on `null` / `""`,
+so either umbrella slipped through the visibility net even
+though it was operationally indistinguishable from a missing
+reason.
+
+**Post-fix steady-state (P3 layer).** The kernel's Mode-B
+premature-exit synthesiser in `session_spawn_orchestrator`
+is now driven by a structured `PlannerExitOutcome` enum the
+planner ships over `IpcMessage::PlannerExitNotice`
+immediately before EOF. The formatter produces strings like
+`"executor planner reached max_turns budget (60 used / 60
+limit) without submitting a terminal intent — raise
+RAXIS_PLANNER_MAX_TURNS …"`. The dashboard surfaces THAT
+verbatim — no special FE handling is required because the
+kernel-side fix makes concreteness structural. The activity-
+tracker rendering helpers (`render_clean_exit_with_activity`
+/ `render_clean_exit_without_activity`) were also retemplated
+to remove the `(likely MaxTurnsExceeded / TokensExceeded /
+DispatchIdle)` hedge — they now NAME the missing
+`PlannerExitNotice` and point at the substrate's
+`SessionVmExited` audit event for forensic correlation. The
+kernel-bug badge `data-failure-empty="missing-reason-bug"`
+fires only on the actual `null` / `""` empty-state, NOT on
+the post-fix concrete strings.
+
+**FE follow-up: the `(no reason)` fallback.** The previous
+`failure-extract.ts` mapping for `WitnessRejected` /
+`ReviewerRejected` / `EscalationDenied` / `PolicyAdvanceRejected`
+/ `PolicyAdvanceFailed` / `ReplayRejected` / `GatewayQuarantined`
+/ `NotificationDeliveryFailed` collapsed missing payload
+`reason` / `detail` to the string `"(no reason)"` — a hedge
+placeholder that bypassed the panel's `(no message)` empty-state
+and rendered as a non-empty-but-empty-of-information message.
+Post-fix the mapping leaves `message` empty in that case so the
+panel's empty-state badge fires correctly, surfacing the gap
+as a kernel bug per `INV-FAILURE-REASON-MANDATORY-01`.
 
 ### 5.6 Action-failure rule
 

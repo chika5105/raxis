@@ -476,8 +476,12 @@ pub struct HandlerContext {
     /// `(intent_kind, sequence_number, outcome, timestamp)`
     /// tuple verbatim, so the dashboard's `<FailureReasonPanel>`
     /// surfaces a non-generic reason instead of the pre-fix
+    // SWEEP-IGNORE-BEGIN
     /// umbrella `"MaxTurnsExceeded / TokensExceeded /
-    /// DispatchIdle / process death"` placeholder.
+    /// DispatchIdle / process death"` placeholder
+    // SWEEP-IGNORE-END
+    /// (the iter56 regression baseline that
+    /// `INV-FAILURE-REASON-CONCRETE-01` now forbids).
     ///
     /// **Why non-Option**: the tracker is forensic, never gates
     /// admission, and the default-empty state is a no-op for

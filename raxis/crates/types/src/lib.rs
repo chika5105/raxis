@@ -24,6 +24,7 @@ pub mod operator_cert;
 pub mod operator_wire;
 pub mod plan_bundle;
 pub mod planner_env;
+pub mod planner_exit;
 pub mod planner_fetch;
 pub mod policy;
 pub mod tproxy;
@@ -64,6 +65,7 @@ pub use operator_cert::{CertKind, OperatorCert};
 pub use plan_bundle::{
     BundleArtifact, BundleNonce, BundleSha256, OperatorFingerprint, PlanBundle, SchemaVersion,
 };
+pub use planner_exit::PlannerExitOutcome;
 pub use planner_fetch::{PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse};
 pub use policy::Role;
 pub use tproxy::{

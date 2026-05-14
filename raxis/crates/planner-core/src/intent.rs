@@ -37,7 +37,7 @@ use uuid::Uuid;
 use raxis_ipc::IpcMessage;
 use raxis_types::{
     CommitSha, EscalationClass, EscalationRequest, IntentKind,
-    IntentRequest, IntentResponse, RequestedEscalationScope,
+    IntentRequest, IntentResponse, PlannerExitOutcome, RequestedEscalationScope,
     StructuredOutputKind, TaskId, TokensReport,
 };
 
@@ -285,6 +285,39 @@ impl IntentSubmitter {
         let mut req = self.skeleton(IntentKind::StructuredOutput);
         req.structured_output = Some(payload);
         self.send(IpcMessage::IntentRequest(req)).await
+    }
+
+    /// **`INV-FAILURE-REASON-CONCRETE-01`** — emit a final
+    /// [`PlannerExitOutcome`] notice immediately before the role
+    /// binary exits.
+    ///
+    /// The kernel's `drive_planner_stream` captures the most
+    /// recent notice it sees and threads the cause into the
+    /// Mode-B premature-exit synthesis in
+    /// `session_spawn_orchestrator`, so the synthesised
+    /// `block_reason` is a CONCRETE cause
+    /// (e.g. `"executor planner reached max_turns budget
+    /// (60 used / 60 limit) without submitting a terminal
+    /// intent"`) instead of the multi-option umbrella that
+    /// `INV-FAILURE-REASON-CONCRETE-01` forbids.
+    ///
+    /// **Best-effort.** Ack errors are returned to the caller
+    /// but the role binary's `main` ignores them — the notice
+    /// is forensic context, NOT a structural unstall (the
+    /// kernel's EOF-driven Mode-B synthesis fires regardless of
+    /// whether the notice arrives, e.g. SIGKILL mid-loop).
+    pub async fn submit_exit_notice(
+        &self,
+        outcome: PlannerExitOutcome,
+    ) -> Result<(), SubmitError> {
+        let resp = self
+            .transport
+            .request(&IpcMessage::PlannerExitNotice { outcome })
+            .await?;
+        match resp {
+            IpcMessage::KernelPlannerExitNoticeAck => Ok(()),
+            other => Err(SubmitError::UnexpectedResponse(format!("{other:?}"))),
+        }
     }
 
     /// Submit a generic `EscalationRequest`. Used by the planner

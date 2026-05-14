@@ -383,7 +383,14 @@ async fn handle_planner_connection(
     // both correct and the only safe choice — recording activity
     // against a session_id we don't yet know would let one VM's
     // last intent leak into a sibling VM's synthesised reason.
-    drive_planner_stream(stream, ctx, None).await
+    //
+    // The returned `PlannerStreamOutcome` (carrying any received
+    // `PlannerExitNotice`) is discarded for the same reason: the
+    // UDS-substrate accept loop has no post-exit synthesiser
+    // wired in. The notice is still routed through the dispatch
+    // match arm so the planner sees a valid
+    // `KernelPlannerExitNoticeAck` reply across every substrate.
+    drive_planner_stream(stream, ctx, None).await.map(|_| ())
 }
 
 /// **The planner dispatch loop, transport-agnostic.**
@@ -411,24 +418,45 @@ async fn handle_planner_connection(
 /// [`crate::ipc::context::HandlerContext::session_activity`] keyed
 /// by this `session_id`. The Mode-B post-exit synthesis hook in
 /// [`crate::session_spawn_orchestrator::spawn_planner_dispatcher`]
-/// reads (and consumes) the entry to weave a non-generic
-/// `tasks.block_reason` for the clean-exit-no-terminal-intent
-/// sub-case of `INV-FAILURE-REASON-MANDATORY-01`.
+/// reads (and consumes) the entry as a *fallback* breadcrumb when
+/// the planner exits without sending a `PlannerExitNotice` (see
+/// `INV-FAILURE-REASON-MANDATORY-01`). When the planner *does*
+/// emit `PlannerExitNotice`, the captured
+/// [`PlannerExitOutcome`](raxis_types::PlannerExitOutcome) is the
+/// preferred concreteness source (`INV-FAILURE-REASON-CONCRETE-01`).
 ///
 /// Substrate-spawned VM sessions (the only callers that exercise
 /// the post-exit hook) pass `Some(session_id)`. UDS-substrate
 /// callers pass `None` (see `handle_planner_connection`'s call
 /// site for the rationale: the UDS path is not session-bound at
 /// accept time, and the post-exit hook does not run for it).
+///
+/// **`INV-FAILURE-REASON-CONCRETE-01`.** The dispatch loop also
+/// captures every `IpcMessage::PlannerExitNotice` frame the
+/// planner sends and surfaces the most recent one through the
+/// returned [`PlannerStreamOutcome`]. The session-spawn
+/// post-exit synthesiser uses that captured outcome to format a
+/// CONCRETE `block_reason` instead of falling back to the
+/// multi-option umbrella string the invariant forbids.
 pub(crate) async fn drive_planner_stream<S>(
     mut stream: S,
     ctx: Arc<HandlerContext>,
     session_id_for_activity: Option<String>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+) -> Result<PlannerStreamOutcome, Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin,
 {
     use raxis_ipc::{read_frame, write_frame, IpcMessage};
+
+    // `INV-FAILURE-REASON-CONCRETE-01` — capture the last-seen
+    // planner exit notice across every frame the loop reads. The
+    // planner emits at most one notice per session (immediately
+    // before EOF), but the loop tolerates multiple notices
+    // defensively: a buggy planner that ships several updates
+    // surfaces only the FINAL one to the Mode-B synthesiser, on
+    // the principle that the most-recent state-of-the-world is
+    // the most actionable.
+    let mut last_exit_notice: Option<raxis_types::PlannerExitOutcome> = None;
 
     loop {
         let msg: IpcMessage = match read_frame(&mut stream).await {
@@ -623,6 +651,41 @@ where
                 ).await?;
             }
 
+            // ── PlannerExitNotice ─────────────────────────────────
+            // `INV-FAILURE-REASON-CONCRETE-01`. The planner ships
+            // its structured exit outcome (max_turns hit / token
+            // cap tripped / idle / explicit give-up / clean
+            // completion) immediately before EOF so the kernel's
+            // Mode-B premature-exit synthesiser in
+            // `session_spawn_orchestrator` can format a CONCRETE
+            // `block_reason` like
+            //
+            //   "executor planner reached max_turns budget
+            //    (60 used / 60 limit) without submitting a
+            //    terminal intent"
+            //
+            // instead of the multi-option umbrella the invariant
+            // forbids.
+            //
+            // The frame round-trips with a tiny ack
+            // (`KernelPlannerExitNoticeAck`) so the planner's
+            // request/reply transport sees a typed reply before
+            // the VM powers off. Latency is logged structurally
+            // for parity with the other planner-socket frames.
+            IpcMessage::PlannerExitNotice { outcome } => {
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_PLANNER,
+                    crate::observability::IPC_MSG_KIND_PLANNER_EXIT_NOTICE,
+                );
+                planner_dispatch_log::planner_exit_notice(&outcome);
+                last_exit_notice = Some(outcome);
+                write_frame(
+                    &mut stream,
+                    &IpcMessage::KernelPlannerExitNoticeAck,
+                ).await?;
+            }
+
             other => {
                 let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
                     ctx.observability.as_ref(),
@@ -634,7 +697,33 @@ where
             }
         }
     }
-    Ok(())
+    Ok(PlannerStreamOutcome { last_exit_notice })
+}
+
+/// **`INV-FAILURE-REASON-CONCRETE-01`** — value returned by
+/// [`drive_planner_stream`] when the planner-side socket reaches
+/// EOF.
+///
+/// Carries the most recently received
+/// [`raxis_types::PlannerExitOutcome`] (when the planner emitted
+/// `IpcMessage::PlannerExitNotice` before disconnecting) so the
+/// session-spawn premature-exit synthesiser can format a
+/// CONCRETE `block_reason` instead of falling back to the multi-
+/// option umbrella string.
+///
+/// `last_exit_notice = None` is the operator-visible gap: it
+/// means the planner exited (or was killed) without sending an
+/// exit notice. The Mode-B synthesiser still fires, but its
+/// formatted reason names the gap explicitly (e.g. `"executor
+/// VM exited via clean EOF without a PlannerExitNotice — likely
+/// SIGKILL / OOM / panic before exit cleanup"`) rather than the
+/// previous multi-cause umbrella.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PlannerStreamOutcome {
+    /// Most recent `PlannerExitNotice::outcome` observed on the
+    /// stream, or `None` if the planner closed the connection
+    /// without sending one.
+    pub last_exit_notice: Option<raxis_types::PlannerExitOutcome>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,6 +1278,31 @@ pub(crate) mod planner_dispatch_log {
         );
     }
 
+    /// `INV-FAILURE-REASON-CONCRETE-01` — structured-log line
+    /// emitted when the planner ships its
+    /// `IpcMessage::PlannerExitNotice` frame. Pairs with the
+    /// kernel-side `planner_exit_notice_observed` event so the
+    /// `kernel.stderr.log` carries the same machine-parseable
+    /// shape on both sides of the wire.
+    ///
+    /// Renders the outcome as JSON via `serde_json::to_string`
+    /// so the `kind`/`detail` discriminator round-trips
+    /// verbatim. Operators can grep on the `kind` field to
+    /// classify exits without writing a per-variant log
+    /// scanner.
+    pub(super) fn planner_exit_notice(
+        outcome: &raxis_types::PlannerExitOutcome,
+    ) {
+        let outcome_json = serde_json::to_string(outcome)
+            .unwrap_or_else(|e| format!("{{\"kind\":\"_serde_error\",\"err\":{:?}}}", e.to_string()));
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"planner_exit_notice_observed\",\
+              \"outcome\":{outcome_json},\
+              \"ts\":{ts}}}",
+            ts = raxis_types::unix_now_secs(),
+        );
+    }
+
     // ── Helpers ──
 
     /// Stable variant tag for the `planner_unexpected_message` log
@@ -1203,9 +1317,11 @@ pub(crate) mod planner_dispatch_log {
             IpcMessage::IntentRequest(_)              => "IntentRequest",
             IpcMessage::EscalationRequest(_)          => "EscalationRequest",
             IpcMessage::PlannerFetchRequest(_)        => "PlannerFetchRequest",
+            IpcMessage::PlannerExitNotice { .. }      => "PlannerExitNotice",
             IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
             IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
             IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
+            IpcMessage::KernelPlannerExitNoticeAck    => "KernelPlannerExitNoticeAck",
             IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
             IpcMessage::WitnessAck { .. }             => "WitnessAck",
             IpcMessage::OperatorRequest(_)            => "OperatorRequest",

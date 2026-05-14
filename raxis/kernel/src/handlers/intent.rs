@@ -69,8 +69,10 @@ use crate::vcs::diff::CommitSha;
 
 /// Dispatch one IntentRequest and return the IntentResponse.
 ///
+// SWEEP-IGNORE-BEGIN
 /// Never panics. All internal errors produce a Rejected response; the
 /// connection stays open for subsequent requests.
+// SWEEP-IGNORE-END
 ///
 /// ## Async safety contract (P0)
 ///

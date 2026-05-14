@@ -249,32 +249,50 @@ impl SessionActivityTracker {
 /// Operator-facing rendering of a captured activity, woven into
 /// the Mode-B synthesised `block_reason` for the
 /// clean-exit-no-terminal-intent sub-case of
-/// `INV-FAILURE-REASON-MANDATORY-01`. Returns the dashboard-
+/// `INV-FAILURE-REASON-MANDATORY-01` AND
+/// `INV-FAILURE-REASON-CONCRETE-01`. Returns the dashboard-
 /// stable text the spec pins.
 ///
-/// Template (canonical):
+/// Post-`INV-FAILURE-REASON-CONCRETE-01` template (canonical):
 ///
+// SWEEP-IGNORE-BEGIN
 /// ```text
-/// session_spawn_orchestrator: <role> VM exited cleanly after
-/// last intent <Kind> #<seq> (<outcome>) at unix=<ts>; no
-/// terminal intent submitted before EOF (likely MaxTurnsExceeded
-/// / TokensExceeded / DispatchIdle).
+/// session_spawn_orchestrator: <role> VM exited via clean EOF
+/// after last intent <Kind> #<seq> (<outcome>) at unix=<ts>; no
+/// terminal intent submitted and no PlannerExitNotice was
+/// received before the socket closed. …
 /// ```
+// SWEEP-IGNORE-END
 ///
-/// Example:
-///
-/// ```text
-/// session_spawn_orchestrator: executor VM exited cleanly after
-/// last intent StructuredOutput #7 (Accepted) at unix=1715694342;
-/// no terminal intent submitted before EOF (likely
-/// MaxTurnsExceeded / TokensExceeded / DispatchIdle).
-/// ```
+/// The pre-`INV-FAILURE-REASON-CONCRETE-01` form of this
+/// template hedged with `(likely MaxTurnsExceeded /
+/// TokensExceeded / DispatchIdle)` — that multi-option umbrella
+/// is now forbidden (it is the iter56 regression baseline). The
+/// helper names the missing exit-notice gap explicitly instead.
 pub fn render_clean_exit_with_activity(role: &str, activity: &SessionActivity) -> String {
+    // INV-FAILURE-REASON-CONCRETE-01 — this is the P2 activity-
+    // tracker fallback used only when the planner did NOT ship an
+    // `IpcMessage::PlannerExitNotice` (the P3 signal). The pre-
+    // INV-FAILURE-REASON-CONCRETE-01 template hedged with
+    // "(likely MaxTurnsExceeded / TokensExceeded / DispatchIdle)";
+    // that umbrella is now forbidden. We instead NAME the gap
+    // (no exit notice was received before EOF) and let the
+    // operator correlate against the inlined last-intent
+    // breadcrumb (`kind #seq (outcome) at unix=ts`) plus the
+    // substrate's `SessionVmExited` event for the host-side exit
+    // code — both of which carry concrete forensic detail.
     format!(
-        "session_spawn_orchestrator: {role} VM exited cleanly \
-         after last intent {kind} #{seq} ({outcome}) at unix={ts}; \
-         no terminal intent submitted before EOF (likely \
-         MaxTurnsExceeded / TokensExceeded / DispatchIdle).",
+        "session_spawn_orchestrator: {role} VM exited via clean \
+         EOF after last intent {kind} #{seq} ({outcome}) at \
+         unix={ts}; no terminal intent submitted and no \
+         PlannerExitNotice was received before the socket \
+         closed. The planner driver emits an exit notice for \
+         every documented exit shape (max_turns / max_tokens / \
+         idle / explicit give-up / clean completion); the \
+         absence of one here means the process was killed \
+         BEFORE the driver's exit-notice emit could fire — \
+         cross-correlate with the substrate's SessionVmExited \
+         event for the host-side exit code.",
         role     = role,
         kind     = activity.last_intent_kind.as_str(),
         seq      = activity.last_intent_seq,
@@ -288,23 +306,41 @@ pub fn render_clean_exit_with_activity(role: &str, activity: &SessionActivity) -
 /// receiving an `IntentRequest`). Distinct from
 /// `render_clean_exit_with_activity` so the operator can
 /// disambiguate boot-failure exits (this branch) from
-/// MaxTurnsExceeded-class exits (the activity branch).
+/// runaway-loop exits (the activity branch).
 ///
-/// Template (canonical):
+/// Post-`INV-FAILURE-REASON-CONCRETE-01` template (canonical):
 ///
 /// ```text
-/// session_spawn_orchestrator: <role> VM exited cleanly without
-/// ever submitting an IntentRequest before EOF; likely planner-
-/// boot-error / model-init failure / dispatch loop returned Idle
-/// on the very first turn (no terminal intent observed).
+/// session_spawn_orchestrator: <role> VM exited via clean EOF
+/// without ever submitting an IntentRequest AND without
+/// shipping a PlannerExitNotice — i.e. the planner process died
+/// before its first model turn. …
 /// ```
 pub fn render_clean_exit_without_activity(role: &str) -> String {
+    // INV-FAILURE-REASON-CONCRETE-01 — the boot-failure branch.
+    // The kernel saw a clean EOF on the planner socket without
+    // ever receiving an `IntentRequest` AND without a
+    // `PlannerExitNotice`. Operationally this is a planner-boot
+    // / model-init failure: the planner process died before its
+    // first model turn (cold-start panic, model-init OOM,
+    // missing `RAXIS_MODEL_ID`, etc.). We NAME this distinct
+    // failure surface explicitly rather than hedging across
+    // unrelated causes (e.g. the old "/ dispatch loop returned
+    // Idle on the very first turn" tail was a stretch — that
+    // case is handled by tier 1 via the planner's own
+    // `IdleNoTerminalIntent` exit notice).
     format!(
-        "session_spawn_orchestrator: {role} VM exited cleanly \
-         without ever submitting an IntentRequest before EOF; \
-         likely planner-boot-error / model-init failure / \
-         dispatch loop returned Idle on the very first turn \
-         (no terminal intent observed).",
+        "session_spawn_orchestrator: {role} VM exited via clean \
+         EOF without ever submitting an IntentRequest AND \
+         without shipping a PlannerExitNotice — i.e. the planner \
+         process died before its first model turn. This is the \
+         planner-boot / model-init failure surface: cold-start \
+         panic, model-init OOM (check the host cgroup \
+         memory.peak), missing RAXIS_MODEL_ID / model-asset \
+         lookup failure, or a substrate-level VM teardown during \
+         boot. Cross-correlate with the substrate's \
+         SessionVmExited audit event for the host-side exit \
+         code and the planner stderr for a panic backtrace.",
         role = role,
     )
 }
@@ -353,15 +389,25 @@ mod tests {
         assert!(s.contains("#7"),               "seq inlined:  {s}");
         assert!(s.contains("Accepted"),         "outcome inlined: {s}");
         assert!(s.contains("unix=1715694342"),  "timestamp inlined: {s}");
+        // `INV-FAILURE-REASON-CONCRETE-01` — the multi-option
+        // umbrella the iter56 P2 patch left behind must be
+        // absent from this fallback as well.
+        let lower = s.to_lowercase();
         assert!(
-            !s.contains("MaxTurnsExceeded / TokensExceeded / \
-                         DispatchIdle / process death"),
-            "must NOT echo the pre-fix umbrella verbatim — \
-             that string is the regression alarm: {s}"
+            !lower.contains("maxturnsexceeded / tokensexceeded / dispatchidle"),
+            "must NOT echo any pre-fix umbrella — that string \
+             is the regression alarm for INV-FAILURE-REASON-\
+             CONCRETE-01: {s}"
         );
         assert!(
-            s.contains("MaxTurnsExceeded"),
-            "operator hint about likely cause MUST appear: {s}"
+            !lower.contains("maxturnsexceeded"),
+            "must NOT hedge with MaxTurnsExceeded — tier 1 \
+             (PlannerExitNotice MaxTurnsReached) is the \
+             concreteness source for that surface: {s}"
+        );
+        assert!(
+            s.contains("PlannerExitNotice"),
+            "must NAME the missing-notice gap concretely: {s}"
         );
     }
 
@@ -386,8 +432,20 @@ mod tests {
              from runaway-loop exits: {s}"
         );
         assert!(
-            s.contains("planner-boot-error"),
+            s.contains("planner-boot"),
             "operator hint about likely cause MUST appear: {s}"
+        );
+        // `INV-FAILURE-REASON-CONCRETE-01` — the boot-failure
+        // template MUST NOT hedge with multi-option umbrellas
+        // (the pre-fix "/ dispatch loop returned Idle on the
+        // very first turn" tail is gone — that case has its own
+        // exit-notice variant).
+        let lower = s.to_lowercase();
+        assert!(
+            !lower.contains("dispatch loop returned idle"),
+            "must NOT hedge into the Idle-on-first-turn surface \
+             — that case is handled by tier 1 via the planner's \
+             IdleNoTerminalIntent exit notice: {s}"
         );
     }
 }

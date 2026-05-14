@@ -83,7 +83,7 @@
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 | 15 |
-| Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01 | 1 |
+| Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01, INV-FAILURE-REASON-CONCRETE-01 | 2 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
@@ -6396,13 +6396,16 @@ equivalent to `None` from the dashboard's perspective.
   block_reason population)
 - `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`
   (Mode-B premature-exit synthesis — captures the
-  `drive_planner_stream` dispatch error as the operator-facing
-  reason; on a clean `Ok(())` return reads
-  `ctx.session_activity` for the last observed IntentRequest
-  and emits one of the two iter56 sub-case templates listed
-  above; the pre-iter56 umbrella `"MaxTurnsExceeded /
-  TokensExceeded / DispatchIdle / process death"` placeholder
-  is no longer reachable on any tier)
+  `drive_planner_stream` dispatch error AND the structured
+  `PlannerStreamOutcome::last_exit_notice`
+  (`raxis_types::PlannerExitOutcome`) as the operator-facing
+  reason; per `INV-FAILURE-REASON-CONCRETE-01` ALWAYS returns
+  a concrete cause through
+  `build_worker_post_exit_failure_reason` — the multi-option
+  umbrella that the iter56 reproduction surfaced is no longer
+  reachable from any code path; on a clean `Ok(_)` return
+  with no exit notice the synthesiser falls back to
+  `ctx.session_activity`'s last IntentRequest breadcrumb)
 - `kernel/src/session_activity.rs::{SessionActivityTracker,
   render_clean_exit_with_activity, render_clean_exit_without_activity}`
   (kernel-side per-session activity tracker + the two iter56
@@ -6410,7 +6413,12 @@ equivalent to `None` from the dashboard's perspective.
   session_id, written by
   `kernel/src/ipc/server.rs::drive_planner_stream` on every
   IntentRequest round-trip, and consumed by the post-exit
-  hook before the synthesis arm fires)
+  hook before the synthesis arm fires — the rendering
+  helpers are now `INV-FAILURE-REASON-CONCRETE-01`-clean: the
+  pre-fix "(likely MaxTurnsExceeded / TokensExceeded /
+  DispatchIdle)" umbrella tail was excised in favour of
+  explicit "no PlannerExitNotice was received before EOF"
+  phrasing)
 - `kernel/src/session_spawn_orchestrator.rs` ceiling cascade
   (`OrchestratorRespawnCeilingExceeded` arm — non-terminal
   tasks under the ceiling-exceeded initiative get
@@ -6493,6 +6501,177 @@ invariant's normative wording lives here; the FE-side
 empty-reason rule (operator-experience contract) is in
 `v2/dashboard-hardening.md §5.5`; the audit-event
 non-nullability declaration is in `v2/audit-paired-writes.md`.
+
+### INV-FAILURE-REASON-CONCRETE-01 — Every failure reason MUST name a SPECIFIC cause, never hedge between possibilities
+
+**Statement.** Every transition into a terminal-failure or
+operator-blocked state — including the synthesised reasons the
+kernel writes when no upstream cause string is available — MUST
+carry a CONCRETE reason that names the SPECIFIC cause. The
+reason MUST NOT:
+
+  * Hedge between multiple causes with a multi-option umbrella
+    string of the form
+    `<Cause1> / <Cause2> / <Cause3> / process death` (the
+    canonical iter56 regression baseline — see below).
+  * Contain any of the opaque placeholders enumerated in the
+    forbidden-phrase set below.
+
+**Forbidden-phrase set (case-insensitive).** Any reason
+matching any of the substrings below is a violation of this
+invariant:
+
+  * `MaxTurnsExceeded / TokensExceeded` (the iter56 umbrella
+    head; the rest of the umbrella tail variants
+    `TokensExceeded / DispatchIdle` and
+    `DispatchIdle / process death` are also forbidden).
+  * `(no reason)` — the hedged FE fallback that bypasses the
+    `<FailureReasonPanel>`'s `(no message)` empty-state.
+  * `see logs` — pushes the operator into kernel-log
+    spelunking; the kernel knows the cause, propagate it.
+  * `internal error` (when used as a failure_reason value;
+    the dashboard's HTTP 500 wire body is intentionally
+    generic for security reasons and is allowlisted in the
+    sweep).
+  * `something went wrong` — fortune-cookie placeholder.
+  * `unknown reason` / `unspecified reason` — same as above.
+
+**Justification.** A reason that lists every theoretical
+cause and names none of them concretely is operationally
+indistinguishable from a missing reason: the operator
+cannot triage either way. `INV-FAILURE-REASON-MANDATORY-01`
+already requires non-empty; this invariant adds the
+concreteness step.
+
+**iter56 regression baseline.** The `lint-runner-python`
+executor VM exited cleanly after 5 minutes of planner traffic
+(hit `max_turns`) without submitting a terminal intent. The
+kernel synthesised `Running → Failed` with a generic
+placeholder `block_reason`:
+
+> "executor VM exited without submitting a terminal intent
+> (MaxTurnsExceeded / TokensExceeded / DispatchIdle / process
+> death). Kernel synthesised Running → Failed so the
+> orchestrator can decide retry_subtask vs. settle Blocked."
+
+The dashboard correctly flagged this as a kernel bug
+(`<FailureReasonPanel>`'s red ⚠ KERNEL BUG badge fires when
+the reason is empty OR hedged), but the operator still
+couldn't tell whether to raise `max_turns`, raise the token
+cap, look at substrate-level OOM, or something else entirely.
+The Mode-B premature-exit synthesis path in
+`session_spawn_orchestrator::spawn_planner_dispatcher` was
+the originating emit site.
+
+**The fix.** Plumb a structured `PlannerExitOutcome` enum
+from the planner-core driver to the kernel via a new
+`IpcMessage::PlannerExitNotice` wire frame. The planner ships
+the notice immediately before EOF; the kernel's
+`drive_planner_stream` captures the most-recent notice and
+threads it back through the `PlannerStreamOutcome` return
+type. The Mode-B synthesiser formats the notice via
+`PlannerExitOutcome::format_concrete_reason` which produces
+strings like:
+
+  * `"executor planner reached max_turns budget (60 used / 60
+    limit) without submitting a terminal intent — raise
+    RAXIS_PLANNER_MAX_TURNS …"`
+  * `"reviewer planner exceeded cumulative max_tokens cap on
+    the input axis (150000 used / 100000 limit) — raise
+    RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL …"`
+  * `"executor planner declared end_turn (final_text N bytes)
+    without selecting a terminal tool — the model thinks it
+    is done but did not call `task_complete` / …"`
+
+When the planner exits WITHOUT shipping an exit notice (the
+process was killed before the driver's exit-notice emit could
+fire — SIGKILL / OOM / panic), the synthesiser names THAT gap
+explicitly:
+
+> "session_spawn_orchestrator: executor VM exited via clean
+> EOF on the kernel↔planner socket but did NOT ship a
+> PlannerExitNotice before disconnecting. The planner driver
+> emits one of these notices for every documented exit shape;
+> the absence of a notice means the process was killed BEFORE
+> the driver's exit-notice emit could fire — most commonly
+> SIGKILL / OOM (check the host cgroup memory.peak), a panic
+> before the driver's terminal match arm, a substrate-level
+> VM teardown, or a host-side power loss."
+
+**Witness:**
+- `crates/types/src/planner_exit.rs::PlannerExitOutcome`
+  (structured wire-level exit cause; serde-tagged enum).
+- `crates/types/src/planner_exit.rs::PlannerExitOutcome::format_concrete_reason`
+  (formatter — type-checked against forbidden phrases by the
+  inline unit test).
+- `crates/types/src/planner_exit.rs::tests::format_concrete_reason_avoids_forbidden_phrases`
+  (per-variant concreteness assertion).
+- `crates/ipc/src/message.rs::IpcMessage::PlannerExitNotice`
+  + `IpcMessage::KernelPlannerExitNoticeAck` (wire frame).
+- `crates/planner-core/src/driver.rs::driver_outcome_to_exit_outcome`
+  (driver-side `DriverOutcome → PlannerExitOutcome` mapping).
+- `crates/planner-core/src/intent.rs::IntentSubmitter::submit_exit_notice`
+  (planner-side wire-emit helper).
+- `kernel/src/ipc/server.rs::drive_planner_stream` (kernel-
+  side capture into `PlannerStreamOutcome::last_exit_notice`).
+- `kernel/src/session_spawn_orchestrator.rs::build_worker_post_exit_failure_reason`
+  (Mode-B synthesiser — per-branch concreteness witness in
+  `concrete_reason_tests`).
+- `kernel/src/session_spawn_orchestrator.rs::concrete_reason_tests`
+  (one inline unit test per `PlannerExitOutcome` variant + the
+  no-notice/no-dispatch-error regression guard).
+- `kernel/tests/concrete_reason_sweep.rs::no_umbrella_reason_in_kernel_or_dashboard_emit_sites`
+  (integration sweep — scans `kernel/src/**.rs` and
+  `dashboard-fe/src/**.{ts,tsx}` for any forbidden-phrase
+  occurrence and fails if a non-allowlisted file matches).
+- `dashboard-fe/src/lib/failure-extract.ts` (`(no reason)`
+  placeholder removed; empty message now triggers the
+  `<FailureReasonPanel>` kernel-bug empty-state).
+
+**Enforcement.** Three layers, defense-in-depth:
+
+1. **Wire-level structured causes.** The planner ships a
+   structured `PlannerExitOutcome` enum rather than a
+   free-form string. The kernel's formatter has one match
+   arm per variant; adding a new variant produces a compile
+   error against `format_concrete_reason` (exhaustive match
+   over the enum).
+
+2. **Per-formatter inline tests.** Every code path through
+   `build_worker_post_exit_failure_reason` has a dedicated
+   inline unit test in `concrete_reason_tests` that drives
+   the formatter into that shape and asserts the surfaced
+   reason (a) is non-empty, (b) does not contain a
+   forbidden phrase, and (c) names the SPECIFIC cause.
+
+3. **File-sweep regression guard.** `concrete_reason_sweep.rs`
+   walks `kernel/src/**` and `dashboard-fe/src/**`,
+   strips `SWEEP-IGNORE-BEGIN`/`SWEEP-IGNORE-END` regions
+   from each file (so per-file counter-example lists can
+   co-exist with emit code), and fails if any non-
+   allowlisted file contains a forbidden phrase. New code
+   that re-introduces an umbrella string or a new hedge
+   phrase fails this test BEFORE landing in main.
+
+**Anti-pattern catalogue.** In addition to the
+`INV-FAILURE-REASON-MANDATORY-01` patterns above, the
+following are specifically forbidden by this invariant:
+
+  * `format!("<role> VM exited without submitting a terminal
+    intent (Cause1 / Cause2 / Cause3 / process death) …")`
+    — the iter56 umbrella; replace with a
+    `PlannerExitOutcome`-driven formatter.
+  * `match err { _ => "see logs" }` — hide-everything fallback;
+    propagate the verbatim error chain instead.
+  * `if cause.is_none() { "unspecified" }` — name the gap
+    explicitly (`"reason from <module> was None — caller
+    bug"`).
+
+**Canonical home.** `specs/invariants.md` (this file).
+Audit-paired-writes parity in `v2/audit-paired-writes.md
+§14.8`; dashboard FE counterpart in
+`v2/dashboard-hardening.md §5.5.1`; planner-harness wire
+contract in `v2/planner-harness.md`.
 
 ### INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 — Approved plans surface their original sealed TOML
 

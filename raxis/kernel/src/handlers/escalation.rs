@@ -74,9 +74,11 @@ const INITIATIVES:          &str = Table::Initiatives.as_str();
 
 /// Dispatch one EscalationRequest and return the EscalationResponse.
 ///
+// SWEEP-IGNORE-BEGIN
 /// Never panics. Any internal error (transport, store, policy) is
 /// converted to a Rejected response — the connection stays open so the
 /// planner can retry with fresh idempotency_key.
+// SWEEP-IGNORE-END
 ///
 /// The connection-level dispatcher is responsible for writing the
 /// returned `IpcMessage::KernelEscalationResponse` frame back to the

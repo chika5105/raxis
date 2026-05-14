@@ -2059,6 +2059,13 @@ pub const IPC_MSG_KIND_WITNESS_SUBMISSION:    &str = "witness_submission";
 pub const IPC_MSG_KIND_ESCALATION_REQUEST:    &str = "escalation_request";
 /// Pairs with `role = planner`. Gateway-mediated egress request.
 pub const IPC_MSG_KIND_PLANNER_FETCH_REQUEST: &str = "planner_fetch_request";
+/// Pairs with `role = planner`. The structured
+/// [`raxis_types::PlannerExitOutcome`] notice the planner emits
+/// immediately before EOF (`INV-FAILURE-REASON-CONCRETE-01`).
+/// The kernel uses it to format a concrete `block_reason` for
+/// the Mode-B premature-exit synthesis in
+/// `session_spawn_orchestrator`.
+pub const IPC_MSG_KIND_PLANNER_EXIT_NOTICE:   &str = "planner_exit_notice";
 /// Pairs with `role = unknown`. Any [`raxis_ipc::IpcMessage`]
 /// variant that arrives on planner.sock without an expected handler
 /// (response variants, operator-socket variants routed to the wrong
@@ -2073,6 +2080,7 @@ pub const KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET: &[&str] = &[
     IPC_MSG_KIND_WITNESS_SUBMISSION,
     IPC_MSG_KIND_ESCALATION_REQUEST,
     IPC_MSG_KIND_PLANNER_FETCH_REQUEST,
+    IPC_MSG_KIND_PLANNER_EXIT_NOTICE,
     IPC_MSG_KIND_UNEXPECTED,
 ];
 
@@ -2100,6 +2108,7 @@ pub fn kernel_substrate_ipc_route(
         M::WitnessSubmission(_)     => (IPC_ROLE_VERIFIER, IPC_MSG_KIND_WITNESS_SUBMISSION),
         M::EscalationRequest(_)     => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_ESCALATION_REQUEST),
         M::PlannerFetchRequest(_)   => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_PLANNER_FETCH_REQUEST),
+        M::PlannerExitNotice { .. } => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_PLANNER_EXIT_NOTICE),
 
         // ── Response variants, operator-socket variants, tproxy /
         //    dns admission variants — all wire-shape oddities on
@@ -2109,6 +2118,7 @@ pub fn kernel_substrate_ipc_route(
         M::KernelIntentResponse(_)
         | M::KernelEscalationResponse(_)
         | M::KernelPlannerFetchResponse(_)
+        | M::KernelPlannerExitNoticeAck
         | M::WitnessAck { .. }
         | M::OperatorRequest(_)
         | M::OperatorResponse(_)
@@ -2391,6 +2401,17 @@ mod substrate_ipc_tests {
                 body_bytes:    vec![],
                 timeout_ms:    30_000,
             }),
+            // ── Dispatched: planner / PlannerExitNotice ──
+            //   `INV-FAILURE-REASON-CONCRETE-01` — the planner ships
+            //   a structured exit cause to the kernel immediately
+            //   before EOF so the Mode-B premature-exit synthesiser
+            //   can format a concrete `block_reason`.
+            M::PlannerExitNotice {
+                outcome: raxis_types::PlannerExitOutcome::MaxTurnsReached {
+                    used:  60,
+                    limit: 60,
+                },
+            },
             // ── Unexpected: a wire-shape oddity that hits the
             //    catch-all arm. WitnessAck is convenient because it
             //    is a struct variant (different syntactic shape
@@ -2451,6 +2472,10 @@ mod substrate_ipc_tests {
                 raxis_ipc::IpcMessage::PlannerFetchRequest(_) => {
                     assert_eq!(role, IPC_ROLE_PLANNER);
                     assert_eq!(kind, IPC_MSG_KIND_PLANNER_FETCH_REQUEST);
+                }
+                raxis_ipc::IpcMessage::PlannerExitNotice { .. } => {
+                    assert_eq!(role, IPC_ROLE_PLANNER);
+                    assert_eq!(kind, IPC_MSG_KIND_PLANNER_EXIT_NOTICE);
                 }
                 _ => {
                     assert_eq!(role, IPC_ROLE_UNKNOWN,
@@ -2591,6 +2616,7 @@ mod substrate_ipc_tests {
             "witness_submission",
             "escalation_request",
             "planner_fetch_request",
+            "planner_exit_notice",
             "unexpected",
         ];
         assert_eq!(KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.len(), kind_expected.len());

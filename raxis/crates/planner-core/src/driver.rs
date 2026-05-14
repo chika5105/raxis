@@ -949,20 +949,116 @@ pub async fn run_role_session_with_connected_transport(
         provider_id:           String::new(),
     });
 
-    match outcome {
+    let driver_outcome = match outcome {
         DispatchOutcome::TerminalTool {
             tool_name, input, output: _, ..
         } => {
             submit_terminal(role, submitter.as_ref(), &tool_name, &input).await?;
-            Ok(DriverOutcome::Completed { tool_name })
+            DriverOutcome::Completed { tool_name }
         }
-        DispatchOutcome::Idle { final_text, .. } => Ok(DriverOutcome::Idle { final_text }),
+        DispatchOutcome::Idle { final_text, .. } => DriverOutcome::Idle { final_text },
         DispatchOutcome::MaxTurnsExceeded { turns, .. } => {
-            Ok(DriverOutcome::MaxTurnsExceeded { turns })
+            DriverOutcome::MaxTurnsExceeded { turns }
         }
         DispatchOutcome::TokensExceeded {
             which, ceiling, ..
-        } => Ok(DriverOutcome::TokensExceeded { which, ceiling }),
+        } => DriverOutcome::TokensExceeded { which, ceiling },
+    };
+
+    // `INV-FAILURE-REASON-CONCRETE-01` — emit a structured exit
+    // notice to the kernel so the Mode-B premature-exit
+    // synthesiser in `session_spawn_orchestrator` can format a
+    // CONCRETE `block_reason` (e.g. `"executor planner reached
+    // max_turns budget (60 used / 60 limit) without submitting a
+    // terminal intent"`) instead of falling back to the multi-
+    // option umbrella that the invariant forbids.
+    //
+    // Best-effort: ack failures are logged and swallowed. The
+    // kernel's EOF-driven Mode-B synthesis still fires even if
+    // the notice never lands (SIGKILL / OOM / panic before exit
+    // cleanup), so we don't gate the role binary's exit on the
+    // ack.
+    let exit_outcome = driver_outcome_to_exit_outcome(&driver_outcome, max_turns);
+    if let Err(e) = submitter.submit_exit_notice(exit_outcome).await {
+        // Anchors `INV-FAILURE-REASON-CONCRETE-01`: the kernel
+        // logs `worker_post_exit_synth_*` events that already
+        // surface the missing notice; this stderr line gives
+        // operators a planner-side correlate so a kernel/planner
+        // version-skew is visible from either side of the wire.
+        eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"planner-exit-notice\",\
+              \"event\":\"submit_exit_notice_failed\",\
+              \"error\":{:?}}}",
+            e.to_string(),
+        );
+    }
+
+    Ok(driver_outcome)
+}
+
+/// **`INV-FAILURE-REASON-CONCRETE-01`** — map a [`DriverOutcome`]
+/// (the driver-side terminal shape) onto a [`PlannerExitOutcome`]
+/// (the wire-level structured exit cause shipped to the kernel
+/// over `IpcMessage::PlannerExitNotice`).
+///
+/// Pure mapping, no I/O — exposed as a free function so the
+/// per-outcome unit tests in
+/// `crates/planner-core/src/driver.rs#tests::exit_outcome_*`
+/// can pin the wire shape without booting a full dispatch loop.
+///
+/// `max_turns` is the configured ceiling; the driver does not
+/// retain it on the `MaxTurnsExceeded` variant (only the count
+/// of turns ACTUALLY used is stamped). We thread the limit
+/// alongside so the wire variant carries both `used` and
+/// `limit` — the dashboard renders `"60 used / 60 limit"` so
+/// the operator can tell whether the cap is the bound to raise
+/// or whether something else is racing.
+pub fn driver_outcome_to_exit_outcome(
+    outcome:   &DriverOutcome,
+    max_turns: u32,
+) -> raxis_types::PlannerExitOutcome {
+    use raxis_types::PlannerExitOutcome;
+    match outcome {
+        DriverOutcome::Scaffold => PlannerExitOutcome::ExplicitGiveUp {
+            reason: "driver returned Scaffold (no task prompt was stamped on the spawn env)"
+                .to_string(),
+        },
+        DriverOutcome::Completed { tool_name } => PlannerExitOutcome::CleanCompletion {
+            tool_name: tool_name.clone(),
+        },
+        DriverOutcome::Idle { final_text } => PlannerExitOutcome::IdleNoTerminalIntent {
+            // u32 fits 4 GiB so even the largest plausible
+            // assistant turn cannot overflow; saturating cast
+            // is defensive against future growth of
+            // `DriverOutcome::Idle::final_text`.
+            final_text_len: final_text.len().min(u32::MAX as usize) as u32,
+        },
+        DriverOutcome::MaxTurnsExceeded { turns } => {
+            PlannerExitOutcome::MaxTurnsReached { used: *turns, limit: max_turns }
+        }
+        DriverOutcome::TokensExceeded { which, ceiling } => {
+            // Cumulative-used count is preserved on the
+            // `DispatchOutcome::TokensExceeded` variant in
+            // `dispatch.rs`; the driver currently flattens that
+            // away when constructing `DriverOutcome::TokensExceeded`
+            // (it only retains `which` + `ceiling`). The wire
+            // notice surfaces `used = limit` as a defensive
+            // floor — the planner's `step:"planner-tokens-exceeded"`
+            // stderr line carries the exact count for the audit
+            // trail, and the dashboard `FailureReasonPanel` shows
+            // both fields verbatim so the gap is visible.
+            //
+            // A follow-up commit can plumb the exact `used`
+            // count through `DriverOutcome::TokensExceeded`; for
+            // now `used = limit` gives the operator the same
+            // floor the previous umbrella string did (the
+            // ceiling tripped, so cumulative ≥ ceiling).
+            PlannerExitOutcome::MaxTokensReached {
+                which: (*which).to_string(),
+                used:  *ceiling,
+                limit: *ceiling,
+            }
+        }
     }
 }
 
@@ -1486,6 +1582,81 @@ mod tests {
     use crate::model::{ContentBlock, MessageResponse, MockModelClient, Usage};
     use crate::transport::StreamTransport;
     use tokio::io::duplex;
+
+    // ---------------------------------------------------------------
+    // `INV-FAILURE-REASON-CONCRETE-01` — per-`DriverOutcome` unit
+    // tests for the wire-level exit-outcome mapping. The dashboard's
+    // `<FailureReasonPanel>` reads the kernel-side synthesised reason
+    // that is formatted from these wire shapes; pinning the mapping
+    // here keeps the planner half of the contract type-checked.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn exit_outcome_for_completed_clean_completion() {
+        let d = DriverOutcome::Completed { tool_name: "task_complete".to_string() };
+        let o = driver_outcome_to_exit_outcome(&d, 60);
+        assert_eq!(
+            o,
+            raxis_types::PlannerExitOutcome::CleanCompletion {
+                tool_name: "task_complete".to_string(),
+            },
+        );
+        assert!(o.is_clean_completion());
+    }
+
+    #[test]
+    fn exit_outcome_for_max_turns_exceeded() {
+        let d = DriverOutcome::MaxTurnsExceeded { turns: 60 };
+        let o = driver_outcome_to_exit_outcome(&d, 60);
+        assert_eq!(
+            o,
+            raxis_types::PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 },
+        );
+        let r = o.format_concrete_reason("executor").expect("non-clean variant returns Some");
+        assert!(r.contains("max_turns"));
+        assert!(r.contains("60 used / 60 limit"));
+    }
+
+    #[test]
+    fn exit_outcome_for_tokens_exceeded() {
+        let d = DriverOutcome::TokensExceeded { which: "input", ceiling: 100_000 };
+        let o = driver_outcome_to_exit_outcome(&d, 60);
+        assert_eq!(
+            o,
+            raxis_types::PlannerExitOutcome::MaxTokensReached {
+                which: "input".to_string(),
+                used:  100_000,
+                limit: 100_000,
+            },
+        );
+        let r = o.format_concrete_reason("reviewer").expect("non-clean variant returns Some");
+        assert!(r.contains("max_tokens"));
+        assert!(r.contains("input"));
+    }
+
+    #[test]
+    fn exit_outcome_for_idle() {
+        let d = DriverOutcome::Idle { final_text: "I think we're done.".to_string() };
+        let o = driver_outcome_to_exit_outcome(&d, 60);
+        match o {
+            raxis_types::PlannerExitOutcome::IdleNoTerminalIntent { final_text_len } => {
+                assert_eq!(final_text_len, "I think we're done.".len() as u32);
+            }
+            other => panic!("expected IdleNoTerminalIntent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_outcome_for_scaffold_classified_as_explicit_give_up() {
+        let d = DriverOutcome::Scaffold;
+        let o = driver_outcome_to_exit_outcome(&d, 60);
+        match o {
+            raxis_types::PlannerExitOutcome::ExplicitGiveUp { reason } => {
+                assert!(reason.contains("Scaffold"), "got {reason:?}");
+            }
+            other => panic!("expected ExplicitGiveUp, got {other:?}"),
+        }
+    }
 
     /// Construct a minimal `IntentSubmitter` for `build_role` tests.
     /// The transport's other end is dropped — tests that assert on

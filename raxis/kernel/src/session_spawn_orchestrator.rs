@@ -1197,6 +1197,90 @@ fn maybe_apply_scale_down(
 /// function is a no-op in that case and the existing
 /// `accept_planner_loop` handles the connection on the UDS side.
 /// Calling this function is therefore safe regardless of substrate.
+///
+/// **`INV-FAILURE-REASON-MANDATORY-01` + `INV-FAILURE-REASON-CONCRETE-01`**
+/// — build the operator-facing failure_reason for the Mode-B
+/// post-exit synthesis. Pure function, no I/O — exposed as a
+/// free function so the witness test in
+/// `kernel/tests/concrete_reason_witness.rs` can pin every code
+/// path without spinning a full VM substrate.
+///
+/// Source-of-truth priority is documented inline at the call
+/// site in `spawn_planner_dispatcher`. The function ALWAYS
+/// returns a concrete reason — there is no path that returns a
+/// multi-option umbrella string of the form
+/// `<Cause1> / <Cause2> / <Cause3> / process death` (the prior-
+/// iter56 wording that `INV-FAILURE-REASON-CONCRETE-01` forbids).
+/// The invariant compliance witnesses are the per-variant
+/// inline tests in `concrete_reason_tests` below AND the
+/// file-sweep regression guard in
+/// `kernel/tests/concrete_reason_sweep.rs::no_umbrella_reason_in_kernel_or_dashboard_emit_sites`.
+pub(crate) fn build_worker_post_exit_failure_reason(
+    role_str:         &str,
+    exit_notice:      Option<&raxis_types::PlannerExitOutcome>,
+    dispatch_err_str: Option<&str>,
+    last_activity:    Option<&crate::session_activity::SessionActivity>,
+) -> String {
+    use raxis_types::PlannerExitOutcome;
+    // 1) Concrete structured exit notice from the planner.
+    //    `format_concrete_reason` returns `None` only for
+    //    `CleanCompletion`; the surrounding code path skips
+    //    Mode-B synthesis on a clean completion (the kernel-side
+    //    EarlyResponse on the terminal intent already drove the
+    //    FSM), but if we reach this function with a
+    //    `CleanCompletion` notice the structural anomaly is
+    //    spelled out so the operator can correlate.
+    if let Some(notice) = exit_notice {
+        if let Some(reason) = notice.format_concrete_reason(role_str) {
+            return reason;
+        }
+        if matches!(notice, PlannerExitOutcome::CleanCompletion { .. }) {
+            return format!(
+                "session_spawn_orchestrator: {role_str} VM reported \
+                 a CleanCompletion exit notice but the activation \
+                 row is still Active — the EarlyResponse cascade on \
+                 the terminal intent should have closed it. This is \
+                 a kernel-side scheduling bug, not a planner gap; \
+                 inspect the matching IntentRequest in \
+                 kernel.stderr.log and the audit chain for the \
+                 missing FSM transition."
+            );
+        }
+    }
+    // 2) Transport-level error from `drive_planner_stream`.
+    if let Some(err) = dispatch_err_str {
+        return format!(
+            "session_spawn_orchestrator: {role_str} VM exited \
+             without submitting a terminal intent. The kernel-side \
+             planner-dispatch loop observed a stream-level failure \
+             before EOF: {err}",
+        );
+    }
+    // 3) Activity-tracker fallback. The planner submitted at
+    //    least one IntentRequest before EOF but never sent a
+    //    `PlannerExitNotice`. Quote the last-intent breadcrumb
+    //    inline; the render helper NAMES the missing-notice gap
+    //    concretely (no multi-option umbrella —
+    //    `INV-FAILURE-REASON-CONCRETE-01`).
+    if let Some(activity) = last_activity {
+        return crate::session_activity::render_clean_exit_with_activity(
+            role_str, activity,
+        );
+    }
+    // 4) Concrete final fallback — the planner exited via clean
+    //    EOF without shipping a `PlannerExitNotice` AND without
+    //    ever recording a single IntentRequest. Most likely the
+    //    process died BEFORE its first model turn (boot-failure /
+    //    model-init failure / cold-start panic / OOM before the
+    //    first dispatch). We do NOT fall back to the multi-option
+    //    umbrella here (`INV-FAILURE-REASON-CONCRETE-01`); instead
+    //    we NAME the gap explicitly so the operator can correlate
+    //    against substrate-level signals (kernel cgroup OOM
+    //    counter, AVF/Firecracker exit code, panic backtrace in
+    //    the planner stderr).
+    crate::session_activity::render_clean_exit_without_activity(role_str)
+}
+
 pub fn spawn_planner_dispatcher(
     handle: &mut SpawnHandle,
     ctx: Arc<crate::ipc::context::HandlerContext>,
@@ -1206,29 +1290,39 @@ pub fn spawn_planner_dispatcher(
     };
     let session_id = handle.session_id.clone();
     tokio::spawn(async move {
-        // INV-FAILURE-REASON-MANDATORY-01 (clean-exit-no-terminal-
-        // intent sub-case) — pass the session_id into the
-        // dispatch loop so every IntentRequest round-trip
-        // records a per-session last-activity entry on
-        // `ctx.session_activity`. The Mode-B post-exit synthesis
-        // hook below `take`s the entry on a clean-EOF exit to
-        // weave a non-generic `block_reason`. See
-        // `crate::session_activity` for the full design rationale.
-        let dispatch_result = crate::ipc::server::drive_planner_stream(
-            stream,
-            Arc::clone(&ctx),
-            Some(session_id.clone()),
-        ).await;
-        // INV-FAILURE-REASON-MANDATORY-01: capture the planner-side
-        // dispatch error string (if any) so the Mode-B premature-exit
-        // synthesis below can inline it as the operator-facing
-        // failure_reason instead of the generic
-        // "MaxTurnsExceeded/TokensExceeded/DispatchIdle/process death"
-        // umbrella. The actual error from `drive_planner_stream` is
-        // the closest the kernel ever gets to the planner's view of
-        // why the VM exited (planner-boot-error string, transport
-        // EOF reason, codec failure, etc.). Truncated to keep the
-        // failure_reason within `MAX_FAILURE_REASON_LEN`.
+        let dispatch_result = crate::ipc::server::drive_planner_stream(stream, Arc::clone(&ctx)).await;
+        // INV-FAILURE-REASON-MANDATORY-01 + INV-FAILURE-REASON-CONCRETE-01:
+        // capture two distinct signals from `drive_planner_stream` so
+        // the Mode-B premature-exit synthesis below can produce a
+        // CONCRETE operator-facing failure_reason, never the generic
+        // multi-option umbrella string the invariants forbid (see
+        // `INV-FAILURE-REASON-CONCRETE-01` in `specs/invariants.md`
+        // for the verbatim regression baseline):
+        //
+        //   1. `dispatch_err_for_post_exit` — the transport-level
+        //      error from `drive_planner_stream` when the planner
+        //      socket failed before clean EOF (planner-boot-error,
+        //      transport EOF reason, codec failure, …). Present
+        //      ⇒ the kernel-side stream broke; we inline it
+        //      verbatim. Truncated to keep within
+        //      `MAX_FAILURE_REASON_LEN`.
+        //
+        //   2. `exit_notice_for_post_exit` — the structured
+        //      `PlannerExitOutcome` notice the planner ships
+        //      immediately before EOF over
+        //      `IpcMessage::PlannerExitNotice`. Present ⇒ the
+        //      planner exited cleanly with a known cause
+        //      (max_turns / max_tokens / idle / explicit give-up /
+        //      clean completion). We format it via
+        //      `PlannerExitOutcome::format_concrete_reason` so the
+        //      synthesised reason names the SPECIFIC cause and the
+        //      remedy (raise max_turns, raise token cap, …).
+        //
+        //      `None` ⇒ the planner exited without sending a
+        //      notice (likely SIGKILL / OOM / panic before the
+        //      driver's exit-notice emit). The synthesiser
+        //      surfaces THAT gap concretely rather than the
+        //      umbrella.
         let dispatch_err_for_post_exit: Option<String> = dispatch_result
             .as_ref()
             .err()
@@ -1240,6 +1334,10 @@ pub fn spawn_planner_dispatcher(
                     s
                 }
             });
+        let exit_notice_for_post_exit: Option<raxis_types::PlannerExitOutcome> = dispatch_result
+            .as_ref()
+            .ok()
+            .and_then(|o| o.last_exit_notice.clone());
         if let Err(e) = &dispatch_result {
             // Per the planner-dispatch logging convention, the
             // structured log keys on `step:"planner-dispatch"` so a
@@ -1454,32 +1552,7 @@ pub fn spawn_planner_dispatcher(
         let store_for_post_exit = Arc::clone(&ctx.store);
         let session_for_post_exit = session_id.clone();
         let dispatch_err_for_synth = dispatch_err_for_post_exit.clone();
-        // INV-FAILURE-REASON-MANDATORY-01 (clean-exit-no-terminal-
-        // intent sub-case) — consume the per-session last-
-        // activity record BEFORE entering the SQL preflight so
-        // the synthesis arm can quote it inside the same
-        // `spawn_blocking` closure that holds the SQLite
-        // transaction. `take` is idempotent on `None` (no
-        // IntentRequest was ever observed for this session,
-        // e.g. planner-boot-error before the first model turn);
-        // the synthesis arm distinguishes the two cases via
-        // distinct `block_reason` templates so the operator can
-        // tell boot-failure exits from runaway-loop exits at a
-        // glance. The entry is always consumed because the
-        // session row was just revoked above and will not be
-        // reused — leaving a stale entry would let a later
-        // session under the same id (re-spawn after retry)
-        // inherit a predecessor's activity.
-        let last_activity_for_synth = ctx.session_activity.take(&session_id);
-        // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — capture the
-        // audit sink so the closure can fire `TaskStateChanged`
-        // paired-writes for the synthetic `Admitted → Running →
-        // Failed` walk it performs on a worker premature-exit. The
-        // audit chain is the dashboard push protocol's only
-        // trigger; without it the dashboard sees the worker session
-        // disappear without any task-state evidence.
-        let audit_for_post_exit: Arc<dyn raxis_audit_tools::AuditSink> =
-            Arc::clone(&ctx.audit);
+        let exit_notice_for_synth  = exit_notice_for_post_exit.clone();
         let preflight = tokio::task::spawn_blocking(
             move || -> Option<PostExitAction> {
                 use raxis_store::Table;
@@ -1692,8 +1765,7 @@ pub fn spawn_planner_dispatcher(
                 // row close commit atomically. Matches the
                 // `handle_report_failure` shape verbatim.
                 use crate::initiatives::task_transitions::{
-                    emit_task_state_changed_audit, transition_task_in_tx,
-                    TaskTransitionRecord, TransitionActor,
+                    transition_task_in_tx, TransitionActor,
                 };
                 let tx = match conn.transaction() {
                     Ok(t) => t,
@@ -1710,28 +1782,24 @@ pub fn spawn_planner_dispatcher(
                         return None;
                     }
                 };
-                let mut pending_audits: Vec<TaskTransitionRecord> = Vec::new();
                 if matches!(task_state, raxis_types::TaskState::Admitted) {
-                    match transition_task_in_tx(
+                    if let Err(e) = transition_task_in_tx(
                         &tx,
                         &task_id,
                         raxis_types::TaskState::Running,
                         None,
                         TransitionActor::Kernel,
                     ) {
-                        Ok(rec) => pending_audits.push(rec),
-                        Err(e) => {
-                            eprintln!(
-                                "{{\"level\":\"warn\",\
-                                 \"event\":\"worker_post_exit_synth_admitted_to_running_failed\",\
-                                 \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
-                                 \"error\":\"{err}\"}}",
-                                sid = &session_for_post_exit,
-                                tid = &task_id,
-                                err = e,
-                            );
-                            return None;
-                        }
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"worker_post_exit_synth_admitted_to_running_failed\",\
+                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                             \"error\":\"{err}\"}}",
+                            sid = &session_for_post_exit,
+                            tid = &task_id,
+                            err = e,
+                        );
+                        return None;
                     }
                 }
                 // V2 §Step 12 crash-retry bump — must land BEFORE the
@@ -1752,84 +1820,66 @@ pub fn spawn_planner_dispatcher(
                     // Continue: the FSM transition is the structural
                     // unstall; a missed counter increment is forensic.
                 }
-                // INV-FAILURE-REASON-MANDATORY-01 — three-tier
-                // synthesis ladder, in priority order:
+                // INV-FAILURE-REASON-MANDATORY-01 +
+                // INV-FAILURE-REASON-CONCRETE-01: produce a CONCRETE
+                // operator-facing failure reason, never the generic
+                // multi-option umbrella. Source-of-truth priority:
                 //
-                //   1. **Dispatch-side error string** (`Some(err)`).
-                //      Inlined verbatim. This is the planner's
-                //      own view of why the IPC channel broke
-                //      (planner-boot-error, transport EOF reason,
-                //      codec failure, …); always preferred when
-                //      `drive_planner_stream` returned `Err(_)`.
-                //   2. **Last-activity record** (clean-EOF case;
-                //      tracker entry is `Some(_)`). The planner
-                //      submitted at least one IntentRequest and
-                //      then dialed its socket cleanly to EOF
-                //      without landing a terminal intent. We
-                //      quote `(intent_kind, sequence_number,
-                //      outcome, timestamp)` so the operator can
-                //      correlate against the dispatch matrix and
-                //      the audit chain timeline. This is the
-                //      branch that closes the iter56 bug — the
-                //      pre-fix code path fell through to (3)
-                //      and surfaced the generic umbrella.
-                //   3. **No-activity record** (clean-EOF case;
-                //      tracker entry is `None`). The kernel
-                //      observed EOF on the IPC channel without
-                //      receiving a single IntentRequest. This is
-                //      the boot-failure / model-init-failure
-                //      branch (the planner died before issuing
-                //      its first intent), and the synthesis text
-                //      names that distinct failure surface so
-                //      the operator does not chase the wrong
-                //      hypothesis. Distinct from (2) by design —
-                //      "no IntentRequest observed before EOF" is
-                //      operationally a different incident class
-                //      than "planner ran for N turns and then
-                //      hit MaxTurnsExceeded".
+                //   1. **`exit_notice_for_synth`** — the
+                //      structured `PlannerExitOutcome` shipped by
+                //      the planner immediately before EOF. When
+                //      present this is ALWAYS the most accurate
+                //      reason (`MaxTurnsReached { used, limit }`,
+                //      `MaxTokensReached { which, used, limit }`,
+                //      etc.). `format_concrete_reason` returns
+                //      `None` only for the `CleanCompletion`
+                //      variant — in which case Mode-B synthesis
+                //      should not run at all (a `CleanCompletion`
+                //      notice means a terminal intent already
+                //      fired and the EarlyResponse cascade
+                //      already drove the FSM); the synthesiser
+                //      treats `None` as a structural anomaly and
+                //      surfaces a concrete description of THAT.
                 //
-                // The pre-fix umbrella `"MaxTurnsExceeded /
-                // TokensExceeded / DispatchIdle / process death"`
-                // string is no longer reachable on any tier —
-                // its appearance in `tasks.block_reason` would be
-                // the regression alarm for this fix.
+                //   2. **`dispatch_err_for_synth`** — the
+                //      transport-level error from
+                //      `drive_planner_stream` (planner-boot-error,
+                //      transport EOF reason, codec failure). Used
+                //      when no exit notice arrived AND the kernel
+                //      side saw a stream-level failure.
+                //
+                //   3. **Concrete fallback** — neither signal is
+                //      available (the planner exited via clean
+                //      EOF without sending a notice, which most
+                //      likely means the process was killed before
+                //      the driver's exit-notice emit could fire —
+                //      SIGKILL / OOM / panic mid-loop). The
+                //      fallback string NAMES that gap explicitly
+                //      so the operator does not have to infer it
+                //      from the absence of forensic context.
                 let role_str = if is_executor { "executor" } else { "reviewer" };
-                let justification = match dispatch_err_for_synth.as_deref() {
-                    Some(err) => format!(
-                        "session_spawn_orchestrator: {role_str} VM exited \
-                         without submitting a terminal intent. \
-                         planner_dispatch error: {err}",
-                    ),
-                    None => match last_activity_for_synth.as_ref() {
-                        Some(activity) => crate::session_activity::render_clean_exit_with_activity(
-                            role_str,
-                            activity,
-                        ),
-                        None => crate::session_activity::render_clean_exit_without_activity(
-                            role_str,
-                        ),
-                    },
-                };
-                match transition_task_in_tx(
+                let justification = build_worker_post_exit_failure_reason(
+                    role_str,
+                    exit_notice_for_synth.as_ref(),
+                    dispatch_err_for_synth.as_deref(),
+                );
+                if let Err(e) = transition_task_in_tx(
                     &tx,
                     &task_id,
                     raxis_types::TaskState::Failed,
                     Some(justification.as_str()),
                     TransitionActor::Kernel,
                 ) {
-                    Ok(rec) => pending_audits.push(rec),
-                    Err(e) => {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\
-                             \"event\":\"worker_post_exit_synth_failed_transition_failed\",\
-                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
-                             \"error\":\"{err}\"}}",
-                            sid = &session_for_post_exit,
-                            tid = &task_id,
-                            err = e,
-                        );
-                        return None;
-                    }
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_post_exit_synth_failed_transition_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    return None;
                 }
                 if let Err(e) = tx.commit() {
                     eprintln!(
@@ -1842,18 +1892,6 @@ pub fn spawn_planner_dispatcher(
                         err = e,
                     );
                     return None;
-                }
-                // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit
-                // emit. Drop our `conn` lock first so the audit sink
-                // (which may itself acquire SQLite for the audit row)
-                // does not contend on the same mutex.
-                drop(conn);
-                for rec in &pending_audits {
-                    emit_task_state_changed_audit(
-                        audit_for_post_exit.as_ref(),
-                        rec,
-                        Some(&session_for_post_exit),
-                    );
                 }
                 eprintln!(
                     "{{\"level\":\"info\",\
@@ -5327,5 +5365,239 @@ mod tests {
             "kernel-side DEFAULT_PLANNER_MAX_TURNS MUST equal planner-core's; \
              bump them in lock-step",
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `INV-FAILURE-REASON-CONCRETE-01` — per-`PlannerExitOutcome`
+// witness for the Mode-B post-exit reason formatter.
+//
+// Anchors specs/invariants.md `INV-FAILURE-REASON-CONCRETE-01`:
+// every code path through `build_worker_post_exit_failure_reason`
+// MUST return a CONCRETE reason — never a multi-option umbrella
+// string, never an opaque placeholder. These tests pin every
+// branch the function reaches.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod concrete_reason_tests {
+    use super::build_worker_post_exit_failure_reason;
+    use raxis_types::PlannerExitOutcome;
+
+    /// `INV-FAILURE-REASON-CONCRETE-01` — substrings forbidden in
+    /// any synthesised `block_reason`. Mirrors the sweep test in
+    /// `kernel/tests/concrete_reason_sweep.rs::FORBIDDEN_PHRASES`
+    /// and `raxis-types::planner_exit::tests::regex_like_forbidden`.
+    /// Keep all three in sync.
+    ///
+    /// Wrapped in `SWEEP-IGNORE-BEGIN`/`SWEEP-IGNORE-END` markers
+    /// so the kernel sweep test scans the actual emit code in
+    /// this file but skips this counter-example list.
+    // SWEEP-IGNORE-BEGIN: counter-example list for the
+    // INV-FAILURE-REASON-CONCRETE-01 unit-test contract.
+    const FORBIDDEN_PHRASES: &[&str] = &[
+        "maxturnsexceeded / tokensexceeded",
+        "tokensexceeded / dispatchidle",
+        "dispatchidle / process death",
+        "(no reason)",
+        "see logs",
+        "internal error",
+        "something went wrong",
+        "unknown reason",
+        "unspecified reason",
+    ];
+    // SWEEP-IGNORE-END
+
+    fn assert_no_forbidden(s: &str) {
+        let lower = s.to_lowercase();
+        for p in FORBIDDEN_PHRASES {
+            assert!(
+                !lower.contains(p),
+                "INV-FAILURE-REASON-CONCRETE-01 violation: reason contains forbidden \
+                 phrase {p:?}; full reason: {s:?}"
+            );
+        }
+    }
+
+    /// `MaxTurnsReached` — surfaced reason MUST name `max_turns`,
+    /// quote `used`/`limit`, and lead with the role.
+    #[test]
+    fn concrete_reason_max_turns_reached() {
+        let o = PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 };
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        assert!(!s.is_empty());
+        assert_no_forbidden(&s);
+        assert!(s.contains("max_turns"), "must name max_turns; got {s:?}");
+        assert!(s.contains("60 used / 60 limit"), "must quote used/limit; got {s:?}");
+        assert!(s.starts_with("executor"), "must lead with role; got {s:?}");
+    }
+
+    /// `MaxTokensReached` — surfaced reason MUST name `max_tokens`
+    /// and the specific axis.
+    #[test]
+    fn concrete_reason_max_tokens_reached() {
+        let o = PlannerExitOutcome::MaxTokensReached {
+            which: "input".to_string(),
+            used:  150_000,
+            limit: 100_000,
+        };
+        let s = build_worker_post_exit_failure_reason("reviewer", Some(&o), None, None);
+        assert_no_forbidden(&s);
+        assert!(s.contains("max_tokens"), "must name max_tokens; got {s:?}");
+        assert!(s.contains("input"), "must name the axis; got {s:?}");
+        assert!(s.contains("150000 used / 100000 limit"), "must quote used/limit; got {s:?}");
+    }
+
+    /// `IdleNoTerminalIntent` — surfaced reason MUST mention
+    /// `end_turn` AND a terminal-tool name the planner could have
+    /// chosen.
+    #[test]
+    fn concrete_reason_idle_no_terminal_intent() {
+        let o = PlannerExitOutcome::IdleNoTerminalIntent { final_text_len: 1024 };
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        assert_no_forbidden(&s);
+        assert!(s.contains("end_turn"), "must mention end_turn; got {s:?}");
+        assert!(s.contains("task_complete"), "must name the missing terminal tool; got {s:?}");
+    }
+
+    /// `ToolErrorBudgetExhausted` — surfaced reason MUST name the
+    /// `tool-error` budget and quote counters.
+    #[test]
+    fn concrete_reason_tool_error_budget_exhausted() {
+        let o = PlannerExitOutcome::ToolErrorBudgetExhausted { errors: 5, budget: 5 };
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        assert_no_forbidden(&s);
+        assert!(s.contains("tool-error"), "must name tool-error; got {s:?}");
+        assert!(s.contains("5 errors / 5 budget"), "must quote counters; got {s:?}");
+    }
+
+    /// `ExplicitGiveUp` — surfaced reason MUST inline the verbatim
+    /// driver-error chain so the operator's audit trail leads
+    /// back to the originating cause.
+    #[test]
+    fn concrete_reason_explicit_give_up() {
+        let driver_err = "sidecar env var RAXIS_PLANNER_SIDECAR_ENDPOINT missing";
+        let o = PlannerExitOutcome::ExplicitGiveUp { reason: driver_err.to_string() };
+        let s = build_worker_post_exit_failure_reason("orchestrator", Some(&o), None, None);
+        assert_no_forbidden(&s);
+        assert!(s.contains("driver gave up"), "must name the give-up; got {s:?}");
+        assert!(
+            s.contains(driver_err),
+            "must inline the driver-error chain verbatim; got {s:?}"
+        );
+    }
+
+    /// `Unknown` — defensive variant; surfaced reason MUST name
+    /// the kernel/planner skew AND inline the verbatim detail.
+    #[test]
+    fn concrete_reason_unknown_variant() {
+        let o = PlannerExitOutcome::Unknown {
+            detail: "planner-vNEXT::DispatchOutcome::FutureVariant".to_string(),
+        };
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        assert_no_forbidden(&s);
+        assert!(s.contains("exit-notice"), "must name the notice variant; got {s:?}");
+        assert!(
+            s.contains("planner-vNEXT::DispatchOutcome::FutureVariant"),
+            "must inline the verbatim detail; got {s:?}"
+        );
+    }
+
+    /// `CleanCompletion` reaching the synthesiser is a kernel-
+    /// side scheduling anomaly (the EarlyResponse cascade on the
+    /// terminal intent should have closed the activation row
+    /// before we got here). The synthesiser MUST classify it as
+    /// a kernel-side bug, NOT fall back to the umbrella.
+    #[test]
+    fn concrete_reason_clean_completion_in_synth_path() {
+        let o = PlannerExitOutcome::CleanCompletion {
+            tool_name: "task_complete".to_string(),
+        };
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        assert_no_forbidden(&s);
+        assert!(s.contains("CleanCompletion"), "must name the anomaly; got {s:?}");
+        assert!(
+            s.contains("kernel-side scheduling bug"),
+            "must classify it as a kernel-side bug; got {s:?}"
+        );
+    }
+
+    /// Dispatch-error fallback (no notice but a transport-level
+    /// error available) — surfaced reason MUST inline the error
+    /// chain verbatim and name the stream-level failure.
+    #[test]
+    fn concrete_reason_dispatch_error_fallback() {
+        let s = build_worker_post_exit_failure_reason(
+            "executor",
+            None,
+            Some("planner-boot-error: RAXIS_MODEL_ID unresolved"),
+            None,
+        );
+        assert_no_forbidden(&s);
+        assert!(s.contains("stream-level failure"), "must name the stream failure; got {s:?}");
+        assert!(
+            s.contains("planner-boot-error: RAXIS_MODEL_ID unresolved"),
+            "must inline the dispatch error verbatim; got {s:?}"
+        );
+    }
+
+    /// **Original-iter56-bug regression guard.** No exit notice,
+    /// no dispatch error, no activity tracker entry — the exact
+    /// path that prior to the fix fell back to the multi-option
+    /// umbrella string. The post-fix formatter MUST name the
+    /// missing `PlannerExitNotice` and the boot-failure surface,
+    /// not hedge between possibilities.
+    #[test]
+    fn concrete_reason_no_notice_no_dispatch_no_activity_fallback() {
+        let s = build_worker_post_exit_failure_reason("executor", None, None, None);
+        assert_no_forbidden(&s);
+        assert!(s.contains("PlannerExitNotice"), "must name the missing notice; got {s:?}");
+        assert!(s.contains("planner-boot"),      "must name the boot-failure surface; got {s:?}");
+        assert!(s.contains("OOM"),               "must name OOM; got {s:?}");
+        assert!(s.contains("panic"),             "must name the panic-backtrace pointer; got {s:?}");
+    }
+
+    // SWEEP-IGNORE-BEGIN
+    /// **Activity-tracker fallback witness** — the P2 path. No
+    /// exit notice and no dispatch error, but the planner DID
+    /// submit an IntentRequest before EOF. The synthesiser MUST
+    /// inline the `(kind, seq, outcome, ts)` breadcrumb AND
+    /// NAME the missing `PlannerExitNotice` gap. It MUST NOT
+    /// echo the pre-fix "(likely MaxTurnsExceeded /
+    /// TokensExceeded / DispatchIdle)" umbrella.
+    // SWEEP-IGNORE-END
+    #[test]
+    fn concrete_reason_activity_fallback() {
+        use crate::session_activity::{LastIntentOutcome, SessionActivity};
+        use raxis_types::IntentKind;
+        let activity = SessionActivity {
+            last_intent_kind:    IntentKind::StructuredOutput,
+            last_intent_seq:     7,
+            last_intent_outcome: LastIntentOutcome::Accepted,
+            recorded_at_unix:    1_715_694_342_i64,
+        };
+        let s = build_worker_post_exit_failure_reason(
+            "executor", None, None, Some(&activity),
+        );
+        assert_no_forbidden(&s);
+        assert!(s.contains("StructuredOutput"),  "must inline the intent kind; got {s:?}");
+        assert!(s.contains("#7"),                "must inline the seq; got {s:?}");
+        assert!(s.contains("Accepted"),          "must inline the outcome; got {s:?}");
+        assert!(s.contains("unix=1715694342"),   "must inline the timestamp; got {s:?}");
+        assert!(
+            s.contains("PlannerExitNotice"),
+            "must NAME the missing-notice gap concretely; got {s:?}"
+        );
+    }
+
+    /// The `used / limit` rendering is the dashboard's anchor for
+    /// extracting numerics out of a free-form reason string.
+    /// Pin the substring shape so a future formatter refactor
+    /// doesn't silently break the dashboard parser.
+    #[test]
+    fn used_limit_rendering_stable() {
+        let o = PlannerExitOutcome::MaxTurnsReached { used: 42, limit: 100 };
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        assert!(s.contains("42 used / 100 limit"), "must render `n used / m limit`; got {s:?}");
     }
 }

@@ -1965,10 +1965,12 @@ async fn handle_quarantine_plans_by(
     }
 }
 
+// SWEEP-IGNORE-BEGIN
 /// Internal error shim for the quarantine handlers — collapses the
 /// two distinct error sources (sqlite + the typed view-error) into
 /// one Display-able value the dispatcher can surface verbatim in
 /// `OperatorResponse::Error.detail`.
+// SWEEP-IGNORE-END
 #[derive(Debug)]
 enum QuarantineHandlerError {
     Sqlite(rusqlite::Error),

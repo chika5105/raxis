@@ -20,8 +20,8 @@
 
 use raxis_types::{
     DnsResolveRequest, DnsResolveResponse, EscalationRequest, EscalationResponse, IntentRequest,
-    IntentResponse, OperatorRequest, OperatorResponse, PlannerFetchRequest, PlannerFetchResponse,
-    TproxyAdmissionRequest, TproxyAdmissionResponse, WitnessSubmission,
+    IntentResponse, OperatorRequest, OperatorResponse, PlannerExitOutcome, PlannerFetchRequest,
+    PlannerFetchResponse, TproxyAdmissionRequest, TproxyAdmissionResponse, WitnessSubmission,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -73,6 +73,37 @@ pub enum IpcMessage {
     /// `request_id` echoes the planner's correlation id from the
     /// request.
     KernelPlannerFetchResponse(PlannerFetchResponse),
+
+    /// **Planner → kernel — `INV-FAILURE-REASON-CONCRETE-01`.** The
+    /// planner-core driver emits this notice immediately before
+    /// the role binary returns from `main`. It carries the
+    /// structured reason the dispatch loop terminated
+    /// ([`PlannerExitOutcome`]) so the kernel's `drive_planner_stream`
+    /// can capture a concrete cause for the Mode-B premature-exit
+    /// synthesis in `session_spawn_orchestrator`.
+    ///
+    /// **Wire contract.**
+    ///   * Sent at most once per session, immediately before EOF.
+    ///   * Kernel responds with [`Self::KernelPlannerExitNoticeAck`]
+    ///     so the request/reply shape of the planner socket is
+    ///     preserved. The planner ignores ack errors — the notice
+    ///     is best-effort forensic context, NOT a structural
+    ///     unstall mechanism (the kernel's EOF-driven Mode-B
+    ///     synthesis still fires even if the notice never
+    ///     arrives, e.g. SIGKILL / panic mid-loop).
+    ///
+    /// Anchors `INV-FAILURE-REASON-CONCRETE-01` (specs/invariants.md)
+    /// and `audit-paired-writes.md §14.8`. See `planner-harness.md`
+    /// for the role-binary contract.
+    PlannerExitNotice {
+        /// Structured reason the dispatch loop terminated.
+        outcome: PlannerExitOutcome,
+    },
+
+    /// Kernel acknowledgement of a [`Self::PlannerExitNotice`].
+    /// Carries no payload — the planner only needs to know its
+    /// frame round-tripped before issuing `LINUX_REBOOT_CMD_POWER_OFF`.
+    KernelPlannerExitNoticeAck,
 
     // -----------------------------------------------------------------------
     // Path A3 — in-guest tproxy admission + DNS resolution.

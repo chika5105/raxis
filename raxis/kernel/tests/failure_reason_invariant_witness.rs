@@ -340,8 +340,10 @@ const PRE_FIX_UMBRELLA_MARKER: &str =
 
 /// Spec-pinned template for the WITH-activity branch. Mirrors
 /// `kernel/src/session_activity.rs::render_clean_exit_with_activity`
-/// verbatim. The arguments match the canonical example in the
-/// spec (`specs/invariants.md §INV-FAILURE-REASON-MANDATORY-01`).
+/// verbatim AFTER the `INV-FAILURE-REASON-CONCRETE-01` retemplate
+/// — the pre-fix `(likely MaxTurnsExceeded / TokensExceeded /
+/// DispatchIdle)` umbrella tail is gone; the helper now NAMES
+/// the missing `PlannerExitNotice` gap concretely.
 fn synthesised_block_reason_with_activity(
     role: &str,
     kind: &str,
@@ -350,23 +352,37 @@ fn synthesised_block_reason_with_activity(
     ts: u64,
 ) -> String {
     format!(
-        "session_spawn_orchestrator: {role} VM exited cleanly \
-         after last intent {kind} #{seq} ({outcome}) at unix={ts}; \
-         no terminal intent submitted before EOF (likely \
-         MaxTurnsExceeded / TokensExceeded / DispatchIdle).",
+        "session_spawn_orchestrator: {role} VM exited via clean \
+         EOF after last intent {kind} #{seq} ({outcome}) at \
+         unix={ts}; no terminal intent submitted and no \
+         PlannerExitNotice was received before the socket \
+         closed. The planner driver emits an exit notice for \
+         every documented exit shape (max_turns / max_tokens / \
+         idle / explicit give-up / clean completion); the \
+         absence of one here means the process was killed \
+         BEFORE the driver's exit-notice emit could fire — \
+         cross-correlate with the substrate's SessionVmExited \
+         event for the host-side exit code.",
     )
 }
 
 /// Spec-pinned template for the WITHOUT-activity branch. Mirrors
 /// `kernel/src/session_activity.rs::render_clean_exit_without_activity`
-/// verbatim.
+/// verbatim AFTER the `INV-FAILURE-REASON-CONCRETE-01`
+/// retemplate.
 fn synthesised_block_reason_without_activity(role: &str) -> String {
     format!(
-        "session_spawn_orchestrator: {role} VM exited cleanly \
-         without ever submitting an IntentRequest before EOF; \
-         likely planner-boot-error / model-init failure / \
-         dispatch loop returned Idle on the very first turn \
-         (no terminal intent observed).",
+        "session_spawn_orchestrator: {role} VM exited via clean \
+         EOF without ever submitting an IntentRequest AND \
+         without shipping a PlannerExitNotice — i.e. the planner \
+         process died before its first model turn. This is the \
+         planner-boot / model-init failure surface: cold-start \
+         panic, model-init OOM (check the host cgroup \
+         memory.peak), missing RAXIS_MODEL_ID / model-asset \
+         lookup failure, or a substrate-level VM teardown during \
+         boot. Cross-correlate with the substrate's \
+         SessionVmExited audit event for the host-side exit \
+         code and the planner stderr for a panic backtrace.",
     )
 }
 
@@ -469,7 +485,14 @@ fn tasks_block_reason_clean_exit_with_activity_is_non_generic() {
         "#7",               // sequence_number turn-counter proxy
         "Accepted",         // outcome class
         "unix=1715694342",  // timestamp correlator
-        "MaxTurnsExceeded", // operator hint about likely cause
+        // `INV-FAILURE-REASON-CONCRETE-01` — the post-retemplate
+        // helper NAMES the missing exit-notice gap concretely
+        // instead of hedging with the iter56 umbrella; the
+        // operator-actionable marker is therefore the
+        // `PlannerExitNotice` substring + the substrate cross-
+        // correlation pointer.
+        "PlannerExitNotice",
+        "SessionVmExited",
     ];
     for marker in must_contain {
         assert!(
@@ -565,7 +588,14 @@ fn tasks_block_reason_clean_exit_without_activity_is_non_generic() {
         "reviewer",                          // role disambiguation
         "without ever submitting",           // distinguishing prefix
         "IntentRequest",                     // dispatch-channel marker
-        "planner-boot-error",                // operator hint about likely cause
+        // `INV-FAILURE-REASON-CONCRETE-01` — the post-retemplate
+        // helper names the boot-failure surface concretely
+        // (cold-start panic / model-init OOM / missing
+        // RAXIS_MODEL_ID) instead of the pre-fix
+        // `planner-boot-error / model-init failure / dispatch
+        // loop returned Idle on the very first turn` umbrella.
+        "planner-boot",                      // operator hint about likely cause
+        "PlannerExitNotice",                 // missing-notice gap is named explicitly
     ];
     for marker in must_contain {
         assert!(

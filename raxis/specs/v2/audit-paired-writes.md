@@ -1830,6 +1830,33 @@ See `specs/invariants.md §INV-FAILURE-REASON-MANDATORY-01` for the canonical te
 
 **Future hardening.** A follow-up will replace the `Option<String>` payload field on the audit-event variants in the table above with `FailureReason`, so deserialization of a chain-segment with an empty reason fails closed at the verifier (the offline verifier in `crates/audit-verify` would then surface a `Finding::EmptyFailureReason` for any pre-fix segment). Until then the verifier accepts any string and the invariant is enforced kernel-side only.
 
+### §14.8.1 `INV-FAILURE-REASON-CONCRETE-01` — failure-reason concreteness for terminal-failure event kinds
+
+**Statement.** In addition to `INV-FAILURE-REASON-MANDATORY-01`'s non-empty / non-whitespace gate, every paired audit event whose underlying SQLite mutation drives an entity into a terminal-failure or blocked state MUST carry a CONCRETE reason — never a multi-option umbrella string, never an opaque placeholder. The reason MUST name the SPECIFIC cause and (where applicable) the operator-actionable remedy.
+
+**Forbidden-phrase set (case-insensitive).** The audit chain MUST NOT carry any terminal-failure event whose reason payload contains any of the following substrings:
+
+  * `MaxTurnsExceeded / TokensExceeded` (the canonical iter56 umbrella head; the rest of the umbrella tail variants `TokensExceeded / DispatchIdle` and `DispatchIdle / process death` are also forbidden).
+  * `(no reason)`
+  * `see logs`
+  * `internal error` (when used as a `failure_reason` payload value; the dashboard's HTTP 500 wire body is intentionally generic for security reasons and is allowlisted in `kernel/tests/concrete_reason_sweep.rs`).
+  * `something went wrong`
+  * `unknown reason` / `unspecified reason`
+
+The same rule applies to the SQLite columns these events project from: `tasks.block_reason`, `initiatives.abort_reason`, `sessions.revoke_reason`. The dashboard's `<FailureReasonPanel>` projection reads these columns directly; a placeholder value bypasses the kernel-bug empty-state badge that fires on `null` / `""` and is therefore strictly worse than a missing reason.
+
+**Justification.** A reason that hedges between possibilities (the iter56 multi-option umbrella) is operationally indistinguishable from a missing reason — the operator cannot triage either way. Concreteness is what makes the audit chain operator-actionable: every Failed entity ships a reason that names the SPECIFIC cause AND the remedy, so the on-call engineer can route the page without grepping `kernel.stderr.log`.
+
+**Enforcement.** Three layers:
+
+  1. **Wire-level structured causes** — the planner ships a `PlannerExitOutcome` enum (one variant per documented exit shape: `MaxTurnsReached`, `MaxTokensReached`, `IdleNoTerminalIntent`, `ToolErrorBudgetExhausted`, `ExplicitGiveUp`, `CleanCompletion`, `Unknown`) over `IpcMessage::PlannerExitNotice` immediately before EOF. The kernel formats it through `PlannerExitOutcome::format_concrete_reason` whose match is exhaustive over the enum.
+  2. **Per-formatter inline unit tests** — `session_spawn_orchestrator::concrete_reason_tests` drives `build_worker_post_exit_failure_reason` into every variant and asserts the surfaced reason (a) is non-empty, (b) does not contain a forbidden phrase, (c) names the SPECIFIC cause.
+  3. **File-sweep regression guard** — `kernel/tests/concrete_reason_sweep.rs` walks `kernel/src/**.rs` and `dashboard-fe/src/**.{ts,tsx}` (stripping `SWEEP-IGNORE-BEGIN`/`SWEEP-IGNORE-END` regions) and fails if any non-allowlisted file contains a forbidden phrase.
+
+**Cross-references.** `INV-FAILURE-REASON-CONCRETE-01` (`specs/invariants.md`); `dashboard-hardening.md §5.5.1` (the dashboard half of the contract — post-fix the kernel-bug badge fires only on actual gaps, never on the iter56 umbrella); `planner-harness.md` (the `PlannerExitOutcome` wire surface); `crates/types/src/planner_exit.rs` (the structured cause); `kernel/src/session_spawn_orchestrator.rs::build_worker_post_exit_failure_reason` (the Mode-B synthesiser); `kernel/tests/concrete_reason_sweep.rs` (the regression sweep).
+
+**Verification.** Inline unit tests in `kernel/src/session_spawn_orchestrator.rs::concrete_reason_tests` (`concrete_reason_max_turns_reached`, `concrete_reason_max_tokens_reached`, `concrete_reason_idle_no_terminal_intent`, `concrete_reason_tool_error_budget_exhausted`, `concrete_reason_explicit_give_up`, `concrete_reason_unknown_variant`, `concrete_reason_clean_completion_in_synth_path`, `concrete_reason_dispatch_error_fallback`, `concrete_reason_no_notice_no_dispatch_error_fallback`, `used_limit_rendering_stable`); type-side tests in `crates/types/src/planner_exit.rs::tests`; the file sweep `no_umbrella_reason_in_kernel_or_dashboard_emit_sites`.
+
 ---
 
 ## §15 — Conformance kit

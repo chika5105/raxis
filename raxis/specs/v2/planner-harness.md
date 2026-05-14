@@ -2675,6 +2675,67 @@ elsewhere:
 - `INV-VM-CAP-03` (operator-published image OCI digest pinning) — the
   Executor and Orchestrator path; `INV-PLANNER-HARNESS-02` is the
   Reviewer-specific exception.
+- `INV-FAILURE-REASON-CONCRETE-01` (`specs/invariants.md`) — the
+  planner driver loop's exit shapes are wired to the kernel via the
+  `PlannerExitOutcome` enum (see §13.1 below) so the Mode-B
+  premature-exit synthesiser in
+  `session_spawn_orchestrator::build_worker_post_exit_failure_reason`
+  produces concrete operator-facing reasons instead of the iter56
+  multi-option umbrella.
+
+### §13.1 `PlannerExitOutcome` — Wire-Level Driver Exit Shape
+
+The planner-core's `DispatchLoop` terminates with a
+`DispatchOutcome` whose four documented shapes (`TerminalTool`,
+`Idle`, `MaxTurnsExceeded`, `TokensExceeded`) map onto the four
+non-`Scaffold` `DriverOutcome` variants. The driver folds those
+shapes (plus `Scaffold` and any pre-loop driver error) onto a
+single wire-level enum, `raxis_types::PlannerExitOutcome`
+(`crates/types/src/planner_exit.rs`), and ships it to the
+kernel via a NEW IPC frame:
+
+```rust
+// raxis-ipc::IpcMessage variant — best-effort planner→kernel
+// notice emitted immediately before EOF.
+IpcMessage::PlannerExitNotice { outcome: PlannerExitOutcome }
+IpcMessage::KernelPlannerExitNoticeAck
+```
+
+`PlannerExitOutcome` variants:
+
+| Variant | Surfaced when | Carries |
+|---|---|---|
+| `CleanCompletion { tool_name }` | A terminal tool fired (`task_complete` / `report_failure` / `submit_review` / etc.). | Tool name (forensic; the EarlyResponse cascade on the matching `IntentRequest` already drove the FSM). |
+| `MaxTurnsReached { used, limit }` | The dispatch loop reached `DispatchConfig::max_turns` without a terminal tool. | `used` (= the `max_turns` ceiling that tripped) and the `limit` (so the dashboard renders `"N used / M limit"`). |
+| `MaxTokensReached { which, used, limit }` | A cumulative per-session token cap tripped (`input` / `output` / `total`). | The axis, the cumulative tokens, and the configured ceiling. |
+| `IdleNoTerminalIntent { final_text_len }` | The model said `end_turn` without selecting a terminal tool. | Length of the final assistant text (forensic; full text in planner stderr at `step:"planner-idle"`). |
+| `ToolErrorBudgetExhausted { errors, budget }` | Future-reserved — no driver path emits this today. | Counter + budget for forward compatibility. |
+| `ExplicitGiveUp { reason }` | The driver bailed before the dispatch loop could terminate normally (KSB-assembly failure, sidecar env missing, …). | Verbatim driver-error chain. |
+| `Unknown { detail }` | Defensive — kernel saw a notice variant it could not decode (kernel/planner minor-rev skew). | Textual description. |
+
+**Driver-side wiring.** `crates/planner-core/src/driver.rs::driver_outcome_to_exit_outcome`
+is the pure-mapping function (no I/O) — given a `DriverOutcome`
+and the configured `max_turns`, it returns the matching
+`PlannerExitOutcome`. The role binary's
+`run_role_session_with_connected_transport` calls
+`IntentSubmitter::submit_exit_notice(outcome)` right after the
+dispatch loop's terminal arm fires; ack failures are logged at
+`step:"planner-exit-notice"` and swallowed (best-effort —
+the kernel's EOF-driven Mode-B synthesis still fires on a
+missing notice).
+
+**Kernel-side wiring.** `kernel/src/ipc/server.rs::drive_planner_stream`
+captures the most-recent `PlannerExitNotice` it observes and
+returns it on `PlannerStreamOutcome::last_exit_notice`. The
+session-spawn caller in
+`kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`
+threads the captured notice (plus the kernel-side dispatch
+error string, if any) into
+`build_worker_post_exit_failure_reason`, which produces the
+concrete operator-facing `block_reason`. The synthesiser is
+pinned per-variant by the inline unit tests in
+`concrete_reason_tests` and globally by the sweep test in
+`kernel/tests/concrete_reason_sweep.rs`.
 
 ---
 ## §14 — Implementation Plan

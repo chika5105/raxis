@@ -406,10 +406,21 @@ bearing kernel concern with **three mutually exclusive paths**:
       `bump_executor_crash_retry_count_in_tx` — Step 12 budget
       enforcement; without this a misbehaving planner could exit-
       and-be-retried unboundedly.
-   3. Transition `Running → Failed` with a structured justification
-      (`"session_spawn_orchestrator: <role> VM exited without
-      submitting a terminal intent (MaxTurnsExceeded / TokensExceeded
-      / DispatchIdle / process death) …"`). The cascade in
+   3. Transition `Running → Failed` with a CONCRETE justification
+      formatted from the `PlannerExitOutcome` notice the planner
+      shipped over `IpcMessage::PlannerExitNotice` immediately
+      before EOF (per `INV-FAILURE-REASON-CONCRETE-01`). Example
+      reasons:
+      * `"executor planner reached max_turns budget (60 used / 60
+        limit) without submitting a terminal intent — raise
+        RAXIS_PLANNER_MAX_TURNS …"`
+      * `"reviewer planner exceeded cumulative max_tokens cap on
+        the input axis (150000 used / 100000 limit) — raise
+        RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL …"`
+      When the planner exited without shipping a notice (SIGKILL
+      / OOM / panic before the driver's exit-notice emit), the
+      synthesiser names THAT gap explicitly rather than hedging
+      between possibilities. The cascade in
       `transition_task_in_tx` closes the `Active` activation row.
    4. Commit, then fire `respawn_orchestrator_for_initiative` so the
       Orchestrator's next decision-cycle observes the Failed task and
