@@ -7214,6 +7214,7 @@ share one view of the budget.
 * `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_precedence_01_orchestrator_path_ignores_task_arm`
 * `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_compiled_default_matches_planner_core` (pins the kernel-side `DEFAULT_PLANNER_MAX_TURNS` constant against `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`)
 * `kernel/src/initiatives/lifecycle.rs::tests::inv_planner_max_turns_precedence_01_parser_rejects_zero`
+* `kernel/tests/extended_e2e_support/multi_initiative.rs::tests::sibling_plan_toml_carries_max_turns_150` (iter52 parity guard: the Rust source-of-truth `sibling_plan_toml()` MUST declare `max_turns = 150` for the sibling materializer so the kernel resolves it via `source=task` rather than `source=compiled-default=100`, mirroring the primary plan's `materialize-records` budget)
 
 **Enforcement sites:**
 * `kernel/src/session_spawn_orchestrator.rs::resolve_planner_max_turns_for` — the resolver

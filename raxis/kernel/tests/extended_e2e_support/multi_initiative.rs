@@ -112,11 +112,29 @@ materially testable.
 name    = "E2E realistic sibling"
 lane_id = "e2e-realistic-sibling-lane""#;
 
+// V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` parity guard. Iter52
+// surfaced a drift between this Rust source-of-truth and the
+// auto-refreshed example bundle at
+// `raxis/live-e2e/examples/plan_sibling.toml`: commit `5946b18`
+// landed `max_turns = 150` on the example but missed this constant,
+// so the kernel resolved `sibling-materialize-records` via the
+// compiled-default arm (`source=compiled-default, resolved=100`,
+// visible in iter52's `PlannerMaxTurnsResolved` log lines) instead
+// of the per-task arm. The TOML comment block below is byte-stable
+// against the example bundle so a future
+// `RAXIS_E2E_REFRESH_EXAMPLES=1` produces a no-op diff. The
+// `sibling_plan_toml_carries_max_turns_150` test below is the
+// witness pin against the regression returning.
 const SIBLING_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Sibling materializer Executor (P3-6) ────────────────
 [[tasks]]
 task_id            = "sibling-materialize-records"
 name               = "Sibling-initiative materializer (audit-chain isolation witness)"
 session_agent_type = "Executor"
+# Same workload as `materialize-records` (25 pg rows + 25 mongo docs +
+# 50 file writes + commit). 150 mirrors the primary materializer for
+# the audit-chain isolation witness — both initiatives must converge.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 150
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
 description = """
 "#;
@@ -327,6 +345,59 @@ mod tests {
             .and_then(|w| w.get("lane_id"))
             .and_then(|l| l.as_str());
         assert_eq!(lane, Some(SIBLING_LANE_ID));
+    }
+
+    /// Iter52 parity guard for `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+    ///
+    /// The sibling initiative carries the same materializer workload
+    /// as the primary plan's `materialize-records` task (25 pg rows +
+    /// 25 mongo docs + 50 file writes + commit). The primary task
+    /// declares `max_turns = 150` in
+    /// `super::plan_realistic::REALISTIC_PLAN_MATERIALIZER_HEAD`;
+    /// the sibling task MUST declare the same ceiling so the audit-
+    /// chain isolation witness compares two initiatives that have
+    /// converged under matching budgets.
+    ///
+    /// Iter52 surfaced a parity gap where the auto-refreshed example
+    /// bundle at `live-e2e/examples/plan_sibling.toml` had been
+    /// updated to `max_turns = 150` (commit `5946b18`) but this Rust
+    /// source-of-truth was missed; the kernel then resolved the
+    /// sibling task's ceiling via the compiled-default arm
+    /// (`PlannerMaxTurnsResolved {source=compiled-default,
+    /// resolved=100}` — visible in the iter52 partial-run kernel log)
+    /// instead of the per-task arm. This test guards against the
+    /// regression returning by asserting on the post-decode value.
+    #[test]
+    fn sibling_plan_toml_carries_max_turns_150() {
+        let toml_text = sibling_plan_toml();
+        let v: toml::Value =
+            toml::from_str(&toml_text).expect("sibling plan must decode");
+        let tasks = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("[[tasks]] array");
+        let max_turns_per_task: Vec<(&str, i64)> = tasks
+            .iter()
+            .map(|t| {
+                let id = t.get("task_id").and_then(|i| i.as_str())
+                    .expect("task_id");
+                let mt = t.get("max_turns").and_then(|m| m.as_integer())
+                    .expect(
+                        "INV-PLANNER-MAX-TURNS-PRECEDENCE-01 parity: \
+                         every sibling-plan task MUST declare an explicit \
+                         max_turns; iter52 partial-run showed the kernel \
+                         falling back to compiled-default=100 when this \
+                         was omitted",
+                    );
+                (id, mt)
+            })
+            .collect();
+        assert_eq!(
+            max_turns_per_task,
+            vec![(TASK_SIBLING_MATERIALIZE, 150)],
+            "sibling-materialize-records MUST declare max_turns = 150 \
+             (parity with primary plan_realistic.rs `materialize-records`)",
+        );
     }
 
     #[test]
