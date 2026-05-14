@@ -1257,9 +1257,12 @@ fallback service so any non-`/api/*` path serves the bundle's
 **Stack (final).**
 
 * React 18 + TypeScript (strict; `noUnusedLocals`, `noUnusedParameters`)
-* Vite 5 for build tooling (`tsc -b && vite build`); JS chunks
+* Vite 6 for build tooling (`tsc -b && vite build`); JS chunks
   split into `react`, `query`, `monaco`, `dagre`, `index` for
-  cache stability
+  cache stability. (Bumped from Vite 5 in 2026-05 to take the
+  GHSA-4w7w-66w2-5vf9 / CVE-2026-39365 path-traversal patch in
+  vite ≥ 6.4.2; vitest was bumped 2.x → 3.x in lockstep because
+  vitest 3 is the first line that supports vite 6.)
 * React Router 6 (`BrowserRouter`)
 * `@tanstack/react-query` 5 for data fetching, caching, and
   background refetch
