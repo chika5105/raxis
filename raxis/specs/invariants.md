@@ -92,7 +92,8 @@
 | KSB capabilities envelope — V2.6 | INV-KSB-CAPABILITIES-PARITY-01, INV-KSB-CAPABILITIES-ROLE-SCOPED-01, INV-KSB-CAPABILITIES-TURN-COHERENT-01 | 3 |
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
 | Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
-| **Total** | | **115** |
+| Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
+| **Total** | | **116** |
 
 ---
 
@@ -7105,6 +7106,152 @@ spent >75% of its budget on a single coherent edit should prefer
 
 **Canonical home.** `v2/v2_extended_gaps.md §2.4` (KSB schema);
 `v2/v2-deep-spec.md §Step 12` (planner-harness ceiling resolution).
+
+---
+
+## §11.14 — Grafana provisioning lifecycle (INV-GRAFANA-*)
+
+The extended-e2e observability stack stands or falls on a single
+container-runtime contract: when Grafana starts, the YAML files
+under `raxis/observability/grafana/provisioning/` are picked up
+and applied. There is no Grafana-side reload API for datasources
+in 11.x — the only deterministic moment to assert provisioning
+state is "after `docker compose up --wait` returns." iter52's
+metrics validator flagged a regression in exactly this surface
+(operator reported empty dashboards because the wrong admin
+credentials returned a misleading view, attributing an auth
+problem to a provisioning failure). This invariant pins the
+contract mechanically so no future drift — in the YAML, in the
+compose mount paths, or in the datasource URL — can slip into
+main without breaking the witness.
+
+### INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 — Grafana auto-provisions the Prometheus datasource + every raxis dashboard at stack-up
+
+**Statement.** After `docker compose -p raxis-live-e2e-test -f
+raxis/live-e2e/docker-compose.extended.e2e.yml up -d --wait`
+returns successfully, Grafana on `http://127.0.0.1:3000` MUST
+satisfy all four sub-properties below. Each is independently
+assertable from the Grafana HTTP API by an operator probe armed
+with the canonical admin credentials (`admin` /
+`GF_SECURITY_ADMIN_PASSWORD` — pinned in the compose env block
+to `raxis-e2e` and to be rotated only in lock-step with the
+witness):
+
+  1. **Datasource registration.** `GET /api/datasources` MUST
+     return a JSON array containing a single entry with
+     `uid == "prometheus"`, `type == "prometheus"`,
+     `access == "proxy"`, `url == "http://prometheus:9090"`,
+     `isDefault == true`, `readOnly == true`. The URL host
+     `prometheus` is the compose service name — the kernel of
+     the gotcha: `127.0.0.1` and `localhost` inside the Grafana
+     container resolve to Grafana itself and silently break every
+     panel query without breaking datasource registration.
+  2. **Dashboard provisioning.** `GET
+     /api/search?type=dash-db&folderUIDs=raxis` MUST return
+     exactly eleven entries, with the uid set
+     `{raxis-00-overview, raxis-10-isolation, raxis-15-ipc,
+     raxis-20-lifecycle, raxis-30-audit, raxis-40-planner,
+     raxis-50-credproxies, raxis-60-egress, raxis-70-dashboard,
+     raxis-80-budget-reviewer, raxis-90-git}`. The count and the
+     uid set are both load-bearing: a drift in either signals a
+     dashboard provider misconfiguration or a renamed
+     dashboard JSON whose uid doesn't match its
+     `provisioning/dashboards/raxis.yaml` path.
+  3. **Overview fetchability.** `GET
+     /api/dashboards/uid/raxis-00-overview` MUST return a
+     dashboard envelope whose `dashboard.title` field contains
+     `"00 Overview"`. This is the canonical "home" dashboard
+     (`GF_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/00-overview.json`)
+     — if it can't be fetched by uid, anonymous browser landing
+     is broken too.
+  4. **Proxy query.** `GET
+     /api/datasources/proxy/uid/prometheus/api/v1/query?query=up`
+     MUST return `{"status":"success", ...}` with at least one
+     series in `data.result`. This is the end-to-end witness
+     that the datasource URL actually resolves to a running
+     Prometheus: registration without working query proxy is
+     the failure mode §3.1 of `recipes/ops/19-grafana-datasource-provisioning.md`
+     calls out specifically.
+
+**Justification.** Eleven raxis dashboards (`00-overview` through
+`90-git`) all pin `datasource.uid = "prometheus"` in their panel
+queries — this uid is the single contract between the dashboard
+JSONs and the datasource YAML. A drift in any of:
+
+  * the datasource YAML (missing `apiVersion: 1`; key casing
+    `isDefault` vs `is_default`; deprecated `access: direct`;
+    URL host typo),
+  * the bind mount in the compose file
+    (`../observability/grafana/provisioning:/etc/grafana/provisioning:ro`
+    — relative to the compose file's directory, not the caller's
+    cwd; macOS Docker Desktop has been known to silently drop
+    bind mounts when the host path carries a `com.apple.*`
+    xattr), or
+  * the dashboard provider YAML
+    (`provisioning/dashboards/raxis.yaml` — `path:` typo,
+    `orgId:` drift, removed `apiVersion: 1`),
+
+manifests as "Grafana UI is up, but every panel says No data" —
+a symptom that is impossible to distinguish from "Prometheus
+has no metrics yet" without poking the four API endpoints
+above. The validator that flagged iter52's P0 ALSO hit a
+related-but-distinct gotcha: `GF_AUTH_ANONYMOUS_ENABLED: "true"`
++ `GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer` means `GET
+/api/datasources` succeeds without ANY credentials (returning
+the Viewer's view, which is the same as the admin's view for
+the datasource list), so an auth-misconfigured probe that
+expected a 401 and got a 200 with what looked like an empty
+list led the validator to attribute the symptom to provisioning
+when no provisioning regression existed. The witness asserts
+the strict positive shape so neither the auth path nor the
+provisioning path can be the silent cause of a false report.
+
+**Scenario.** A contributor edits
+`raxis/observability/grafana/provisioning/datasources/prometheus.yaml`
+to change `url: http://prometheus:9090` to `url:
+http://localhost:9090` while debugging a Prometheus
+configuration issue locally. They forget to revert before
+pushing. The datasource still REGISTERS at stack-up (Grafana
+does not probe the URL during provisioning); the operator opens
+the overview dashboard and every panel reads `No data`.
+Without this invariant, the operator's first hypothesis is
+"Prometheus isn't scraping" — they spend twenty minutes
+poking at the OTel collector and scrape configs before
+finding the YAML drift. With this invariant + witness, the
+sub-property §1.url check fails on the next CI run (or local
+pre-commit) with `datasource.url mismatch want=http://prometheus:9090
+got=http://localhost:9090` — root cause localized in seconds.
+The §4 proxy query is the defense-in-depth: a future URL drift
+to a syntactically-plausible-but-wrong host would still pass
+the §1 string check if someone updated the witness's expected
+URL without thinking, but the §4 proxy query catches it
+because the resulting fetch fails.
+
+**Witness.** The shell script
+`raxis/live-e2e/witness/inv_grafana_datasource_provisioned_at_stack_up_01.sh`:
+
+* `--bounce` mode runs `docker compose down -v` (wiping the
+  named `grafana_data` volume so provisioning runs against a
+  fresh Grafana DB), then `up -d --wait`, then verifies — this
+  is the canonical CI-gate / pre-commit form of the witness.
+* Default mode (no `--bounce`) probes whatever stack is
+  currently up — useful when an operator wants a fast read-only
+  check without disturbing in-flight state.
+* Twenty-two checks across the four sub-properties (§1 — 7
+  datasource fields, §2 — 12 dashboard checks (count + each
+  uid), §3 — title substring, §4 — proxy status + non-empty
+  result).
+* Exit 0 ⇔ invariant HOLDS; exit 1 ⇔ at least one check failed
+  (every failure line in stderr names the field, the expected
+  value, and the observed value); exit 2 ⇔ prerequisites
+  missing (`curl`/`jq`/`docker`) or stack not up.
+
+**Canonical home.** `v3/observability-prometheus.md §4`
+(Grafana dashboards) — the dashboards-and-datasource contract
+description. Operator-facing recipe:
+`guides/recipes/ops/19-grafana-datasource-provisioning.md`
+(canonical YAML + the six known gotchas + the witness
+invocation).
 
 ---
 

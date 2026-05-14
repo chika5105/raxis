@@ -431,6 +431,33 @@ declared in
 that uid is the contract every dashboard pins. Renaming the uid
 is a coordinated change with every dashboard JSON.
 
+### 4.1 Provisioning-at-stack-up contract
+
+The provisioning surface — datasource YAML, dashboard provider
+YAML, dashboard JSONs, and the three Grafana bind/named volume
+mounts in `raxis/live-e2e/docker-compose.extended.e2e.yml` — is
+pinned by `INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01`
+(`specs/invariants.md §11.14`). After `docker compose -p
+raxis-live-e2e-test -f docker-compose.extended.e2e.yml up -d
+--wait` returns, the Grafana HTTP API MUST report (a) the
+Prometheus datasource at uid `prometheus` with `url:
+http://prometheus:9090` and `access: proxy`, (b) exactly eleven
+dashboards under the `raxis` folder uid (the set listed in the
+table above), (c) the overview dashboard fetchable by uid, and
+(d) the datasource able to proxy `query=up` to Prometheus
+successfully.
+
+The witness script
+`raxis/live-e2e/witness/inv_grafana_datasource_provisioned_at_stack_up_01.sh`
+asserts the four sub-properties in twenty-two checks; run with
+`--bounce` for the canonical cold-boot gate (`docker compose
+down -v` + `up -d --wait` + verify). The operator-facing recipe
+`guides/recipes/ops/19-grafana-datasource-provisioning.md`
+documents the canonical YAML and the six known gotchas (URL
+host = compose service name not `localhost`; admin password is
+`raxis-e2e` not `admin`; Grafana 11.x silently skips YAML
+without `apiVersion: 1`; etc.).
+
 ## 5. Perf harness
 
 The `cargo xtask perf` runner in
