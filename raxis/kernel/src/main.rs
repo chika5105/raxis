@@ -1199,6 +1199,8 @@ async fn main() {
     let heartbeat_handle = {
         let data_dir_for_hb = data_dir.clone();
         let policy_for_hb = Arc::clone(&policy);
+        let store_for_hb  = Arc::clone(&store);
+        let hub_for_hb    = Arc::clone(&observability_hub);
         let pid = std::process::id();
         tokio::spawn(async move {
             runtime::heartbeat_loop(
@@ -1206,6 +1208,8 @@ async fn main() {
                 pid,
                 started_at,
                 policy_for_hb,
+                store_for_hb,
+                hub_for_hb,
                 heartbeat_shutdown_rx,
             )
             .await

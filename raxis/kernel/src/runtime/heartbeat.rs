@@ -25,6 +25,17 @@ use raxis_runtime::{
     HEARTBEAT_FILE, HEARTBEAT_INTERVAL, KernelLifecycleState, RUNTIME_DIR, Snapshot,
     unix_now_secs, write_atomic,
 };
+use raxis_store::Store;
+use raxis_observability::ObservabilityHub;
+
+/// Closed set of session agent types the heartbeat emits a
+/// `raxis.session.active` gauge for, mirroring
+/// `raxis_types::fsm::SessionAgentType::ALL`. Iterating this list
+/// (rather than just emitting whatever the SQL query returned)
+/// guarantees Prometheus sees a stable three-line gauge per scrape
+/// — even when a role currently has zero active sessions, the
+/// dashboard still shows a `0` line rather than a gap.
+const SESSION_AGENT_TYPES: &[&str] = &["Orchestrator", "Executor", "Reviewer"];
 
 /// Collect a snapshot from the kernel's live in-memory state. This is
 /// the function the production loop calls; tests build snapshots
@@ -90,6 +101,8 @@ pub async fn run_loop(
     kernel_pid: u32,
     started_at: u64,
     policy: Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
+    store: Arc<Store>,
+    hub: Arc<ObservabilityHub>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
     let dest_path = data_dir.join(RUNTIME_DIR).join(HEARTBEAT_FILE);
@@ -105,6 +118,7 @@ pub async fn run_loop(
         KernelLifecycleState::Running,
         &policy,
     );
+    emit_observability_gauges(hub.as_ref(), &store, started_at).await;
 
     let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -123,6 +137,7 @@ pub async fn run_loop(
                     KernelLifecycleState::Running,
                     &policy,
                 );
+                emit_observability_gauges(hub.as_ref(), &store, started_at).await;
             }
             _ = &mut shutdown => {
                 write_one(
@@ -132,9 +147,63 @@ pub async fn run_loop(
                     KernelLifecycleState::Stopping,
                     &policy,
                 );
+                emit_observability_gauges(hub.as_ref(), &store, started_at).await;
                 return Ok(());
             }
         }
+    }
+}
+
+/// Emit the per-tick observability gauges:
+///   * `raxis.kernel.uptime.seconds` — elapsed since the kernel
+///     started.
+///   * `raxis.session.active` — per-agent-type active session count.
+///
+/// Hub is a `&ObservabilityHub` (cheap when disabled — every emit
+/// site short-circuits). Failure paths log to stderr and do NOT
+/// propagate; the heartbeat loop must never die because of an
+/// observability blip (`INV-OTEL-08`).
+async fn emit_observability_gauges(
+    hub: &ObservabilityHub,
+    store: &Arc<Store>,
+    started_at: u64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+
+    // Kernel uptime gauge — independent of the SQL query so we still
+    // emit it even if the store query below fails.
+    let now = unix_now_secs();
+    let uptime = now.saturating_sub(started_at);
+    crate::observability::record_kernel_uptime(hub, uptime as i64);
+
+    // Per-agent-type active session gauge — query the live store.
+    // Holds the kernel store mutex briefly (one aggregation query).
+    let counts = {
+        let conn = store.lock().await;
+        match raxis_store::views::sessions::active_counts_by_agent_type(&conn) {
+            Ok(v)  => v,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"heartbeat_session_gauge_failed\",\
+                     \"reason\":\"{e}\"}}",
+                );
+                return;
+            }
+        }
+    };
+
+    // Iterate the closed set so Prometheus sees a stable three-line
+    // gauge per scrape. Roles with zero active sessions still emit a
+    // `0` so the dashboard has a continuous time series.
+    for kind in SESSION_AGENT_TYPES {
+        let count = counts
+            .iter()
+            .find(|(k, _)| k == kind)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        crate::observability::record_sessions_active(hub, kind, count as i64);
     }
 }
 
@@ -192,6 +261,17 @@ mod tests {
         );
     }
 
+    fn fresh_disabled_hub() -> Arc<ObservabilityHub> {
+        Arc::new(ObservabilityHub::disabled())
+    }
+
+    fn fresh_in_memory_store() -> Arc<Store> {
+        // `Store::open` runs migrations against an in-memory SQLite —
+        // gives the heartbeat's `active_counts_by_agent_type` query a
+        // valid `sessions` table to scan even when no rows exist.
+        Arc::new(raxis_test_support::mem_store())
+    }
+
     #[tokio::test]
     async fn run_loop_writes_initial_heartbeat_then_stops_on_shutdown() {
         let tmp = TempDir::new().unwrap();
@@ -204,9 +284,14 @@ mod tests {
         let started_at = unix_now_secs();
 
         let policy_for_loop = Arc::clone(&policy);
+        let store_for_loop  = fresh_in_memory_store();
+        let hub_for_loop    = fresh_disabled_hub();
         let data_dir = tmp.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            run_loop(data_dir, pid, started_at, policy_for_loop, rx).await
+            run_loop(
+                data_dir, pid, started_at, policy_for_loop,
+                store_for_loop, hub_for_loop, rx,
+            ).await
         });
 
         // Allow the eager initial write to land; 50ms is far less
@@ -239,9 +324,14 @@ mod tests {
         let started_at = unix_now_secs();
 
         let policy_for_loop = Arc::clone(&policy);
+        let store_for_loop  = fresh_in_memory_store();
+        let hub_for_loop    = fresh_disabled_hub();
         let data_dir = tmp.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            run_loop(data_dir, pid, started_at, policy_for_loop, rx).await
+            run_loop(
+                data_dir, pid, started_at, policy_for_loop,
+                store_for_loop, hub_for_loop, rx,
+            ).await
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;

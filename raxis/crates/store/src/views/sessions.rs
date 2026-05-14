@@ -95,6 +95,62 @@ pub fn active_counts(conn: &RoConn) -> Result<SessionStateCounts, SessionViewErr
     active_counts_at(conn, unix_now_secs())
 }
 
+/// Count active sessions split by `session_agent_type` (Orchestrator /
+/// Executor / Reviewer). Returns one entry per agent type that has at
+/// least one row in the `sessions` table whose `revoked = 0 AND
+/// expires_at > now` predicate evaluates to true. Agent types with
+/// zero active sessions do NOT appear in the returned vec — callers
+/// that want a stable three-row gauge (one per type) MUST iterate
+/// the closed set themselves and look up the count from this map.
+///
+/// The label values returned are exactly the SQL strings stored in
+/// `sessions.session_agent_type`, which by the migration-5 CHECK
+/// constraint are drawn from the closed lexicon
+/// `{"Orchestrator", "Executor", "Reviewer"}` (mirroring
+/// `raxis_types::fsm::SessionAgentType::as_sql_str`). Rows with NULL
+/// `session_agent_type` (V1-legacy) are omitted from the result.
+///
+/// Wired by the kernel heartbeat loop
+/// (`kernel/src/runtime/heartbeat.rs::run_loop`) which emits a
+/// `raxis.session.active` gauge per agent type on every tick. Without
+/// this query the gauge would have to poll a per-role atomic counter
+/// maintained at every spawn / terminate site — a significantly more
+/// invasive wiring whose only advantage is millisecond-level
+/// freshness, which the dashboard does not need (HEARTBEAT_INTERVAL =
+/// 5 s is well below the dashboard scrape cadence).
+pub fn active_counts_by_agent_type_at(
+    conn: &rusqlite::Connection,
+    now_secs: u64,
+) -> Result<Vec<(String, u64)>, SessionViewError> {
+    let now_i = now_secs.min(i64::MAX as u64) as i64;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT session_agent_type, COUNT(*) \
+         FROM {} \
+         WHERE revoked = 0 \
+           AND expires_at > ?1 \
+           AND session_agent_type IS NOT NULL \
+         GROUP BY session_agent_type",
+        Table::Sessions.as_str(),
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![now_i], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (kind, count) = row?;
+        out.push((kind, count.max(0) as u64));
+    }
+    Ok(out)
+}
+
+/// Wall-clock-driven wrapper around
+/// [`active_counts_by_agent_type_at`].
+pub fn active_counts_by_agent_type(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<(String, u64)>, SessionViewError> {
+    active_counts_by_agent_type_at(conn, unix_now_secs())
+}
+
 /// List currently-active sessions, ordered newest-first.
 ///
 /// Active = `revoked == 0 AND expires_at > now`. The CLI uses this
