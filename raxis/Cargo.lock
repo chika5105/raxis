@@ -3499,6 +3499,7 @@ dependencies = [
  "raxis-credentials",
  "raxis-credentials-file",
  "raxis-dashboard",
+ "raxis-observability",
  "raxis-plan-credentials",
  "raxis-policy",
  "raxis-store",
