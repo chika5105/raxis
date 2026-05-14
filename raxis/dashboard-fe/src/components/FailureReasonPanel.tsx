@@ -79,14 +79,65 @@ export function FailureReasonPanel({
 
   if (!reason) {
     if (whenMissing === "absent") return null;
-    const label =
-      whenMissing === "no-error-reported"
-        ? "No error reported"
-        : "No reason supplied — kernel bug";
+
+    if (whenMissing === "missing-reason-bug") {
+      const label =
+        "⚠ KERNEL BUG: No reason supplied — kernel bug " +
+        "(INV-FAILURE-REASON-MANDATORY-01 violated)";
+      const tooltip =
+        "The kernel emitted a terminal-failure transition " +
+        "without a non-empty reason. This violates " +
+        "INV-FAILURE-REASON-MANDATORY-01 — every Failed / " +
+        "Aborted / Cancelled / BlockedRecoveryPending " +
+        "transition MUST carry an operator-actionable reason. " +
+        "Please file a bug against the originating emit site.";
+      return (
+        <div
+          role="alert"
+          aria-live="assertive"
+          data-failure-empty="missing-reason-bug"
+          data-invariant="INV-FAILURE-REASON-MANDATORY-01"
+          data-testid="failure-kernel-bug"
+          className={clsx(
+            "card border-bad/60 bg-bad/10 p-3 text-sm space-y-1",
+            className,
+          )}
+        >
+          <div className="flex items-start gap-2">
+            <span
+              aria-hidden="true"
+              className="text-bad font-bold leading-none mt-0.5"
+            >
+              !
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs uppercase tracking-wide text-bad/90 font-medium">
+                Kernel invariant violation
+              </p>
+              <p
+                className="text-bad break-words font-medium"
+                title={tooltip}
+              >
+                {label}
+              </p>
+              <p className="text-[11px] text-ink-muted mt-1">
+                See{" "}
+                <code className="font-mono">
+                  INV-FAILURE-REASON-MANDATORY-01
+                </code>{" "}
+                in <code className="font-mono">specs/invariants.md</code>.
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const label = "No error reported";
     const tooltip =
-      whenMissing === "no-error-reported"
-        ? "The kernel did not surface an error for this entity. Look at the audit chain for the originating event if you expected one."
-        : "The kernel did NOT include a reason on the failure event for this entity. This is an operator-actionable bug in the originating reporter — please file it.";
+      "The kernel did not surface an error for this entity. " +
+      "Look at the audit chain for the originating event if " +
+      "you expected one.";
     return (
       <div
         role="status"
@@ -342,7 +393,10 @@ export function FailurePill({
     : reason?.kind?.trim() || "No reason supplied — kernel bug";
   const tooltip = reason
     ? [reason.kind, reason.message].filter(Boolean).join("\n")
-    : "The kernel did NOT include a reason on the failure event. Please file a bug.";
+    : "INV-FAILURE-REASON-MANDATORY-01 violated: the kernel " +
+      "emitted a terminal-failure transition without a " +
+      "human-readable reason. Please file a bug against the " +
+      "originating emit site.";
   return (
     <span
       className={clsx(

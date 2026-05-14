@@ -167,7 +167,10 @@ function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
   // than silently swallowed by the green dot.
   const errorText =
     card.last_error?.trim() ||
-    (isUnhealthy ? "No reason supplied — kernel bug" : "");
+    (isUnhealthy
+      ? "⚠ KERNEL BUG: No reason supplied — kernel bug " +
+        "(INV-FAILURE-REASON-MANDATORY-01 violated)"
+      : "");
   return (
     <article
       className="card p-3 space-y-2"

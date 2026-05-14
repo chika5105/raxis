@@ -418,6 +418,145 @@ impl fmt::Display for OperatorErrorCode {
 }
 
 // ---------------------------------------------------------------------------
+// FailureReason newtype — `INV-FAILURE-REASON-MANDATORY-01`
+// ---------------------------------------------------------------------------
+
+/// A non-empty, human-readable failure reason.
+///
+/// Pinned by `INV-FAILURE-REASON-MANDATORY-01` (`specs/invariants.md`):
+/// every transition into a terminal-failure or operator-blocked
+/// state (`TaskState::Failed`, `TaskState::Aborted`,
+/// `TaskState::Cancelled`, `TaskState::BlockedRecoveryPending`,
+/// `InitiativeState::Failed`, `InitiativeState::Aborted`,
+/// `InitiativeState::Blocked`, `SessionRevoked`) MUST carry a
+/// non-empty, human-readable reason string.
+///
+/// **Invariant.** `FailureReason::new(s)` rejects empty input,
+/// whitespace-only input, and inputs longer than
+/// [`MAX_FAILURE_REASON_LEN`] bytes. The single constructor
+/// guarantees the contained string satisfies the invariant — no
+/// other code path can construct a `FailureReason` that
+/// violates it. Type-level enforcement of the invariant: an
+/// emit site that takes `FailureReason` instead of
+/// `Option<String>` cannot compile if the caller doesn't supply
+/// a real reason.
+///
+/// **Why a newtype, not `String`.** A bare `String` permits
+/// `String::new()` / `"".to_string()` / `"   ".to_string()` —
+/// all three surface in the dashboard as the `"No reason
+/// supplied — kernel bug"` empty-state, which IS the operator-
+/// visible kernel bug this invariant catches. The newtype makes
+/// those constructions a compile error at the boundary.
+///
+/// **Why a newtype, not `Option<String>`.** A `None` carries
+/// the same semantic gap as `Some("")` — the dashboard renders
+/// both as the kernel-bug empty-state. Forcing the caller to
+/// produce a `FailureReason` removes the option entirely.
+///
+/// **Round-trips serde transparently** so the wire shape on the
+/// audit chain stays a bare string — no breaking change to the
+/// JSONL projection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FailureReason(String);
+
+/// Maximum byte length accepted by [`FailureReason::new`].
+///
+/// Generous on purpose — failure reasons frequently embed a
+/// stack-tail or planner-boot-error console excerpt to give the
+/// operator end-to-end forensic context. 4 KiB is comfortably
+/// below SQLite's 1 GiB row-blob cap and well below any audit
+/// JSONL line-length concern. Inputs longer than this are
+/// rejected at construction so a runaway reason payload cannot
+/// poison the audit chain.
+pub const MAX_FAILURE_REASON_LEN: usize = 4096;
+
+/// Constructor failure for [`FailureReason::new`]. Returned when
+/// the input is empty, whitespace-only, or exceeds
+/// [`MAX_FAILURE_REASON_LEN`] bytes.
+///
+/// **Why a dedicated error type.** A `Result<FailureReason,
+/// EmptyReasonError>` makes the constructor's contract explicit
+/// at the call site — the caller MUST handle the impossible-but-
+/// guarded case (and panic, or escalate, or supply a fallback
+/// message). A unit return like `Option<FailureReason>` would
+/// hide the failure mode behind silent `None` propagation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EmptyReasonError;
+
+impl fmt::Display for EmptyReasonError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "FailureReason must be non-empty and not whitespace-only \
+             (max 4096 bytes) per INV-FAILURE-REASON-MANDATORY-01 — \
+             every Failed / Aborted / Cancelled / BlockedRecoveryPending \
+             transition MUST carry an operator-actionable reason. If you \
+             cannot determine a reason at the emit site, that's a code \
+             defect — fix the call to supply one rather than passing \
+             the empty string.",
+        )
+    }
+}
+
+impl std::error::Error for EmptyReasonError {}
+
+impl FailureReason {
+    /// Construct a `FailureReason` from any string-like input.
+    /// Returns `Err(EmptyReasonError)` when the trimmed input is
+    /// empty or when the byte length exceeds
+    /// [`MAX_FAILURE_REASON_LEN`].
+    ///
+    /// **Does NOT trim.** Leading/trailing whitespace is
+    /// preserved verbatim because it can carry meaningful
+    /// formatting (a multi-line stack tail with leading
+    /// indentation, a multi-line planner-boot-error console
+    /// excerpt). Only the *whitespace-only* gate uses `trim` to
+    /// reject `"   "` / `"\n"`.
+    pub fn new(reason: impl Into<String>) -> Result<Self, EmptyReasonError> {
+        let s = reason.into();
+        if s.trim().is_empty() {
+            return Err(EmptyReasonError);
+        }
+        if s.len() > MAX_FAILURE_REASON_LEN {
+            return Err(EmptyReasonError);
+        }
+        Ok(Self(s))
+    }
+
+    /// Borrow the inner string (the verbatim reason text).
+    pub fn as_str(&self) -> &str { &self.0 }
+
+    /// Consume the newtype and return the inner `String`. For
+    /// callers that need to write the value into SQLite via
+    /// `rusqlite::params!` or feed it through an `Option<String>`-
+    /// shaped legacy API — at the call site they convert through
+    /// `into_string()` so the type-system entry-point stays
+    /// `FailureReason::new()`.
+    pub fn into_string(self) -> String { self.0 }
+
+    /// Adapt an `Option<&str>` legacy API: `Some(non-empty)` →
+    /// `Some(FailureReason)`, `Some("") | Some("   ") | None` →
+    /// `None`. Used at boundaries that haven't migrated to the
+    /// newtype yet — the receiving side still gets the invariant
+    /// for whatever passes through, and the constructor failure case
+    /// should use [`FailureReason::new`] directly.
+    pub fn from_optional<S: AsRef<str>>(reason: Option<S>) -> Option<Self> {
+        let s = reason?;
+        Self::new(s.as_ref().to_owned()).ok()
+    }
+}
+
+impl fmt::Display for FailureReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for FailureReason {
+    fn as_ref(&self) -> &str { &self.0 }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

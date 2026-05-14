@@ -1792,6 +1792,36 @@ The seven invariants below are the canonical R-7-bearing properties of the V2.1 
 
 **Verification.** `kernel/tests/audit_paired_writes_e2e.rs::pre_v21_rows_isolated`.
 
+### §14.8 `INV-FAILURE-REASON-MANDATORY-01` — failure-reason field non-nullability for terminal-failure event kinds
+
+**Statement.** For every paired audit event whose underlying SQLite mutation drives an entity into a terminal-failure or blocked state, the corresponding reason payload field MUST be present and MUST be a non-empty, non-whitespace-only string. The audit chain MUST NOT carry a terminal-failure event with an empty / null / whitespace-only reason. Specifically:
+
+| `AuditEventKind`                         | Required-non-empty payload field |
+| ---------------------------------------- | -------------------------------- |
+| `TaskFailedOnWorkerPrematureExit`        | `failure_reason`                 |
+| `TaskBlockedRecoveryPending`             | `block_reason`                   |
+| `TaskAborted`                            | `abort_reason`                   |
+| `InitiativeAborted`                      | `abort_reason`                   |
+| `InitiativeBlocked`                      | `block_reason`                   |
+| `SessionRevoked`                         | `revoke_reason`                  |
+| `SessionVmFailedFinal`                   | `failure_reason`                 |
+
+The same rule applies to the SQLite columns these events project from: `tasks.block_reason`, `initiatives.abort_reason`, `sessions.revoke_reason` MUST be non-NULL and non-empty whenever the row's `state` column is in the corresponding terminal-failure / blocked variant. The dashboard's `<FailureReasonPanel>` projection reads these columns directly; an empty value surfaces as the red kernel-bug band documented in `dashboard-hardening.md §5.5.1`.
+
+**Justification.** Operators need actionable failure context to diagnose incidents — every kernel-emitted failure event is read by a human under time pressure. A failure event with `failure_reason: null` (or `""`, or `"   "`) forces the operator into kernel-log spelunking and defeats the dashboard's purpose. The audit chain is the canonical operator-actionable record; if the chain doesn't carry the reason then no downstream consumer can recover it (the kernel may have rotated logs, the originating worker VM may have been torn down, etc.).
+
+**Enforcement.** The kernel enforces the invariant through three layered defenses:
+
+  1. **Type-level (compile-time) enforcement** — the `FailureReason` newtype in `crates/types/src/error.rs` whose `FailureReason::new(s) -> Result<Self, EmptyReasonError>` constructor rejects empty / whitespace-only input. New emit sites that take `FailureReason` instead of `Option<String>` make it mechanically impossible to construct a Failed-class transition without a reason. New code MUST adopt this newtype rather than `Option<String>`.
+  2. **FSM-transition assertions (debug-build runtime)** — `kernel/src/initiatives/task_transitions.rs::transition_task_in_tx` and the sibling initiative / session FSM transition functions carry `debug_assert!(reason.is_some_and(non-empty), "INV-FAILURE-REASON-MANDATORY-01 violated …")` gates that fail loud in debug / test builds. Release builds silently accept the gap (so production uptime isn't risked) and rely on the dashboard's red kernel-bug band for visibility.
+  3. **Audit-emit-site assertions (debug-build runtime)** — for the audit kinds in the table above, the emitter asserts the reason payload field is non-empty before serializing the event into the chain.
+
+**Cross-references.** `INV-FAILURE-REASON-MANDATORY-01` (`specs/invariants.md`); `dashboard-hardening.md §5.5` and `§5.5.1` (the dashboard half of the contract); `crates/types/src/error.rs::FailureReason` (the newtype); `kernel/tests/failure_reason_invariant_witness.rs` (witness suite).
+
+**Verification.** `kernel/tests/failure_reason_invariant_witness.rs` carries witnesses for newtype rejection (`failure_reason_newtype_rejects_empty_string`, `failure_reason_newtype_rejects_whitespace_only`, `failure_reason_newtype_accepts_valid_reason`), audit-event payload shape (`session_revoked_audit_carries_revoked_by_display_name`, `initiative_aborted_audit_carries_operator_attribution_when_present`), and SQL projection (`tasks_block_reason_persists_failure_reason_verbatim`).
+
+**Future hardening.** A follow-up will replace the `Option<String>` payload field on the audit-event variants in the table above with `FailureReason`, so deserialization of a chain-segment with an empty reason fails closed at the verifier (the offline verifier in `crates/audit-verify` would then surface a `Finding::EmptyFailureReason` for any pre-fix segment). Until then the verifier accepts any string and the invariant is enforced kernel-side only.
+
 ---
 
 ## §15 — Conformance kit

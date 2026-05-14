@@ -71,6 +71,37 @@ pub fn transition_task_in_tx(
     block_reason: Option<&str>,
     actor:        TransitionActor,
 ) -> Result<(), LifecycleError> {
+    // `INV-FAILURE-REASON-MANDATORY-01` defense-in-depth: every
+    // transition into a terminal-failure or operator-blocked
+    // state MUST carry a non-empty, human-readable reason. The
+    // newtype `raxis_types::FailureReason` enforces this at
+    // construction time for new code paths; this `debug_assert!`
+    // is the defense-in-depth gate at the single audit-emit
+    // site so a legacy `Option<&str>` caller that regresses to
+    // `None` / `Some("")` / `Some("   ")` trips loudly in test
+    // + dev builds. Release builds keep the historical
+    // behaviour (write a NULL `block_reason`) so production
+    // tasks never get stuck inside an `assert_failed` panic —
+    // the dashboard-side `<FailureReasonPanel>` empty-state
+    // already surfaces the gap as a kernel-bug badge per
+    // `INV-DASHBOARD-FAILURE-VISIBILITY-01`. The audit chain is
+    // the structural backstop; the assertion is the loud signal
+    // for the engineer running tests.
+    debug_assert!(
+        !matches!(
+            new_state,
+            TaskState::Failed | TaskState::BlockedRecoveryPending,
+        ) || block_reason
+            .map(|r| !r.trim().is_empty())
+            .unwrap_or(false),
+        "INV-FAILURE-REASON-MANDATORY-01 violated in \
+         transition_task_in_tx: task_id={task_id}, new_state={new_state:?} \
+         was driven into a terminal-failure / blocked state with \
+         block_reason={block_reason:?}. Every emit site MUST supply a \
+         non-empty, operator-actionable reason — see \
+         crates/types/src/error.rs::FailureReason.",
+    );
+
     let now = unix_now_secs();
 
     // Load current state string and parse it through the enum.

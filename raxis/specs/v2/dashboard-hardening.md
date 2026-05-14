@@ -809,20 +809,63 @@ rather than render a bespoke red badge. Specifically:
 
 When a failure-bearing entity ships `failure: null` /
 `last_error: null`, the dashboard MUST render
-`"No reason supplied — kernel bug"` (not a blank state, not the
-status colour alone). The string is operator-actionable: the
-originating kernel reporter SHOULD always supply a reason, and a
-missing reason is a bug to file rather than expected behaviour.
+`"⚠ KERNEL BUG: No reason supplied — kernel bug
+(INV-FAILURE-REASON-MANDATORY-01 violated)"` as a **red alert
+band** (`role="alert"`, `bg-bad/10`, `border-bad/60`) — NOT
+muted info chrome and NOT the status colour alone. The string
+is operator-actionable: the originating kernel reporter MUST
+always supply a reason (per `INV-FAILURE-REASON-MANDATORY-01`
+in `specs/invariants.md`), and a missing reason is a kernel
+bug to file rather than expected behaviour.
 
 `<FailureReasonPanel>` exposes three `whenMissing` modes:
 
   * `missing-reason-bug` (default for Failed entities) — emit the
-    kernel-bug affordance.
+    kernel-bug affordance per the contract above. The DOM
+    carries `data-failure-empty="missing-reason-bug"` and
+    `data-invariant="INV-FAILURE-REASON-MANDATORY-01"` so E2E
+    tooling and operator dashboards can deep-link straight to
+    the violating entity. Once the kernel honours the invariant
+    end-to-end this branch should NEVER fire in production —
+    its visibility is the regression alarm.
   * `absent` — return `null`; used by parents that aren't sure
     whether the entity is failed yet.
   * `no-error-reported` — render `"No error reported"`; used on
     surfaces where a missing reason is plausibly normal (e.g.
     in-flight `Running` sessions).
+
+#### 5.5.1 Kernel-side counterpart — `INV-FAILURE-REASON-MANDATORY-01`
+
+The empty-reason rule is the dashboard half of a paired
+invariant. The kernel half is `INV-FAILURE-REASON-MANDATORY-01`
+(`specs/invariants.md`): every transition into a
+terminal-failure or blocked state
+(`TaskState::Failed | Aborted | BlockedRecoveryPending`,
+`InitiativeState::Failed | Aborted | Blocked`,
+`SessionRevoked`) MUST carry a non-empty, human-readable
+reason. The kernel enforces this through:
+
+  * The `FailureReason` newtype in `crates/types/src/error.rs`
+    whose constructor rejects empty / whitespace-only input —
+    making it mechanically impossible to construct a Failed
+    transition without a reason.
+  * `debug_assert!` gates at `transition_task_in_tx` and
+    sibling FSM transition functions for defense-in-depth in
+    debug / test builds.
+  * Audit-emit-site `debug_assert!` for terminal-failure event
+    kinds (`TaskFailedOnWorkerPrematureExit`,
+    `InitiativeAborted`, `SessionRevoked`, …) so the audit
+    chain never carries an empty `failure_reason` /
+    `revoke_reason` field.
+
+The dashboard's `missing-reason-bug` rendering is therefore a
+**belt-and-braces visibility net** for an invariant the kernel
+already enforces at the type level. If operators ever see the
+red kernel-bug band in production, that is a structural
+regression that bypassed both compile-time enforcement and
+the runtime debug_assert — file an immediate kernel bug citing
+`INV-FAILURE-REASON-MANDATORY-01` and the violating entity's
+`event_id` from the audit chain.
 
 ### 5.6 Action-failure rule
 

@@ -34,7 +34,10 @@ pub mod witness;
 // Convenient flat re-exports for the most-used types.
 pub use capability::{CapabilityClass, DelegationStatus};
 pub use clock::{unix_now_secs, Clock, RealClock};
-pub use error::{OperatorErrorCode, PlannerErrorCode};
+pub use error::{
+    EmptyReasonError, FailureReason, OperatorErrorCode, PlannerErrorCode,
+    MAX_FAILURE_REASON_LEN,
+};
 pub use host_preflight::{DiskVolumeReport, HostPreflightError};
 pub use escalation::{
     EscalationClass, EscalationRejectionReason, EscalationRequest, EscalationResponse,

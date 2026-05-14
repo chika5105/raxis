@@ -392,12 +392,41 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     // Sweep every non-terminal task in a single statement. This avoids the
     // N-statement TOCTOU window where a query-then-loop-then-update pattern
     // could race a parallel actor.
+    //
+    // `INV-FAILURE-REASON-MANDATORY-01` — the bulk sweep into
+    // `BlockedRecoveryPending` is one of the kernel's
+    // structurally-failure-emitting code paths and MUST populate
+    // a non-empty `block_reason` for the dashboard's
+    // `<FailureReasonPanel>` to render. Pre-fix the bulk UPDATE
+    // touched only `state` + `transitioned_at`, leaving
+    // `block_reason` at its prior value (often NULL for tasks
+    // that crashed mid-`Running`); the dashboard then surfaced
+    // `"No reason supplied — kernel bug"` for every
+    // restart-recovery sweep, defeating the operator-experience
+    // contract. The reason text is intentionally generic — the
+    // sweep is bulk and cannot attribute per-task root-cause —
+    // but it names the operator action ("operator must resume")
+    // and the structural cause ("kernel restart sweep") so the
+    // operator can route correctly without grepping
+    // `kernel.stderr.log`. Per-task forensic detail (the
+    // pre-sweep `prior_state`) is captured separately via
+    // `swept_detail` above and projected into the audit chain
+    // by the AuditSink.
+    const SWEEP_REASON: &str =
+        "kernel restart recovery sweep: task was non-terminal at \
+         kernel shutdown; operator action required to resume \
+         (raxis task resume <task_id>) or abort \
+         (raxis task abort <task_id>). \
+         See INV-INIT-05 and INV-FAILURE-REASON-MANDATORY-01.";
     let swept = match tx.execute(
         &format!(
-            "UPDATE {TASKS} SET state='{blocked}', transitioned_at=?1
-             WHERE state NOT IN ({terminal})"
+            "UPDATE {TASKS}
+                SET state           = '{blocked}',
+                    transitioned_at = ?1,
+                    block_reason    = ?2
+              WHERE state NOT IN ({terminal})"
         ),
-        rusqlite::params![now],
+        rusqlite::params![now, SWEEP_REASON],
     ) {
         Ok(rows) => rows,
         Err(e) => {
