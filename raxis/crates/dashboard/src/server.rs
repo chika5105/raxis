@@ -366,6 +366,14 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/escalations/:id",             get(escalations::detail::<D>))
         // Audit + Inbox.
         .route("/api/audit",                       get(audit::list::<D>))
+        // Curated recent-activity feed for the dashboard
+        // Overview widget. Filters server-side to state-
+        // affecting events only (allow-list lives in
+        // `data::recent_activity_filter`) so the FE never
+        // makes a policy call about what's "noise". See
+        // `specs/v2/dashboard-operator-action-audit-coverage.md
+        // §signal-vs-noise`.
+        .route("/api/audit/recent",                get(audit::recent::<D>))
         .route("/api/audit/chain-status",          get(audit::chain_status::<D>))
         .route("/api/inbox",                       get(inbox::list::<D>))
         // Notifications.

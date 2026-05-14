@@ -2334,6 +2334,186 @@ fn hex_sha256_prefix(bytes: &[u8]) -> String {
     s
 }
 
+/// Audit-chain curation for the dashboard Overview "Recent
+/// activity" widget.
+///
+/// **Why this lives server-side.** The dashboard is a read-only
+/// projection of kernel state; it must not encode policy
+/// decisions about which audit events "matter". The kernel owns
+/// the forensic chain and the kernel owns the curated feed.
+///
+/// **Signal vs noise.** After
+/// `worker/audit-tightening` retired the read-only
+/// `OperatorViewed*` emissions (see
+/// `specs/v2/dashboard-operator-action-audit-coverage.md
+/// §signal-vs-noise`), the chain still carries plenty of
+/// per-operator clicks (mark-read, credential-list, health-
+/// query, worktree-access) that are forensically interesting
+/// but not what an operator wants to see in a 10-row "what
+/// changed?" widget. The allow-list below is the *additional*
+/// filter the Overview applies: ONLY state-affecting,
+/// initiative-affecting, or security events are surfaced.
+///
+/// **Append-only.** Every new state-affecting audit variant
+/// MUST be added here if it should surface on the Overview. The
+/// list lives in one place so a forensic reviewer can audit the
+/// curation policy at a glance.
+pub mod recent_activity_filter {
+    /// Allow-list of audit `event_kind` discriminants surfaced
+    /// by `GET /api/audit/recent`.
+    ///
+    /// Each entry corresponds to a [`raxis_audit_tools::AuditEventKind`]
+    /// variant's stable wire string (the `as_str()` value the
+    /// chain row carries on its `event_kind` column).
+    ///
+    /// Categories (organised for the reviewer's benefit; the
+    /// runtime filter is a flat membership check):
+    ///
+    /// 1. **Initiative lifecycle** — admit, approve, fail,
+    ///    close. The Overview's primary value is "what
+    ///    initiatives moved today?"
+    /// 2. **Plan + task transitions** — plan approval, task
+    ///    admit/state change, intent accept/reject. The
+    ///    granular FSM events an operator wants on the
+    ///    timeline.
+    /// 3. **Session lifecycle (terminal only)** — spawn,
+    ///    final-failure, revoke. We surface the spawn (a
+    ///    state-creating event) and the terminal failure (a
+    ///    state-affecting outcome) but NOT every respawn /
+    ///    scale event (those flood the timeline; the audit
+    ///    chain still records them for forensic walks).
+    /// 4. **Security events** — egress denied, tproxy admit
+    ///    denied, kernel deadlock, supervisor refused
+    ///    restart, security violation, JWT-secret rotation.
+    /// 5. **Integration merge** — push complete, merge
+    ///    landed, push failed.
+    /// 6. **Operator-mutating actions** — plan approve, plan
+    ///    reject, dry-run admit, credential reveal, policy
+    ///    update. The "the operator did something that
+    ///    changed kernel state" rows.
+    /// 7. **Kernel lifecycle (boot/shutdown only)** — start,
+    ///    stop, supervisor restart. Audited once per
+    ///    occurrence; heartbeat / health-tick events are
+    ///    NEVER in this list.
+    pub const IMPORTANT_EVENT_KINDS: &[&str] = &[
+        // 1. Initiative lifecycle.
+        "InitiativeCreated",
+        "InitiativeAdmitted",
+        "InitiativeAdmissionRejected",
+        "InitiativeStateChanged",
+        "InitiativeClosed",
+        "InitiativeFailed",
+        // 2. Plan + task transitions.
+        "PlanApproved",
+        "PlanRejected",
+        "TaskAdmitted",
+        "TaskStateChanged",
+        "TaskTransitioned",
+        "TaskCompleted",
+        "TaskFailed",
+        "IntentAccepted",
+        "IntentRejected",
+        // 3. Session lifecycle (creation + terminal failure
+        //    only — routine respawn / scale events stay out
+        //    of the curated feed but remain in the chain).
+        "SessionCreated",
+        "SessionVmSpawned",
+        "SessionVmFailedFinal",
+        "SessionRevoked",
+        // 4. Security events.
+        "SecurityViolationDetected",
+        "EgressDenied",
+        "TproxyAdmissionDenied",
+        "TransparentProxyDenied",
+        "KernelDeadlockDetected",
+        "KernelCrashedBySignal",
+        "SupervisorRefusedRestart",
+        "OrchestratorRespawnCeilingExceeded",
+        "CredentialProxyUpstreamFailed",
+        "OperatorRotatedDashboardJwtSecret",
+        // 5. Integration merge.
+        "IntegrationMergeCompleted",
+        "IntegrationMergeFailed",
+        "PushFailed",
+        // 6. Operator-mutating actions.
+        "OperatorApprovedPlan",
+        "OperatorRejectedPlan",
+        "OperatorApprovedRespawnEscalation",
+        "OperatorDeniedRespawnEscalation",
+        "OperatorRevealedCredential",
+        "OperatorRevealedSystemCredential",
+        "OperatorAuditChainReverified",
+        "PolicyUpdatedViaDashboard",
+        "PolicyEpochAdvanced",
+        "DryRunAdmitted",
+        "PathScopeOverrideApplied",
+        // 7. Kernel lifecycle (boot/shutdown).
+        "KernelStarted",
+        "KernelStopped",
+        "KernelRestartInitiated",
+        "KernelRestartCompleted",
+        "KernelBootedFromSupervisorRestart",
+        "ExecutorRespawnFromReviewRejection",
+    ];
+
+    /// Returns `true` iff `event_kind` should appear in the
+    /// curated Overview recent-activity feed.
+    pub fn is_important(event_kind: &str) -> bool {
+        IMPORTANT_EVENT_KINDS.iter().any(|k| *k == event_kind)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn allow_list_admits_state_affecting_events() {
+            assert!(is_important("InitiativeCreated"));
+            assert!(is_important("PlanApproved"));
+            assert!(is_important("TaskCompleted"));
+            assert!(is_important("OperatorRevealedCredential"));
+            assert!(is_important("SecurityViolationDetected"));
+            assert!(is_important("KernelStarted"));
+        }
+
+        #[test]
+        fn allow_list_excludes_operator_viewed_pageviews() {
+            assert!(!is_important("OperatorViewedInitiativeList"));
+            assert!(!is_important("OperatorViewedSessionList"));
+            assert!(!is_important("OperatorViewedAuditChain"));
+            assert!(!is_important("OperatorViewedEscalationList"));
+            assert!(!is_important("OperatorViewedInbox"));
+            assert!(!is_important("OperatorViewedNotifications"));
+            assert!(!is_important("OperatorViewedPolicySnapshot"));
+            assert!(!is_important("OperatorViewedPolicyToml"));
+            assert!(!is_important("OperatorViewedWorktreeList"));
+            assert!(!is_important("OperatorViewedTask"));
+            assert!(!is_important("OperatorViewedSession"));
+            assert!(!is_important("OperatorViewedInitiative"));
+            assert!(!is_important("OperatorViewedInitiativeDag"));
+            assert!(!is_important("OperatorViewedInitiativeTasks"));
+            assert!(!is_important("OperatorViewedPlanToml"));
+        }
+
+        #[test]
+        fn allow_list_excludes_operator_pageview_class_events() {
+            // Health-tick, notification-mark, worktree-access and
+            // similar per-click events that remain in the audit
+            // chain for forensic walks but are not what the
+            // Overview surfaces.
+            assert!(!is_important("OperatorHealthQueried"));
+            assert!(!is_important("OperatorNotificationMarkedRead"));
+            assert!(!is_important("OperatorNotificationsMarkedAllRead"));
+            assert!(!is_important("OperatorWorktreeAccessed"));
+            assert!(!is_important("OperatorDiffViewed"));
+            assert!(!is_important("OperatorFileContentFetched"));
+            assert!(!is_important("OperatorListedCredentials"));
+            assert!(!is_important("OperatorListedSystemCredentials"));
+            assert!(!is_important("OperatorOpenedSessionStream"));
+        }
+    }
+}
+
 /// Stable-wire `outcome` discriminants for `Operator*` audit
 /// events per `INV-AUDIT-OPERATOR-ACTION-01`. Each is a single
 /// JSON string the dashboard surfaces verbatim — extension here

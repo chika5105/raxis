@@ -356,6 +356,25 @@ export const dashboardApi = {
       const suffix = qs.toString() ? `?${qs}` : "";
       return apiFetch<AuditEntryView[]>(`/api/audit${suffix}`, signal ? { signal } : {});
     },
+    // Curated recent-activity feed for the Overview widget.
+    // The backend filters the chain to state-affecting events
+    // only (allow-list lives server-side in
+    // `data::recent_activity_filter`) so the FE never makes a
+    // policy call about what's "noise". See
+    // `specs/v2/dashboard-operator-action-audit-coverage.md
+    // §signal-vs-noise`.
+    recent: (
+      params: { limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<AuditEntryView[]> => {
+      const qs = new URLSearchParams();
+      if (params.limit !== undefined) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<AuditEntryView[]>(
+        `/api/audit/recent${suffix}`,
+        signal ? { signal } : {},
+      );
+    },
     // Chain-integrity verdict surface — `INV-AUDIT-DASHBOARD-01`.
     // The kernel is the single source of truth; the FE renders
     // the kernel's verdict and never re-implements verification.

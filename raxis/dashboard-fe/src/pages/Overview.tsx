@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -7,22 +6,15 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { Mono } from "@/components/Mono";
-import { isOperatorRelevantEvent } from "@/lib/audit-importance";
 import { auditBadgeClasses } from "@/lib/audit-tone";
 import { fmtRelative, fmtTokens, plural } from "@/lib/format";
 
 // How many operator-relevant rows the "Recent activity" widget
-// surfaces.
+// surfaces. The backend's curated `/api/audit/recent` endpoint
+// already filters out read-only page-view audits server-side
+// (see `crates/dashboard/src/data.rs::recent_activity_filter`),
+// so we ask for exactly the count we want to render.
 const RECENT_ACTIVITY_DISPLAY_LIMIT = 10;
-// How many raw rows we ask the backend for. We over-fetch so the
-// after-filter rendered set typically lands at the display limit
-// even when the chain tail is dominated by `OperatorViewed*` page
-// views (the 1260-event iter48 chain had ~90% read-only spam — at
-// that ratio fetching the 10 newest entries surfaces ZERO useful
-// rows). 80 rows × 10% useful ≈ 8 rendered; we round up to a
-// margin of safety, but keep the cap modest so the home-page query
-// stays cheap.
-const RECENT_ACTIVITY_FETCH_LIMIT = 80;
 
 /// Operator landing page. Shows kernel health, top-level
 /// counters, and a recent-activity feed (newest 10 audit
@@ -49,24 +41,25 @@ export function OverviewPage() {
     refetchInterval: 3_000,
   });
 
-  // The Recent Activity widget filters out `OperatorViewed*` /
-  // `OperatorOpened*` read-only page-view events
-  // (`INV-DASHBOARD-RECENT-ACTIVITY-FILTER-01`). We over-fetch
-  // (see `RECENT_ACTIVITY_FETCH_LIMIT`) so the filtered teaser
-  // typically lands at the operator-facing display limit even when
-  // the audit chain tail is dominated by read-only spam.
+  // The Recent Activity widget hits the backend's curated
+  // `/api/audit/recent` endpoint, which the dashboard kernel
+  // filters to state-affecting events only (the allow-list
+  // lives in `data::recent_activity_filter`). The FE no longer
+  // post-filters — once the backend filters, the FE doing it
+  // again is dead code (`INV-DASHBOARD-RECENT-ACTIVITY-FILTER-01`
+  // moved server-side; see
+  // `specs/v2/dashboard-operator-action-audit-coverage.md
+  // §signal-vs-noise`).
   const audit = useQuery({
-    queryKey: ["audit", { limit: RECENT_ACTIVITY_FETCH_LIMIT }],
+    queryKey: ["audit", "recent", { limit: RECENT_ACTIVITY_DISPLAY_LIMIT }],
     queryFn: ({ signal }) =>
-      dashboardApi.audit.list({ limit: RECENT_ACTIVITY_FETCH_LIMIT }, signal),
+      dashboardApi.audit.recent(
+        { limit: RECENT_ACTIVITY_DISPLAY_LIMIT },
+        signal,
+      ),
     refetchInterval: 5_000,
   });
-  const recentActivity = useMemo(() => {
-    if (!audit.data) return [];
-    return audit.data
-      .filter((a) => isOperatorRelevantEvent(a.event_kind))
-      .slice(0, RECENT_ACTIVITY_DISPLAY_LIMIT);
-  }, [audit.data]);
+  const recentActivity = audit.data ?? [];
 
   if (health.isPending) return <PageSpinner />;
   if (health.error)
@@ -349,15 +342,17 @@ export function OverviewPage() {
 
       {/*
        * Recent activity — operator-relevant subset of the audit
-       * chain (`INV-DASHBOARD-RECENT-ACTIVITY-FILTER-01`).
-       * `OperatorViewed*` / `OperatorOpened*` read-only page-view
-       * events are filtered out here so a busy operator session
-       * (the iter48 chain hit 1260 events / 17 min, ~90% page-
-       * view spam) does not bury the meaningful state transitions
-       * the teaser exists to surface. The full chain remains on
-       * `/audit`, which ships its own toggle to show / hide the
-       * read-only views (`INV-DASHBOARD-AUDIT-OPERATOR-READ-
-       * TOGGLE-01`).
+       * chain. The backend's `/api/audit/recent` endpoint filters
+       * the chain server-side to state-affecting events only
+       * (`OperatorViewed*` / `OperatorOpened*` read-only page-
+       * views are no longer persisted; what slips through pre-
+       * deprecation is suppressed by the curated filter), so the
+       * teaser surfaces meaningful state transitions even on a
+       * busy operator session (the iter48 chain hit 1260 events
+       * in 17 min, ~90% read-only spam). The full chain remains
+       * on `/audit`, which ships its own toggle to show / hide
+       * the read-only views
+       * (`INV-DASHBOARD-AUDIT-OPERATOR-READ-TOGGLE-01`).
        */}
       <section className="card p-0 overflow-hidden">
         <header className="px-4 py-3 border-b border-edge flex items-center justify-between">
