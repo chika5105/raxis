@@ -2743,7 +2743,11 @@ fn parse_plan_orchestrator(plan_toml: &str)
 /// smaller `max_*` is fine; only `Some(true)` against
 /// disabled policy or larger `max_*` against the policy ceiling
 /// surfaces a `LifecycleError::PlanInvalid`.
-pub(crate) fn validate_elastic_against_policy(
+// `private_interfaces` clean: callers live inside this same module
+// (only call site is `approve_plan` at line 941), so the function
+// drops `pub(crate)` rather than promoting `PlanTask` (and its 25+
+// fields) to crate visibility for a single in-module callsite.
+fn validate_elastic_against_policy(
     tasks:        &[PlanTask],
     initiative:   &crate::initiatives::OrchestratorPlanFields,
     elastic_cfg:  &raxis_policy::ElasticConfig,
