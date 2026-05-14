@@ -599,12 +599,25 @@ async fn reveal_credential_without_auth_yields_401_not_500() {
 }
 
 // ---------------------------------------------------------------------------
-// Audit-coverage gap closures — read-only endpoints emit Operator* events
+// Audit-tightening — read-only endpoints do NOT emit Operator* events
 // ---------------------------------------------------------------------------
 
+/// `worker/audit-tightening` retired the read-only
+/// `OperatorViewed*` emissions because they drowned the chain
+/// in dashboard pageview noise (iter48 saw 1258 / 1260 chain
+/// rows be `OperatorViewed*` rows). This test pins the new
+/// invariant: a `GET /api/initiatives` must succeed without
+/// appending an `OperatorViewed*` row to the operator-audit
+/// ledger.
+///
+/// See `specs/v2/dashboard-operator-action-audit-coverage.md
+/// §signal-vs-noise` for the policy and
+/// `specs/v2/dashboard-operator-action-audit-coverage.md §2` for
+/// the updated coverage table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_initiatives_emits_operator_viewed_initiative_list_audit() {
-    let (handle, base, token, data, fp) =
+#[allow(deprecated)] // pattern-matches the deprecated variants on purpose
+async fn list_initiatives_does_not_emit_operator_viewed_initiative_list_audit() {
+    let (handle, base, token, data, _fp) =
         serve_with_role(DashboardRole::Read).await;
     let client = reqwest::Client::new();
     let res = client
@@ -615,14 +628,19 @@ async fn list_initiatives_emits_operator_viewed_initiative_list_audit() {
         .expect("send");
     assert_eq!(res.status(), 200);
     let audits = data.recorded_operator_audits();
-    let row = audits.iter().any(|e| {
+    let any_viewed = audits.iter().any(|e| {
         matches!(
             e,
-            AuditEventKind::OperatorViewedInitiativeList {
-                operator_fingerprint, outcome, ..
-            } if operator_fingerprint == &fp && outcome == "Accepted"
+            AuditEventKind::OperatorViewedInitiativeList { .. }
+                | AuditEventKind::OperatorViewedInitiative { .. }
+                | AuditEventKind::OperatorViewedInitiativeDag { .. }
+                | AuditEventKind::OperatorViewedInitiativeTasks { .. }
         )
     });
-    assert!(row, "OperatorViewedInitiativeList not found: {audits:?}");
+    assert!(
+        !any_viewed,
+        "Expected no OperatorViewed* row after a read-only list \
+         (signal-vs-noise tightening). Saw: {audits:?}",
+    );
     handle.shutdown().await.expect("shutdown");
 }
