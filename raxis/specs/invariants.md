@@ -82,7 +82,8 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01 | 12 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01 | 13 |
+| Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01 | 1 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
@@ -95,7 +96,7 @@
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
 | Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01, INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01 | 2 |
 | Integration-merge completion cascade — V3 (iter54) | INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01, INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01 | 2 |
-| **Total** | | **125** |
+| **Total** | | **126** |
 
 ---
 
@@ -5720,6 +5721,157 @@ see for any other failure.
 
 **Canonical home.** `v2/dashboard-hardening.md §5`.
 
+### INV-FAILURE-REASON-MANDATORY-01 — Every kernel-emitted terminal-failure transition MUST carry a non-empty reason
+
+**Statement.** Every transition into a terminal-failure or
+operator-blocked state MUST carry a non-empty, human-readable
+`reason` string. Concretely:
+
+  * `TaskState::Failed`, `TaskState::Aborted`,
+    `TaskState::Cancelled`, `TaskState::BlockedRecoveryPending`
+    — the task FSM's per-task `block_reason` column
+    (`tasks.block_reason`) MUST be non-NULL and MUST NOT be
+    empty / whitespace-only.
+  * `InitiativeState::Failed`, `InitiativeState::Aborted`,
+    `InitiativeState::Blocked` — the kernel-emitted audit
+    event that drives the FSM transition
+    (`OrchestratorRespawnCeilingExceeded`,
+    `IntegrationMergeFailed`, `InitiativeAborted`, etc.) MUST
+    carry a non-empty reason in either a dedicated field or
+    the structured-payload field set the
+    `<FailureReasonPanel>` projection reads.
+  * `SessionRevoked` — the audit event MUST carry a non-empty
+    `revoked_by` (operator fingerprint) AND, when the operator
+    is resolvable in the policy bundle at emit time, a
+    non-empty `revoked_by_display_name`. A
+    `revoked_by_display_name = None` against an operator that
+    IS in the bundle is a kernel bug per this invariant (the
+    dashboard cannot render a 64-char hex fingerprint as
+    operator-actionable text).
+
+The kernel MUST NEVER emit a failure transition (or its
+corresponding audit event) with `reason = None`, `""`, or a
+whitespace-only string.
+
+**Justification.** Operators need actionable failure context to
+diagnose incidents. `"No reason supplied"` surfaces in the
+dashboard as opaque body text (`<FailureReasonPanel>` empty-state
+fallback per `INV-DASHBOARD-FAILURE-VISIBILITY-01`) and forces
+operators into kernel-log spelunking — which defeats the entire
+purpose of having a dashboard. A failure without a reason is a
+*kernel bug*, not legitimate user-visible data: the kernel knows
+why it transitioned the FSM (it just made the decision); failing
+to propagate that "why" to the operator is a defect in the emit
+site, not a permissible state.
+
+This invariant is the kernel-side counterpart of
+`INV-DASHBOARD-FAILURE-VISIBILITY-01` (which mandates the FE
+*surface* the reason): the FE can only render real reasons if
+the kernel supplies them. Holding both halves makes the
+operator-experience contract symmetric: every Failed entity
+ships a reason; every reason ships to the dashboard.
+
+**Scenario (iter54 reproduction).** A dashboard surface displays
+a task in `Failed` state with body text `"No reason supplied —
+kernel bug"`. Tracing back: the kernel's
+`session_spawn_orchestrator` worker-post-exit hook drove a
+synthetic `Running → Failed` transition for an executor whose VM
+exited prematurely (`exit_code=4`, planner-boot-error from VM
+console). Pre-fix, the synthesized `block_reason` was a generic
+`"VM exited without submitting a terminal intent"` string, but
+the underlying VM-console `planner-boot-error` (which carries
+the *actual* root cause: `dispatch loop exceeded max_turns: 30`)
+was logged to `guests/<sid>/console.log` and dropped on the
+floor of the failure-reason payload. The operator then sees a
+red badge with vague text, opens devtools / `kernel.stderr.log`
+to find the real reason, and files an avoidable on-call ticket
+asking "why did this fail?". With this invariant + the Option-A
+type-level enforcement (`FailureReason` newtype) + the Option-B
+debug_assert at the audit-emit site, every failure-emitting
+code path is a regression target — adding a `Failed { reason:
+None }` literal to the codebase fails witness tests at PR-time.
+
+A second class of pre-fix bug: `recovery::reconcile_tasks`'s
+bulk sweep into `BlockedRecoveryPending` at kernel boot wrote
+only `state` + `transitioned_at`, leaving `block_reason` at its
+prior value (often NULL). Every restart-recovery sweep then
+surfaced `"No reason supplied — kernel bug"` for the swept
+tasks, even though the structural cause was straightforward
+("kernel restarted while task was non-terminal — operator must
+resume or abort"). The fix populates `block_reason` with a
+structural reason that names operator action and references
+this invariant.
+
+**Witness:**
+- `crates/types/src/error.rs::FailureReason` (newtype impl)
+- `crates/types/src/error.rs::EmptyReasonError` (constructor
+  failure type)
+- `kernel/src/initiatives/task_transitions.rs::transition_task_in_tx`
+  (debug_assert! defense-in-depth)
+- `kernel/src/recovery.rs::reconcile_tasks` (bulk-sweep
+  block_reason population)
+- `kernel/tests/failure_reason_invariant_witness.rs`
+  (cross-crate witness — newtype contract + audit-event variant
+  shapes + SQL projection)
+- `kernel/src/initiatives/task_transitions.rs::tests::failed_transition_persists_non_empty_block_reason`
+- `kernel/src/initiatives/task_transitions.rs::tests::failed_transition_with_none_reason_trips_debug_assert`
+- `kernel/src/recovery.rs::tests::reconcile_populates_block_reason_for_swept_tasks`
+
+**Enforcement.** Two layers, defense-in-depth:
+
+1. **Type-level (Option A).** `FailureReason::new()` rejects
+   empty / whitespace-only input at construction time. Any new
+   FSM-transition function that takes `FailureReason` instead
+   of `Option<String>` gets the invariant for free at compile
+   time — the compiler refuses to admit a `None` or `""`
+   value through the type.
+
+2. **Audit-emit gate (Option B).** Existing `Option<&str>`
+   callers route through `transition_task_in_tx`, which carries
+   a `debug_assert!` that fires on every Failed /
+   BlockedRecoveryPending transition with a missing or empty
+   reason. Test + dev builds panic loudly with the invariant
+   name in the message; release builds keep the historical
+   behaviour (write NULL) so production tasks never get stuck
+   inside an `assert_failed` panic — the FE-side
+   `<FailureReasonPanel>` empty-state then surfaces the gap as
+   a kernel-bug badge per
+   `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
+
+The two layers are intentionally redundant: the newtype catches
+forward-going regressions in new code paths; the debug_assert
+catches regressions in legacy `Option<&str>` callers that
+haven't been migrated yet. Both reference this invariant by
+name in their failure messages so a tripped check immediately
+points the engineer at the spec.
+
+**Anti-pattern catalogue.** The following are forbidden by this
+invariant — DO NOT apply any of these at an emit site that
+cannot determine a real reason:
+
+  * `reason: None` / `reason: Some("")` / `reason: Some("   ")`
+    — the literal failure modes the invariant exists to
+    prevent. Fix the call site to determine and supply a real
+    reason.
+  * `reason: Some("Unknown")` / `Some("Failed")` /
+    `Some("error occurred")` / `Some("see logs")` — the same
+    bug spelled differently. A placeholder that doesn't carry
+    operator-actionable detail is structurally equivalent to
+    `None` from the dashboard's perspective.
+  * Wrapping a real failure in a generic outer reason that
+    discards the inner detail
+    (`Some("internal kernel error: see kernel.stderr.log")`)
+    — the inner detail (exit code, role, planner-boot-error
+    string from VM console) is what the operator needs.
+    Propagate the inner reason verbatim or include it in the
+    outer one.
+
+**Canonical home.** `specs/invariants.md` (this file) — the
+invariant's normative wording lives here; the FE-side
+empty-reason rule (operator-experience contract) is in
+`v2/dashboard-hardening.md §5.5`; the audit-event
+non-nullability declaration is in `v2/audit-paired-writes.md`.
+
 ### INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 — Approved plans surface their original sealed TOML
 
 **Statement.** For every initiative the dashboard lists, an
@@ -6069,6 +6221,98 @@ surface` and `v2/dashboard-hardening.md §integration-merge-visibility`.
     focused-task aside), `dashboard-fe/src/pages/InitiativeDag.tsx`
     (focused-node panel), and
     `dashboard-fe/src/pages/TaskDetail.tsx` (breadcrumb chip).
+
+### INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01 — Dashboard wire timestamps name and emit a single unit
+
+**Statement.** Every timestamp / duration field on the dashboard
+wire schema (`raxis/crates/dashboard/src/data.rs`) MUST either
+(a) carry an explicit unit suffix in its name (`_ms`, `_s`,
+`_us`, `_ns`, or the spelled-out `_unix_secs` /
+`_at_unix`) AND be emitted in that unit by every kernel
+producer, OR (b) carry a doc-comment that explicitly states the
+unit AND be emitted in that unit by every kernel producer. The
+FE consumer MUST read the field at the documented unit; no
+silent unit conversions are permitted at consumption time, and
+no producer may emit a value in a unit other than the field's
+documented one.
+
+**Justification.** A unit mismatch between the kernel producer
+and the documented wire contract silently produces nonsense at
+the rendering layer with no compile-time, no runtime, and no
+test-time check. The dashboard Health page surfaced this
+concretely in iter54: the kernel emitted milliseconds into
+`SubsystemHealthCard.last_observed_at`, a field documented at
+`crates/dashboard/src/data.rs:802-804` as **"Unix-seconds when
+the kernel last reported on this subsystem"**. The FE's
+`fmtRelative` (`dashboard-fe/src/lib/format.ts`) correctly
+read the field as seconds per the documented contract, computed
+the delta against `Math.floor(Date.now()/1000)`, and rendered
+**"in 56,347 years"** on every one of the nine subsystem cards.
+
+The math is unambiguous: `1.78×10¹² ms − 1.78×10⁹ s ≈ 1.78×10¹²
+seconds delta ≈ 56,402 years`. The render path had no defence
+because (a) JavaScript's `number` accepts both magnitudes
+without complaint, (b) Rust's `u64` accepts both magnitudes
+without complaint, and (c) neither side had a typed unit
+wrapper to force the producer and consumer into structural
+agreement. The invariant exists to make this class of bug
+visible at code-review time, since at runtime it surfaces only
+as a nonsense duration string to operators who may dismiss it
+as a one-off display glitch rather than a producer bug.
+
+**Scenario.** Iter54 live e2e: an operator opens the Health
+page during a healthy run. Every subsystem card reads
+`Booted at (unix-s): 1778750356 / kernel_main_loop ... in
+56,347 years`. The 9-card consistency tells the operator the
+bug is structural rather than per-subsystem; the explicit
+"Unix-seconds when ..." doc comment in `data.rs` tells the
+reviewer the producer is the violator (the FE was reading at
+the documented unit). Fixed in iter54 by switching the
+`subsystem_health` producer to `unix_now_s()` for the
+seconds-typed field while keeping `unix_now_ms()` for the
+correctly `_ms`-suffixed `generated_at_ms` and `verified_at_ms`
+fields.
+
+**Canonical home.**
+`v2/dashboard-hardening.md §5.13 Wire-time units` (this file
+mirrors); see also `v2_extended_gaps.md §4` for the broader
+dashboard backend contract.
+
+**Witness.**
+  * Wire schema: `crates/dashboard/src/data.rs` — every
+    timestamp field carries either a unit-suffixed name
+    (`_ms`, `_unix_secs`, `_at_unix`) OR a doc-comment line
+    that begins `Unix-seconds` / `Unix-milliseconds`. New
+    fields without one of these markers MUST be rejected at
+    code review.
+  * Kernel producer: `crates/dashboard-kernel/src/lib.rs` —
+    `fn unix_now_s() -> u64` is the canonical helper for
+    seconds-typed fields; `fn unix_now_ms() -> u64` is the
+    canonical helper for `_ms`-suffixed fields. The
+    `subsystem_health` builder demonstrates the pattern: it
+    holds both `now_s` and `now_ms` locals, and each per-arm
+    tuple feeds the variable matching the destination field's
+    unit.
+  * FE consumer: `dashboard-fe/src/lib/format.ts::fmtRelative`
+    and `fmtAbsolute` both expect unix-seconds and document so
+    in their function signatures (`unixSeconds: number`).
+    Consumer pages (`Health.tsx`, `Sessions.tsx`,
+    `Initiatives.tsx`, …) MUST pass the wire field at the
+    documented unit; the only sanctioned conversion is at the
+    field-name boundary (e.g.
+    `dashboard-fe/src/components/ChainStatusBanner.tsx`
+    divides `verified_at_ms` by 1000 before passing to
+    `fmtAbsolute`, with the field-name suffix making the
+    conversion locally obvious).
+
+**Enforcement.** Documentation contract, audited at every
+dashboard wire schema change. A future stronger enforcement —
+introducing newtype wrappers (`UnixSeconds(u64)`,
+`UnixMillis(u64)`) in `crates/dashboard/src/data.rs` so the
+compiler refuses to mix the two — is filed for the
+post-validation cleanup sweep but is not wired today
+(touching every wire field would balloon this fix beyond the
+one-line correction the live bug needed).
 
 ---
 

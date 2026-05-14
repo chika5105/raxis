@@ -497,7 +497,16 @@ impl DashboardData for KernelDashboardData {
         // signal for a subsystem yet (`booted_at` window, store
         // unreadable, etc.) we roll the card to `"unknown"`
         // with a short reason rather than guessing `"ok"`.
+        // `now_ms` populates `SubsystemHealthResponse.generated_at_ms`
+        // (correctly `_ms`-suffixed on the wire). `now_s` populates
+        // `SubsystemHealthCard.last_observed_at`, which is documented
+        // as unix-seconds in `crates/dashboard/src/data.rs:802-804`
+        // and consumed as seconds by the FE's `fmtRelative`. Mixing
+        // the two yielded "in 56,347 years" on every Health card
+        // until we split the helpers; pinned by
+        // `INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01`.
         let now_ms = unix_now_ms();
+        let now_s = unix_now_s();
         let store_ok = raxis_store::ro::open(&self.data_dir).is_ok();
         let chain_ok = ChainReader::open(&self.audit_dir).is_ok();
         // Best-effort kernel-main-loop heartbeat: we use boot
@@ -524,7 +533,7 @@ impl DashboardData for KernelDashboardData {
                             label: "Booted at (unix-s)".into(),
                             value: self.booted_at.to_string(),
                         }],
-                        if kernel_alive { self.booted_at * 1000 } else { 0 },
+                        if kernel_alive { self.booted_at } else { 0 },
                         grafana_dashboard_url("kernel"),
                     ),
                     "audit_writer" => {
@@ -545,13 +554,13 @@ impl DashboardData for KernelDashboardData {
                                 value: e.to_string(),
                             }],
                         };
-                        (s, summary, details, now_ms, grafana_dashboard_url("audit"))
+                        (s, summary, details, now_s, grafana_dashboard_url("audit"))
                     }
                     "credential_proxies" => (
                         if store_ok { "ok" } else { "unknown" },
                         "Credential-proxy registry tracked in kernel.db.".to_owned(),
                         vec![],
-                        if store_ok { now_ms } else { 0 },
+                        if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("credentials"),
                     ),
                     "egress_admission" => (
@@ -559,7 +568,7 @@ impl DashboardData for KernelDashboardData {
                         "Egress-admission decisions surfaced via audit chain."
                             .to_owned(),
                         vec![],
-                        if store_ok { now_ms } else { 0 },
+                        if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("egress"),
                     ),
                     "session_spawn_pool" => (
@@ -567,7 +576,7 @@ impl DashboardData for KernelDashboardData {
                         "Session spawn / lifecycle visible through sessions view."
                             .to_owned(),
                         vec![],
-                        if store_ok { now_ms } else { 0 },
+                        if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("sessions"),
                     ),
                     "planner_registry" => (
@@ -575,7 +584,7 @@ impl DashboardData for KernelDashboardData {
                         "Planner registry health derives from planner-core."
                             .to_owned(),
                         vec![],
-                        if store_ok { now_ms } else { 0 },
+                        if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("planner"),
                     ),
                     "observability_pusher" => (
@@ -590,7 +599,7 @@ impl DashboardData for KernelDashboardData {
                         if store_ok { "ok" } else { "unknown" },
                         "Git worktree pool tracked in initiatives view.".to_owned(),
                         vec![],
-                        if store_ok { now_ms } else { 0 },
+                        if store_ok { now_s } else { 0 },
                         None,
                     ),
                     "dashboard_sse_pump" => (
@@ -598,7 +607,7 @@ impl DashboardData for KernelDashboardData {
                         "SSE pump active — this request was served by it."
                             .to_owned(),
                         vec![],
-                        now_ms,
+                        now_s,
                         None,
                     ),
                     _ => (
@@ -2403,6 +2412,26 @@ fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Wall-clock now in seconds-since-Unix-epoch as `u64`. Used by
+/// every dashboard wire field documented as unix-seconds (e.g.
+/// `SubsystemHealthCard.last_observed_at`,
+/// `HealthSnapshot.kernel_booted_at`).
+///
+/// Pinned by `INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01`: producers
+/// of seconds-typed fields MUST go through this helper (or the
+/// equivalent `raxis_types::clock::unix_now_secs`) so we never
+/// silently feed milliseconds into a seconds-typed field. The
+/// `u64` return matches the wire types in
+/// `crates/dashboard/src/data.rs` without an intermediate `i64
+/// → u64` cast at every call site.
+fn unix_now_s() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 

@@ -1269,6 +1269,89 @@ Cross-reference:
 `crates/dashboard-kernel/src/lib.rs::task_row_to_view`,
 `dashboard-fe/src/lib/state-color.ts::taskDisplayId`.
 
+## 5.13 Wire-time units (`INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01`)
+
+Every timestamp / duration field on the dashboard wire schema
+(`crates/dashboard/src/data.rs`) MUST carry an unambiguous
+unit, exposed in one of two ways:
+
+  1. **Suffixed field name** — `_ms`, `_s`, `_us`, `_ns`, or
+     the spelled-out forms `_unix_secs` / `_at_unix`. The
+     suffix is the contract; no doc-comment is required when
+     the suffix is present.
+  2. **Doc-comment with explicit unit** — when the historical
+     field name does not carry a suffix (e.g. `created_at`,
+     `updated_at`, `kernel_booted_at`, `last_observed_at`,
+     `at`, `signed_at`, `advanced_at`, FailureInfo
+     `observed_at`), the field MUST carry a doc-comment line
+     that begins `Unix-seconds` or `Unix-milliseconds`. The
+     reviewer reads the comment to know which producer helper
+     to call.
+
+Both producers and consumers MUST honour the documented unit:
+
+  * **Kernel producers** in `crates/dashboard-kernel/src/lib.rs`
+    (and any other crate writing into a `data.rs` wire struct)
+    pick the helper matching the field's documented unit.
+    `fn unix_now_s() -> u64` is the canonical helper for
+    seconds-typed fields; `fn unix_now_ms() -> u64` is the
+    canonical helper for `_ms`-suffixed fields. When a single
+    builder writes both unit families (the iter54
+    `subsystem_health` builder is the exemplar — it populates
+    `last_observed_at` in seconds AND `generated_at_ms` in
+    milliseconds in the same response struct), both locals
+    MUST be in scope and the reviewer MUST be able to match
+    each per-arm tuple to its destination field's unit at a
+    glance.
+  * **FE consumers** in `dashboard-fe/src/` read the wire
+    field at the documented unit. `fmtRelative` and
+    `fmtAbsolute` (`dashboard-fe/src/lib/format.ts`) both
+    expect unix-seconds and document so in their function
+    signatures. The only sanctioned conversion is at the
+    field-name boundary, and the field name's `_ms` suffix
+    must be locally visible at the conversion site (cf.
+    `ChainStatusBanner.tsx` divides `s.verified_at_ms` by
+    1000 before passing to `fmtAbsolute`;
+    `FailureReasonPanel.tsx` multiplies a documented
+    `unixSeconds` by 1000 before passing to `new Date(...)`).
+
+**The bug class this prevents.** Iter54 surfaced the failure
+mode this section exists to forbid: the kernel emitted
+`unix_now_ms()` (milliseconds) into
+`SubsystemHealthCard.last_observed_at` — a field documented
+at `data.rs:802-804` as **"Unix-seconds when the kernel last
+reported on this subsystem."** The FE's `fmtRelative` correctly
+read the field as seconds per the documented contract,
+computed `1.78×10¹² s − 1.78×10⁹ s ≈ 1.78×10¹² seconds`, and
+rendered **"in 56,347 years"** on every one of the nine
+subsystem cards. The render path had no defence because both
+the Rust `u64` and the JS `number` accept either magnitude
+without complaint, and there was no integration test that
+asserted "the Health page renders a sensible relative-time
+string for a healthy subsystem". The producer was changed to
+`unix_now_s()` for the seconds-typed field while
+`generated_at_ms` and `verified_at_ms` (correctly
+`_ms`-suffixed) stayed on `unix_now_ms()`.
+
+**Future strengthening.** A typed wrapper pair —
+`UnixSeconds(u64)` and `UnixMillis(u64)` in
+`crates/dashboard/src/data.rs`, with `Serialize` /
+`Deserialize` impls that round-trip the inner integer
+verbatim — would make this contract compiler-checked rather
+than reviewer-checked. Filed for the post-validation cleanup
+sweep; not wired today because it touches every wire field
+and the live operator bug only needed a one-line producer fix.
+
+Cross-reference:
+`INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01`
+(`specs/invariants.md §11.9`),
+`crates/dashboard/src/data.rs` (wire schema with per-field
+unit doc-comments),
+`crates/dashboard-kernel/src/lib.rs::unix_now_s` /
+`::unix_now_ms` (kernel-side helpers),
+`dashboard-fe/src/lib/format.ts::fmtRelative` /
+`::fmtAbsolute` (FE consumers, both seconds-typed).
+
 ## 6. Rationale (why these bounds)
 
 * **30 s handler timeout.** Gives the audit-chain walk
