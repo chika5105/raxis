@@ -5,7 +5,8 @@
 > **Cross-references:**
 > - [`isolation-linux-microvm.md`](isolation-linux-microvm.md) — Linux Firecracker substrate spec.
 > - [`extensibility-traits.md §3`](extensibility-traits.md) — `IsolationBackend` trait surface both substrates implement.
-> - [`vm-network-isolation.md`](vm-network-isolation.md) — Tier-1 networking contract every substrate honours.
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — historical Tier-1 networking contract (now superseded by Path A3; see `airgap-architecture.md`).
+> - [`airgap-architecture.md`](airgap-architecture.md) — Path A3 universal-airgap egress (the only non-`None` tier shipped in V2).
 > - [`system-requirements.md §1.1, §2`](system-requirements.md) — host requirements.
 > - `crates/raxis-isolation-apple-vz/src/lib.rs` — macOS substrate impl.
 > - `crates/raxis-isolation-firecracker/src/lib.rs` — Linux substrate impl.
@@ -51,7 +52,7 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 | Kernel cmdline                                   | `console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10` (verbose for diagnostics; Apple's PL011 is async-flushed) | `console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd quiet loglevel=0 tsc=reliable clocksource=tsc 8250.nr_uarts=0 random.trust_cpu=on` (fast-boot recipe) | ⚠️ partial — divergence is intentional per-VMM tuning, not a contract gap. The substrate owns the cmdline; operator-supplied `boot_args` REPLACE on both substrates. |
 | Initramfs vs EROFS rootfs                        | Both supported; `ImageKind::RootfsInitramfsCpio` → `vz_initial_ram_disk_url`; `RootfsErofs` → `vz_block_device_initialization` | Both supported; initramfs → `BootSource.initrd_path`; EROFS → `PUT /drives/rootfs` | ✅ parity |
 | Workspace mount path                             | VirtioFS via `VZVirtioFileSystemDeviceConfiguration`            | V2: vsock-mediated artifact RPC (no virtiofs in upstream Firecracker); V3: virtiofsd sidecar | ⚠️ partial — observable to the planner agent but invisible to the kernel; `WorkspaceMount` typed contract is identical |
-| Network device                                   | `VZBridgedNetworkDeviceAttachment` for tap; `VZNATNetworkDeviceAttachment` for slirp; `None` for `EgressTier::None` | `PUT /network-interfaces/eth0 { host_dev_name: "raxis-tap" }` for `Tier1Tproxy`; no PUT for `EgressTier::None` | ✅ parity (kernel-side network plumbing per `vm-network-isolation.md §3` is OS-agnostic) |
+| Network device                                   | No `VZ*NetworkDevice*` attachment for any tier (`EgressTier::None` and `EgressTier::Mediated` both produce a NIC-less VM) | No `PUT /network-interfaces` call for any tier (both `None` and `Mediated` omit it) | ✅ parity (Path A3 — `airgap-architecture.md` — is the only egress path; the legacy `Tier1Tproxy` virtio-net + NAT codepath was deleted alongside the variant) |
 | Vsock contract                                   | Host CID 2; per-session guest CID; planner port 1024            | Host CID 2; per-session guest CID (Firecracker-assigned); planner port 1024 | ✅ parity |
 | Host-side vsock channel                          | `VZVirtioSocketDevice` connect; raw bytes                       | UDS multiplexer + `CONNECT 1024\n`/`OK <peer_port>\n` handshake; raw bytes | ✅ parity (handshake invisible to the kernel; both surface a `dyn Read + Write`) |
 | Frame envelope                                   | 4-byte BE length + payload, 16 MiB cap (`MAX_FRAME_BYTES`)       | 4-byte BE length + payload, 16 MiB cap (`MAX_FRAME_BYTES`)     | ✅ parity (byte-identical) |
@@ -78,17 +79,27 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 
 ---
 
-## §5 Networking (Tier-1 tproxy contract)
+## §5 Networking (Path A3 universal-airgap contract)
 
-`vm-network-isolation.md §3` mandates that every isolation backend deliver a VM with no virtio-net interface to the host and all egress routed through `raxis-tproxy` running on a kernel-side network namespace, with SNI inspection enforced. The substrate's job is to plumb the `EgressTier` to the per-VMM device config.
+After the Tier1Tproxy deletion every supported egress tier
+produces a NIC-less VM. The kernel arbitrates outbound TCP and
+DNS over AF_VSOCK rather than over a virtio-net device — see
+`airgap-architecture.md` for the wire protocol. The substrate's
+job is to honour `EgressTier::Mediated` by emitting *no* network
+device, and to honour `EgressTier::None` the same way.
 
 | EgressTier              | macOS Apple-VZ                                                  | Linux Firecracker                                              | Status |
 |-------------------------|-----------------------------------------------------------------|----------------------------------------------------------------|--------|
 | `EgressTier::None`      | No `VZ*NetworkDevice*` attachment — VM has no virtio-net at all | No `PUT /network-interfaces/...` — VM has no virtio-net        | ✅ parity |
-| `EgressTier::Tier1Tproxy` | `VZBridgedNetworkDeviceAttachment` against `raxis-tap` (kernel-managed by `vm-network-isolation.md §3`) | `PUT /network-interfaces/eth0 { host_dev_name: "raxis-tap" }`  | ✅ parity |
+| `EgressTier::Mediated`  | No `VZ*NetworkDevice*` attachment — VM has no virtio-net; egress flows over the per-session vsock device set up by the substrate's IPC channel | No `PUT /network-interfaces/...` — VM has no virtio-net; egress flows over the per-session vsock device set up by the substrate's IPC channel | ✅ parity (both substrates structurally enforce the no-NIC invariant) |
 | `EgressTier::Tier2CredProxy` | Not yet wired (V2.5 — extends the boot device list with a per-credential socketpair) | Not yet wired (V2.5 — same)                                    | ⚠️ partial — both substrates share the gap; no per-OS divergence |
 
-The kernel-side egress wiring (tap creation, nftables / pf redirect into `raxis-tproxy`, per-session SNI rules) is OS-aware but lives in `kernel/src/runtime/egress/` — the substrate never touches it.
+The kernel-side admission gate (`handlers::tproxy_admit`,
+`handlers::dns_resolve`, per-session vsock tunnel listener) is
+OS-aware but lives in `kernel/src/` — the substrate never touches
+it. The previous host-side tap / nftables / pf egress wiring
+referenced by old revisions of this matrix was removed alongside
+the `Tier1Tproxy` variant.
 
 ---
 

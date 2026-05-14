@@ -219,7 +219,7 @@ least the following config flags `=y`:
 |---------------------------------------|------------------------------------------------------|
 | `CONFIG_VIRTIO_PCI`                   | AVF advertises virtio devices on the PCI bus.        |
 | `CONFIG_VIRTIO_BLK`                   | Rootfs as virtio-blk drive (`RootfsErofs` path).     |
-| `CONFIG_VIRTIO_NET`                   | NAT bridge for `EgressTier::Tier1Tproxy`.            |
+| `CONFIG_VIRTIO_NET`                   | Historically required for the deleted `EgressTier::Tier1Tproxy` NAT bridge. After the Tier1Tproxy deletion the kernel emits no virtio-net device for any shipped tier (`Mediated` / `None`); leaving the config option compiled in is harmless. |
 | `CONFIG_VIRTIO_CONSOLE`               | `console=hvc0` lines reach the host console-log.     |
 | `CONFIG_VIRTIO_VSOCKETS`              | Kernel↔planner control channel (port 1024).         |
 | `CONFIG_VSOCKETS`                     | Guest userspace `AF_VSOCK` socket support.           |

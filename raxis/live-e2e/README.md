@@ -123,7 +123,7 @@ docker compose -f live-e2e/docker-compose.e2e.yml ps
 docker compose -f live-e2e/docker-compose.e2e.yml down -v
 ```
 
-Three compose files live in this directory:
+Two compose files live in this directory:
 
 * `docker-compose.e2e.yml` — the minimum stack the live-e2e
   slices and `kernel/tests/full_e2e_session_lifecycle.rs` need.
@@ -132,13 +132,15 @@ Three compose files live in this directory:
   `kernel/tests/extended_e2e_*.rs`. It publishes the same ports
   on the same loopback addresses so a slice configured for one
   works against the other unchanged.
-* `docker-compose.airgap-a3.yml` — opt-in Path A3 variant. Extends
-  the baseline service set and stamps `RAXIS_AIRGAP_A3=1` into the
-  `.env.airgap-a3` file the kernel harness reads when spawning the
-  kernel-under-test. Use with `cargo test --features
-  runtime-airgap-a3` to exercise the universal-airgap chokepoint
-  end-to-end. See `specs/v2/airgap-architecture.md` and
-  `guides/operator/21-airgap-a3-egress-allowlist.md`.
+
+> **Path A3 / Mediated egress.** After the Tier1Tproxy deletion
+> (TODO `tier1-deletion-fold-into-cleanup-sweep`) every executor /
+> orchestrator VM boots at `EgressTier::Mediated` unconditionally
+> — there is no opt-in toggle and no separate compose file. Both
+> compose files exercise the Mediated codepath; the previous
+> `docker-compose.airgap-a3.yml` opt-in stamper was deleted in the
+> same sweep. See `specs/v2/airgap-architecture.md` and
+> `guides/operator/21-airgap-a3-egress-allowlist.md`.
 
 Both compose files pin the project namespace to
 `raxis-live-e2e-test` via the top-level `name:` field, which

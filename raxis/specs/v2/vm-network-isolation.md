@@ -63,8 +63,9 @@ network-level mechanism.
 by the Kernel at boot, combined with iptables rules that redirect all outbound
 TCP to it.
 
-> **Path A3 (`RAXIS_AIRGAP_A3=1`).** Under the universal-airgap mode documented in
-> `airgap-architecture.md`, the VM has **no** virtio-net device at all
+> **Path A3 (universal-airgap; the only egress path shipped in V2).** This
+> document captures the historical Tier-1 admission contract that Path A3
+> inherits. The VM has **no** virtio-net device at all
 > (`EgressTier::Mediated`). The iptables REDIRECT chain still targets
 > `raxis-tproxy` on `127.0.0.1:3129`, but the tproxy itself routes the
 > admission request — and, on Admit, the byte-tunnel — over AF_VSOCK to a
@@ -72,8 +73,11 @@ TCP to it.
 > upstream host socket. The agent inside the VM has no path to the outside
 > world that does not transit the kernel's vsock admission gate; even DNS is
 > mediated by an in-guest stub forwarder that proxies queries to the kernel
-> over the same vsock device. Default-off (legacy) path is bit-identical to
-> the rest of this section.
+> over the same vsock device. The legacy `EgressTier::Tier1Tproxy`
+> NAT-attached-virtio-net variant was removed in the Tier1Tproxy deletion
+> sweep (TODO `tier1-deletion-fold-into-cleanup-sweep`); see
+> `airgap-architecture.md` for the canonical home of the post-deletion
+> contract.
 
 > **Custom-tool subprocess interaction (cross-reference: `custom-tools.md`).**
 > Operator-defined custom tools (`[[profiles.<name>.custom_tool]]`) execute as
@@ -97,14 +101,16 @@ owned by `root`, not executable by the agent user).
 
 ### 3.1 — iptables Rules (Installed by Kernel at VM Boot)
 
-> **Path A3 substitution.** Under `RAXIS_AIRGAP_A3=1` the VM has no NIC at all,
-> so the `OUTPUT DROP` default policy is moot — there is no device for packets
-> to egress. The REDIRECT rules still install (now catching every dport
-> indiscriminately, since the tproxy talks to the kernel over vsock and the
-> kernel can apply the per-port admission policy itself) and a new
-> `-p udp --dport 53 -j REDIRECT --to-port 53` rule routes DNS queries through
-> the in-guest stub forwarder. See `airgap-architecture.md §4` for the A3
-> rule shape.
+> **Path A3 substitution.** The VM has no NIC at all under
+> `EgressTier::Mediated` (the only non-`None` tier shipped in V2 after the
+> Tier1Tproxy deletion), so the `OUTPUT DROP` default policy is moot —
+> there is no device for packets to egress. The REDIRECT rules still
+> install (now catching every dport indiscriminately, since the tproxy
+> talks to the kernel over vsock and the kernel can apply the per-port
+> admission policy itself) and a new
+> `-p udp --dport 53 -j REDIRECT --to-port 53` rule routes DNS queries
+> through the in-guest stub forwarder. See `airgap-architecture.md §4`
+> for the A3 rule shape.
 
 ```bash
 # Drop all outbound traffic by default (VM has no direct internet)

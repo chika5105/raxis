@@ -4280,32 +4280,37 @@ catches every stall regardless of root cause.
 
 These six invariants form the contract for the **universal airgap**
 egress model documented in `v2/airgap-architecture.md`. They are
-opt-in: a kernel built without `--features runtime-airgap-a3` (or
-launched without `RAXIS_AIRGAP_A3=1`) operates under the legacy
-`Tier1Tproxy` model and the A3 invariants are vacuously true (the
-A3 code paths are compiled out / disabled). When A3 is active they
-universally supersede the role-asymmetric `INV-NETISO-01` family —
-the Reviewer was always `EgressTier::None` (no NIC); under A3 every
-role is.
+**unconditional** in V2 after the Tier1Tproxy deletion (TODO
+`tier1-deletion-fold-into-cleanup-sweep`): the legacy
+`EgressTier::Tier1Tproxy` variant, the `runtime-airgap-a3` cargo
+feature, and the `RAXIS_AIRGAP_A3` runtime env gate were all
+removed in the same sweep. Path A3 is no longer opt-in. The A3
+invariants universally supersede the historical role-asymmetric
+`INV-NETISO-01` family — the Reviewer / Orchestrator are at
+`EgressTier::None` (no NIC); the Executor is at
+`EgressTier::Mediated` (also no NIC, with admission over vsock).
 
-### INV-NETISO-A3-UNIVERSAL-NO-NIC-01 — No role's VM has a virtio-net device under A3
+### INV-NETISO-A3-UNIVERSAL-NO-NIC-01 — No role's VM has a virtio-net device
 
-When `RAXIS_AIRGAP_A3=1`, the kernel session-spawn path selects
-`EgressTier::Mediated` for every role (Orchestrator, Executor,
-Reviewer). Both V2 microVM substrates honour the tier:
-`crates/isolation-apple-vz::translate_to_avf` returns
-`network: None` and `crates/isolation-firecracker::drive_boot`
-omits the `PUT /network-interfaces` call. The guest kernel boots
-without an `eth0` (or any other virtio-net device); the guest
-networking stack has loopback only.
+The kernel session-spawn path selects `EgressTier::None` for the
+Orchestrator and Reviewer roles and `EgressTier::Mediated` for the
+Executor, unconditionally. Both V2 microVM substrates honour the
+tier: `crates/isolation-apple-vz::translate_to_avf` emits no
+network device for any tier, and
+`crates/isolation-firecracker::drive_boot` omits the
+`PUT /network-interfaces` call for any tier. The guest kernel boots
+without an `eth0` (or any other virtio-net device) regardless of
+role; the guest networking stack has loopback only.
 
-**Justification.** The audit identified that the legacy Executor /
-Orchestrator path under `Tier1Tproxy` ships a virtio-net NAT
-adapter *without* the matching in-guest iptables enforcement and
-without the `raxis-tproxy` binary on the rootfs. Removing the NIC
-entirely makes the enforcement contract structurally true: the
-agent has no path around the kernel admission gate because there is
-no second path.
+**Justification.** The pre-deletion audit identified that the
+legacy Executor / Orchestrator path under `Tier1Tproxy` shipped a
+virtio-net NAT adapter *without* the matching in-guest iptables
+enforcement and without the `raxis-tproxy` binary on the rootfs.
+Removing the NIC entirely (and then removing the Tier1Tproxy
+variant itself in the deletion sweep) makes the enforcement
+contract structurally true: the agent has no path around the
+kernel admission gate because there is no second path *and there
+is no codepath that produces a NIC*.
 
 **Witness.** `kernel/tests/airgap_a3_executor_no_nic.rs`.
 

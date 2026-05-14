@@ -1,33 +1,31 @@
-# Enable the Path A3 universal-airgap egress chokepoint
+# Path A3 universal-airgap egress allowlist (default, only path)
 
-> **Audience.** Operators who want to take the kernel from the V2
-> baseline (executor VM has a virtio-net device + NAT egress) to
-> the Path A3 universal-airgap posture (no virtio-net for any
-> role; every outbound flow is admitted by the kernel over
-> AF_VSOCK). Recipe-level detail; the normative contract lives in
-> `specs/v2/airgap-architecture.md` and the
-> `INV-NETISO-A3-*` / `INV-AUDIT-TPROXY-ADMIT-01` /
-> `INV-AUDIT-DNS-RESOLVE-01` invariants.
+> **Audience.** Operators authoring the `[egress] domains` /
+> `[egress] patterns` allowlist that Path A3 enforces on the
+> kernel side. Path A3 is **the only egress path** shipped in V2
+> after the Tier1Tproxy deletion (TODO
+> `tier1-deletion-fold-into-cleanup-sweep`) — there is no opt-in
+> toggle, no cargo feature, and no env-var gate. Recipe-level
+> detail; the normative contract lives in
+> `specs/v2/airgap-architecture.md` and the `INV-NETISO-A3-*` /
+> `INV-AUDIT-TPROXY-ADMIT-01` / `INV-AUDIT-DNS-RESOLVE-01`
+> invariants.
 
 ## Before you start
 
 You will need:
 
-  1. **A kernel binary built with the `runtime-airgap-a3` cargo
-     feature.** Without it, `RAXIS_AIRGAP_A3=1` is silently
-     ignored — the gate is double-checked (feature flag AND env
-     var) so an operator cannot accidentally engage A3 against a
-     kernel that does not ship the handler code.
-
-     Build it with:
+  1. **A current kernel binary.** No cargo feature gating — the
+     A3 admission listener (`handlers::tproxy_admit`), the DNS
+     resolver (`handlers::dns_resolve`), and the per-session
+     vsock admission / tunnel listeners are compiled in
+     unconditionally. The previous `runtime-airgap-a3` cargo
+     feature was removed alongside the Tier1Tproxy variant; a
+     plain release build is all you need:
 
      ```
-     cargo build --release -p raxis-kernel --features runtime-airgap-a3
+     cargo build --release -p raxis-kernel
      ```
-
-     If you already ship a release kernel, ask whoever bakes
-     the operator-facing distribution to enable
-     `runtime-airgap-a3` on the next cut.
 
   2. **An executor rootfs that ships `iptables`.** The canonical
      `images/executor-starter/Containerfile` shipped with this
@@ -43,9 +41,7 @@ You will need:
      effective allowlist (operator-declared + the implicit
      provider grants the policy bundle materialises from
      `[[providers]]`) gets a `TproxyAdmissionDenied` event and an
-     `ECONNREFUSED`-shaped failure on the agent side. The
-     legacy Tier-1 path applies the same allowlist; A3 makes it
-     load-bearing.
+     `ECONNREFUSED`-shaped failure on the agent side.
 
 ## Step 1 — Audit your effective allowlist
 
@@ -87,23 +83,18 @@ install` hits `pypi.org` first and then redirects to
 tproxy re-issues admission for every new flow even within a
 single `pip install` invocation.
 
-## Step 2 — Engage the gate
+## Step 2 — Run the kernel
 
-Set the runtime env var on the kernel process:
+No special env vars are required. Boot the kernel as usual:
 
 ```
-RAXIS_AIRGAP_A3=1 raxis kernel run \
+raxis kernel run \
     --data-dir /var/lib/raxis \
     --policy /etc/raxis/policy.toml
 ```
 
-The kernel logs a single `airgap-a3-active=true` line at boot
-when it has accepted the gate (feature compiled in AND env var
-recognised). Absence of that line means A3 is OFF; check both
-the cargo feature and the env-var spelling.
-
-From this point on, every Executor VM the kernel spawns boots
-under `EgressTier::Mediated`:
+Every Executor VM the kernel spawns boots under
+`EgressTier::Mediated` unconditionally:
 
   * **No virtio-net** in the AVF / Firecracker config
     (`INV-NETISO-A3-UNIVERSAL-NO-NIC-01`).
@@ -144,18 +135,21 @@ denied, fix the policy IMMEDIATELY:
 
 ## Step 4 — Operating the gate
 
-  * **Disabling.** Unset `RAXIS_AIRGAP_A3` on the kernel
-    process. New sessions will boot through the legacy
-    Tier1Tproxy path again; existing sessions retain whatever
-    posture they spawned under.
+  * **Disabling Mediated is not supported in V2.** Mediated is
+    the only non-`None` egress tier after the Tier1Tproxy
+    deletion; there is no "back to NAT" toggle. If a session must
+    boot without egress at all, give it `EgressTier::None`
+    (Reviewer / Orchestrator default).
   * **Allowlist edits.** Standard policy update flow. The
     in-guest tproxy reads the kernel's response per-admission;
     there is no in-guest cache to invalidate.
-  * **DNS troubleshooting.** Set
+  * **Per-port discovery overrides.** Set
     `RAXIS_AIRGAP_A3_HOST_CID` / `_ADMISSION_PORT` only if your
     substrate exposes a non-default CID; the defaults match
     `VMADDR_CID_HOST`, kernel admission port `5380`, kernel
-    tunnel port `5381`.
+    tunnel port `5381`. (These per-port env vars survived the
+    Tier1Tproxy deletion — only the `RAXIS_AIRGAP_A3=1` ACTIVE
+    toggle was removed.)
 
 ## Failure modes
 
@@ -170,20 +164,18 @@ denied, fix the policy IMMEDIATELY:
   * **Substrate that pre-mounts `/proc` without IPv6 sysfs
     nodes.** The IPv6 disable step skips silently
     (`ipv6_sysfs_unavailable`); already safe because no NIC.
-  * **`RAXIS_AIRGAP_A3=1` set on a kernel built without the
-    cargo feature.** Gate is OFF (double-check passes); kernel
-    logs `airgap-a3-active=false` so the operator can spot the
-    misconfiguration before a session spawns.
 
 ## Why this exists
 
-The V2 baseline executor VM had a virtio-net device + NAT NIC
-but never shipped the in-guest `iptables` REDIRECT rules that
-the Tier-1 tproxy needed to be load-bearing. That meant the
-admission chokepoint existed in code but not in practice: an
-agent that bypassed the tproxy by dialling its destination
-directly would reach the upstream unsupervised. Path A3 closes
-that gap by removing the NIC entirely and routing every flow
-through a chokepoint the kernel controls. See
+The pre-deletion V2 baseline executor VM had a virtio-net device
++ NAT NIC but never shipped the in-guest `iptables` REDIRECT
+rules that the Tier-1 tproxy needed to be load-bearing. That
+meant the admission chokepoint existed in code but not in
+practice: an agent that bypassed the tproxy by dialling its
+destination directly would reach the upstream unsupervised. Path
+A3 closed that gap by removing the NIC entirely and routing every
+flow through a chokepoint the kernel controls. The Tier1Tproxy
+deletion finished the job by making A3 the only egress path —
+operators no longer have to opt in. See
 `specs/v2/airgap-architecture.md` for the full architectural
 rationale.

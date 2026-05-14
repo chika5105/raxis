@@ -42,16 +42,17 @@ mode.
 
 The kernel has **two** independent egress gates:
 
-1. **Tier-1 transparent proxy** (`raxis-tproxy` in-VM, kernel-side
-   `raxis-egress-admission`). Under the legacy default-off path, used by
-   Executor / Orchestrator VMs that boot at `EgressTier::Tier1Tproxy`
-   (virtio-net + NAT + iptables REDIRECT to the in-guest tproxy). Under
-   Path A3 (`RAXIS_AIRGAP_A3=1`; see `airgap-architecture.md`), used by
-   *every* role's VM at `EgressTier::Mediated`, with the tproxy routing
-   admission decisions over AF_VSOCK rather than over an upstream NIC.
-   In both modes the kernel's `EgressAllowlist` is sourced from
-   `policy.[egress] domains` + `[egress] patterns`, and a non-allowlisted
-   SNI is denied with `DenyReason::HostNotInAllowlist` so the agent sees
+1. **Transparent egress proxy / admission gate** (`raxis-tproxy`
+   in-VM, kernel-side `handlers::tproxy_admit` admission listener
+   over AF_VSOCK). Used by Executor VMs that boot at
+   `EgressTier::Mediated` — the only non-`None` tier shipped in V2
+   after the Tier1Tproxy deletion. There is no virtio-net device in
+   the guest; the in-guest tproxy routes admission decisions over
+   AF_VSOCK to the kernel admission handler (see
+   `airgap-architecture.md`). The kernel's `EgressAllowlist` is
+   sourced from `policy.[egress] domains` + `[egress] patterns`,
+   and a non-allowlisted SNI is denied with
+   `DenyReason::HostNotInAllowlist` so the agent sees
    `ECONNREFUSED`.
 
 2. **Gateway URL allowlist** (`raxis-gateway::policy_view::PolicyView::is_url_allowed`).
@@ -61,15 +62,14 @@ The kernel has **two** independent egress gates:
    sourced from the same `policy.[egress] domains` + `[egress] patterns`.
    A non-allowlisted host returns `error: "DomainNotAllowed"`.
 
-The Reviewer runs at `EgressTier::None` (no NIC) unconditionally so its
-inference traffic only hits gate (2). The Executor / Orchestrator hit
-gate (2) for kernel-mediated inference calls universally; they additionally
-hit gate (1) for any **direct** outbound socket (a bash-invoked `curl`, an
-SDK that bypasses `PlannerFetchRequest`, a custom-tool subprocess) — under
-the legacy path this means flows through `raxis-tproxy` over the NAT tap,
-under Path A3 it means flows through `raxis-tproxy` over vsock to the
-kernel admission handler. The audit, allowlist, and denial semantics at
-gate (1) are identical between the two modes.
+The Reviewer and Orchestrator run at `EgressTier::None` (no NIC)
+unconditionally so their inference traffic only hits gate (2).
+The Executor hits gate (2) for kernel-mediated inference calls
+universally and additionally hits gate (1) for any **direct**
+outbound socket (a bash-invoked `curl`, an SDK that bypasses
+`PlannerFetchRequest`, a custom-tool subprocess) — those flow
+through in-guest `raxis-tproxy` over vsock to the kernel
+admission handler.
 
 The bug class therefore manifests at **both** gates whenever the
 operator's `[[providers]]` and `[egress]` lists drift apart.

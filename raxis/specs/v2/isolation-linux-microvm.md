@@ -138,16 +138,29 @@ Length-prefix is a 4-byte big-endian `u32`. Maximum frame size is 16 MiB (`MAX_F
 
 ---
 
-## §5 Networking (Tier-1 tproxy, V2)
+## §5 Networking (Path A3 universal-airgap, V2)
 
-The substrate plumbs the `EgressTier::Tier1Tproxy` variant by adding a `PUT /network-interfaces/eth0` REST call to the boot sequence with `host_dev_name = "raxis-tap"`. The kernel-side egress wiring (per `vm-network-isolation.md §3`) is responsible for:
+The substrate plumbs every shipped `EgressTier` by **omitting** the
+`PUT /network-interfaces` REST call entirely — both `EgressTier::None`
+and `EgressTier::Mediated` (the only non-`None` tier shipped in V2 after
+the Tier1Tproxy deletion) produce a Firecracker VM with no virtio-net
+device. The kernel arbitrates outbound TCP and DNS over AF_VSOCK via
+the `handlers::tproxy_admit` and `handlers::dns_resolve` listeners
+(see `airgap-architecture.md`); there is no host tap device, no
+nftables redirect, and no host-side egress namespace.
 
-1. Creating the host tap device + nftables redirect into `raxis-tproxy` BEFORE calling `Backend::spawn`.
-2. Tearing down the tap device + nftables ruleset on `Session` drop.
+The substrate does NOT own network plumbing — it only honours the
+operator-declared egress tier. A future `EgressTier::Tier2CredProxy`
+would extend the boot sequence with a per-credential socket-pair,
+gated by `credential-proxy.md`.
 
-The substrate does NOT own network plumbing — it only forwards the operator-declared egress tier to Firecracker. A future `EgressTier::Tier2CredProxy` would extend the boot sequence with a per-credential socket-pair, gated by `credential-proxy.md`.
-
-`EgressTier::None` (Reviewer images, `INV-NETISO-01`) is the no-op default — Firecracker boots without a virtio-net device at all, so the guest can't attempt egress.
+`EgressTier::None` (Reviewer / Orchestrator images, `INV-NETISO-01`)
+and `EgressTier::Mediated` (Executor, `INV-NETISO-A3-*`) are
+structurally identical at the substrate layer: Firecracker boots
+without a virtio-net device for both. The behavioural difference is
+entirely in the kernel's session-spawn path, which only installs the
+per-session admission / tunnel / DNS listeners and stamps the
+in-guest tproxy when the spec is `Mediated`.
 
 ---
 
