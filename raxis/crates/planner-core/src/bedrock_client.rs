@@ -38,7 +38,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::model::{
-    MessageRequest, MessageResponse, ModelClient, ModelError,
+    CacheControl, CacheTtl, MessageRequest, MessageResponse, ModelClient,
+    ModelError,
 };
 
 /// Bedrock-required version string. Pinned by AWS — bumping requires
@@ -57,19 +58,131 @@ pub struct BedrockClient {
     request_timeout: Duration,
 }
 
-fn skip_if_slice_empty<T>(s: &&[T]) -> bool { s.is_empty() }
-
-#[derive(Serialize)]
+/// Manual `Serialize` impl that mirrors the Anthropic-on-Bedrock
+/// wire shape **and** honors the [`MessageRequest::cache_*`]
+/// flags. Bedrock proxies the Anthropic Messages API verbatim, so
+/// the projection rules are identical to the Anthropic native
+/// client — with two exceptions:
+///
+/// 1. `model` is omitted (it lives in the URL path).
+/// 2. `anthropic_version` is added (the Bedrock-required pin).
+/// 3. The top-level **automatic-caching** breakpoint
+///    (`MessageRequest::cache_messages`) is suppressed: per
+///    `prompt-caching.md §"Provider parity"`, Bedrock + Vertex
+///    AI do NOT support automatic caching. The system + tools
+///    explicit breakpoints still serialize because Bedrock
+///    supports per-block `cache_control` markers at the same
+///    Anthropic shape.
 struct BedrockRequestBody<'a> {
-    anthropic_version: &'static str,
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
-    messages: &'a [crate::model::Message],
-    #[serde(skip_serializing_if = "skip_if_slice_empty")]
-    tools: &'a [crate::model::ToolSpec],
+    req: &'a MessageRequest,
+}
+
+impl<'a> Serialize for BedrockRequestBody<'a> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use crate::model::{ToolSpec, Message};
+        use serde::ser::SerializeMap;
+
+        // Fixed Anthropic-shape system block view local to this
+        // impl. We re-implement it (rather than re-export the
+        // `model.rs` private one) to keep `BedrockRequestBody`
+        // self-contained and to make the wire-shape contract
+        // visible in the file that owns the Bedrock client.
+        #[derive(Serialize)]
+        struct SystemBlock<'b> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            text: &'b str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            cache_control: Option<CacheControl>,
+        }
+        struct ToolView<'b> {
+            spec: &'b ToolSpec,
+            cache_control: Option<CacheControl>,
+        }
+        impl<'b> Serialize for ToolView<'b> {
+            fn serialize<S2: serde::Serializer>(
+                &self,
+                ser: S2,
+            ) -> Result<S2::Ok, S2::Error> {
+                use serde::ser::SerializeMap;
+                let len = 3 + usize::from(self.cache_control.is_some());
+                let mut m = ser.serialize_map(Some(len))?;
+                m.serialize_entry("name", &self.spec.name)?;
+                m.serialize_entry("description", &self.spec.description)?;
+                m.serialize_entry("input_schema", &self.spec.input_schema)?;
+                if let Some(cc) = self.cache_control {
+                    m.serialize_entry("cache_control", &cc)?;
+                }
+                m.end()
+            }
+        }
+
+        let cache_payload = self.req.cache_ttl.unwrap_or(CacheTtl::Short);
+
+        // Pre-count the map size for serializers that benefit from
+        // a known length (e.g. CBOR via `bincode`); JSON is
+        // length-agnostic but cheap to compute.
+        let mut len = 2; // anthropic_version, max_tokens
+        if self.req.system.is_some()      { len += 1; }
+        let _: () = (); /* messages always present */ len += 1;
+        if !self.req.tools.is_empty()     { len += 1; }
+        if self.req.temperature.is_some() { len += 1; }
+
+        let mut m = serializer.serialize_map(Some(len))?;
+        m.serialize_entry("anthropic_version", ANTHROPIC_VERSION_BEDROCK)?;
+        m.serialize_entry("max_tokens", &self.req.max_tokens)?;
+
+        if let Some(t) = self.req.temperature {
+            m.serialize_entry("temperature", &t)?;
+        }
+
+        if let Some(sys) = &self.req.system {
+            if self.req.cache_system {
+                let block = SystemBlock {
+                    kind: "text",
+                    text: sys.as_str(),
+                    cache_control: Some(CacheControl::Ephemeral {
+                        ttl: Some(cache_payload),
+                    }),
+                };
+                m.serialize_entry("system", &[block])?;
+            } else {
+                m.serialize_entry("system", sys.as_str())?;
+            }
+        }
+
+        let messages: &[Message] = &self.req.messages;
+        m.serialize_entry("messages", messages)?;
+
+        if !self.req.tools.is_empty() {
+            if self.req.cache_tools {
+                let projected: Vec<ToolView<'_>> = self
+                    .req
+                    .tools
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| ToolView {
+                        spec: t,
+                        cache_control: if i + 1 == self.req.tools.len() {
+                            Some(CacheControl::Ephemeral {
+                                ttl: Some(cache_payload),
+                            })
+                        } else {
+                            None
+                        },
+                    })
+                    .collect();
+                m.serialize_entry("tools", &projected)?;
+            } else {
+                m.serialize_entry("tools", &self.req.tools)?;
+            }
+        }
+
+        m.end()
+    }
 }
 
 impl BedrockClient {
@@ -118,14 +231,7 @@ impl ModelClient for BedrockClient {
         req: &MessageRequest,
     ) -> Result<MessageResponse, ModelError> {
         let url = format!("{}/model/{}/invoke", self.base_url, req.model);
-        let body = BedrockRequestBody {
-            anthropic_version: ANTHROPIC_VERSION_BEDROCK,
-            max_tokens: req.max_tokens,
-            temperature: req.temperature,
-            system: req.system.as_deref(),
-            messages: &req.messages,
-            tools: &req.tools,
-        };
+        let body = BedrockRequestBody { req };
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| ModelError::Json(e.to_string()))?;
 
@@ -186,22 +292,14 @@ mod tests {
                 role: "user".to_owned(),
                 content: vec![ContentBlock::Text { text: "hello".to_owned() }],
             }],
-            tools: vec![],
-            stream: false,
+            ..Default::default()
         }
     }
 
     #[test]
     fn body_omits_model_field_and_includes_anthropic_version() {
         let r = req();
-        let body = BedrockRequestBody {
-            anthropic_version: ANTHROPIC_VERSION_BEDROCK,
-            max_tokens: r.max_tokens,
-            temperature: r.temperature,
-            system: r.system.as_deref(),
-            messages: &r.messages,
-            tools: &r.tools,
-        };
+        let body = BedrockRequestBody { req: &r };
         let json = serde_json::to_value(&body).unwrap();
         assert!(json.get("model").is_none(),
             "Bedrock body MUST NOT include `model` (it's in the URL); got {json}");
@@ -209,6 +307,44 @@ mod tests {
         assert_eq!(json["max_tokens"], 256);
         assert_eq!(json["system"], "be helpful");
         assert_eq!(json["messages"][0]["role"], "user");
+    }
+
+    /// Pin the cache-on Bedrock wire shape: when caller opts into
+    /// `cache_system` + `cache_tools`, the body emits the
+    /// Anthropic-on-Bedrock cache_control markers exactly the way
+    /// AWS proxies the Anthropic Messages API. Top-level
+    /// `cache_control` (Anthropic automatic caching) is suppressed
+    /// because Bedrock does not support it (per
+    /// `prompt-caching.md §"Provider parity"`).
+    #[test]
+    fn body_emits_cache_control_when_flags_opted_in() {
+        let mut r = req();
+        r.cache_system = true;
+        r.cache_tools = true;
+        r.cache_messages = true; // intentionally true to assert suppression
+        r.tools = vec![crate::model::ToolSpec {
+            name:         "read_file".to_owned(),
+            description:  "read".to_owned(),
+            input_schema: serde_json::json!({"type":"object"}),
+        }];
+        let body = BedrockRequestBody { req: &r };
+        let json = serde_json::to_value(&body).unwrap();
+
+        // System projected as block array carrying cache_control.
+        let sys = json["system"].as_array()
+            .expect("cache_system=true MUST project system to a block array");
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["text"], "be helpful");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+
+        // Last tool carries cache_control.
+        let tools = json["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
+
+        // Bedrock MUST NOT emit a top-level cache_control (it does
+        // not support Anthropic automatic caching).
+        assert!(json.get("cache_control").is_none(),
+            "Bedrock MUST NOT emit top-level cache_control; got {json}");
     }
 
     #[tokio::test]

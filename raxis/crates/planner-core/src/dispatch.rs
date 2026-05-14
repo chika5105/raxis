@@ -337,6 +337,18 @@ impl DispatchLoop {
             tools:       self.registry.to_specs(),
             temperature: self.config.temperature,
             stream:      false,
+            // `prompt-caching.md §"Per-role defaults"` — every
+            // dispatch session's tools + system + growing message
+            // history are the canonical cache-write targets.
+            // Anthropic / Bedrock honor these flags via the wire
+            // shape projection in `MessageRequest::Serialize`;
+            // OpenAI / Gemini ignore them and rely on upstream
+            // automatic / implicit caching, surfacing the cache
+            // hit count through `Usage::cache_read_input_tokens`.
+            cache_system:   true,
+            cache_tools:    true,
+            cache_messages: true,
+            cache_ttl:      None, // 5-minute ephemeral, refreshed for free
         };
 
         // V2_GAPS §C1 — cumulative session token totals. Updated
@@ -535,6 +547,12 @@ impl DispatchLoop {
             tools:       self.registry.to_specs(),
             temperature: self.config.temperature,
             stream:      true,
+            // Same cache opt-in as the buffered path above. See
+            // `prompt-caching.md §"Per-role defaults"`.
+            cache_system:   true,
+            cache_tools:    true,
+            cache_messages: true,
+            cache_ttl:      None,
         };
 
         let mut cum_in:  u64 = 0;

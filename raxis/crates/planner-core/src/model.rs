@@ -62,11 +62,23 @@
 //! * **No vision / files.** `content` blocks are text-only; tool
 //!   outputs are bytes (UTF-8 strings). The Anthropic schema
 //!   supports image blocks; the planner does not emit them.
-//! * **No prompt caching.** The `cache_control` field on system /
-//!   user blocks is supported by Anthropic but the planner does
-//!   not opt in (every turn re-renders the system prompt). Adding
-//!   prompt caching is a B2 follow-up after the dispatch loop's
-//!   per-turn token telemetry lands.
+//! * **Prompt caching is opt-in via `MessageRequest::cache_*`
+//!   flags** (see [`MessageRequest`]). When set, providers that
+//!   support cache markers (Anthropic Messages API natively;
+//!   Anthropic-on-Bedrock via the same wire shape) emit
+//!   `cache_control: { type: "ephemeral" }` at the configured
+//!   breakpoints (system / last tool / top-level automatic
+//!   messages). Providers without explicit cache markers
+//!   (OpenAI, Gemini) ignore the flags and rely on the upstream's
+//!   automatic / implicit caching; the per-response cache-hit
+//!   token counts surface uniformly through [`Usage`] so the
+//!   dispatch loop's token telemetry remains provider-agnostic.
+//!
+//!   Per `prompt-caching.md` (the normative spec), the dispatch
+//!   loop opts into all three flags by default since the system
+//!   prompt + tool definitions are stable per session and the
+//!   message history grows monotonically — the canonical
+//!   high-cache-hit-rate shape Anthropic recommends.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -193,9 +205,104 @@ pub struct ToolSpec {
     pub input_schema: serde_json::Value,
 }
 
+// ---------------------------------------------------------------------------
+// Prompt caching — provider-agnostic types
+// ---------------------------------------------------------------------------
+
+/// Cache-control TTL hint applied to a cache breakpoint.
+///
+/// Anthropic supports two ephemeral durations:
+///
+/// * `Short` — 5 minutes (default). Cache writes are billed at
+///   1.25× the base input-token price; cache reads at 0.10×.
+///   Idle prompts older than 5 min require a fresh cache write.
+/// * `Long` — 1 hour. Cache writes are billed at 2× base; reads
+///   at 0.10×. Use when prompts may sit idle longer than 5 min
+///   (long agentic workloads, slow human follow-ups).
+///
+/// Maps to Anthropic's `cache_control: { type: "ephemeral", ttl: "1h" }`
+/// (`Long`) vs. plain `cache_control: { type: "ephemeral" }` (`Short`).
+/// Bedrock uses the same shape; OpenAI / Gemini ignore TTL hints
+/// (their caching layer manages TTL implicitly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheTtl {
+    /// 5-minute ephemeral cache. Default — refreshed for free on
+    /// every cache hit, so steady-state agentic dispatch loops
+    /// almost always want this tier.
+    #[default]
+    Short,
+    /// 1-hour ephemeral cache. 2× write cost; use only when the
+    /// prompt may sit idle longer than 5 min between calls.
+    Long,
+}
+
+/// Cache-control marker placed on a cache breakpoint.
+///
+/// Anthropic / Bedrock wire shape:
+/// ```json
+/// { "type": "ephemeral" }            // 5-minute TTL (default)
+/// { "type": "ephemeral", "ttl": "1h" }  // 1-hour TTL
+/// ```
+///
+/// Currently `"ephemeral"` is the only supported `type` upstream;
+/// the variant is named for the wire-shape value it serializes to
+/// so future cache-control modes (if Anthropic adds them) can land
+/// as new variants without renaming the existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CacheControl {
+    /// Default ephemeral cache; carries an optional TTL hint that
+    /// serializes only when non-default to keep the wire shape
+    /// minimal for the steady-state 5-min path.
+    Ephemeral {
+        /// `None` ⇒ omit the field (Anthropic default = 5 min).
+        /// `Some(CacheTtl::Long)` ⇒ emit `"ttl": "1h"`.
+        /// `Some(CacheTtl::Short)` ⇒ omit (no-op vs. default).
+        #[serde(skip_serializing_if = "ttl_is_none_or_short", default)]
+        ttl: Option<CacheTtl>,
+    },
+}
+
+/// Skip predicate: only emit `ttl` on the wire when it carries a
+/// non-default value. The Anthropic wire shape treats absence and
+/// `Short` (5 min) identically; collapsing them on serialize keeps
+/// the request body byte-stable for the common case.
+#[inline]
+fn ttl_is_none_or_short(t: &Option<CacheTtl>) -> bool {
+    matches!(t, None | Some(CacheTtl::Short))
+}
+
+impl CacheControl {
+    /// 5-minute ephemeral cache. Convenience constructor for the
+    /// common case so call sites read as `CacheControl::short()`
+    /// rather than `CacheControl::Ephemeral { ttl: None }`.
+    pub fn short() -> Self {
+        CacheControl::Ephemeral { ttl: Some(CacheTtl::Short) }
+    }
+
+    /// 1-hour ephemeral cache. Convenience constructor matching
+    /// Anthropic's `cache_control: { type: "ephemeral", ttl: "1h" }`.
+    pub fn long() -> Self {
+        CacheControl::Ephemeral { ttl: Some(CacheTtl::Long) }
+    }
+}
+
 /// Top-level request body for Anthropic's
 /// `POST /v1/messages` endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// **Wire-shape note.** This struct uses a hand-written
+/// [`Serialize`] impl rather than `#[derive(Serialize)]` because
+/// the Anthropic prompt-caching wire shape requires conditional
+/// projection of three fields (`system`, `tools`, top-level
+/// `cache_control`) based on the [`MessageRequest::cache_system`]
+/// / [`MessageRequest::cache_tools`] / [`MessageRequest::cache_messages`]
+/// flags. The flags themselves are deliberately invisible to serde
+/// (they have no `#[serde]` attributes and the manual impl never
+/// emits them) so the canonical request type stays
+/// transport-agnostic; per-provider clients pick up the flags via
+/// the on-the-wire projection.
+#[derive(Debug, Clone, Deserialize)]
 pub struct MessageRequest {
     /// Anthropic model identifier (e.g. `"claude-sonnet-4-5-20250929"`).
     /// Per provider-model-selection.md the planner reads the value
@@ -212,7 +319,7 @@ pub struct MessageRequest {
     /// Top-level system prompt. The dispatch loop renders the KSB
     /// + role-specific NNSP into this field once per session;
     /// individual turn-level system blocks are not used.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub system:      Option<String>,
 
     /// Conversation history. The dispatch loop appends one `user`
@@ -222,14 +329,14 @@ pub struct MessageRequest {
     /// Tools the model may call this turn. Empty ⇒ pure-text
     /// dialogue (used by reviewer post-hoc summary, not by the
     /// dispatch loop).
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(default)]
     pub tools:       Vec<ToolSpec>,
 
     /// Per-turn temperature. Anthropic's default is 1.0; the V2
     /// planner pins 0.7 for executor / 0.3 for reviewer — tighter
     /// reviewer temperature reduces flake on the verdict tool. See
     /// `provider-model-selection.md §6.2`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub temperature: Option<f32>,
 
     /// V2_GAPS §C9 — opt into Anthropic's SSE streaming endpoint.
@@ -240,22 +347,77 @@ pub struct MessageRequest {
     /// `crate::streaming`). When `false` (default), the upstream
     /// returns a single buffered JSON envelope and consumers go
     /// through [`ModelClient::create_message`].
-    ///
-    /// `#[serde(skip_serializing_if = "is_false")]` keeps the
-    /// on-the-wire shape stable for callers that haven't opted into
-    /// streaming — adding the field would otherwise change the
-    /// serialized JSON for every request and risk breaking the
-    /// `request_serialises_to_anthropic_wire_shape` golden test.
-    #[serde(skip_serializing_if = "is_false", default)]
+    #[serde(default)]
     pub stream:      bool,
-}
 
-/// Helper: matches the `MessageRequest::stream` skip predicate.
-/// Free function so the `#[serde(skip_serializing_if)]` attribute
-/// can name it without leaking trait surface.
-#[inline]
-fn is_false(b: &bool) -> bool {
-    !*b
+    /// **Prompt caching opt-in: cache the system prompt.**
+    ///
+    /// When `true`, the on-the-wire `system` field is projected as
+    /// a single-element block array
+    /// `[{ "type": "text", "text": ..., "cache_control": {...} }]`
+    /// instead of the bare-string form, so Anthropic / Bedrock
+    /// pin the cache breakpoint at the end of the system prompt.
+    /// Subsequent requests with an identical `tools` + `system`
+    /// prefix get a cache READ (10% of base input price) instead
+    /// of recomputing. Ignored by OpenAI / Gemini (they cache
+    /// transparently — see [`Usage::cache_read_input_tokens`]).
+    ///
+    /// **Default `false`** for backward compat; the planner
+    /// dispatch loop sets it `true` per
+    /// `prompt-caching.md §"Per-role defaults"`.
+    ///
+    /// `#[serde(skip)]` because this is a request-construction
+    /// flag, not an Anthropic-shaped wire field — the manual
+    /// `Serialize` impl reads it to drive the projection but never
+    /// emits it as a JSON key.
+    #[serde(skip)]
+    pub cache_system: bool,
+
+    /// **Prompt caching opt-in: cache the tool definitions.**
+    ///
+    /// When `true`, the LAST tool in `tools` carries
+    /// `cache_control: { "type": "ephemeral" }` on the wire so
+    /// Anthropic / Bedrock cache the entire tools section. Tool
+    /// definitions are large, stable per session, and cached
+    /// reads cost 10% of base input price.
+    ///
+    /// Ignored by OpenAI / Gemini per the same rationale as
+    /// [`Self::cache_system`].
+    #[serde(skip)]
+    pub cache_tools: bool,
+
+    /// **Prompt caching opt-in: cache the growing message
+    /// history.**
+    ///
+    /// When `true`, emits a top-level
+    /// `cache_control: { "type": "ephemeral" }` so Anthropic
+    /// applies its **automatic caching** rule — the cache
+    /// breakpoint moves forward to the last cacheable block in
+    /// `messages`, and the next request reads everything up to the
+    /// previous breakpoint from cache. Best for multi-turn
+    /// conversations where the message history grows monotonically
+    /// (the steady-state agentic dispatch shape).
+    ///
+    /// Bedrock + Vertex AI do not support automatic caching
+    /// (per `prompt-caching.md §"Provider parity"`); on those
+    /// providers the flag is suppressed at projection time.
+    /// OpenAI / Gemini ignore the flag.
+    #[serde(skip)]
+    pub cache_messages: bool,
+
+    /// **TTL hint for the cache breakpoints set by the
+    /// `cache_*` flags above.**
+    ///
+    /// `None` (default) is wire-equivalent to [`CacheTtl::Short`]
+    /// (5-minute ephemeral). `Some(CacheTtl::Long)` switches every
+    /// breakpoint emitted by this request to the 1-hour tier
+    /// (2× write cost; same read cost). Mixing TTLs across
+    /// breakpoints in a single request is not supported by this
+    /// type — Anthropic requires longer-TTL entries to appear
+    /// before shorter ones, so a uniform per-request TTL is the
+    /// safe default and matches every dispatch-loop call site.
+    #[serde(skip)]
+    pub cache_ttl: Option<CacheTtl>,
 }
 
 impl Default for MessageRequest {
@@ -265,14 +427,164 @@ impl Default for MessageRequest {
     /// new optional field lands.
     fn default() -> Self {
         Self {
-            model:       String::new(),
-            max_tokens:  4096,
-            system:      None,
-            messages:    Vec::new(),
-            tools:       Vec::new(),
-            temperature: None,
-            stream:      false,
+            model:          String::new(),
+            max_tokens:     4096,
+            system:         None,
+            messages:       Vec::new(),
+            tools:          Vec::new(),
+            temperature:    None,
+            stream:         false,
+            cache_system:   false,
+            cache_tools:    false,
+            cache_messages: false,
+            cache_ttl:      None,
         }
+    }
+}
+
+impl serde::Serialize for MessageRequest {
+    /// Manual Anthropic-Messages wire-shape serializer that:
+    ///
+    /// 1. Always emits `model` + `max_tokens`.
+    /// 2. Skips `temperature` when `None`, `tools` when empty,
+    ///    `stream` when `false` (matches the prior derive-based
+    ///    skip predicates so the steady-state wire shape is
+    ///    byte-stable for callers that haven't opted into the
+    ///    new fields).
+    /// 3. When `cache_system && system.is_some()`, projects
+    ///    `system` as a single-element block array carrying
+    ///    `cache_control`. Otherwise emits the bare-string form.
+    /// 4. When `cache_tools && !tools.is_empty()`, augments the
+    ///    LAST `ToolSpec` with `cache_control` while emitting the
+    ///    rest of the tool array verbatim. The first N-1 tools
+    ///    serialize through their normal `ToolSpec` impl (no
+    ///    `cache_control` field) so the prefix hash is the
+    ///    deterministic shape the cache lookup keys off.
+    /// 5. When `cache_messages`, emits a top-level
+    ///    `cache_control: { "type": "ephemeral" }` (with optional
+    ///    `ttl` honoring [`Self::cache_ttl`]).
+    ///
+    /// This impl is the production wire-shape contract; any
+    /// serde-output regression must be caught by the
+    /// `request_serialises_*` golden tests in this module.
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let cache_control_payload =
+            self.cache_ttl.unwrap_or(CacheTtl::Short);
+
+        // Pre-compute optional-field presence so we can pick the
+        // exact map size up-front and avoid serde's "unknown size"
+        // path which can confuse some downstream consumers.
+        let mut len = 2; // model, max_tokens
+        if self.system.is_some()        { len += 1; }
+        let _messages_always = ();      len += 1;
+        if !self.tools.is_empty()       { len += 1; }
+        if self.temperature.is_some()   { len += 1; }
+        if self.stream                  { len += 1; }
+        if self.cache_messages          { len += 1; }
+        let _ = _messages_always;
+
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("model", &self.model)?;
+        map.serialize_entry("max_tokens", &self.max_tokens)?;
+
+        if let Some(sys) = &self.system {
+            if self.cache_system {
+                let block = SystemTextBlock {
+                    kind: "text",
+                    text: sys.as_str(),
+                    cache_control: Some(CacheControl::Ephemeral {
+                        ttl: Some(cache_control_payload),
+                    }),
+                };
+                map.serialize_entry("system", &[block])?;
+            } else {
+                map.serialize_entry("system", sys)?;
+            }
+        }
+
+        map.serialize_entry("messages", &self.messages)?;
+
+        if !self.tools.is_empty() {
+            if self.cache_tools {
+                let projected: Vec<ToolSpecCachedView<'_>> = self
+                    .tools
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| ToolSpecCachedView {
+                        spec: t,
+                        cache_control: if i + 1 == self.tools.len() {
+                            Some(CacheControl::Ephemeral {
+                                ttl: Some(cache_control_payload),
+                            })
+                        } else {
+                            None
+                        },
+                    })
+                    .collect();
+                map.serialize_entry("tools", &projected)?;
+            } else {
+                map.serialize_entry("tools", &self.tools)?;
+            }
+        }
+
+        if let Some(t) = self.temperature {
+            map.serialize_entry("temperature", &t)?;
+        }
+        if self.stream {
+            map.serialize_entry("stream", &true)?;
+        }
+        if self.cache_messages {
+            map.serialize_entry(
+                "cache_control",
+                &CacheControl::Ephemeral { ttl: Some(cache_control_payload) },
+            )?;
+        }
+        map.end()
+    }
+}
+
+/// Wire-only system block view used by the cache-on projection
+/// branch of [`MessageRequest`]'s `Serialize`. Not exported; the
+/// canonical type uses `system: Option<String>` for the bare-string
+/// path and projects to this shape only when caching is enabled.
+#[derive(Serialize)]
+struct SystemTextBlock<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+/// Wire-only tool view that prepends a `cache_control` field to a
+/// borrowed [`ToolSpec`]. Used by [`MessageRequest`]'s `Serialize`
+/// to emit `cache_control` on the LAST tool when caching is
+/// enabled, without mutating the canonical `ToolSpec` type.
+struct ToolSpecCachedView<'a> {
+    spec:          &'a ToolSpec,
+    cache_control: Option<CacheControl>,
+}
+
+impl<'a> serde::Serialize for ToolSpecCachedView<'a> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let len = 3 + usize::from(self.cache_control.is_some());
+        let mut m = serializer.serialize_map(Some(len))?;
+        m.serialize_entry("name", &self.spec.name)?;
+        m.serialize_entry("description", &self.spec.description)?;
+        m.serialize_entry("input_schema", &self.spec.input_schema)?;
+        if let Some(cc) = self.cache_control {
+            m.serialize_entry("cache_control", &cc)?;
+        }
+        m.end()
     }
 }
 
@@ -332,11 +644,26 @@ pub struct Usage {
     /// Output tokens emitted (assistant content this turn).
     #[serde(default)]
     pub output_tokens:              u32,
-    /// Cache-read input tokens (Anthropic prompt-caching). 0
-    /// when caching is disabled (V2 default).
+    /// **Cache-creation input tokens.** Tokens written to the
+    /// prompt cache during this turn (i.e., a cache MISS that
+    /// minted a new cache entry). Billed at 1.25× base input
+    /// price for 5-minute TTL or 2× base for 1-hour TTL on
+    /// Anthropic / Bedrock. Always 0 for OpenAI / Gemini (their
+    /// caching layer manages writes implicitly and does not
+    /// surface a per-call write counter).
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
-    /// Cache-creation input tokens. 0 when caching is disabled.
+    /// **Cache-read input tokens.** Tokens served from the prompt
+    /// cache during this turn (i.e., a cache HIT). Billed at
+    /// ~10% of base input price across all providers that
+    /// support prompt caching. The dispatch loop folds this into
+    /// the cumulative input-token budget total so a session that
+    /// hits cache heavily stays within its policy ceiling.
+    ///
+    /// Provider attribution:
+    /// * Anthropic / Bedrock — `usage.cache_read_input_tokens`
+    /// * OpenAI — `usage.prompt_tokens_details.cached_tokens`
+    /// * Gemini — `usageMetadata.cachedContentTokenCount`
     #[serde(default)]
     pub cache_read_input_tokens:    u32,
 }
@@ -888,7 +1215,7 @@ mod tests {
             }],
             tools:       vec![],
             temperature: Some(0.7),
-            stream:      false,
+            ..Default::default()
         };
         let json = serde_json::to_value(&req).unwrap();
         // Pin the on-the-wire shape against the Anthropic API
@@ -923,6 +1250,132 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["stream"], true);
+    }
+
+    /// **Prompt-caching wire shape — system breakpoint.**
+    ///
+    /// When `cache_system = true`, the on-the-wire `system` field
+    /// MUST project to a single-element block array carrying
+    /// `cache_control: { "type": "ephemeral" }`. This is the
+    /// Anthropic-required shape for an explicit system-prompt
+    /// cache breakpoint per `prompt-caching.md`.
+    #[test]
+    fn message_request_cache_system_projects_to_block_array_with_cache_control() {
+        let req = MessageRequest {
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 1024,
+            system: Some("STABLE PREFIX".to_owned()),
+            cache_system: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        let arr = json["system"].as_array()
+            .expect("cache_system=true MUST project system to a JSON array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "STABLE PREFIX");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        // Default TTL (Short = 5min) MUST be omitted from the wire
+        // (matches Anthropic's default; see `prompt-caching.md
+        // §"TTL hint"`).
+        assert!(arr[0]["cache_control"].get("ttl").is_none(),
+            "default 5-min TTL MUST be omitted from the wire");
+    }
+
+    /// **Prompt-caching wire shape — long TTL.**
+    #[test]
+    fn message_request_cache_ttl_long_emits_one_hour_marker() {
+        let req = MessageRequest {
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 1024,
+            system: Some("S".to_owned()),
+            cache_system: true,
+            cache_ttl: Some(CacheTtl::Long),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["system"][0]["cache_control"]["ttl"], "long");
+    }
+
+    /// **Prompt-caching wire shape — tools breakpoint.**
+    ///
+    /// When `cache_tools = true`, the LAST tool in `tools`
+    /// carries `cache_control`; earlier tools do NOT. This pins
+    /// the cache prefix at the end of the (tools + system)
+    /// block hierarchy per the Anthropic ordering
+    /// `tools → system → messages`.
+    #[test]
+    fn message_request_cache_tools_marks_only_last_tool() {
+        let req = MessageRequest {
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 1024,
+            cache_tools: true,
+            tools: vec![
+                ToolSpec {
+                    name: "tool_a".to_owned(),
+                    description: "A".to_owned(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                },
+                ToolSpec {
+                    name: "tool_b".to_owned(),
+                    description: "B".to_owned(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                },
+            ],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        let tools = json["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(tools[0].get("cache_control").is_none(),
+            "first tool MUST NOT carry cache_control (only the LAST one does)");
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// **Prompt-caching wire shape — automatic top-level breakpoint.**
+    ///
+    /// When `cache_messages = true`, the request body emits a
+    /// top-level `cache_control: { "type": "ephemeral" }` so
+    /// Anthropic applies its automatic-caching rule to the growing
+    /// message history (the steady-state agentic dispatch shape).
+    #[test]
+    fn message_request_cache_messages_emits_top_level_cache_control() {
+        let req = MessageRequest {
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 1024,
+            cache_messages: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["cache_control"]["type"], "ephemeral");
+    }
+
+    /// **Prompt-caching wire shape — opt-out is byte-stable.**
+    ///
+    /// When all three cache flags are `false` (the legacy default),
+    /// the serialized request MUST NOT contain ANY of:
+    /// system block array, per-tool cache_control, or top-level
+    /// cache_control. This pins backwards compatibility — every
+    /// caller that has not opted in sees the pre-prompt-caching
+    /// wire shape unchanged.
+    #[test]
+    fn message_request_no_cache_flags_emits_legacy_wire_shape() {
+        let req = MessageRequest {
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 1024,
+            system: Some("legacy".to_owned()),
+            tools: vec![ToolSpec {
+                name: "t".to_owned(),
+                description: "d".to_owned(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json["system"].is_string(),
+            "cache_system=false MUST keep the bare-string system shape");
+        assert!(json["tools"][0].get("cache_control").is_none());
+        assert!(json.get("cache_control").is_none());
     }
 
     #[test]
@@ -983,11 +1436,7 @@ mod tests {
         let req = MessageRequest {
             model:       "claude-sonnet-4-5-20250929".to_owned(),
             max_tokens:  256,
-            system:      None,
-            messages:    vec![],
-            tools:       vec![],
-            temperature: None,
-            stream:      false,
+            ..Default::default()
         };
         let resp = client.create_message(&req).await.unwrap();
         assert_eq!(resp.id, "msg_01");

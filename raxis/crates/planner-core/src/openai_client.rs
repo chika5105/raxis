@@ -179,6 +179,32 @@ struct OpenAiUsage {
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    /// **Prompt-caching attribution.** OpenAI nests cache-hit
+    /// counts under `prompt_tokens_details.cached_tokens` (since
+    /// gpt-4o, gpt-4o-mini, o1-mini, o1-preview, and the o3
+    /// family). Older deployments may surface a top-level
+    /// `cached_tokens` (none observed in production responses,
+    /// but the field is documented at the top level by some
+    /// SDK versions). We accept either shape and the parser
+    /// (`parse_response`) folds whichever is non-zero into
+    /// canonical [`Usage::cache_read_input_tokens`].
+    ///
+    /// Per OpenAI's caching docs, prompts ≥ 1024 tokens are
+    /// cached automatically with no opt-in field; this counter
+    /// is the only operator-observable signal that caching is
+    /// working.
+    #[serde(default, rename = "prompt_tokens_details")]
+    prompt_tokens_details: OpenAiPromptTokensDetails,
+    /// Legacy top-level field — empty in current responses.
+    #[serde(default)]
+    cached_tokens: u32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    /// Number of prompt tokens served from cache. 0 if cache was
+    /// missed or the prompt was below the (model-dependent)
+    /// caching threshold.
     #[serde(default)]
     cached_tokens: u32,
 }
@@ -340,6 +366,16 @@ fn parse_response(raw: &OpenAiResponse) -> Result<MessageResponse, ModelError> {
 
     let role = if msg.role.is_empty() { "assistant".to_owned() } else { msg.role.clone() };
     let stop_reason = choice.finish_reason.as_deref().map(map_finish_reason);
+    // OpenAI surfaces cache-hit counts at
+    // `prompt_tokens_details.cached_tokens` per the current
+    // API; some SDK versions document a top-level `cached_tokens`
+    // field. Take whichever is non-zero (canonical = nested) so a
+    // caller sees a consistent `Usage::cache_read_input_tokens`
+    // regardless of the OpenAI-side surface.
+    let cache_read = std::cmp::max(
+        raw.usage.prompt_tokens_details.cached_tokens,
+        raw.usage.cached_tokens,
+    );
     Ok(MessageResponse {
         id:    raw.id.clone(),
         kind:  "message".to_owned(),
@@ -350,7 +386,7 @@ fn parse_response(raw: &OpenAiResponse) -> Result<MessageResponse, ModelError> {
             input_tokens:                raw.usage.prompt_tokens,
             output_tokens:               raw.usage.completion_tokens,
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens:     raw.usage.cached_tokens,
+            cache_read_input_tokens:     cache_read,
         },
         model: raw.model.clone(),
     })
@@ -500,7 +536,7 @@ mod tests {
                     "required": ["expr"],
                 }),
             }],
-            stream: false,
+            ..Default::default()
         }
     }
 
@@ -628,6 +664,65 @@ mod tests {
         assert_eq!(map_finish_reason("length"),     "max_tokens");
         assert_eq!(map_finish_reason("tool_calls"), "tool_use");
         assert_eq!(map_finish_reason("safety"),     "safety");
+    }
+
+    /// **Prompt-caching attribution — nested `prompt_tokens_details`.**
+    ///
+    /// OpenAI surfaces cache-hit counts at
+    /// `usage.prompt_tokens_details.cached_tokens` (since gpt-4o,
+    /// gpt-4o-mini, o1-*, o3-*). The canonical
+    /// `Usage::cache_read_input_tokens` MUST reflect that count so
+    /// dispatch / operator telemetry stays provider-agnostic.
+    #[test]
+    fn cached_tokens_from_prompt_tokens_details_folds_into_canonical_usage() {
+        let raw = serde_json::json!({
+            "id": "chatcmpl-cache",
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "hi" }
+            }],
+            "usage": {
+                "prompt_tokens":     2006,
+                "completion_tokens": 5,
+                "prompt_tokens_details": { "cached_tokens": 1920 }
+            }
+        });
+        let raw: OpenAiResponse = serde_json::from_value(raw).unwrap();
+        let canonical = parse_response(&raw).unwrap();
+        assert_eq!(canonical.usage.input_tokens, 2006);
+        assert_eq!(canonical.usage.cache_read_input_tokens, 1920,
+            "OpenAI cached_tokens MUST fold into Usage::cache_read_input_tokens \
+             so dispatch-side budget accounting matches Anthropic semantics");
+        // OpenAI does not surface a per-call cache-write counter.
+        assert_eq!(canonical.usage.cache_creation_input_tokens, 0);
+    }
+
+    /// **Prompt-caching attribution — legacy top-level `cached_tokens`.**
+    ///
+    /// Some SDK versions document a top-level `usage.cached_tokens`.
+    /// The parser accepts either shape (max-of-two) so a gateway
+    /// that flattens the nested counter to top-level is honored.
+    #[test]
+    fn cached_tokens_from_top_level_field_also_folds_into_canonical_usage() {
+        let raw = serde_json::json!({
+            "id": "chatcmpl-flat",
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "hi" }
+            }],
+            "usage": {
+                "prompt_tokens":     500,
+                "completion_tokens": 10,
+                "cached_tokens":     400
+            }
+        });
+        let raw: OpenAiResponse = serde_json::from_value(raw).unwrap();
+        let canonical = parse_response(&raw).unwrap();
+        assert_eq!(canonical.usage.cache_read_input_tokens, 400);
     }
 
     #[tokio::test]

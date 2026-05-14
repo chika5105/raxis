@@ -1229,7 +1229,7 @@ mod tests {
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
             temperature: Some(0.7),
-            stream:      false,
+            ..Default::default()
         }
     }
 

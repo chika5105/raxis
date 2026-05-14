@@ -346,11 +346,7 @@ mod tests {
         MessageRequest {
             model:      "claude-test".to_owned(),
             max_tokens: 8,
-            system:     None,
-            messages:   vec![],
-            tools:      vec![],
-            temperature: None,
-            stream:     false,
+            ..MessageRequest::default()
         }
     }
 

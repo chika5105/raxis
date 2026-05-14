@@ -9754,6 +9754,192 @@ round-trip-on-deny) and `specs/v2/secrets-model.md §5.1`
 
 ---
 
+## §11.15 — Prompt caching (INV-PROVIDER-CACHE-*)
+
+V3 (iter58) wires Anthropic's prompt-caching feature
+(`cache_control` markers on system + tools + automatic top-level
+breakpoints) into the planner-core dispatch loop and surfaces
+equivalent cache-hit attribution from every other supported
+provider (Bedrock-via-Anthropic, OpenAI, Gemini). The four
+invariants below pin the **wire-shape contract**, the
+**provider-parity rules** (what each provider supports vs.
+silently ignores), the **opt-out byte stability** guarantee, and
+the **token-accounting fold** so cache-read tokens count against
+the dispatch loop's per-session input-token ceiling exactly the
+same way uncached input tokens do.
+
+These invariants are normative for every code path that builds
+a `MessageRequest` and feeds it to a `ModelClient` impl —
+production dispatch loops, retry shells, circuit-breaker probes,
+and test fakes alike.
+
+### INV-PROVIDER-CACHE-WIRE-SHAPE-01 — Anthropic / Bedrock cache_control wire shape is byte-pinned
+
+**Statement.** When `MessageRequest::cache_system = true`, the
+on-the-wire `system` field MUST serialize to a single-element
+JSON array of the shape
+`[{ "type": "text", "text": <prompt>, "cache_control": { "type": "ephemeral", ["ttl": "long"] } }]`
+— never the bare-string form. When `cache_tools = true`, the
+LAST `ToolSpec` in `tools` MUST carry a `cache_control` field
+(same shape) and the first N-1 tools MUST NOT carry one. When
+`cache_messages = true` AND the provider is Anthropic native (NOT
+Bedrock / Vertex), the request body MUST emit a top-level
+`cache_control` field for the automatic-caching breakpoint.
+
+The `ttl` sub-field is omitted when [`CacheTtl::Short`] (the 5-min
+default — Anthropic's wire-shape default) and emitted as
+`"long"` for `CacheTtl::Long` (1-hour, billed at 2× write cost).
+
+**Justification.** Anthropic's prompt-caching documentation
+prescribes a **prefix-hash** cache lookup: a cache HIT requires
+that the byte-for-byte prefix up to the marked breakpoint
+matches a previously-written entry. Any drift in the shape (a
+trailing whitespace, a key reorder, an extra field) recomputes
+the hash and produces a cache MISS. Pinning the wire shape in a
+witness test catches a refactor that reorders serializer fields
+or drops a `cache_control` marker before it lands on `main` — a
+production cache-miss regression would burn 12.5× the per-token
+cost (1.25× write cost on every turn instead of 0.10× read
+cost) until detected, with no operator-side error signal.
+
+**Witness.**
+`raxis/crates/planner-core/src/model.rs::tests::message_request_cache_system_projects_to_block_array_with_cache_control`,
+`...::message_request_cache_tools_marks_only_last_tool`,
+`...::message_request_cache_messages_emits_top_level_cache_control`,
+`...::message_request_cache_ttl_long_emits_one_hour_marker`,
+plus the Bedrock-side
+`raxis/crates/planner-core/src/bedrock_client.rs::tests::body_emits_cache_control_when_flags_opted_in`
+which additionally asserts top-level `cache_control` is
+suppressed for Bedrock.
+
+**Canonical home.**
+`specs/v3/prompt-caching.md §"Anthropic / Bedrock wire shape"`.
+
+### INV-PROVIDER-CACHE-PARITY-02 — Provider parity rules (what each provider supports)
+
+**Statement.** Per-provider, the cache flags resolve as follows:
+
+| Provider           | `cache_system` | `cache_tools` | `cache_messages` (top-level automatic) | Cache-hit attribution                              |
+| ------------------ | -------------- | ------------- | -------------------------------------- | -------------------------------------------------- |
+| Anthropic (native) | wire           | wire          | wire                                   | `usage.cache_read_input_tokens`                    |
+| Anthropic-on-Bedrock | wire         | wire          | **suppressed** (Bedrock unsupported)   | `usage.cache_read_input_tokens`                    |
+| OpenAI             | ignored        | ignored       | ignored                                | `usage.prompt_tokens_details.cached_tokens` (auto) |
+| Gemini             | ignored        | ignored       | ignored                                | `usageMetadata.cachedContentTokenCount` (implicit) |
+
+OpenAI does prompt caching automatically on prompts above a
+model-dependent floor (~1024 tokens for gpt-4o-mini, gpt-4o,
+o1-*, o3-*) with no opt-in field; Gemini 2.5+ does the same via
+implicit context caching. Both providers MUST surface their
+upstream cache-hit count through canonical
+`Usage::cache_read_input_tokens` so the dispatch loop's
+per-session budget ceiling honors cached prefixes uniformly.
+
+**Justification.** A planner that opts into caching should never
+have to know which provider it is talking to. The
+provider-agnostic `MessageRequest::cache_*` API pushes the
+provider-specific projection into each `ModelClient` impl, and
+the provider-agnostic `Usage::cache_read_input_tokens` pulls
+each provider's specific attribution back into one canonical
+counter. Without this rule, the cumulative-input-token budget in
+`DispatchConfig::max_tokens_input_total` would silently
+under-count cached tokens on OpenAI / Gemini (operator sees a
+session that "should" be over budget but isn't) or, worse,
+double-count on Anthropic (cache-read folded once via the
+canonical counter and once via the upstream's own
+`input_tokens` accounting if the parser is wrong).
+
+**Witness.**
+`raxis/crates/planner-core/src/openai_client.rs::tests::cached_tokens_from_prompt_tokens_details_folds_into_canonical_usage`,
+`...::cached_tokens_from_top_level_field_also_folds_into_canonical_usage`,
+`raxis/crates/planner-core/src/gemini_client.rs::tests::cached_content_token_count_folds_into_canonical_usage`,
+`raxis/crates/planner-core/src/bedrock_client.rs::tests::body_emits_cache_control_when_flags_opted_in`
+(the assertion `assert!(json.get("cache_control").is_none(), ...)`
+is the Bedrock-side parity witness for the suppressed top-level
+`cache_messages` projection).
+
+**Canonical home.**
+`specs/v3/prompt-caching.md §"Provider parity"`.
+
+### INV-PROVIDER-CACHE-OPT-OUT-BYTE-STABLE-03 — Caching opt-out preserves the legacy wire shape
+
+**Statement.** When all three cache flags
+(`cache_system`, `cache_tools`, `cache_messages`) are `false`
+(the `MessageRequest::default()` shape and the pre-iter58
+behavior), the serialized request body MUST be byte-identical
+to the pre-prompt-caching wire shape. Specifically:
+
+* `system` MUST serialize as a bare JSON string (not a block
+  array) when present.
+* No `ToolSpec` in `tools` MUST carry a `cache_control` field.
+* The request body MUST NOT contain a top-level `cache_control`
+  key.
+
+**Justification.** Every existing Anthropic / Bedrock /
+OpenAI / Gemini call site that has not opted into caching MUST
+see zero on-the-wire delta from this iter58 change. A drifted
+opt-out path would invalidate the
+`request_serialises_to_anthropic_wire_shape` golden test (which
+pins the legacy shape) and would silently change cache
+fingerprints for callers that DON'T want caching but have
+historical cache entries the upstream would otherwise reuse —
+e.g. test fixtures that compare HTTP body bytes against a
+recorded fixture would diff every run. Pinning the opt-out
+explicitly keeps the iter58 change a strict-add: callers opt in
+deliberately, callers that don't are unaffected.
+
+**Witness.**
+`raxis/crates/planner-core/src/model.rs::tests::message_request_no_cache_flags_emits_legacy_wire_shape`
+asserts the three negative properties (system stays string, no
+per-tool cache_control, no top-level cache_control) on a request
+with all three flags defaulted.
+`raxis/crates/planner-core/src/model.rs::tests::message_request_serialises_to_anthropic_wire_shape`
+(pre-existing) catches any drift in the bare wire shape.
+
+**Canonical home.**
+`specs/v3/prompt-caching.md §"Opt-out is byte-stable"`.
+
+### INV-PROVIDER-CACHE-USAGE-FOLD-04 — Cache-read tokens count against the cumulative input-token ceiling
+
+**Statement.** The dispatch loop
+(`DispatchLoop::run` and `DispatchLoop::run_streaming`) MUST
+fold every turn's `MessageResponse::usage.cache_read_input_tokens`
+AND `usage.cache_creation_input_tokens` into the cumulative
+`cum_in: u64` counter that gates the per-session
+`DispatchConfig::max_tokens_input_total` ceiling — exactly the
+same way uncached `usage.input_tokens` are folded. A session
+that hits cache heavily SHOULD still be bounded by the operator-
+declared input budget so a caching regression cannot mask a
+runaway turn count.
+
+**Justification.** Without this fold, an operator who has set
+`max_tokens_input_total = 10_000_000` (10M tokens) would observe
+a session quietly running 100M tokens through cache reads
+because the dispatch loop's ceiling check ignored cached
+content. Cache reads are 10× cheaper per token than uncached,
+but they are NOT free, AND they still count against the
+provider's rate-limit budget; both pricing and rate-limit
+realities require accounting for them. The fold is also
+defensive against a future caching-on regression: if the
+upstream's caching layer silently regresses (cache MISSes that
+should have HIT), the cumulative counter will catch the
+regression as a sudden ceiling trip rather than a silent cost
+balloon.
+
+**Witness.**
+`raxis/crates/planner-core/src/dispatch.rs` —
+the saturating-add on lines folding `input_tokens +
+cache_creation_input_tokens + cache_read_input_tokens` into
+`cum_in` is the in-code enforcement; the existing
+`DispatchOutcome::TokensExceeded` ceiling tests
+(`dispatch.rs::tests::*tokens_exceeded*`) exercise the fold
+end-to-end (a `Usage` carrying non-zero `cache_*` tokens trips
+the same ceiling as a `Usage` carrying only `input_tokens`).
+
+**Canonical home.**
+`specs/v3/prompt-caching.md §"Cumulative budget fold"`.
+
+---
+
 ## §12 — How invariants combine (composition map)
 
 Most security properties at the system level are emergent from

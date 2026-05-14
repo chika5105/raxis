@@ -179,6 +179,23 @@ struct GeminiUsageMetadata {
     prompt_token_count: u32,
     #[serde(rename = "candidatesTokenCount", default)]
     candidates_token_count: u32,
+    /// **Prompt-caching attribution.** Gemini 2.5+ does
+    /// **implicit caching** (no explicit `cache_control` opt-in)
+    /// on prompts above a model-dependent floor (typically 1024
+    /// tokens for Flash, 4096 for Pro). The cache-hit count is
+    /// reported in `usageMetadata.cachedContentTokenCount` per
+    /// the Generative Language API reference. Folded into
+    /// canonical `Usage::cache_read_input_tokens` so operator
+    /// telemetry is uniform across providers.
+    ///
+    /// Gemini also supports **explicit context caching** via the
+    /// separate `cachedContents` resource (pre-create cache, then
+    /// reference by name). That path is not wired here — it
+    /// requires a sibling resource lifecycle that must live in
+    /// the gateway, not the planner. See
+    /// `prompt-caching.md §"Provider parity"`.
+    #[serde(rename = "cachedContentTokenCount", default)]
+    cached_content_token_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +359,11 @@ fn parse_response(raw: &GeminiResponse, model_id: &str) -> Result<MessageRespons
             input_tokens:                raw.usage_metadata.prompt_token_count,
             output_tokens:               raw.usage_metadata.candidates_token_count,
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens:     0,
+            // Gemini 2.5+ implicit caching surfaces hit counts in
+            // `usageMetadata.cachedContentTokenCount`; fold into
+            // the canonical `cache_read_input_tokens` so dispatch
+            // / operator telemetry is provider-agnostic.
+            cache_read_input_tokens:     raw.usage_metadata.cached_content_token_count,
         },
         model: model_id.to_owned(),
     })
@@ -475,8 +496,7 @@ mod tests {
                     }],
                 },
             ],
-            tools: vec![],
-            stream: false,
+            ..Default::default()
         }
     }
 
@@ -568,6 +588,37 @@ mod tests {
         assert_eq!(map_finish_reason("SAFETY"),     "safety");
         assert_eq!(map_finish_reason("RECITATION"), "recitation");
         assert_eq!(map_finish_reason("OTHER"),      "other");
+    }
+
+    /// **Prompt-caching attribution — Gemini implicit caching.**
+    ///
+    /// Gemini 2.5+ does implicit context caching with no opt-in;
+    /// the cache-hit count is reported via
+    /// `usageMetadata.cachedContentTokenCount`. Fold into the
+    /// canonical `Usage::cache_read_input_tokens` so dispatch /
+    /// operator telemetry is uniform with the Anthropic /
+    /// Bedrock / OpenAI clients.
+    #[test]
+    fn cached_content_token_count_folds_into_canonical_usage() {
+        let raw = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{"text": "hi"}] },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount":         5000,
+                "candidatesTokenCount":     12,
+                "cachedContentTokenCount":  4500
+            }
+        });
+        let raw: GeminiResponse = serde_json::from_value(raw).unwrap();
+        let canonical = parse_response(&raw, "gemini-2.5-pro").unwrap();
+        assert_eq!(canonical.usage.input_tokens, 5000);
+        assert_eq!(canonical.usage.cache_read_input_tokens, 4500,
+            "Gemini cachedContentTokenCount MUST fold into \
+             Usage::cache_read_input_tokens for provider-agnostic \
+             dispatch-side budget accounting");
+        assert_eq!(canonical.usage.cache_creation_input_tokens, 0);
     }
 
     #[tokio::test]
