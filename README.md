@@ -16,7 +16,7 @@ for a project-level overview.
 .
 ├── raxis/         # Rust workspace — kernel, planner-core, ipc, audit, store, dashboard backend, …
 ├── raxis-site/    # Marketing & docs site (Next.js)
-├── .github/       # GitHub Actions (build-images, release, spec-graph) + branch-protection script
+├── .github/       # GitHub Actions (build-images, release, spec-graph, cla-check), PR template, branch-protection script
 ├── LICENSE        # SSPL — see raxis/LICENSE-SSPL.txt for the full SSPL text
 └── README.md
 ```
@@ -45,7 +45,11 @@ SSPL-1.0. See [`LICENSE`](LICENSE) (the SSPL header) and
 [`raxis/LICENSE-SSPL.txt`](raxis/LICENSE-SSPL.txt) (the full SSPL text).
 
 Contributions require sign-off via the project CLA: see
-[`raxis/CLA.md`](raxis/CLA.md).
+[`raxis/CLA.md`](raxis/CLA.md). Every pull request opens with the
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)
+which contains a CLA-agreement checkbox; the `cla-check` workflow
+verifies the box is ticked and is a required status check on `main`
+(see [`.github/scripts/protect-main.sh`](.github/scripts/protect-main.sh)).
 
 ## Provenance
 

@@ -1,0 +1,45 @@
+name: cla-check
+
+# Verifies that every PR opened against `main` (or any other targeted
+# branch) has the CLA-agreement checkbox ticked in the PR description
+# (template lives at .github/PULL_REQUEST_TEMPLATE.md). The check is
+# wired into branch protection as a required status check, so an
+# unticked box blocks merge.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  cla:
+    name: cla
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CLA checkbox is ticked in PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PR_BODY:-}" ]; then
+            echo "::error::PR description is empty. The PR template includes a required CLA checkbox; please open the PR with the template populated." >&2
+            exit 1
+          fi
+          # Match either the original template wording or the shorter
+          # one-line acknowledgement. Both must appear with a checked
+          # box ('[x]' or '[X]'). Whitespace inside the brackets is
+          # accepted to be tolerant of editor reformatting.
+          if printf '%s' "${PR_BODY}" \
+              | grep -E -i -q '\- \[[xX]\] +I have read and agree to the .*CLA'; then
+            echo "ok: CLA checkbox is ticked on PR #${PR_NUMBER}."
+            exit 0
+          fi
+          echo "::error::The CLA agreement checkbox in the PR description is not ticked." >&2
+          echo "::error::Edit the PR description and tick the box under 'Contributor License Agreement', e.g.:" >&2
+          echo "::error::  - [x] I have read and agree to the RAXIS CLA." >&2
+          echo "::error::See raxis/CLA.md for the full agreement text." >&2
+          exit 1

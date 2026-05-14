@@ -526,7 +526,7 @@ For operators wanting to build RAXIS from source rather than use pre-built binar
 ### 9.3 Build invocation
 
 ```bash
-$ git clone https://github.com/raxis-ai/raxis
+$ git clone https://github.com/chika5105/raxis
 $ cd raxis
 $ cargo build --release
 $ sudo ./target/release/raxis kernel install --system  # production install

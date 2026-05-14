@@ -33,8 +33,8 @@
 //! └── epoch_binding.rs  // session_prompt_valid + invalidation
 //! ```
 //!
-//! [`planner-api.md`]: https://github.com/raxis/specs/v1/planner-api.md
-//! [`peripherals.md §3.1`]: https://github.com/raxis/specs/v1/peripherals.md
+//! [`planner-api.md`]: https://github.com/chika5105/raxis/blob/main/raxis/specs/v1/planner-api.md
+//! [`peripherals.md §3.1`]: https://github.com/chika5105/raxis/blob/main/raxis/specs/v1/peripherals.md
 
 pub mod assembler;
 pub mod epoch_binding;

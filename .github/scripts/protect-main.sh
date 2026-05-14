@@ -12,6 +12,10 @@
 #       * build-images / cargo check + test (Linux only) is sufficient as a
 #         minimum gate; the macOS arm is informational so contributors
 #         without macOS can still get green if Linux passes.
+#       * cla-check / cla                     (verifies the CLA-agreement
+#         checkbox in the PR description is ticked; the agreement itself
+#         lives at raxis/CLA.md and the checkbox is part of the PR
+#         template at .github/PULL_REQUEST_TEMPLATE.md).
 #   - Force-pushes are disabled.
 #   - Branch deletions are disabled.
 #   - Even repo admins/owners are NOT subject to status-check enforcement
@@ -86,6 +90,7 @@ fi
 declare -a REQUIRED_CHECKS=(
     "spec-graph"
     "build-images / cargo check + test (ubuntu-22.04)"
+    "cla-check / cla"
 )
 
 # Build the JSON body from the array safely via jq.

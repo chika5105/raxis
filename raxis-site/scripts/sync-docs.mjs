@@ -130,7 +130,7 @@ function writePlaceholder() {
       "",
       "    RAXIS_REPO_PATH=../raxis npm run build",
       "    # or",
-      "    RAXIS_REPO_URL=https://github.com/cjinanwa/raxis.git npm run build",
+      "    RAXIS_REPO_URL=https://github.com/chika5105/raxis.git npm run build",
       "",
       "The `scripts/sync-docs.mjs` step copies every `.md` file from that",
       "source into `vendor/raxis-docs/`, and the rest of the site renders",

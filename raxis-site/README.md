@@ -50,7 +50,7 @@ The site deploys without any custom configuration. The recommended setup:
 
 1. Push this repo to GitHub (or your git host of choice).
 2. Import it in the Vercel dashboard.
-3. Set one environment variable: **`RAXIS_REPO_URL`** = the public git URL of the raxis repository (e.g. `https://github.com/your-org/raxis.git`).
+3. Set one environment variable: **`RAXIS_REPO_URL`** = the public git URL of the raxis repository (e.g. `https://github.com/chika5105/raxis.git`).
 4. Trigger a build. The `prebuild` step shallow-clones raxis, mirrors every `.md` into `vendor/raxis-docs/`, and the rest of the build works normally.
 
 If your raxis repo is private, set up a Vercel deploy hook with a personal access token in the URL, or use a Vercel git integration with read access to the private repo.
