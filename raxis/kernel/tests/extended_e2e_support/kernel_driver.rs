@@ -347,6 +347,19 @@ pub fn require_canonical_images() {
     // do NOT have docker / podman / buildah on the host).
     if std::env::var("RAXIS_LIVE_E2E_SKIP_AUTO_BAKE").is_err() {
         ensure_canonical_images_baked(&install_dir, kernel_version);
+        // INV-LIVE-E2E-VMLINUX-PRESENT-01 (auto-stage): the AVF /
+        // Firecracker substrates resolve their boot kernel from
+        // `<install_dir>/kernel/vmlinux` via
+        // `canonical_images_preflight::linux_kernel_path`. Without
+        // this file, the FIRST orchestrator session-spawn surfaces
+        // `AVF VM start failed: Invalid virtual machine
+        // configuration. The boot loader is invalid.` 2 seconds
+        // into the run — symptom is fatal but the diagnostic only
+        // points the operator at the substrate, never at the
+        // missing canonical asset. Stage it during auto-bake so
+        // `RAXIS_INSTALL_DIR=$(mktemp -d)` is sufficient setup
+        // (matching the auto-bake contract for the rootfs images).
+        ensure_canonical_kernel_binary_staged(&install_dir);
     }
 
     for role in &["orchestrator-core", "executor-starter", "reviewer-core"] {
@@ -583,6 +596,118 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
             ],
         );
     }
+}
+
+/// Stage the canonical AVF / Firecracker boot kernel binary into
+/// `<install_dir>/kernel/vmlinux` so the substrate's
+/// `VZLinuxBootLoader::initWithKernelURL` (and the Firecracker
+/// equivalent) can find it on first session-spawn.
+///
+/// **Why a separate helper.** `ensure_canonical_images_baked`
+/// drives the rootfs cpio.gz pipeline (`bake-rootfs → dev-stage →
+/// build-all`); it does NOT produce or stage `vmlinux`. The Linux
+/// kernel binary is rotated independently (see
+/// `kernel/src/canonical_images_preflight.rs::linux_kernel_path`
+/// doc-comment for the trust-model rationale) and lives outside
+/// the per-role rootfs images. Without staging it here, a fresh
+/// `RAXIS_INSTALL_DIR=$(mktemp -d)` install dir gets all three
+/// rootfs images but no boot kernel, and AVF surfaces:
+///
+/// > `AVF VM start failed: Invalid virtual machine configuration.
+/// >  The boot loader is invalid.`
+///
+/// 2 seconds into the run, with `transient_retry` x3 then a
+/// terminal `orchestrator_spawn_failed`. The diagnostic points at
+/// the substrate (correct: the boot loader IS invalid because
+/// `kernel_url` resolves to a non-existent file) but never names
+/// the missing canonical asset.
+///
+/// **Source-of-truth resolution order:**
+///   1. `RAXIS_DEV_KERNEL_SOURCE` env var (explicit operator
+///      override; useful when bisecting kernel rotations).
+///   2. `/usr/local/lib/raxis/kernel/vmlinux` (the canonical host
+///      install location populated by `cargo xtask images
+///      dev-kernel`; matches `system-requirements.md §1`).
+///
+/// Hard-fails with an actionable remediation message if neither
+/// source is present — the alternative is a 2-second cargo-test
+/// failure deep inside AVF that gives the operator no hint about
+/// which file is missing.
+///
+/// **Idempotent.** If `<install_dir>/kernel/vmlinux` already
+/// exists with non-zero size we skip the copy and log a `skip`
+/// line for parity with the rootfs auto-bake. Operators who want
+/// a forced re-stage can `rm <install_dir>/kernel/vmlinux` first.
+fn ensure_canonical_kernel_binary_staged(install_dir: &Path) {
+    let dest_dir = install_dir.join("kernel");
+    let dest     = dest_dir.join("vmlinux");
+
+    if let Ok(meta) = std::fs::metadata(&dest) {
+        if meta.is_file() && meta.len() > 0 {
+            eprintln!(
+                "[live-e2e auto-bake] skip vmlinux \
+                 (boot kernel already staged at {})",
+                dest.display(),
+            );
+            return;
+        }
+    }
+
+    let candidate_sources: Vec<PathBuf> = std::env::var("RAXIS_DEV_KERNEL_SOURCE")
+        .ok()
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::iter::once(PathBuf::from(
+            "/usr/local/lib/raxis/kernel/vmlinux",
+        )))
+        .collect();
+
+    let source = candidate_sources
+        .iter()
+        .find(|p| p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
+        .unwrap_or_else(|| panic!(
+            "[live-e2e auto-bake] cannot stage canonical boot kernel: \
+             no `vmlinux` found in any of:\n{candidates}\n\n\
+             AVF / Firecracker resolve the Linux kernel binary from \
+             `<install_dir>/kernel/vmlinux` per \
+             `canonical_images_preflight::linux_kernel_path`. \
+             Without it, the first session-spawn fails with \
+             `AVF VM start failed: Invalid virtual machine \
+             configuration. The boot loader is invalid.` and the \
+             test cannot proceed.\n\n\
+             Remediation:\n  \
+             cargo xtask images dev-kernel --from-file <path-to-vmlinux>\n\
+             (or set RAXIS_DEV_KERNEL_SOURCE=<path-to-vmlinux> for \
+             this run only; the harness will copy it into \
+             {dest})",
+            candidates = candidate_sources
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            dest = dest.display(),
+        ));
+
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        panic!(
+            "[live-e2e auto-bake] failed to mkdir {}: {e}",
+            dest_dir.display(),
+        );
+    }
+    if let Err(e) = std::fs::copy(source, &dest) {
+        panic!(
+            "[live-e2e auto-bake] failed to stage vmlinux from {} \
+             to {}: {e}",
+            source.display(),
+            dest.display(),
+        );
+    }
+    eprintln!(
+        "[live-e2e auto-bake] staged vmlinux: {src} → {dst} ({size} bytes)",
+        src  = source.display(),
+        dst  = dest.display(),
+        size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+    );
 }
 
 /// Map the harness-internal `images/<subdir>` role name to the
