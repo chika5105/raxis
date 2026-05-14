@@ -67,12 +67,69 @@ external signal.
 | Variable | Required | Default | Effect |
 |---|---|---|---|
 | `RAXIS_PLANNER_BASE_URL` | optional | `https://api.anthropic.com` | Override the model API base URL. Used by tests to point at a local mock. The kernel stamps this from the active gateway provider. |
-| `RAXIS_PLANNER_MAX_TURNS` | optional | `100` | Hard turn ceiling per session. Beyond this the planner stops the loop and submits whatever it has. Default raised from `20` to `50` after Live-e2e iter25 showed the `credential-substitution-canary` task reproducibly exhausted a 20-turn budget on natural tool-error retry cycles, then raised again from `50` to `100` after Live-e2e iter31 reproduced `MaxTurnsExceeded` at turn 50 on the realistic `materialize-records` Executor (25 postgres rows + 25 mongo docs + per-row write + commit + complete — a strictly larger fanout than the canary). The token-cap ceiling (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` / `…_OUTPUT_TOTAL`) remains the cost-side bound. Operators can still pin lower (`= 5`) in policy via `[gateway].planner_max_turns_default` for CI / known-easy scenarios. |
+| `RAXIS_PLANNER_MAX_TURNS` | optional | `100` | Hard turn ceiling per session. Beyond this the planner stops the loop and submits whatever it has. Default raised from `20` to `50` after Live-e2e iter25 showed the `credential-substitution-canary` task reproducibly exhausted a 20-turn budget on natural tool-error retry cycles, then raised again from `50` to `100` after Live-e2e iter31 reproduced `MaxTurnsExceeded` at turn 50 on the realistic `materialize-records` Executor (25 postgres rows + 25 mongo docs + per-row write + commit + complete — a strictly larger fanout than the canary). The token-cap ceiling (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` / `…_OUTPUT_TOTAL`) remains the cost-side bound. Resolution is per-task (V2.7 — see "Resolving `RAXIS_PLANNER_MAX_TURNS`" below). |
 | `RAXIS_PLANNER_MAX_TOKENS` | optional | `4096` | Per-request `max_tokens` value sent to the model API. |
 
 `RAXIS_PLANNER_BASE_URL` must parse as an `http` or `https` URL.
 Anything else triggers
 `RAXIS_PLANNER_BASE_URL must be a valid http(s) URL`.
+
+---
+
+## Resolving `RAXIS_PLANNER_MAX_TURNS` (V2.7, `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`)
+
+The kernel computes the value stamped into `RAXIS_PLANNER_MAX_TURNS`
+at session-spawn time via this precedence chain — the **first**
+matching arm wins:
+
+| Arm | Source | Wins when | Resulting `source` log label |
+|---|---|---|---|
+| 1 | `[[tasks]] max_turns = N` in the plan TOML | the activating task declares `max_turns` | `task` |
+| 2 | `[gateway].planner_max_turns_default = N` in `policy.toml` | per-task is omitted, policy default is set | `policy` |
+| 3 | compiled-in `DEFAULT_PLANNER_MAX_TURNS = 100` | both per-task and policy default are omitted | `compiled-default` |
+
+Each spawn emits a structured `PlannerMaxTurnsResolved` log line on
+the kernel's stderr with shape:
+
+```text
+PlannerMaxTurnsResolved {
+  source        = "task" | "policy" | "compiled-default",
+  resolved      = N,
+  task_id       = "<task_id>",        // "<orchestrator>" for orchestrator spawns
+  session_id    = "sess-…",
+  initiative_id = "init-…",
+}
+```
+
+so an operator can `rg PlannerMaxTurnsResolved <data-dir>/runtime/`
+to confirm what budget every spawned VM received.
+
+**Validation.** `[[tasks]] max_turns = 0` is rejected at admission
+with `LifecycleError::PlanInvalid` — a 0-turn budget would terminate
+the dispatch loop before the first model call and is never useful.
+Negative values are rejected by the existing TOML shape check.
+
+**Per-task vs. policy default — when to use which:**
+
+- **Per-task `max_turns`** is the right knob for plans with mixed
+  fanout — e.g. one Executor that materializes 25 records (needs
+  ≥150) plus three Reviewers that judge a single diff (need ≤5).
+  Put the per-task value on each `[[tasks]]` entry that needs to
+  diverge from the default.
+- **Policy `[gateway].planner_max_turns_default`** is the right knob
+  for org-wide ceiling adjustments (e.g. CI plans with `= 5` for
+  fail-fast smoke runs). Per-task overrides still win.
+- **Compiled `100`** is the safe blanket default — calibrated
+  against the realistic-scenario `materialize-records` Executor
+  observed in iter25 / iter31.
+
+**KSB visibility (`INV-KSB-MAX-TURNS-VISIBILITY-01`).** The same
+resolved value is also projected into the per-session
+`SessionCapabilityView::planner_max_turns` field on the KSB
+`capabilities=` block, rendered as
+`role=<role> session=<id> planner_max_turns=N`. This lets the
+in-VM agent self-track its turn budget against the kernel's view
+without an extra IPC round-trip.
 
 ---
 

@@ -338,10 +338,31 @@ pub enum Capabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionCapabilityView {
     /// Session id this capability projection was built against.
-    pub session_id: String,
+    pub session_id:        String,
     /// Role string (`"orchestrator"` / `"executor"` / `"reviewer"`).
     /// Mirrors [`KsbSnapshot::role`].
-    pub role:       String,
+    pub role:              String,
+
+    /// **V2.7 — `INV-KSB-MAX-TURNS-VISIBILITY-01`.** Resolved
+    /// per-session planner turn ceiling, populated from the SAME
+    /// `crate::session_spawn_orchestrator::resolve_planner_max_turns_for`
+    /// call that produces the `RAXIS_PLANNER_MAX_TURNS` env stamp at
+    /// session spawn (single source of truth — the env stamp and the
+    /// KSB projection are guaranteed bit-equal).
+    ///
+    /// **Why this is in the KSB, not just the env.** The agent (LLM)
+    /// inside the planner VM does not have direct visibility into its
+    /// own process env — it only sees the rendered system prompt the
+    /// driver assembles via [`assemble_system_prompt`]. Surfacing
+    /// `planner_max_turns` in the per-session capabilities lets the
+    /// renderer expose the budget verbatim. The agent then
+    /// self-tracks its own turn index by counting prior assistant
+    /// turns in its conversation transcript and computes
+    /// `remaining = planner_max_turns - turn_index`. The role NNSPs
+    /// instruct the agent on how to spend the remaining budget
+    /// (e.g. the Executor NNSP at >75% spent biases toward
+    /// `task_complete` over speculative investigation).
+    pub planner_max_turns: u32,
 }
 
 /// Orchestrator's per-initiative view. Carries the orchestrator
@@ -974,9 +995,7 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
     buf.push_str("capabilities=\n");
     match caps {
         Capabilities::Orchestrator(o) => {
-            buf.push_str("  role=orchestrator session=");
-            buf.push_str(&o.session.session_id);
-            buf.push('\n');
+            push_session_capability_line(buf, "orchestrator", &o.session);
             buf.push_str("  initiative=");
             buf.push_str(&o.initiative.initiative_id);
             buf.push_str(" orch_no_progress_respawns=");
@@ -996,21 +1015,46 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
             }
         }
         Capabilities::Executor(e) => {
-            buf.push_str("  role=executor session=");
-            buf.push_str(&e.session.session_id);
-            buf.push('\n');
+            push_session_capability_line(buf, "executor", &e.session);
             buf.push_str("  task=\n");
             push_task_capability_row(buf, &e.task);
         }
         Capabilities::Reviewer(r) => {
-            buf.push_str("  role=reviewer session=");
-            buf.push_str(&r.session.session_id);
-            buf.push('\n');
+            push_session_capability_line(buf, "reviewer", &r.session);
             buf.push_str("  artifact_task_id=");
             buf.push_str(&r.artifact_task_id);
             buf.push('\n');
         }
     }
+}
+
+/// V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — render the per-session
+/// capability line uniformly across all three role envelopes:
+///
+/// ```text
+///   role={orchestrator|executor|reviewer} session={id} planner_max_turns={N}
+/// ```
+///
+/// `planner_max_turns` is the resolved per-session hard turn ceiling
+/// (`crate::session_spawn_orchestrator::resolve_planner_max_turns_for`).
+/// The agent self-tracks its turn index inside the dispatch loop and
+/// computes `remaining = planner_max_turns - turn_index`; the
+/// dispatch loop's per-turn `[KERNEL: TURN BUDGET turn=K of N,
+/// remaining=M]` preamble (see
+/// `crates/planner-core/src/dispatch.rs::Dispatcher::run`) renders
+/// the live count every turn.
+fn push_session_capability_line(
+    buf:  &mut String,
+    role: &str,
+    sess: &SessionCapabilityView,
+) {
+    buf.push_str("  role=");
+    buf.push_str(role);
+    buf.push_str(" session=");
+    buf.push_str(&sess.session_id);
+    buf.push_str(" planner_max_turns=");
+    buf.push_str(&sess.planner_max_turns.to_string());
+    buf.push('\n');
 }
 
 fn push_task_capability_row(buf: &mut String, t: &TaskCapabilityView) {
@@ -1462,5 +1506,83 @@ mod tests {
         assert!(snap.reviewer_verdicts.is_empty());
         assert!(snap.pending_escalations.is_empty());
         assert!(snap.credential_ports.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — renderer pin: every
+    // role's `role=` line MUST carry a `planner_max_turns=N` token.
+    // The presence of the token is a positive structural signal the
+    // agent's NNSP relies on; absence is taken as a renderer
+    // regression and the agent is permitted to refuse.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn caps_session_view(role: &str, max_turns: u32) -> SessionCapabilityView {
+        SessionCapabilityView {
+            session_id:        format!("sess-{role}-test"),
+            role:              role.to_owned(),
+            planner_max_turns: max_turns,
+        }
+    }
+
+    #[test]
+    fn inv_ksb_max_turns_visibility_01_renderer_emits_planner_max_turns_for_all_roles() {
+        // Orchestrator envelope.
+        let mut snap = fixture_snapshot();
+        snap.role     = "orchestrator".to_owned();
+        snap.task_id  = None;
+        snap.capabilities = Some(Capabilities::Orchestrator(OrchestratorCapabilities {
+            session:    caps_session_view("orchestrator", 77),
+            initiative: InitiativeCapabilityView {
+                initiative_id:                          snap.initiative_id.clone(),
+                orchestrator_no_progress_respawn_count: 0,
+                max_orchestrator_no_progress_respawns:  3,
+                orchestrator_respawns_remaining:        3,
+            },
+            tasks:      Vec::new(),
+        }));
+        let s = render_ksb(&snap).unwrap();
+        assert!(s.contains("role=orchestrator"),
+            "orchestrator capabilities line MUST emit `role=orchestrator`; got: {s}");
+        assert!(s.contains("planner_max_turns=77"),
+            "orchestrator capabilities line MUST carry `planner_max_turns=77`; got: {s}");
+
+        // Executor envelope.
+        let mut snap = fixture_snapshot();
+        snap.role = "executor".to_owned();
+        snap.capabilities = Some(Capabilities::Executor(ExecutorCapabilities {
+            session: caps_session_view("executor", 25),
+            task:    TaskCapabilityView {
+                task_id:                  "task-42".to_owned(),
+                crash_retry_count:        0,
+                review_reject_count:      0,
+                max_crash_retries:        3,
+                max_review_rejections:    3,
+                crash_retries_remaining:  3,
+                review_retries_remaining: 3,
+                retry_admissible:         false,
+                retry_inadmissible_reason: Some(
+                    "no prior activation".to_owned(),
+                ),
+            },
+        }));
+        let s = render_ksb(&snap).unwrap();
+        assert!(s.contains("role=executor"),
+            "executor capabilities line MUST emit `role=executor`; got: {s}");
+        assert!(s.contains("planner_max_turns=25"),
+            "executor capabilities line MUST carry `planner_max_turns=25`; got: {s}");
+
+        // Reviewer envelope.
+        let mut snap = fixture_snapshot();
+        snap.role    = "reviewer".to_owned();
+        snap.task_id = Some("rev-A".to_owned());
+        snap.capabilities = Some(Capabilities::Reviewer(ReviewerCapabilities {
+            session:          caps_session_view("reviewer", 5),
+            artifact_task_id: "task-42".to_owned(),
+        }));
+        let s = render_ksb(&snap).unwrap();
+        assert!(s.contains("role=reviewer"),
+            "reviewer capabilities line MUST emit `role=reviewer`; got: {s}");
+        assert!(s.contains("planner_max_turns=5"),
+            "reviewer capabilities line MUST carry `planner_max_turns=5`; got: {s}");
     }
 }

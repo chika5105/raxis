@@ -516,6 +516,7 @@ mod tests {
             spawn_timeout_secs: 1,
             respawn_backoff_ms: backoff_ms,
             max_consecutive_respawns: max_respawns,
+            planner_max_turns_default: None,
         }
     }
 

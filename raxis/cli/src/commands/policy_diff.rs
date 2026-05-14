@@ -583,10 +583,11 @@ mod tests {
     #[test]
     fn diff_gateway_added_when_only_right_has_section() {
         let g = GatewaySection {
-            binary_path:              "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs:       5,
-            respawn_backoff_ms:       1000,
-            max_consecutive_respawns: 5,
+            binary_path:                "/bin/raxis-gateway".to_owned(),
+            spawn_timeout_secs:         5,
+            respawn_backoff_ms:         1000,
+            max_consecutive_respawns:   5,
+            planner_max_turns_default:  None,
         };
         let mut report = DiffReport::default();
         diff_gateway(&mut report, None, Some(&g));
@@ -598,16 +599,18 @@ mod tests {
     #[test]
     fn diff_gateway_changed_per_field() {
         let l = GatewaySection {
-            binary_path:              "/bin/old".to_owned(),
-            spawn_timeout_secs:       5,
-            respawn_backoff_ms:       1000,
-            max_consecutive_respawns: 5,
+            binary_path:                "/bin/old".to_owned(),
+            spawn_timeout_secs:         5,
+            respawn_backoff_ms:         1000,
+            max_consecutive_respawns:   5,
+            planner_max_turns_default:  None,
         };
         let r = GatewaySection {
-            binary_path:              "/bin/new".to_owned(),
-            spawn_timeout_secs:       10,
-            respawn_backoff_ms:       1000,
-            max_consecutive_respawns: 5,
+            binary_path:                "/bin/new".to_owned(),
+            spawn_timeout_secs:         10,
+            respawn_backoff_ms:         1000,
+            max_consecutive_respawns:   5,
+            planner_max_turns_default:  None,
         };
         let mut report = DiffReport::default();
         diff_gateway(&mut report, Some(&l), Some(&r));

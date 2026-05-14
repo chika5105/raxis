@@ -130,6 +130,16 @@ pub struct KsbInputs<'a> {
     /// populates the rest of the capabilities envelope but emits
     /// the literal empty string for `session_id`.
     pub session_id: &'a str,
+
+    /// **V2.7 — `INV-KSB-MAX-TURNS-VISIBILITY-01`.** Resolved per-session
+    /// planner turn ceiling. The spawn callsites
+    /// (`session_spawn_orchestrator::spawn_orchestrator_for_initiative`
+    /// + `…spawn_executor_for_task`) MUST populate this with the SAME
+    /// value `resolve_planner_max_turns_for(task_fields, gateway)`
+    /// returns for the env stamp — single source of truth for the
+    /// resolution. Tests that do not care can pass
+    /// [`crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS`].
+    pub planner_max_turns: u32,
 }
 
 /// Assemble the KSB snapshot the kernel will stamp into
@@ -685,8 +695,14 @@ fn assemble_capabilities(
     inputs:   &KsbInputs<'_>,
 ) -> Result<Capabilities, KsbAssemblyError> {
     let session = SessionCapabilityView {
-        session_id: inputs.session_id.to_owned(),
-        role:       inputs.role.as_str().to_owned(),
+        session_id:        inputs.session_id.to_owned(),
+        role:              inputs.role.as_str().to_owned(),
+        // V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — projected verbatim
+        // from the resolver-provided value the spawn callsite already
+        // used for the `RAXIS_PLANNER_MAX_TURNS` env stamp. Single
+        // source of truth: env stamp and KSB projection are bit-equal
+        // by construction.
+        planner_max_turns: inputs.planner_max_turns,
     };
 
     match inputs.role {
@@ -984,6 +1000,7 @@ mod tests {
                 wallclock_budget_remaining_s: 600,
                 credential_ports: Vec::new(),
                 session_id:       "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             },
         ).expect("assemble snapshot");
 
@@ -1022,6 +1039,7 @@ mod tests {
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
                 session_id:       "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             },
         ).expect("assemble orchestrator snapshot");
 
@@ -1052,6 +1070,7 @@ mod tests {
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
                 session_id:       "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             },
         ).expect("assemble snapshot");
         drop(conn);
@@ -1098,6 +1117,7 @@ mod tests {
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
                 session_id:       "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             },
         ).expect("assemble snapshot");
 
@@ -1201,6 +1221,7 @@ mod tests {
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
                 session_id:       "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);
@@ -1355,6 +1376,7 @@ mod tests {
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
                 session_id:       "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);
@@ -1479,6 +1501,7 @@ mod tests {
                 wallclock_budget_remaining_s: 0,
                 credential_ports: Vec::new(),
                 session_id:       "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);
@@ -1526,5 +1549,59 @@ mod tests {
         let r = raxis_ksb::render_ksb(&snap).expect("render fallback");
         assert!(r.contains("initiative_id=init-x"));
         assert!(r.contains("role=executor"));
+    }
+
+    /// V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — the
+    /// `SessionCapabilityView::planner_max_turns` projection MUST
+    /// equal `KsbInputs::planner_max_turns` byte-for-byte for ALL
+    /// three role envelopes. The spawn callsite passes the
+    /// already-resolved value (computed by
+    /// `crate::session_spawn_orchestrator::resolve_planner_max_turns_for`)
+    /// here so the env stamp and the KSB are bit-equal by
+    /// construction; this test pins that the assembler does not
+    /// transform / clamp / floor the input.
+    #[test]
+    fn inv_ksb_max_turns_visibility_01_session_view_carries_resolved_value() {
+        use raxis_ksb::Capabilities;
+
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        populate_registry(&registry, "init-mt", "task-mt");
+
+        // A non-default value to pin that the assembler is NOT
+        // ignoring its input and substituting a compiled default.
+        const RESOLVED: u32 = 137;
+
+        for role in [KsbRole::Orchestrator, KsbRole::Executor] {
+            let conn = store.lock_sync();
+            let snap = assemble_ksb_snapshot(
+                &*conn,
+                &registry,
+                &KsbInputs {
+                    initiative_id:                "init-mt",
+                    task_id:                      Some("task-mt"),
+                    role,
+                    token_budget_remaining:       0,
+                    wallclock_budget_remaining_s: 0,
+                    credential_ports:             Vec::new(),
+                    session_id:                   "sess-mt",
+                    planner_max_turns:            RESOLVED,
+                },
+            ).expect("assemble snapshot");
+            drop(conn);
+
+            let caps = snap.capabilities.expect("capabilities populated");
+            let session = match &caps {
+                Capabilities::Orchestrator(o) => &o.session,
+                Capabilities::Executor(e)     => &e.session,
+                Capabilities::Reviewer(r)     => &r.session,
+            };
+            assert_eq!(
+                session.planner_max_turns, RESOLVED,
+                "role {role:?}: SessionCapabilityView::planner_max_turns MUST \
+                 equal KsbInputs::planner_max_turns; assembler MUST NOT \
+                 clamp / transform the resolver-provided value",
+            );
+        }
     }
 }

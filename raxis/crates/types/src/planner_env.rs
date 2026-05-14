@@ -65,6 +65,22 @@ pub const PLANNER_TASK_PROMPT_PATH_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT_PATH";
 /// pins this).
 pub const PLANNER_KSB_ENV: &str = "RAXIS_PLANNER_KSB";
 
+/// V2 `v2_extended_gaps.md §2.5` (planner-harness ceiling) — per-session
+/// hard turn ceiling for the in-VM planner dispatch loop. Kernel stamps
+/// the value resolved by the per-task `max_turns` precedence chain
+/// (per-task → `[gateway].planner_max_turns_default` → compiled
+/// [`raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`]). The driver reads
+/// it at boot and folds into `DispatchConfig::max_turns`; the dispatch
+/// loop terminates with `Outcome::TurnsExceeded` on hit.
+///
+/// Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`: this stamp MUST be
+/// explicit (the kernel resolves the per-task value and writes the
+/// resolved integer into the spawned VM's env table). Pre-V2.7
+/// kernel revisions inherited the value from the parent process env;
+/// the explicit stamp closes that drift channel so a per-task
+/// override is mechanically guaranteed.
+pub const PLANNER_MAX_TURNS_ENV:               &str = "RAXIS_PLANNER_MAX_TURNS";
+
 /// V2 `v2_extended_gaps.md §2.5` — per-session cumulative *input*
 /// token cap. Kernel stamps from
 /// `policy.budget.token_caps.max_input_tokens_per_session` when the
@@ -132,6 +148,7 @@ mod tests {
         assert_eq!(PLANNER_TASK_PROMPT_ENV,            "RAXIS_PLANNER_TASK_PROMPT");
         assert_eq!(PLANNER_TASK_PROMPT_PATH_ENV,       "RAXIS_PLANNER_TASK_PROMPT_PATH");
         assert_eq!(PLANNER_KSB_ENV,                    "RAXIS_PLANNER_KSB");
+        assert_eq!(PLANNER_MAX_TURNS_ENV,              "RAXIS_PLANNER_MAX_TURNS");
         assert_eq!(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV, "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL");
         assert_eq!(PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,"RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL");
         assert_eq!(PLANNER_MAX_TOKENS_TOTAL_ENV,       "RAXIS_PLANNER_MAX_TOKENS_TOTAL");

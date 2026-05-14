@@ -653,6 +653,14 @@ async fn spawn_orchestrator_for_initiative(
     // a transient SQLite lock contention does not block initiative
     // activation; the absence of the live KSB is logged in the
     // env-stamp branch below so an operator can correlate.
+    // V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — resolve the per-session
+    // planner turn ceiling here so the SAME value reaches both the
+    // KSB capabilities projection (this spawn-blocking task) and the
+    // `RAXIS_PLANNER_MAX_TURNS` env stamp emitted just below by
+    // `populate_planner_max_turns_env`. The orchestrator passes
+    // `task_fields = None` (per-initiative role, no per-task override).
+    let (planner_max_turns_resolved, _) =
+        resolve_planner_max_turns_for(None, policy.gateway());
     let ksb_fut = {
         let store_for_ksb     = Arc::clone(store);
         let registry_for_ksb  = Arc::clone(plan_registry);
@@ -675,6 +683,7 @@ async fn spawn_orchestrator_for_initiative(
                     // path is provisioning against and is stamped
                     // verbatim into `capabilities.session.session_id`.
                     session_id:                    &session_owned,
+                    planner_max_turns:             planner_max_turns_resolved,
                 },
             )
         })
@@ -839,6 +848,24 @@ async fn spawn_orchestrator_for_initiative(
     // ⇒ env vars stay unset ⇒ uncapped on that axis.
     populate_token_cap_env(&mut env, policy.token_caps());
     populate_sleep_cap_env(&mut env, policy.sleep_caps());
+
+    // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — explicit env
+    // stamp for the planner hard turn ceiling. Orchestrator spawns
+    // pass `task_fields = None` (orchestrator is per-initiative,
+    // not per-task) so the resolution short-circuits the per-task
+    // arm and uses `[gateway].planner_max_turns_default` first,
+    // then the compiled `DEFAULT_PLANNER_MAX_TURNS`. Pre-V2.7
+    // kernel revisions inherited the value from the kernel's
+    // parent process env which left a per-task override mechanism
+    // structurally impossible — explicit stamp closes that gap.
+    populate_planner_max_turns_env(
+        &mut env,
+        None,
+        policy.gateway(),
+        "<orchestrator>",
+        session_id,
+        initiative_id,
+    );
 
     // V2 `v2_extended_gaps.md §2.4` — stamp the KSB snapshot we
     // co-scheduled at the top of this function into
@@ -2414,6 +2441,107 @@ fn populate_token_cap_env_or_insert(
     }
 }
 
+/// V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — resolve the effective
+/// `max_turns` for a planner session against the precedence chain and
+/// return both the resolved integer AND a stable `source` label that
+/// names the resolution arm verbatim (`"task"` / `"policy"` /
+/// `"compiled-default"`).
+///
+/// Used by both the env-stamp helpers below ([`populate_planner_max_turns_env`]
+/// / [`populate_planner_max_turns_env_or_insert`]) and by KSB assembly
+/// (`crate::initiatives::ksb_assembly::assemble_ksb_snapshot`), so the
+/// planner-VM env stamp and the KSB-projected `planner_max_turns` field
+/// are guaranteed to carry the SAME value (single source of truth for
+/// the resolution).
+///
+/// The `task_fields` argument is `None` for orchestrator spawns (the
+/// orchestrator is per-initiative, not per-task — the per-task
+/// `[[tasks]].max_turns` field never applies). For executor / reviewer
+/// spawns it carries the registry-projected
+/// [`crate::initiatives::PlanRegistry::get`] result for the activating
+/// task.
+pub(crate) fn resolve_planner_max_turns_for(
+    task_fields: Option<&crate::initiatives::TaskPlanFields>,
+    gateway:     Option<&raxis_policy::GatewaySection>,
+) -> (u32, &'static str) {
+    let policy_default = gateway.and_then(|g| g.planner_max_turns_default);
+    match task_fields {
+        Some(tf) => tf.effective_max_turns(policy_default),
+        None     => match policy_default {
+            Some(d) => (d, "policy"),
+            None    => (
+                crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                "compiled-default",
+            ),
+        },
+    }
+}
+
+/// V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — stamp the resolved
+/// `RAXIS_PLANNER_MAX_TURNS` into the spawned VM's env table AND emit
+/// the audit-friendly `PlannerMaxTurnsResolved` structured log line.
+///
+/// `task_fields` is `None` for orchestrator spawns; the resolver
+/// short-circuits the per-task arm in that case.
+///
+/// `task_id_for_log` is the per-task id (executor / reviewer) or
+/// `"<orchestrator>"` (orchestrator). It is rendered verbatim into the
+/// log line's `task_id` field so an operator can grep the resolution
+/// trail on a per-task basis.
+///
+/// Used on the orchestrator path where the env table is freshly
+/// allocated; uses unconditional `insert` so a stray pre-existing
+/// value cannot mask the kernel-resolved one.
+fn populate_planner_max_turns_env(
+    env:             &mut BTreeMap<String, String>,
+    task_fields:     Option<&crate::initiatives::TaskPlanFields>,
+    gateway:         Option<&raxis_policy::GatewaySection>,
+    task_id_for_log: &str,
+    session_id:      &str,
+    initiative_id:   &str,
+) {
+    let (resolved, source) = resolve_planner_max_turns_for(task_fields, gateway);
+    env.insert(
+        raxis_types::planner_env::PLANNER_MAX_TURNS_ENV.to_owned(),
+        resolved.to_string(),
+    );
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"PlannerMaxTurnsResolved\",\
+         \"task_id\":{:?},\"session_id\":{:?},\"initiative_id\":{:?},\
+         \"source\":{:?},\"resolved\":{},\
+         \"invariant\":\"INV-PLANNER-MAX-TURNS-PRECEDENCE-01\"}}",
+        task_id_for_log, session_id, initiative_id, source, resolved,
+    );
+}
+
+/// `entry().or_insert` variant of [`populate_planner_max_turns_env`].
+/// Used on the executor / reviewer path where the caller-supplied env
+/// (test rewiring) may declare an override that should win over the
+/// kernel-resolved value. Only emits the log line if the kernel
+/// actually stamped the env (i.e. there was no prior override),
+/// matching the semantics of the token-cap `_or_insert` helpers.
+fn populate_planner_max_turns_env_or_insert(
+    env:             &mut BTreeMap<String, String>,
+    task_fields:     Option<&crate::initiatives::TaskPlanFields>,
+    gateway:         Option<&raxis_policy::GatewaySection>,
+    task_id_for_log: &str,
+    session_id:      &str,
+    initiative_id:   &str,
+) {
+    let (resolved, source) = resolve_planner_max_turns_for(task_fields, gateway);
+    let key = raxis_types::planner_env::PLANNER_MAX_TURNS_ENV.to_owned();
+    if let std::collections::btree_map::Entry::Vacant(slot) = env.entry(key) {
+        slot.insert(resolved.to_string());
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"PlannerMaxTurnsResolved\",\
+             \"task_id\":{:?},\"session_id\":{:?},\"initiative_id\":{:?},\
+             \"source\":{:?},\"resolved\":{},\
+             \"invariant\":\"INV-PLANNER-MAX-TURNS-PRECEDENCE-01\"}}",
+            task_id_for_log, session_id, initiative_id, source, resolved,
+        );
+    }
+}
+
 /// V2 `v2_extended_gaps.md §3.1` — stamp the `[budget.sleep_caps]`
 /// per-call and cumulative ceilings into the spawned VM env.
 /// Absent ⇒ the in-VM `SleepTool::disabled()` refuses every
@@ -3482,6 +3610,30 @@ pub async fn spawn_executor_for_task(
     populate_token_cap_env_or_insert(&mut env, policy.token_caps());
     populate_sleep_cap_env_or_insert(&mut env, policy.sleep_caps());
 
+    // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` +
+    // `INV-KSB-MAX-TURNS-VISIBILITY-01` — resolve the per-task hard
+    // turn ceiling here so the SAME value reaches both the
+    // `RAXIS_PLANNER_MAX_TURNS` env stamp (this `_or_insert` call)
+    // and the KSB capabilities projection
+    // (`KsbInputs::planner_max_turns` populated below). Single source
+    // of truth: env stamp + KSB project from one resolver call.
+    let task_fields_for_max_turns = {
+        let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
+        plan_registry.get(&key)
+    };
+    let (planner_max_turns_resolved, _) = resolve_planner_max_turns_for(
+        task_fields_for_max_turns.as_ref(),
+        policy.gateway(),
+    );
+    populate_planner_max_turns_env_or_insert(
+        &mut env,
+        task_fields_for_max_turns.as_ref(),
+        policy.gateway(),
+        task_id,
+        session_id,
+        initiative_id,
+    );
+
     // V2 `v2_extended_gaps.md §2.4` — assemble the per-task KSB
     // and stamp into `RAXIS_PLANNER_KSB`. Same fallback policy as
     // the orchestrator path: if the SQLite read fails the spawn
@@ -3515,6 +3667,7 @@ pub async fn spawn_executor_for_task(
                     // session id (already minted at this call
                     // site) into the capabilities envelope.
                     session_id:                    &session_owned,
+                    planner_max_turns:             planner_max_turns_resolved,
                 },
             )
         })
@@ -4329,5 +4482,139 @@ mod tests {
             Some("ignored"),
         );
         assert!(s.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` witness tests
+    //
+    // These tests exercise the pure resolver `resolve_planner_max_turns_for`
+    // directly — that helper is what BOTH the env stamp
+    // (`populate_planner_max_turns_env`) AND the KSB projection
+    // (`assemble_capabilities` via `KsbInputs::planner_max_turns`) call
+    // through. Pinning the resolver pins both surfaces by construction.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Helper: minimal `GatewaySection` with only the
+    /// `planner_max_turns_default` field varying. The other fields
+    /// are inert for this resolver — `resolve_planner_max_turns_for`
+    /// reads only `planner_max_turns_default`.
+    fn gateway_with_default(d: Option<u32>) -> raxis_policy::GatewaySection {
+        raxis_policy::GatewaySection {
+            binary_path:                "/bin/raxis-gateway".to_owned(),
+            spawn_timeout_secs:         5,
+            respawn_backoff_ms:         1000,
+            max_consecutive_respawns:   5,
+            planner_max_turns_default:  d,
+        }
+    }
+
+    /// Helper: `TaskPlanFields` with only `max_turns` overridden.
+    fn task_with_max_turns(c: Option<u32>) -> crate::initiatives::TaskPlanFields {
+        let mut tf = crate::initiatives::TaskPlanFields::default();
+        tf.max_turns = c;
+        tf
+    }
+
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` arm 1: a `Some(c)` on
+    /// the per-task field MUST short-circuit the policy + compiled
+    /// arms. The `source` label MUST read `"task"`.
+    #[test]
+    fn inv_planner_max_turns_precedence_01_per_task_wins_over_policy() {
+        let task = task_with_max_turns(Some(7));
+        let gw   = gateway_with_default(Some(42));
+        let (resolved, source) = resolve_planner_max_turns_for(Some(&task), Some(&gw));
+        assert_eq!(resolved, 7,
+            "per-task `max_turns = Some(7)` MUST win over policy default 42");
+        assert_eq!(source, "task",
+            "resolver MUST label the per-task arm `task` for log parity");
+    }
+
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` arm 2: `None` on the
+    /// per-task field + `Some(d)` on the policy default MUST resolve
+    /// to `d` with `source = "policy"`.
+    #[test]
+    fn inv_planner_max_turns_precedence_01_policy_wins_over_compiled() {
+        let task = task_with_max_turns(None);
+        let gw   = gateway_with_default(Some(42));
+        let (resolved, source) = resolve_planner_max_turns_for(Some(&task), Some(&gw));
+        assert_eq!(resolved, 42,
+            "policy default 42 MUST win when per-task is None");
+        assert_eq!(source, "policy",
+            "resolver MUST label the policy arm `policy` for log parity");
+    }
+
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` arm 3: both `None` ⇒
+    /// the compiled `DEFAULT_PLANNER_MAX_TURNS` with
+    /// `source = "compiled-default"`.
+    #[test]
+    fn inv_planner_max_turns_precedence_01_compiled_default_when_both_absent() {
+        let task = task_with_max_turns(None);
+        let gw   = gateway_with_default(None);
+        let (resolved, source) = resolve_planner_max_turns_for(Some(&task), Some(&gw));
+        assert_eq!(
+            resolved,
+            crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+            "both arms None ⇒ compiled fallback DEFAULT_PLANNER_MAX_TURNS",
+        );
+        assert_eq!(source, "compiled-default",
+            "resolver MUST label the compiled-fallback arm `compiled-default`");
+    }
+
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` orchestrator-spawn
+    /// invariant: orchestrator sessions are per-initiative (no task
+    /// fields), so the resolver MUST be called with
+    /// `task_fields = None` and the per-task arm is structurally
+    /// unreachable. This test pins that contract: even if a task
+    /// fields struct existed with a `Some(c)` override, passing
+    /// `None` MUST still resolve via the policy / compiled arms.
+    #[test]
+    fn inv_planner_max_turns_precedence_01_orchestrator_path_ignores_task_arm() {
+        // Policy wins (compiled would be 100, policy is 33).
+        let gw_with_policy = gateway_with_default(Some(33));
+        let (resolved, source) = resolve_planner_max_turns_for(None, Some(&gw_with_policy));
+        assert_eq!(resolved, 33);
+        assert_eq!(source, "policy",
+            "orchestrator-spawn path MUST label `policy` when task_fields=None and policy is Some");
+
+        // No policy ⇒ compiled fallback.
+        let gw_no_policy = gateway_with_default(None);
+        let (resolved, source) = resolve_planner_max_turns_for(None, Some(&gw_no_policy));
+        assert_eq!(
+            resolved,
+            crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+        );
+        assert_eq!(source, "compiled-default",
+            "orchestrator-spawn path MUST fall through to compiled-default when both task and policy are absent");
+
+        // No gateway at all ⇒ also compiled fallback.
+        let (resolved, source) = resolve_planner_max_turns_for(None, None);
+        assert_eq!(
+            resolved,
+            crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+        );
+        assert_eq!(source, "compiled-default");
+    }
+
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` constant-parity guard:
+    /// the kernel-side `DEFAULT_PLANNER_MAX_TURNS` MUST be bit-equal
+    /// to `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`. The two
+    /// constants live in different crates because the kernel cannot
+    /// take `raxis-planner-core` as a regular dependency (that crate
+    /// pulls in `reqwest` and the HTTP-tier deps the kernel
+    /// deliberately keeps out of its production tree). The constants
+    /// MUST agree because the kernel resolves the value at spawn
+    /// time and the planner-core dispatch loop reads the resolved
+    /// value back from `RAXIS_PLANNER_MAX_TURNS`; if the two
+    /// fallbacks diverged, an env-stamp gap on the kernel side
+    /// would silently downgrade to the planner-core default and the
+    /// operator's intended budget would be ignored.
+    #[test]
+    fn inv_planner_max_turns_compiled_default_matches_planner_core() {
+        assert_eq!(
+            crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+            raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS,
+            "kernel-side DEFAULT_PLANNER_MAX_TURNS MUST equal planner-core's; \
+             bump them in lock-step",
+        );
     }
 }

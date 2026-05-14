@@ -1126,6 +1126,13 @@ pub fn approve_plan(
             //  `DEFAULT_MAX_REVIEW_REJECTIONS`).
             max_crash_retries:         pt.max_crash_retries,
             max_review_rejections:     pt.max_review_rejections,
+            // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — propagate
+            // the operator-declared per-task hard turn ceiling into
+            // the in-memory PlanRegistry. `None` preserves "operator
+            // omitted" semantics so `effective_max_turns` can fall
+            // through to `[gateway].planner_max_turns_default` and
+            // then `DEFAULT_PLANNER_MAX_TURNS` at session-spawn time.
+            max_turns:                 pt.max_turns,
             // V2 `elastic-vm-scaling.md §2.2` — propagate the
             // operator-declared elastic knobs into the in-memory
             // PlanRegistry so the spawn helper can consult them
@@ -1721,6 +1728,13 @@ pub fn repopulate_plan_registry(
                     // numeric value where the plan had silence.
                     max_crash_retries:         pt.max_crash_retries,
                     max_review_rejections:     pt.max_review_rejections,
+                    // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` —
+                    // re-hydrate the operator-declared per-task
+                    // hard turn ceiling from the immutable signed
+                    // plan bytes. `None` preserves "operator
+                    // omitted" semantics so a kernel reboot does
+                    // not silently widen the budget.
+                    max_turns:                 pt.max_turns,
                     // V2 `elastic-vm-scaling.md §2.2` — re-hydrate
                     // the operator-declared elastic knobs from the
                     // immutable signed plan bytes. Same `None`
@@ -2107,6 +2121,17 @@ struct PlanTask {
     /// (`DEFAULT_MAX_REVIEW_REJECTIONS`).
     max_review_rejections:     Option<u32>,
 
+    /// **V2.7 — `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.**
+    /// Operator-declared per-task hard turn ceiling for the planner
+    /// dispatch loop. `None` ⇒ fall through to
+    /// `[gateway].planner_max_turns_default` (policy) and then the
+    /// compiled `DEFAULT_PLANNER_MAX_TURNS` (100). `Some(0)` is
+    /// rejected at parse time (a 0-turn budget is never useful).
+    /// See `TaskPlanFields::max_turns` /
+    /// `TaskPlanFields::effective_max_turns` for the resolution
+    /// contract.
+    max_turns:                 Option<u32>,
+
     // ── V2 `credential-proxy.md §3` typed credential decls ─────────────
     /// Parsed `[[tasks.credentials]]` entries for this task. Empty
     /// when the operator omitted the block. The
@@ -2390,6 +2415,31 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             entry, "max_review_rejections", &task_id,
         )?;
 
+        // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — per-task hard
+        // turn ceiling. Same parse shape as the retry-ceiling fields
+        // (Option<u32>, structural-only, no policy cross-check) — the
+        // resolution against `[gateway].planner_max_turns_default` and
+        // the compiled `DEFAULT_PLANNER_MAX_TURNS` happens at
+        // session-spawn time, not at parse time. Reject `Some(0)`
+        // here: a 0-turn budget would terminate the dispatch loop
+        // before the first model call, which is never useful and
+        // almost always indicates an operator typo.
+        let max_turns = parse_optional_u32_field(
+            entry, "max_turns", &task_id,
+        )?;
+        if let Some(0) = max_turns {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) `max_turns = 0` is not \
+                     a useful budget (the planner would terminate before \
+                     its first model call). Either omit the field (to \
+                     fall through to the policy / compiled default) or \
+                     declare a value `>= 1`. See \
+                     `specs/invariants.md#INV-PLANNER-MAX-TURNS-PRECEDENCE-01`."
+                ),
+            });
+        }
+
         // V2 `elastic-vm-scaling.md §2.2` — per-task elastic knobs.
         // All five fields are OPTIONAL; absence carries through as
         // `None` so admission-time validation can apply the
@@ -2471,6 +2521,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             description: description_raw,
             max_crash_retries,
             max_review_rejections,
+            max_turns,
             elastic,
             min_vcpus,
             max_vcpus,
@@ -4627,6 +4678,7 @@ description = "do thing"
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            max_turns:                 None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,
@@ -4806,6 +4858,7 @@ description = "do thing"
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            max_turns:                 None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,
@@ -5005,6 +5058,7 @@ description = "do thing"
             description: String::new(),
             max_crash_retries: None,
             max_review_rejections: None,
+            max_turns: None,
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -5335,6 +5389,7 @@ session_agent_type = "Coordinator"
             description: String::new(),
             max_crash_retries: None,
             max_review_rejections: None,
+            max_turns: None,
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -6019,6 +6074,7 @@ description = "do thing"
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            max_turns:                 None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,
@@ -8494,6 +8550,79 @@ target_ref = "refs/heads/raxis/feature"
     // `BEGIN IMMEDIATE` step ordering — see
     // `initiatives::v2_admission` test module
     // (`plan-bundle-sealing.md §8.1`).
+
+    // ─────────────────────────────────────────────────────────────────
+    // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — parse-time guard:
+    // `[[tasks]] max_turns = 0` MUST fail admission. A 0-turn budget
+    // would terminate the dispatch loop before the first model call,
+    // which is never useful and almost always indicates a typo
+    // (operator probably meant `max_turns = 10` or omitted the field
+    // entirely to take the policy / compiled fallback).
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn inv_planner_max_turns_precedence_01_parser_rejects_zero() {
+        let toml = r#"
+[meta]
+version = 1
+[[tasks]]
+task_id     = "t-zero-turns"
+description = "should be rejected at admission"
+max_turns   = 0
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_turns"),
+            "rejection message MUST name the offending field; got: {msg}",
+        );
+        assert!(
+            msg.contains("t-zero-turns"),
+            "rejection message MUST name the offending task; got: {msg}",
+        );
+        assert!(
+            msg.contains('0'),
+            "rejection message MUST mention the rejected value; got: {msg}",
+        );
+    }
+
+    /// `Some(1)` is the minimum admissible value — pin that the
+    /// boundary check is `< 1`, not `<= 1`. A 1-turn budget is
+    /// degenerate but legal for adversarial / fuzz scenarios.
+    #[test]
+    fn inv_planner_max_turns_precedence_01_parser_admits_one() {
+        let toml = r#"
+[meta]
+version = 1
+[[tasks]]
+task_id     = "t-one-turn"
+description = "minimum admissible budget"
+max_turns   = 1
+"#;
+        let tasks = parse_plan_tasks(toml).expect("max_turns = 1 MUST be admissible");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].max_turns, Some(1),
+            "parser MUST propagate `Some(1)` through to the in-memory PlanTask");
+    }
+
+    /// Omitted `max_turns` ⇒ `None` ⇒ the spawn-time resolver falls
+    /// through to the policy or compiled fallback per
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` arms 2 / 3.
+    #[test]
+    fn inv_planner_max_turns_precedence_01_parser_admits_omitted() {
+        let toml = r#"
+[meta]
+version = 1
+[[tasks]]
+task_id     = "t-omitted"
+description = "no per-task override; defer to policy / compiled fallback"
+"#;
+        let tasks = parse_plan_tasks(toml).expect("omitted max_turns is admissible");
+        assert_eq!(tasks[0].max_turns, None,
+            "omitted `max_turns` MUST parse as `None`, NOT `Some(default)` — \
+             the resolver needs the option-shape to distinguish 'operator \
+             chose the default' from 'operator declared the value'");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8532,6 +8661,7 @@ mod env_consistency_tests {
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            max_turns:                 None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,
@@ -8682,6 +8812,7 @@ mod vm_image_admission_tests {
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            max_turns:                 None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,

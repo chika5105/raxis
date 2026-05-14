@@ -196,6 +196,42 @@ pub struct TaskPlanFields {
     /// reads the latest active activation row's value.
     pub max_review_rejections:     Option<u32>,
 
+    /// V2.7 — operator-declared per-task hard turn ceiling for the
+    /// planner dispatch loop running inside the spawned VM. The
+    /// ceiling is enforced inside the VM by
+    /// `raxis_planner_core::dispatch::Dispatcher::run` (`for turn in
+    /// 0..config.max_turns`); on hit the loop terminates with
+    /// `Outcome::TurnsExceeded` and the VM exits clean (the kernel
+    /// observes the exit and treats it as a deliberate ceiling
+    /// surfacing per `INV-PLANNER-HARNESS-04`).
+    ///
+    /// **Resolution precedence** (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`):
+    ///
+    /// 1. `Some(c)` here ⇒ this exact ceiling, NO matter what the
+    ///    policy or compiled default say. Operators can pin a TIGHT
+    ///    budget for trivial Reviewer / single-edit tasks (e.g. `5`)
+    ///    or a LARGER budget for known-heavy Executor work
+    ///    (e.g. `150` for the `materialize-records` task).
+    /// 2. `None` here ⇒ fall through to
+    ///    `policy.gateway.planner_max_turns_default`.
+    /// 3. Policy default `None` ⇒ fall through to the compiled
+    ///    `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS` (100).
+    ///
+    /// The kernel (`session_spawn_orchestrator::resolve_planner_max_turns`)
+    /// performs this resolution at session-spawn time and stamps the
+    /// result into the spawned VM's env table as
+    /// [`raxis_types::planner_env::PLANNER_MAX_TURNS_ENV`]
+    /// (`RAXIS_PLANNER_MAX_TURNS`). The driver
+    /// (`raxis_planner_core::driver::run_role_session_with_env_fn`)
+    /// reads it at boot and hands it to `DispatchConfig::max_turns`.
+    ///
+    /// **Validation.** `Some(0)` is rejected at plan-parse time with
+    /// `LifecycleError::PlanInvalid` because a 0-turn budget is never
+    /// useful and almost always indicates a typo (the agent would
+    /// terminate before issuing its first model call). `Some(n)` for
+    /// any `n >= 1` is admitted verbatim.
+    pub max_turns:                 Option<u32>,
+
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
     /// Operator-declared toggle for upward VM-resource scaling on
     /// this task. `None` ⇒ inherit from
@@ -256,6 +292,26 @@ pub const DEFAULT_MAX_CRASH_RETRIES: u32 = 3;
 /// spec mismatch better resolved out-of-band.
 pub const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 2;
 
+/// V2.7 — kernel-side compiled fallback for `max_turns` resolution
+/// when **both** the per-task plan field AND the
+/// `[gateway].planner_max_turns_default` policy field are absent.
+///
+/// **Synchronisation contract.** This constant MUST equal
+/// `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`. The kernel cannot
+/// `pub use` the planner-core constant directly because the kernel
+/// crate cannot depend on `raxis-planner-core` (that crate pulls in
+/// `reqwest` and the HTTP-tier deps the kernel deliberately keeps
+/// out of its tree). The
+/// `inv_planner_max_turns_compiled_default_matches_planner_core`
+/// witness test in `kernel/src/session_spawn_orchestrator.rs::tests`
+/// asserts the two constants are bit-equal at compile-time, so any
+/// future bump of one fails CI until both are bumped in lock-step.
+///
+/// Current value: `100`. Historical bumps documented in
+/// `guides/recipes/env/11-planner-env-vars.md` (20 → 50 → 100 across
+/// live-e2e iter25 / iter31).
+pub const DEFAULT_PLANNER_MAX_TURNS: u32 = 100;
+
 impl Default for TaskPlanFields {
     fn default() -> Self {
         Self {
@@ -269,6 +325,7 @@ impl Default for TaskPlanFields {
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            max_turns:                 None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,
@@ -294,6 +351,35 @@ impl TaskPlanFields {
     pub fn effective_max_review_rejections(&self) -> u32 {
         self.max_review_rejections
             .unwrap_or(DEFAULT_MAX_REVIEW_REJECTIONS)
+    }
+
+    /// Resolve [`Self::max_turns`] against the policy-level default
+    /// (`[gateway].planner_max_turns_default`) and the compiled
+    /// fallback [`DEFAULT_PLANNER_MAX_TURNS`].
+    ///
+    /// **Precedence** (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`):
+    ///
+    /// 1. `Some(c)` on the per-task field ⇒ `c` (policy default
+    ///    ignored).
+    /// 2. `None` on the per-task field + `Some(d)` policy default ⇒
+    ///    `d` (compiled default ignored).
+    /// 3. `None` on both ⇒ [`DEFAULT_PLANNER_MAX_TURNS`].
+    ///
+    /// Returns `(resolved_value, source_label)` so the
+    /// `session_spawn_orchestrator` callsite can emit a structured
+    /// `PlannerMaxTurnsResolved` log line whose `source` field names
+    /// the resolution arm verbatim.
+    pub fn effective_max_turns(
+        &self,
+        policy_default: Option<u32>,
+    ) -> (u32, &'static str) {
+        if let Some(c) = self.max_turns {
+            (c, "task")
+        } else if let Some(d) = policy_default {
+            (d, "policy")
+        } else {
+            (DEFAULT_PLANNER_MAX_TURNS, "compiled-default")
+        }
     }
 }
 
@@ -789,6 +875,7 @@ mod tests {
             description:               "Refactor parser to handle UTF-16".to_owned(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            max_turns:                 None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,

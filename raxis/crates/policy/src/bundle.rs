@@ -2119,6 +2119,31 @@ pub struct GatewaySection {
     /// Default: 5 respawns.
     #[serde(default = "default_gateway_max_consecutive_respawns")]
     pub max_consecutive_respawns: u32,
+
+    /// **V2.7 — `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.** Operator-supplied
+    /// default `max_turns` for any planner session whose per-task plan
+    /// entry omits `max_turns`. Resolution precedence (per-spawn):
+    ///
+    /// 1. `[[tasks]].max_turns` from the parsed plan (per-task override).
+    /// 2. `[gateway].planner_max_turns_default` (this field — policy default).
+    /// 3. Compiled fallback `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`
+    ///    (currently 100; bumped 20→50→100 across iter25 / iter31 to fit
+    ///    the historical worst-case Executor task — see
+    ///    `guides/recipes/env/11-planner-env-vars.md` for rationale).
+    ///
+    /// Operators can pin a TIGHTER policy default (e.g. `5`) for CI /
+    /// known-easy scenarios so a Reviewer that hasn't decided in 5 turns
+    /// surfaces as `Outcome::TurnsExceeded` instead of burning the full
+    /// compiled budget. The token caps under `[budget.token_caps]`
+    /// remain the cost-side bound — `planner_max_turns_default` is the
+    /// **liveness** bound ("if you haven't finished in N turns, you're
+    /// stuck").
+    ///
+    /// `None` ⇒ fall through to the compiled default.
+    /// `Some(0)` is rejected at policy-validate time (a 0-turn budget
+    /// is never useful and almost always a typo).
+    #[serde(default)]
+    pub planner_max_turns_default: Option<u32>,
 }
 
 fn default_gateway_spawn_timeout_secs() -> u64 { 5 }

@@ -446,9 +446,64 @@ bearing kernel concern with **three mutually exclusive paths**:
    25 mongo docs + per-row writes), and `100` clears both empirical
    workloads with headroom while the token-cap envelope
    (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` / `…_OUTPUT_TOTAL`)
-   remains the spend bound. Mode B + the turn-cap bump together
-   form the two halves of the "executor exits without a terminal
-   intent" recovery contract.
+   remains the spend bound.
+
+   **V2.7 — per-task `max_turns` precedence
+   (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`).** A blanket compiled
+   default necessarily over-budgets short-fanout tasks (a Reviewer
+   that hasn't decided in 5 turns is stuck, not progressing) AND
+   under-budgets large-fanout tasks (the `materialize-records`
+   Executor is empirically observed to need ~150 turns on real
+   data). Pre-V2.7, the only knob was the compiled default — every
+   role on every initiative shared the same ceiling. V2.7 introduces
+   a three-arm precedence chain resolved at session-spawn time by
+   `kernel/src/session_spawn_orchestrator.rs::resolve_planner_max_turns_for`:
+
+   1. `[[tasks]] max_turns = N` in the plan TOML wins for the
+      activating task. Parsed into
+      `kernel/src/initiatives/plan_registry.rs::TaskPlanFields::max_turns`;
+      `Some(0)` is rejected at admission (a 0-turn budget would
+      terminate the dispatch loop before the first model call and
+      is never useful).
+   2. `[gateway].planner_max_turns_default = N` in `policy.toml`
+      wins when per-task is omitted. Parsed into
+      `crates/policy/src/bundle.rs::GatewaySection::planner_max_turns_default`.
+      Lets an org pin a tighter / looser cap globally without
+      touching every plan.
+   3. Compiled `DEFAULT_PLANNER_MAX_TURNS = 100` wins when both
+      arms are absent. Lives in
+      `kernel/src/initiatives/plan_registry.rs` AND
+      `crates/planner-core/src/driver.rs` — the constants are
+      pinned bit-equal by the `inv_planner_max_turns_compiled_default_matches_planner_core`
+      witness test.
+
+   The resolver returns `(resolved, source_label)` where
+   `source_label` is one of `"task" | "policy" | "compiled-default"`.
+   The kernel emits a `PlannerMaxTurnsResolved` structured log line
+   carrying `source`, `resolved`, `task_id`, `session_id`,
+   `initiative_id` so an operator can `rg PlannerMaxTurnsResolved
+   <data-dir>/runtime/` to confirm what budget every spawn received.
+   Orchestrator spawns pass `task_fields = None` (the orchestrator
+   is per-initiative, not per-task — the per-task arm is structurally
+   unreachable for orchestrator sessions).
+
+   The resolved value is projected into BOTH the env stamp
+   (`RAXIS_PLANNER_MAX_TURNS=N`) AND the KSB capabilities envelope
+   (`SessionCapabilityView::planner_max_turns`, see
+   `INV-KSB-MAX-TURNS-VISIBILITY-01`). The two surfaces share a
+   single resolver call so they are bit-equal by construction —
+   the kernel reads inputs once and stamps both. The KSB
+   projection is what gives the in-VM agent visibility into its
+   own budget without an extra IPC round-trip; the env stamp is
+   what the in-VM dispatch loop reads as its hard ceiling.
+
+   Mode B + the V2 turn-cap bump + the V2.7 per-task precedence chain
+   together form the layered recovery contract for the "executor
+   exits without a terminal intent" failure mode: Mode B re-arms the
+   FSM, the V2 bump gives every task enough headroom that empirical
+   workloads do not trip the ceiling, and the V2.7 chain lets
+   plan-authors and operators carve per-task / per-org exceptions
+   without bumping the global default.
 
 The storm-guard's `pending_exists && !active_exists` predicate is
 load-bearing: without `!active_exists` the hook re-fires on every

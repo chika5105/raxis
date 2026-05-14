@@ -35,8 +35,12 @@ use raxis_ksb::{
 
 fn sample_session(role: &str) -> SessionCapabilityView {
     SessionCapabilityView {
-        session_id: format!("ses-{role}"),
-        role:       role.to_owned(),
+        session_id:        format!("ses-{role}"),
+        role:              role.to_owned(),
+        // V2.7 — fixture default; the assembler stamps the resolved
+        // value at session-spawn time, see
+        // `INV-KSB-MAX-TURNS-VISIBILITY-01`.
+        planner_max_turns: 100,
     }
 }
 
@@ -257,4 +261,75 @@ fn rendered_capabilities_block_respects_role_scope() {
         "reviewer render MUST NOT leak executor crash counters: {rev}");
     assert!(!rev.contains("review_reject_count"),
         "reviewer render MUST NOT leak executor review counters: {rev}");
+}
+
+/// V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — every role's rendered
+/// `capabilities=` block MUST carry the `planner_max_turns=N` token
+/// on its `role=…` line. The agent's NNSP relies on this token's
+/// presence as a positive structural signal — its absence indicates
+/// a renderer regression and the agent is permitted to refuse.
+#[test]
+fn inv_ksb_max_turns_visibility_01_all_three_roles_carry_planner_max_turns() {
+    use raxis_ksb::{render_ksb, KsbSnapshot, KSB_SCHEMA_VERSION};
+
+    fn role_session(role: &'static str, max_turns: u32) -> SessionCapabilityView {
+        SessionCapabilityView {
+            session_id:        format!("ses-mt-{role}"),
+            role:              role.to_owned(),
+            planner_max_turns: max_turns,
+        }
+    }
+
+    fn fixture(caps: Capabilities, role: &'static str) -> KsbSnapshot {
+        KsbSnapshot {
+            version:                       KSB_SCHEMA_VERSION,
+            initiative_id:                 "init-mt".to_owned(),
+            task_id:                       Some("task-mt".to_owned()),
+            role:                          role.to_owned(),
+            evaluation_sha:                String::new(),
+            path_allowlist:                vec![],
+            token_budget_remaining:        0,
+            wallclock_budget_remaining_s:  0,
+            dag_rows:                      vec![],
+            task_description:              String::new(),
+            target_ref:                    "refs/heads/main".to_owned(),
+            base_sha:                      String::new(),
+            reviewer_verdicts:             vec![],
+            pending_escalations:           vec![],
+            credential_ports:              vec![],
+            capabilities:                  Some(caps),
+        }
+    }
+
+    // Distinct values per role to detect cross-role swaps.
+    const ORCH_MT: u32 = 250;
+    const EXEC_MT: u32 = 150;
+    const REV_MT:  u32 = 5;
+
+    let orch = render_ksb(&fixture(Capabilities::Orchestrator(OrchestratorCapabilities {
+        session:    role_session("orchestrator", ORCH_MT),
+        initiative: InitiativeCapabilityView {
+            initiative_id:                          "init-mt".to_owned(),
+            orchestrator_no_progress_respawn_count: 0,
+            max_orchestrator_no_progress_respawns:  3,
+            orchestrator_respawns_remaining:        3,
+        },
+        tasks:      vec![],
+    }), "orchestrator")).expect("render orchestrator");
+    assert!(orch.contains(&format!("role=orchestrator session=ses-mt-orchestrator planner_max_turns={ORCH_MT}")),
+        "orchestrator capabilities line MUST carry role+session+planner_max_turns; got: {orch}");
+
+    let exec = render_ksb(&fixture(Capabilities::Executor(ExecutorCapabilities {
+        session: role_session("executor", EXEC_MT),
+        task:    sample_task_view("task-mt"),
+    }), "executor")).expect("render executor");
+    assert!(exec.contains(&format!("role=executor session=ses-mt-executor planner_max_turns={EXEC_MT}")),
+        "executor capabilities line MUST carry role+session+planner_max_turns; got: {exec}");
+
+    let rev = render_ksb(&fixture(Capabilities::Reviewer(ReviewerCapabilities {
+        session:          role_session("reviewer", REV_MT),
+        artifact_task_id: "task-mt".to_owned(),
+    }), "reviewer")).expect("render reviewer");
+    assert!(rev.contains(&format!("role=reviewer session=ses-mt-reviewer planner_max_turns={REV_MT}")),
+        "reviewer capabilities line MUST carry role+session+planner_max_turns; got: {rev}");
 }

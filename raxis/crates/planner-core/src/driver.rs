@@ -1053,12 +1053,13 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                           ## Capabilities envelope (`capabilities=` block)\n\
                           \n\
                           Your KSB carries a `capabilities=` block that surfaces \
-                          the kernel's view of YOUR task's retry budget. The \
-                          executor variant has shape:\n\
+                          the kernel's view of YOUR task's retry budget AND your \
+                          per-session hard turn ceiling. The executor variant has \
+                          shape:\n\
                           \n\
                           ```\n\
                           capabilities=\n\
-                            role=executor session=<session-id>\n\
+                            role=executor session=<session-id> planner_max_turns=<N>\n\
                             task=\n\
                               - task=<your-task-id> crash=<n>/<max> \
                           review=<n>/<max> retry_admissible=<true|false> \
@@ -1078,7 +1079,24 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                           this task has been Reviewer-rejected; pivot your \
                           implementation strategy if it is non-zero (look for \
                           critique text the orchestrator passed in via the task \
-                          prompt).",
+                          prompt).\n\
+                          \n\
+                          ## Per-session turn budget (`planner_max_turns=N`)\n\
+                          \n\
+                          The `planner_max_turns=N` field on the `role=` line is \
+                          the kernel-projected hard ceiling on how many turns \
+                          your dispatch loop may take before the kernel \
+                          terminates the session with `Outcome::TurnsExceeded`. \
+                          This budget is the **liveness bound** — it is \
+                          independent from the token caps (which are the \
+                          cost-side bound). You should self-track your turn \
+                          index by counting your prior assistant turns in this \
+                          conversation; if you have used >75% of the budget on \
+                          a single coherent edit you should prefer \
+                          `task_complete` over speculative further \
+                          investigation, and if you have used >90% you should \
+                          call `report_failure` with a clear handoff note \
+                          rather than risk being cut off mid-tool-call.",
         Role::Reviewer => "You are the RAXIS reviewer for task `{TASK}` of \
                           initiative `{INIT}`. Read the executor's commit \
                           (via `read_file` / `grep_search`) and evaluate it \
@@ -1087,7 +1105,25 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                           string }` exactly once to deliver your verdict. \
                           You MUST call `submit_review` before ending the \
                           turn — free-form text without a tool call leaves \
-                          the session stuck.",
+                          the session stuck.\n\
+                          \n\
+                          ## Per-session turn budget (`planner_max_turns=N`)\n\
+                          \n\
+                          Your `capabilities=` block carries \
+                          `planner_max_turns=N` on the `role=reviewer` line: \
+                          the kernel-projected hard ceiling on how many turns \
+                          your dispatch loop may take before the kernel \
+                          terminates with `Outcome::TurnsExceeded`. Reviewer \
+                          budgets are typically TIGHT (a reviewer that has \
+                          not decided in 5 turns is stuck, not progressing). \
+                          Self-track your turn index against `N`: by the \
+                          time you have used >50% of the budget you should be \
+                          drafting your `submit_review` call, and you must \
+                          ALWAYS call `submit_review` (approve OR reject) \
+                          rather than letting the dispatch loop time out \
+                          (which records as Idle, not as a terminal verdict, \
+                          and forces the orchestrator to retry the executor \
+                          unnecessarily).",
         Role::Orchestrator => "You are the RAXIS orchestrator for initiative \
                               `{INIT}`. Your job is to drive the task DAG to \
                               completion by calling the right terminal tool \
@@ -1173,9 +1209,8 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                  copied into the orchestrator ODB). Each \
                                  such rejection burns one of your \
                                  `orch_no_progress_respawns=` budget slots \
-                                 and the kernel ceiling \
-                                 (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) \
-                                 will mark the initiative `Failed`. \
+                                 and on exceedance the kernel will mark the \
+                                 initiative `Failed`. \
                                  Examples that look tempting but are wrong: \
                                  the realistic plan's `lint-defect → \
                                  lint-runner → review-lint-defect-A/B` \
@@ -1221,8 +1256,7 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                     the kernel has bumped the executor's \
                                     `subtask_activations.review_reject_count` \
                                     and a `retry_subtask` is now \
-                                    admission-eligible per \
-                                    `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.\n\
+                                    admission-eligible.\n\
                                   - `retry_admissible=false` with \
                                     `reason=\"prior state PendingActivation; \
                                     …\"` ⇒ a PRIOR `retry_subtask` already \
@@ -1230,10 +1264,7 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                     activation row that is currently in \
                                     `PendingActivation` (no executor VM \
                                     spawned yet). Per the kernel handler \
-                                    contract \
-                                    (`handle_retry_sub_task` step 6 — \
-                                    `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`) \
-                                    your NEXT step on this task is \
+                                    contract your NEXT step on this task is \
                                     `activate_subtask { subtask_task_id: \
                                     \"<executor_task_id>\" }`, which spawns \
                                     the executor VM for the fresh \
@@ -1316,7 +1347,31 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               `retry_subtask`, or `integration_merge` per \
                               turn. Free-form text alone (no tool call) ends \
                               the session in Idle and the kernel records an \
-                              orchestration failure — never do that.",
+                              orchestration failure — never do that.\n\
+                              \n\
+                              ## Per-session turn budget (`planner_max_turns=N`)\n\
+                              \n\
+                              Your `capabilities=` block carries \
+                              `planner_max_turns=N` on the \
+                              `role=orchestrator` line. This is the kernel-\
+                              projected hard ceiling on how many turns your \
+                              dispatch loop may take before the kernel \
+                              terminates the session with \
+                              `Outcome::TurnsExceeded`. Each turn you spend \
+                              calling tools eats one slot; speculative \
+                              probes (`bash`, `grep_search`) burn budget \
+                              just as fast as terminal-tool calls. Self-track \
+                              your turn index by counting prior assistant \
+                              turns in this conversation. By the time you \
+                              have used >50% of the budget you should be \
+                              issuing terminal-tool calls aggressively \
+                              (`activate_subtask` / `retry_subtask` / \
+                              `integration_merge`) rather than re-reading the \
+                              `dag=` block; if you have used >75% you must \
+                              `integration_merge` if any executor row is \
+                              eligible. The `planner_max_turns` budget is \
+                              the LIVENESS bound — independent from the \
+                              token caps which are the cost-side bound.",
     };
     let task_repr = args.task_id.as_deref().unwrap_or("(no task id)");
     role_blurb

@@ -91,7 +91,8 @@
 | Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01, INV-OBS-OPERATOR-IPC-COVERAGE-01, INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 | 4 |
 | KSB capabilities envelope — V2.6 | INV-KSB-CAPABILITIES-PARITY-01, INV-KSB-CAPABILITIES-ROLE-SCOPED-01, INV-KSB-CAPABILITIES-TURN-COHERENT-01 | 3 |
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
-| **Total** | | **113** |
+| Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
+| **Total** | | **115** |
 
 ---
 
@@ -6962,6 +6963,148 @@ rows for `KernelSubstrateIpcRoundtripDuration`,
 `KernelSubstrateIpcMessagesTotal`, `KernelSubstrateIpcInflight`).
 Referenced from `v3/observability-prometheus.md §3.13`
 (Prometheus inventory).
+
+---
+
+### INV-PLANNER-MAX-TURNS-PRECEDENCE-01 — Per-task `max_turns` precedence chain is mechanical
+
+**Statement.**
+The kernel MUST resolve the per-session planner hard turn ceiling
+(`RAXIS_PLANNER_MAX_TURNS`) at session-spawn time via the following
+precedence chain, evaluated in order, with the FIRST matching arm
+winning:
+
+1. **Per-task** — If the activating task's
+   `[[tasks]].max_turns` (parsed into
+   `kernel/src/initiatives/plan_registry.rs::TaskPlanFields::max_turns`)
+   is `Some(c)`, the resolved value is `c` and the resolution
+   `source` is `"task"`.
+2. **Policy default** — Else, if
+   `[gateway].planner_max_turns_default` (parsed into
+   `crates/policy/src/bundle.rs::GatewaySection::planner_max_turns_default`)
+   is `Some(d)`, the resolved value is `d` and the resolution
+   `source` is `"policy"`.
+3. **Compiled default** — Otherwise the resolved value is
+   `kernel/src/initiatives/plan_registry.rs::DEFAULT_PLANNER_MAX_TURNS`
+   (currently `100`) and the resolution `source` is
+   `"compiled-default"`.
+
+The kernel MUST then `insert` (orchestrator path:
+`session_spawn_orchestrator::populate_planner_max_turns_env`) or
+`entry().or_insert` (executor / reviewer path:
+`session_spawn_orchestrator::populate_planner_max_turns_env_or_insert`)
+the resolved integer into the spawned VM's env table under
+[`raxis_types::planner_env::PLANNER_MAX_TURNS_ENV`]
+(`RAXIS_PLANNER_MAX_TURNS`), and emit a structured `PlannerMaxTurnsResolved`
+log line carrying `task_id`, `session_id`, `initiative_id`, the
+resolution `source` label, and the resolved integer.
+
+The orchestrator-spawn path passes `task_fields = None` to the
+resolver (orchestrator is per-initiative, not per-task — the
+per-task arm always short-circuits for orchestrator sessions),
+so the orchestrator's effective ceiling is always either the
+policy default or the compiled default.
+
+The plan parser (`kernel/src/initiatives/lifecycle.rs::parse_plan_tasks`)
+MUST reject `max_turns = 0` at admission with
+`LifecycleError::PlanInvalid` (a 0-turn budget would terminate the
+dispatch loop before the first model call and is never useful).
+Negative values, non-integer values, and integer values exceeding
+`u32::MAX` are also rejected by the existing
+`parse_optional_u32_field` shape check.
+
+**Justification.**
+Three live-e2e iterations (iter25, iter31, iter50) reproduced the
+same failure mode: a `DEFAULT_PLANNER_MAX_TURNS` calibrated for the
+single hardest Executor task (`materialize-records`: 25 postgres rows
+× per-row write × commit × verify) was simultaneously too tight for
+that task at lower defaults AND wasteful for trivial Reviewer / single-
+edit Executor tasks. Bumping the compiled default `20 → 50 → 100` to
+fit the worst-case meant every Reviewer that hadn't decided in 5 turns
+got a 100-turn budget, weakening the liveness backstop ("if you haven't
+finished in N turns, you're stuck") for every other task. Per-task
+`max_turns` lets the plan author express what they already know: this
+Reviewer needs ≤ 5; this materializer Executor needs ≥ 150. The kernel
+projects the resolved value into both the env stamp (in-VM dispatch
+loop ceiling) and the KSB capabilities envelope (`SessionCapabilityView::planner_max_turns`,
+per `INV-KSB-MAX-TURNS-VISIBILITY-01`) so the agent and the kernel
+share one view of the budget.
+
+**Witness tests:**
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_precedence_01_per_task_wins_over_policy`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_precedence_01_policy_wins_over_compiled`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_precedence_01_compiled_default_when_both_absent`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_precedence_01_orchestrator_path_ignores_task_arm`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_compiled_default_matches_planner_core` (pins the kernel-side `DEFAULT_PLANNER_MAX_TURNS` constant against `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`)
+* `kernel/src/initiatives/lifecycle.rs::tests::inv_planner_max_turns_precedence_01_parser_rejects_zero`
+
+**Enforcement sites:**
+* `kernel/src/session_spawn_orchestrator.rs::resolve_planner_max_turns_for` — the resolver
+* `kernel/src/session_spawn_orchestrator.rs::populate_planner_max_turns_env` — orchestrator env stamp + log
+* `kernel/src/session_spawn_orchestrator.rs::populate_planner_max_turns_env_or_insert` — executor / reviewer env stamp + log
+* `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks` — `max_turns = 0` rejection
+* `kernel/src/initiatives/plan_registry.rs::TaskPlanFields::effective_max_turns` — pure resolution helper called by the resolver
+
+**Canonical home.** `v2/v2-deep-spec.md §Step 12` (planner-harness
+ceiling resolution); `guides/recipes/env/11-planner-env-vars.md`
+(operator-facing recipe); `guides/recipes/policy/06-budget-section.md`
+(policy-side default).
+
+---
+
+### INV-KSB-MAX-TURNS-VISIBILITY-01 — KSB carries the resolved per-session `planner_max_turns`
+
+**Statement.**
+For every planner session the kernel spawns, the
+`raxis_ksb::SessionCapabilityView::planner_max_turns` field on the
+session's KSB capabilities envelope MUST equal the resolved
+`RAXIS_PLANNER_MAX_TURNS` value the kernel stamped into the spawned
+VM's env table (per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`). Both
+fields MUST come from a SINGLE call to
+`session_spawn_orchestrator::resolve_planner_max_turns_for(...)` so
+they are bit-equal by construction; reading the resolution arm twice
+(once for the env stamp, once for the KSB) is forbidden because the
+underlying inputs (`TaskPlanFields::max_turns`,
+`GatewaySection::planner_max_turns_default`) could in principle change
+between reads on a hot policy-rotate.
+
+The KSB renderer
+(`crates/ksb/src/lib.rs::push_session_capability_line`) MUST emit
+the `planner_max_turns=N` token on the `role=…` line of the rendered
+capabilities block for ALL three role envelopes (orchestrator,
+executor, reviewer) — the token's presence is a positive structural
+signal the agent can rely on; absence indicates a renderer regression
+or an old kernel version (which the agent is permitted to refuse).
+
+**Justification.**
+The agent's only authoritative source of state is the KSB the driver
+deserialises at boot and folds into the system prompt. The agent does
+not have direct visibility into its own process env; surfacing
+`planner_max_turns` only via `RAXIS_PLANNER_MAX_TURNS` would mean the
+agent could not see its own budget without a separate IPC round-trip.
+Including the resolved value in the per-session capabilities block
+gives the agent the BUDGET; the agent's own internal turn counter
+(driver-tracked, see `crates/planner-core/src/dispatch.rs::Dispatcher::run`'s
+`for turn in 0..self.config.max_turns`) gives the SPENT count.
+Computing `remaining = planner_max_turns - turn_index` is then trivial
+inside the dispatch loop, and the role NNSPs instruct the agent to
+self-regulate against this remaining count (e.g. an Executor that has
+spent >75% of its budget on a single coherent edit should prefer
+`task_complete` over speculative further investigation).
+
+**Witness tests:**
+* `kernel/src/initiatives/ksb_assembly.rs::tests::inv_ksb_max_turns_visibility_01_session_view_carries_resolved_value`
+* `kernel/tests/ksb_capabilities_role_scoped.rs::inv_ksb_max_turns_visibility_01_all_three_roles_carry_planner_max_turns`
+* `crates/ksb/src/lib.rs::tests::inv_ksb_max_turns_visibility_01_renderer_emits_planner_max_turns_for_all_roles`
+
+**Enforcement sites:**
+* `crates/ksb/src/lib.rs::SessionCapabilityView::planner_max_turns` — the field
+* `kernel/src/initiatives/ksb_assembly.rs::assemble_capabilities` — the assembler that populates the field from `KsbInputs::planner_max_turns`
+* `kernel/src/session_spawn_orchestrator.rs` (orchestrator + executor spawn paths) — the spawn-site bridge that calls `resolve_planner_max_turns_for(...)` once and threads the result into BOTH the env stamp and `KsbInputs`
+* `crates/ksb/src/lib.rs::push_session_capability_line` — the renderer that emits the `planner_max_turns=N` token
+
+**Canonical home.** `v2/v2_extended_gaps.md §2.4` (KSB schema);
+`v2/v2-deep-spec.md §Step 12` (planner-harness ceiling resolution).
 
 ---
 

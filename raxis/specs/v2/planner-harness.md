@@ -1352,6 +1352,37 @@ realities that shaped it:
 
 ---
 
+### 5.9 Per-Session Hard Turn Ceiling (V2.7, cross-ref)
+
+The dispatch loop's hard turn ceiling — the **liveness** bound that
+caps how many tool-call cycles a single planner session may run
+before the kernel terminates it with `Outcome::TurnsExceeded` — is
+resolved at session-spawn time per
+`INV-PLANNER-MAX-TURNS-PRECEDENCE-01` and projected into the
+in-VM env as `RAXIS_PLANNER_MAX_TURNS=N`. The same value also
+appears on the KSB capabilities envelope as
+`role=<role> session=<id> planner_max_turns=N` per
+`INV-KSB-MAX-TURNS-VISIBILITY-01`, giving the in-VM agent
+visibility into its own budget without an extra IPC round-trip.
+
+The ceiling is **independent** from the token-cap envelope (the
+`RAXIS_PLANNER_MAX_TOKENS_*` family) — token caps are the cost-side
+bound, the turn ceiling is the liveness bound. A wedged tool-call
+loop that emits one tiny tool call per turn would exhaust the turn
+ceiling long before the token cap; a single very-long final
+synthesis would exhaust the token cap long before the turn ceiling.
+Both bounds fire independently.
+
+Per-task (`[[tasks]] max_turns = N` in the plan TOML) and policy
+(`[gateway].planner_max_turns_default = N` in `policy.toml`)
+overrides exist for plans that mix Reviewer (~5 turns) and
+materializer-Executor (~150 turns) tasks in one initiative. See
+`v2-deep-spec.md §Step 12` for the full precedence chain and
+`guides/recipes/env/11-planner-env-vars.md` for the operator
+recipe.
+
+---
+
 ## §6 — Tool Exclusions
 
 Tool primitives from claw-code or candidate additions to the RAXIS

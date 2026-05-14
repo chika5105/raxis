@@ -25,6 +25,7 @@ needs the gateway is structurally invalid.
 | `spawn_timeout_secs` | `u64` | no | 5 | Maximum seconds to wait for `GatewayMessage::GatewayReady` after spawn. Beyond this the kernel terminates the child and treats it as a crash for the respawn loop. |
 | `respawn_backoff_ms` | `u64` | no | 1000 | Initial back-off between respawn attempts. Doubles each consecutive crash up to a hard cap of 60 seconds. |
 | `max_consecutive_respawns` | `u32` | no | 5 | After this many consecutive respawns within the back-off window, the kernel quarantines the gateway slot. No further respawns until kernel restart. |
+| `planner_max_turns_default` | `u32` (optional) | no | unset (compiled fallback `100`) | V2.7 — org-wide default for `RAXIS_PLANNER_MAX_TURNS`. Per-task `[[tasks]] max_turns` always wins if set. See `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` and `guides/recipes/env/11-planner-env-vars.md` "Resolving `RAXIS_PLANNER_MAX_TURNS`". |
 
 ---
 
@@ -32,10 +33,11 @@ needs the gateway is structurally invalid.
 
 ```toml
 [gateway]
-binary_path              = "/usr/local/bin/raxis-gateway"
-spawn_timeout_secs       = 5
-respawn_backoff_ms       = 1000
-max_consecutive_respawns = 5
+binary_path                = "/usr/local/bin/raxis-gateway"
+spawn_timeout_secs         = 5
+respawn_backoff_ms         = 1000
+max_consecutive_respawns   = 5
+# planner_max_turns_default = 50    # optional V2.7 — org-wide cap; per-task overrides still win
 ```
 
 Defaults are usually fine. Tighten only if you have specific

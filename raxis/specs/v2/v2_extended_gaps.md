@@ -578,6 +578,45 @@ Implementation surface:
     `kernel/tests/ksb_capabilities_turn_coherent.rs` — three
     witness tests pinning the three invariants.
 
+#### V2.7 extension — `planner_max_turns` on `SessionCapabilityView`
+
+V2.7 (`INV-KSB-MAX-TURNS-VISIBILITY-01`) extends
+`SessionCapabilityView` with one new `pub planner_max_turns: u32`
+field. The same value is also stamped into the spawned VM's env
+under `RAXIS_PLANNER_MAX_TURNS`; both surfaces share a single call
+to
+`kernel/src/session_spawn_orchestrator.rs::resolve_planner_max_turns_for`,
+so they are bit-equal by construction.
+
+The renderer
+(`crates/ksb/src/lib.rs::push_session_capability_line`) emits the
+`planner_max_turns=N` token uniformly on the `role=…` line for
+ALL three role envelopes:
+
+```text
+capabilities=
+  role=orchestrator session=<id> planner_max_turns=N
+  initiative=<…>
+  tasks=
+    - task=<…> crash=<n>/<m> review=<n>/<m> retry_admissible=<…>
+```
+
+Why surface this on the KSB rather than only via the env var: the
+in-VM agent (LLM) does not have direct visibility into its own
+process env — it only sees the rendered system prompt the driver
+assembles. Surfacing `planner_max_turns` on the per-session
+capabilities line lets the renderer expose the budget verbatim. The
+agent then self-tracks its own turn count by counting prior
+assistant turns in its own conversation transcript and computes
+`remaining = planner_max_turns - turn_index` accordingly. The role
+NNSPs instruct the agent on how to use the remaining budget (e.g.
+the Executor at >75% spent should prefer `task_complete` over
+speculative further investigation).
+
+The resolver precedence chain itself
+(`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`) is documented in
+`v2-deep-spec.md §Step 12` and `guides/recipes/env/11-planner-env-vars.md`.
+
 **Original problem statement (preserved for context).** The planner's
 system prompt was previously a hardcoded string template in
 `crates/planner-core/src/driver.rs:400-422`. It said "you are the
