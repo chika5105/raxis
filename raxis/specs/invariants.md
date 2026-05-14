@@ -6600,7 +6600,10 @@ explicitly:
 
 **Witness:**
 - `crates/types/src/planner_exit.rs::PlannerExitOutcome`
-  (structured wire-level exit cause; serde-tagged enum).
+  (structured wire-level exit cause; default external-tag serde
+  representation per INV-IPC-BINCODE — internal-tag was the iter57
+  `bincode::serde Decode(IdentifierNotSupported)` regression on
+  the planner socket and is forbidden across IPC enums).
 - `crates/types/src/planner_exit.rs::PlannerExitOutcome::format_concrete_reason`
   (formatter — type-checked against forbidden phrases by the
   inline unit test).

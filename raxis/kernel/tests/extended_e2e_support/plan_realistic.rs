@@ -577,7 +577,23 @@ predecessors       = ["lint-defect"]
 # capture wrapper itself misbehaves. Per
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
-path_allowlist     = ["out/lint/", "rust-crate/"]
+# `Cargo.lock` MUST be in this allowlist: cargo always materialises
+# the workspace lockfile at the workspace root (`<worktree>/Cargo.lock`)
+# the FIRST time any cargo command runs against an unlocked workspace,
+# regardless of the cwd cargo is invoked from. The rich-multilang-001
+# fixture ships an unlocked `[workspace]` Cargo.toml at the worktree
+# root (members = ["rust-crate"]); the very first `cargo fmt --check`
+# / `cargo clippy` invocation here writes a fresh `Cargo.lock` next to
+# it. Without `Cargo.lock` admitted, the executor's `task_complete`
+# trips `CompleteTaskAdmitPathViolation` (path-scope check at admit
+# time, `kernel/src/handlers/intent.rs:2311`) — the iter57 failure
+# mode. Allowing `Cargo.lock` is canonical: it is a workspace-root
+# artefact by cargo design and the Reviewer's diff-review surface
+# tolerates it (the lockfile is a one-way function of the workspace
+# manifest tree). The Python and JS sister tasks do NOT need a
+# matching expansion: ruff / eslint / prettier / tsc do not produce
+# workspace-root artefacts, so their narrower allowlists stay tight.
+path_allowlist     = ["out/lint/", "rust-crate/", "Cargo.lock"]
 description = """
 You are the RAXIS lint-runner-rust executor. Your job is to
 surface the strict-Rust-lint verdict (`cargo fmt --all --
@@ -603,7 +619,16 @@ captured output from a committed artifact you produce here.
      echo "raxis_check_sh_exit_code=$?"
    } > out/lint/check-rust.txt
    ```
-3. `git add out/lint/check-rust.txt`
+3. Stage the capture file AND the workspace lockfile (cargo
+   materialises a fresh `Cargo.lock` at the worktree root the
+   first time it resolves the workspace; the `path_allowlist`
+   admits it explicitly, so `git add` it if `git status` shows it):
+   ```bash
+   git add out/lint/check-rust.txt
+   if git status --porcelain | grep -q '^?? Cargo\\.lock$\\|^.M Cargo\\.lock$'; then
+     git add Cargo.lock
+   fi
+   ```
 4. `git commit -m "chore: capture cargo clippy output for reviewer"`
 5. Call `task_complete` with a one-line summary that includes
    the captured exit code.

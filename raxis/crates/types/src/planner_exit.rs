@@ -89,16 +89,31 @@ use serde::{Deserialize, Serialize};
 ///     planner-side `Display` of the unknown outcome so the
 ///     synthesised `block_reason` is still concrete.
 ///
-/// **Serde contract.** Tagged enum with explicit `tag = "kind"`
-/// + `content = "detail"`. Choosing tagged-with-content (rather
-/// than the default externally-tagged form) keeps the wire
-/// shape stable across rename refactors: the JSON projection on
-/// the audit chain (when this enum surfaces in
-/// `WorkerPostExitSynth` events) reads as
+/// **Serde contract — INV-IPC-BINCODE.** Default external-tag
+/// representation (NO `#[serde(tag = ...)]`). The earlier draft of
+/// this enum used internally-tagged-with-content
+/// (`#[serde(tag = "kind", content = "detail")]`) which renders as
 /// `{"kind": "MaxTurnsReached", "detail": { "used": 60, "limit": 60 }}`
-/// — operator-readable AND machine-parseable.
+/// in JSON, but the canonical IPC encoder for this enum is
+/// `bincode::serde` (frame `IpcMessage::PlannerExitNotice` on the
+/// **bincode 2.0** planner socket per `crates/ipc/src/message.rs`).
+/// `bincode::config::standard()` does NOT implement
+/// `serde::Deserializer::deserialize_any`, so the internally-tagged
+/// projection round-trips through the planner socket as
+/// `Decode(Serde(IdentifierNotSupported))` — the iter57 forensic
+/// surface, observed once per worker session-exit on the
+/// `planner_frame_decode_failed` warn line. Switching to the
+/// external-tag default form (`{"MaxTurnsReached": {"used": 60,
+/// "limit": 60}}` in JSON, positional varint-tagged in bincode)
+/// is the canonical fix and matches the same conclusion already
+/// recorded for `IntentOutcome` (`crates/types/src/intent.rs:510`)
+/// and for the discussion in `specs/v2/v2_extended_gaps.md` §IPC
+/// bincode contract. Variants and field names are unchanged so
+/// the tag-only delta is backward-compatible at the audit-event
+/// projection level (the audit chain sees the same kind / payload
+/// keys after the kernel's `WorkerPostExitSynth` formatter
+/// reshapes the value into the audit-event JSON envelope).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "detail")]
 pub enum PlannerExitOutcome {
     /// The planner submitted a terminal intent and is exiting
     /// normally. The kernel's Mode-B synthesis is a no-op for
@@ -350,20 +365,51 @@ mod tests {
     /// the IPC roundtrip tests in `raxis-ipc`; here we pin the
     /// JSON shape so the audit-chain projection stays
     /// machine-parseable.
+    /// INV-IPC-BINCODE: the wire shape is the default external-tag
+    /// serde representation (`{"VariantName":{...payload...}}` in
+    /// JSON, positional varint-tagged in bincode 2.0). Internal-tag
+    /// (`{"kind":"...", "detail":{...}}`) is forbidden because
+    /// `bincode::config::standard()` does NOT implement
+    /// `serde::Deserializer::deserialize_any` and surfaces
+    /// `Decode(Serde(IdentifierNotSupported))` on the planner socket
+    /// for any internally-tagged enum (iter57 forensic surface).
     #[test]
-    fn serde_json_roundtrip_stable_tag() {
+    fn serde_json_roundtrip_external_tag() {
         let c = PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 };
         let s = serde_json::to_string(&c).unwrap();
         assert!(
-            s.contains("\"kind\":\"MaxTurnsReached\""),
-            "expected tag=kind in {s:?}",
+            s.contains("\"MaxTurnsReached\""),
+            "expected external-tag variant key in {s:?}",
         );
         assert!(
             s.contains("\"used\":60") && s.contains("\"limit\":60"),
-            "expected detail fields in {s:?}",
+            "expected payload fields in {s:?}",
+        );
+        // Belt-and-braces: the internally-tagged shape MUST NOT
+        // appear — that's the iter57 bincode regression baseline.
+        assert!(
+            !s.contains("\"kind\":\"MaxTurnsReached\""),
+            "regression: internally-tagged shape detected in {s:?}; \
+             see INV-IPC-BINCODE doc on PlannerExitOutcome",
         );
         let r: PlannerExitOutcome = serde_json::from_str(&s).unwrap();
         assert_eq!(r, c);
+    }
+
+    /// INV-IPC-BINCODE bincode round-trip witness: the planner-side
+    /// notice frame MUST decode cleanly through `bincode::serde` so
+    /// the kernel's `drive_planner_stream` can capture the exit
+    /// outcome instead of falling back to the synthesised umbrella
+    /// reason. Locks down the iter57 fix surface.
+    #[test]
+    fn serde_bincode_roundtrip_no_identifier_not_supported() {
+        let c = PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 };
+        let bytes = bincode::serde::encode_to_vec(&c, bincode::config::standard())
+            .expect("encode_to_vec");
+        let (decoded, _read): (PlannerExitOutcome, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                .expect("decode_from_slice (this is the INV-IPC-BINCODE assertion)");
+        assert_eq!(decoded, c);
     }
 
     /// The forbidden phrases under
