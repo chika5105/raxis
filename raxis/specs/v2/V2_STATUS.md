@@ -245,7 +245,7 @@ the `current_sha` anchor lands, the wiring is a one-line change in
 |---|---|---|
 | `mkfs.erofs` canonical-image producer | deferred | needs a Linux runner with privileged-container support; macOS-developer-only environments cannot exercise it |
 | `.github/workflows/release.yml`, `build-images.yml` | deferred | needs Apple notarization secrets + signing keys provisioned in the repo's GitHub Actions secret store |
-| `aegis-ai/tap` Homebrew tap | deferred | downstream of release.yml — the tap formula fetches release assets that don't exist yet |
+| `chika5105/tap` Homebrew tap | deferred | downstream of release.yml — the tap formula fetches release assets that don't exist yet |
 
 The local-build path is fully working: an operator can run
 `cargo run -p raxis-image-builder -- build {orchestrator,executor,reviewer}`

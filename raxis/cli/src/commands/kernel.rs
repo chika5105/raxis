@@ -361,7 +361,7 @@ fn render_systemd_user(binary: &Path, data_dir: &Path) -> String {
          \n\
          [Unit]\n\
          Description=RAXIS kernel (user)\n\
-         Documentation=https://github.com/chika5105/aegis-ai/blob/main/raxis/specs/v2/kernel-lifecycle.md\n\
+         Documentation=https://github.com/chika5105/raxis/blob/main/raxis/specs/v2/kernel-lifecycle.md\n\
          After=default.target\n\
          \n\
          [Service]\n\
@@ -394,7 +394,7 @@ fn render_systemd_system(binary: &Path, data_dir: &Path) -> String {
          \n\
          [Unit]\n\
          Description=RAXIS kernel\n\
-         Documentation=https://github.com/chika5105/aegis-ai/blob/main/raxis/specs/v2/kernel-lifecycle.md\n\
+         Documentation=https://github.com/chika5105/raxis/blob/main/raxis/specs/v2/kernel-lifecycle.md\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
          RequiresMountsFor={data}\n\

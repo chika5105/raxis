@@ -63,7 +63,7 @@ Resolution order (first match wins):
    long (`refs/remotes/origin/develop`) forms are accepted.
 2. **Auto-detect** — `git symbolic-ref --short refs/remotes/origin/HEAD`.
    This is the same ref `git remote show origin` reports as
-   `HEAD branch`. On a vanilla `aegis-ai` clone it returns
+   `HEAD branch`. On a vanilla `raxis` clone it returns
    `origin/main`; on a fork that renamed the default branch
    to `develop` it returns `origin/develop`.
 3. **Fallback** — the literal `origin/main`. Used only when

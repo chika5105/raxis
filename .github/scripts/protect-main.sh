@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configure branch protection on `main` for chika5105/aegis-ai.
+# Configure branch protection on `main` for chika5105/raxis.
 #
 # Outcome (after this script runs):
 #
@@ -45,7 +45,7 @@
 # To inspect current protection without changing it:
 #
 #     gh api -H "Accept: application/vnd.github+json" \
-#       repos/chika5105/aegis-ai/branches/main/protection | jq .
+#       repos/chika5105/raxis/branches/main/protection | jq .
 #
 # Reference:
 #
@@ -53,7 +53,7 @@
 #
 set -euo pipefail
 
-OWNER_REPO="${OWNER_REPO:-chika5105/aegis-ai}"
+OWNER_REPO="${OWNER_REPO:-chika5105/raxis}"
 BRANCH="${BRANCH:-main}"
 
 if ! command -v gh >/dev/null 2>&1; then

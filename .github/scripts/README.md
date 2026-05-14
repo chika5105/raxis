@@ -40,7 +40,7 @@ configuration via `PUT`.
 #### Inspect current protection
 
 ```bash
-gh api repos/chika5105/aegis-ai/branches/main/protection | jq .
+gh api repos/chika5105/raxis/branches/main/protection | jq .
 ```
 
 #### Adjust required checks

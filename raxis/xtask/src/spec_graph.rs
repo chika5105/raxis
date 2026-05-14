@@ -661,7 +661,7 @@ fn heading_matches(headings: &BTreeSet<String>, target: &str) -> bool {
 
 fn workspace_root() -> anyhow::Result<PathBuf> {
     // `cargo xtask` invokes us from `<workspace>/raxis`; the
-    // `aegis-ai` repo root is one level up. We use
+    // `raxis` repo root is one level up. We use
     // `CARGO_MANIFEST_DIR` of this xtask crate (which is
     // `<repo>/raxis/xtask`) and walk up two parents.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

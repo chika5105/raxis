@@ -387,7 +387,7 @@ mod tests {
     fn fixture_env(tmp: &Path) -> HostEnv {
         HostEnv {
             home: tmp.join("home/operator"),
-            repo_root: tmp.join("repo/aegis-ai"),
+            repo_root: tmp.join("repo/raxis"),
             cargo_bin: PathBuf::from("/usr/local/bin/cargo"),
             user: "operator".into(),
         }
@@ -402,7 +402,7 @@ mod tests {
         assert!(!body.contains("__REPO_ROOT__"), "plist still has __REPO_ROOT__");
         assert!(!body.contains("__HOME__"), "plist still has __HOME__");
         assert!(body.contains("/usr/local/bin/cargo"));
-        assert!(body.contains("repo/aegis-ai"));
+        assert!(body.contains("repo/raxis"));
         assert!(body.contains("home/operator/Library/Logs/raxis-hygiene"));
     }
 

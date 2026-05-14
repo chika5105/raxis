@@ -39,7 +39,7 @@
 
 [Unit]
 Description=RAXIS kernel
-Documentation=https://github.com/chika5105/aegis-ai/blob/main/raxis/specs/v2/kernel-lifecycle.md
+Documentation=https://github.com/chika5105/raxis/blob/main/raxis/specs/v2/kernel-lifecycle.md
 After=network-online.target
 Wants=network-online.target
 # The kernel writes the genesis audit chain anchor inside its data

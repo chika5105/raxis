@@ -943,7 +943,7 @@ detached
     #[test]
     fn live_host_fixture_classifies_correctly() {
         let porcelain = "\
-worktree /Users/op/aegis-ai
+worktree /Users/op/raxis
 HEAD 11111111
 branch refs/heads/main
 

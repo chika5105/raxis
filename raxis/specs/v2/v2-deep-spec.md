@@ -170,7 +170,7 @@ at the OS level via UDS socket permissions (`gateway.sock` mode `0600`, owner `r
 and peer credential verification (`getpeereid()`) on every accepted connection.
 
 **Distribution:** The `raxis-planner` binary and the kernel must support notarized AVF
-execution, distributed via `brew` (`aegis-ai/tap/raxis`). The `raxis-kernel` formula depends
+execution, distributed via `brew` (`chika5105/tap/raxis`). The `raxis-kernel` formula depends
 on `raxis-planner` so that a single `brew install raxis-kernel` brings the complete stack.
 
 > **Normative cross-reference.** Concrete release-pipeline structure

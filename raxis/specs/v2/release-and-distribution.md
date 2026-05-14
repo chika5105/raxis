@@ -29,7 +29,7 @@ The original V2 distribution direction was a two-line statement in
 `v2-deep-spec.md`:
 
 > The `raxis-planner` binary and the kernel must support notarized
-> AVF execution, distributed via `brew` (`aegis-ai/tap/raxis`). The
+> AVF execution, distributed via `brew` (`chika5105/tap/raxis`). The
 > `raxis-kernel` formula depends on `raxis-planner` so that a single
 > `brew install raxis-kernel` brings the complete stack.
 
@@ -85,7 +85,7 @@ Out of scope:
 
 | Channel                 | Audience                          | Trust anchor                                    | Status     |
 | ----------------------- | --------------------------------- | ----------------------------------------------- | ---------- |
-| `aegis-ai/homebrew-tap` | macOS / Linux operators           | Production kernel signing key                   | TARGET     |
+| `chika5105/homebrew-tap` | macOS / Linux operators           | Production kernel signing key                   | TARGET     |
 | GitHub Releases         | Operators wanting raw archives    | Production kernel signing key (same artefacts)  | TARGET     |
 | `cargo build` (source)  | Developers, CI matrix runs        | Operator-supplied or all-zero placeholder       | LIVE       |
 | Local-build self-trust  | Single-laptop hobbyist, CI fixtures| Developer-held keypair                          | DOCUMENTED |
@@ -99,7 +99,7 @@ reconstructed from the release pages alone.
 
 ## §4 — Artefact taxonomy
 
-A single tagged release on `github.com/chika5105/aegis-ai` produces
+A single tagged release on `github.com/chika5105/raxis` produces
 the following artefacts. Every one of them is reproducible (same
 inputs → byte-identical output) and every one of them carries an
 integrity commitment that is enforceable at install / boot time
@@ -599,7 +599,7 @@ and CI fixtures.
 ### §9.1 First-install
 
 ```bash
-brew tap     aegis-ai/raxis    git@github.com:chika5105/homebrew-tap
+brew tap     chika5105/raxis    git@github.com:chika5105/homebrew-tap
 brew install raxis-kernel
 ```
 

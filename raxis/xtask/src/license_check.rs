@@ -211,7 +211,7 @@ fn workspace_root() -> anyhow::Result<PathBuf> {
     // xtask lives at <workspace>/raxis/xtask — so go up two dirs.
     let root = xtask_dir
         .parent()           // raxis/
-        .and_then(|p| p.parent()) // workspace root (aegis-ai/)
+        .and_then(|p| p.parent()) // workspace root (raxis/)
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     Ok(root)

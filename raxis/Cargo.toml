@@ -1,6 +1,9 @@
-# RAXIS — standalone Rust workspace
-# This workspace is independent of the aegis-ai root workspace.
-# It has no dependency on any other aegis-ai crate.
+# RAXIS — Rust workspace.
+# Lives at <repo>/raxis/ as a sibling of <repo>/raxis-site/. The
+# repository's root is reserved for cross-workspace housekeeping
+# (LICENSE, README, .github CI). Build a specific crate from the
+# repo root with `cargo build -p <name> --manifest-path raxis/Cargo.toml`
+# or `cd raxis && cargo build -p <name>`.
 #
 # Workspace layout matches specs/v1/philosophy.md §1.5.
 # All implementation crates are stubs until spec review is complete.
@@ -81,7 +84,7 @@ version     = "0.1.0"
 edition     = "2021"
 license     = "SSPL-1.0"
 authors     = ["RAXIS authors"]
-repository  = "https://github.com/chika5105/aegis-ai"
+repository  = "https://github.com/chika5105/raxis"
 
 [workspace.dependencies]
 # Will be pinned before first implementation sprint
