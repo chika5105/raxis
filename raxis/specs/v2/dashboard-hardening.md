@@ -463,11 +463,28 @@ under `outcome = "RejectedValidation"`.
 ### 2.7.5 Frontend contract
 
   * Each credential renders as a card with metadata + a
-    `Reveal plaintext` button. `read`-role operators see the
-    button disabled with tooltip `Requires admin role`.
+    `Reveal plaintext` button. The button is **always
+    clickable** for authenticated operators (the role gate
+    is enforced server-side); the FE labels the button with
+    a tooltip naming the required role and tags it with
+    `data-reveal-eligible="false"` so dense styling shows
+    the role mismatch visually.
   * Admin operators see a confirmation modal naming the
     credential and the audit class before any reveal call
-    fires.
+    fires (defence-in-depth against accidental reveals).
+  * `read`-role operators bypass the modal and round-trip
+    directly so the kernel emits the paired
+    `OperatorRevealedCredential { outcome: "RejectedPermission" }`
+    audit row before returning 403; the FE then renders
+    the structured error inline. This is the
+    `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`
+    contract — silent failure (button does nothing, no UI
+    feedback, no audit row) is forbidden.
+  * Credentials with `is_revealable=false` do NOT round-trip
+    on click — the kernel cannot satisfy them under any role
+    — and instead surface a local explanation pointing at
+    the on-disk path. (No 4xx that the operator has no
+    way to resolve.)
   * On reveal, the plaintext is rendered in a Monaco viewer
     (read-only, monospace, copy button) inside the card.
     A countdown timer above the plaintext block shows
@@ -476,6 +493,11 @@ under `outcome = "RejectedValidation"`.
     affordance.
   * No `localStorage` / `sessionStorage` persistence —
     closing the tab discards the cached plaintext.
+  * The Shell sidebar shows the **Credentials** link to every
+    authenticated operator (not just admins) so the listing
+    surface is reachable from the chrome — the role gate
+    on reveal is the single source of truth, not the nav
+    visibility.
 
 ### 2.7.6 Anthropic special handling
 

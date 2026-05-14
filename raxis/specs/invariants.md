@@ -93,8 +93,8 @@
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
 | Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
-| Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01 | 1 |
-| **Total** | | **122** |
+| Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01, INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01 | 2 |
+| **Total** | | **123** |
 
 ---
 
@@ -7845,10 +7845,10 @@ invocation).
 
 ## §11.14 — Dashboard credential viewer completeness (INV-DASHBOARD-CREDENTIAL-VIEWER-*)
 
-V3 (iter53) tightens the dashboard's credential-viewer surface
-so an operator with at least the `read` role can audit every
-credential the kernel uses, including planner / reviewer LLM
-provider keys.
+V3 (iter53) adds two invariants tightening the dashboard's
+credential-viewer surface so an operator with at least the
+`read` role can audit every credential the kernel uses, and
+so the reveal action is never a silent no-op.
 
 ### INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01 — Every credential the kernel uses appears in the dashboard list, scoped by role
 
@@ -7912,6 +7912,98 @@ header pill.
 `specs/v2/dashboard-hardening.md §2.7.1` (listing surfaces +
 role gate) and `specs/v2/secrets-model.md §5.1` (operator-
 visible inventory bullet).
+
+### INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01 — A reveal click either succeeds or denies cleanly with an audit row
+
+**Statement.** When an operator clicks "Reveal plaintext" on
+any credential row in the dashboard credential viewer, the
+system MUST take exactly one of these two paths:
+
+1. **Granted.** Return the decrypted value AND emit a paired
+   `OperatorRevealedCredential` (per-initiative, severity
+   `high`) or `OperatorRevealedSystemCredential` (system,
+   severity `critical`) audit row with `outcome = "Accepted"`
+   BEFORE the response leaves the kernel AND update the UI to
+   display the plaintext inside an auto-hiding Monaco viewer
+   (`INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`).
+2. **Denied.** Return a structured 4xx with a stable error
+   code (`FAIL_DASHBOARD_FORBIDDEN`,
+   `FAIL_DASHBOARD_RATE_LIMITED`,
+   `FAIL_DASHBOARD_NOT_FOUND`,
+   `FAIL_DASHBOARD_CREDENTIAL_NOT_REVEALABLE`, …) AND emit
+   the same paired audit row with `outcome = "RejectedPermission"`
+   / `RejectedValidation` / `RejectedPolicy` AND render the
+   error inline in the FE (the row's state machine
+   transitions to `error` and shows a dismissable banner).
+
+**Silent failure is forbidden.** A click MUST NOT result in
+any of: (a) the button doing nothing visible, (b) no audit
+row being written, (c) a 5xx that the operator has no way
+to attribute. The non-revealable-credential branch
+(`is_revealable=false`) is the one path that does NOT
+round-trip — the kernel cannot satisfy that request under
+any role — and instead surfaces an inline local
+explanation pointing at the on-disk path.
+
+**Justification.** The reveal action is the highest-stakes
+operator action the dashboard exposes (it materializes a
+live secret in the operator's browser). A silent failure
+mode — the iter53 bug where the button was HTML-`disabled`
+for `read` operators, so clicks were swallowed by the
+browser before the handler ran — leaves the operator with
+no signal at all: no UI change, no audit row, no console
+error. They cannot tell whether the kernel rejected the
+request, the network dropped, the JWT expired, or the
+button is broken. The contract here pins three properties:
+every click produces UI feedback within ~1 s; every click
+either grants or denies (no third "did nothing" outcome);
+every denial appears in the audit chain so a forensic
+walker reconstructs the attempt.
+
+**Scenario.** A `read`-role operator clicks "Reveal
+plaintext" on the Anthropic credential. Pre-fix: the
+button is disabled; the click is swallowed by the browser;
+the operator stares at an unchanging UI and cannot tell
+whether the kernel rejected, the action is unsupported, or
+the FE is broken. Post-fix: the click round-trips to
+`POST /api/system/credentials/providers.anthropic/reveal`;
+the kernel emits `OperatorRevealedSystemCredential
+{ severity: "critical", outcome: "RejectedPermission" }`;
+the response is 403 with code `FAIL_DASHBOARD_FORBIDDEN`
+and message `this action requires the "admin" role`; the
+FE renders the inline error banner; the audit chain
+records the denied attempt against the operator's
+fingerprint. A subsequent admin operator reviewing the
+audit chain sees both the denied attempt and (if they
+proceed) their own granted reveal.
+
+**Witness.** Two integration tests in
+`raxis/crates/dashboard/tests/credentials_integration.rs`
+pin the contract:
+
+* `reveal_initiative_credential_rejects_read_role_with_403_and_audits`
+  — initiative-scope deny path (existing).
+* `reveal_system_credential_read_role_returns_403_with_audited_denial`
+  — system-scope deny path (new in iter53): asserts 403 + a
+  paired `OperatorRevealedSystemCredential { severity:
+  "critical", outcome: "RejectedPermission" }` audit row.
+
+The FE side is pinned by
+`raxis/dashboard-fe/src/test/credentials-view.test.tsx::"round-trips the reveal click as a read operator and renders the kernel-audited 403 inline"`,
+which asserts the button is NOT HTML-disabled (so clicks
+reach the handler), a click as a read operator fires the
+POST exactly once, the modal does NOT open (it would gate
+plaintext that's never coming), and the structured 403 is
+rendered inline. A companion test
+(`"surfaces the local explanation when the credential
+itself is non-revealable"`) pins the
+`is_revealable=false` branch — no round-trip, local
+explanation only.
+
+**Canonical home.**
+`specs/v2/dashboard-hardening.md §2.7.5` (frontend contract +
+round-trip-on-deny) and `specs/v2/secrets-model.md §5.1`
+(explicit-reveal bullet).
 
 ---
 

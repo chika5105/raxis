@@ -494,6 +494,60 @@ async fn reveal_system_anthropic_credential_emits_critical_severity_audit() {
     handle.shutdown().await.expect("shutdown");
 }
 
+/// `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`:
+/// a `read`-role operator clicking "Reveal plaintext" on a system
+/// credential MUST receive a clean 403 (with a structured error
+/// envelope the FE can render) AND the rejection MUST emit a paired
+/// audit row with `outcome = "RejectedPermission"` so a forensic
+/// walker can reconstruct the denied attempt. Silent failure
+/// (no UI feedback, no audit row) is forbidden.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reveal_system_credential_read_role_returns_403_with_audited_denial() {
+    let (handle, base, token, data, fp) =
+        serve_with_role(DashboardRole::Read).await;
+    data.push_system_credential(fixture("providers.anthropic", "sk-ant-test"));
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!(
+            "{base}/api/system/credentials/providers.anthropic/reveal"
+        ))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(res.status(), 403, "system reveal is admin-only");
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(body["code"], "FAIL_DASHBOARD_FORBIDDEN");
+    assert!(
+        body["message"]
+            .as_str()
+            .map(|m| m.to_ascii_lowercase().contains("admin"))
+            .unwrap_or(false),
+        "deny message must name the missing role; body was: {body}",
+    );
+
+    // The denied attempt MUST appear in the audit chain so a
+    // forensic walker can reconstruct the read operator's
+    // attempt to reveal a system credential.
+    let audits = data.recorded_operator_audits();
+    let denied = audits.iter().any(|e| {
+        matches!(
+            e,
+            AuditEventKind::OperatorRevealedSystemCredential {
+                operator_fingerprint, severity, outcome, ..
+            } if operator_fingerprint == &fp
+              && severity == "critical"
+              && outcome == "RejectedPermission"
+        )
+    });
+    assert!(
+        denied,
+        "system reveal denial MUST emit a paired audit row; got: {audits:?}",
+    );
+    handle.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_initiative_credential_emits_high_severity_audit() {
     // Spec: system reveals are uniformly `severity = "critical"`

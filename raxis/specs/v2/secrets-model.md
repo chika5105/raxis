@@ -332,7 +332,12 @@ backend contract from §2.2 + the agent-isolation contract from
     rate-limits to 5 reveals per operator per 60 s, and emits
     `OperatorRevealedCredential` (per-initiative, severity
     `high`) or `OperatorRevealedSystemCredential` (system /
-    Anthropic, severity `critical`) BEFORE the response.
+    Anthropic, severity `critical`) BEFORE the response. A
+    reveal click from a non-admin operator round-trips so the
+    kernel emits the same paired audit row with
+    `outcome = "RejectedPermission"` — silent failure is
+    forbidden by
+    `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`.
   * **Auto-hide.** Every reveal response carries
     `expires_at_unix`; the FE re-masks at the deadline (30 s
     for per-initiative; 15 s for system). `Hide now` button

@@ -114,9 +114,17 @@ within seconds of the reveal.
 
 ## Failure modes
 
-  * **403 Forbidden** — your token is not `admin`. The audit
-    chain still records the attempt as
-    `OperatorRevealedCredential { outcome = "RejectedPermission" }`.
+  * **403 Forbidden** — your token is not `admin`. The FE
+    renders the structured 403 inline (a red dismissable
+    banner naming the missing role) and the audit chain
+    records the attempt as
+    `OperatorRevealedCredential { outcome = "RejectedPermission" }`
+    (or `OperatorRevealedSystemCredential` at `critical`
+    severity for the system surface). Per
+    `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`,
+    the click is NEVER a silent no-op — every reveal click
+    either returns plaintext or denies cleanly with a
+    visible message AND a paired audit row.
   * **404 Not Found** — the credential name does not match any
     declaration in the initiative's plan, or the on-disk file is
     missing. Audit emission carries `outcome =
@@ -158,7 +166,8 @@ accurate countdown.
     `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01` /
     `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01` /
     `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` /
-    `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01` —
+    `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01` /
+    `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01` —
     canonical statements.
   * `specs/v2/dashboard-operator-action-audit-coverage.md` —
     the per-endpoint emission table.

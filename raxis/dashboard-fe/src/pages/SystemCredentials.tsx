@@ -10,10 +10,12 @@
  * listing path.
  *
  * Reveal surface: admin-only per
- * `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`. Non-admin
- * reveal attempts return a structured 403 with a paired
- * `RejectedPermission` audit row so the denied attempt is
- * forensically visible.
+ * `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`. A `read`
+ * operator who clicks "Reveal plaintext" round-trips to the
+ * kernel, which emits a paired `RejectedPermission` audit row
+ * and returns a structured 403; the FE renders the deny inline
+ * (`INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`
+ * — silent failure forbidden).
  *
  * Spec: `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` —
  * the page renders an explicit warning banner above the
@@ -69,8 +71,9 @@ export function SystemCredentialsPage() {
           <strong>{operatorRoles.join(", ") || "(none)"}</strong>. Listing
           credentials is allowed for the <strong>read</strong> role; the{" "}
           <strong>Reveal plaintext</strong> action is gated on{" "}
-          <strong>admin</strong> and a non-admin attempt will return a
-          structured 403 with a paired audit row.
+          <strong>admin</strong>. Clicking Reveal will round-trip to the
+          kernel, which records a denied-attempt audit row and surfaces an
+          inline error.
         </div>
       )}
       <CredentialsView scope={{ kind: "system" }} operatorRoles={operatorRoles} />

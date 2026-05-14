@@ -7,15 +7,20 @@
  * NEVER fetched on mount; it is fetched on demand through the
  * `Reveal` button, which:
  *
- *   * Is disabled (with an explanatory tooltip) for operators
- *     without the required role
- *     (`INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`).
- *   * Pops a confirmation modal (the modal is hard-coded to
- *     fire for every reveal so the operator has to click
- *     twice — defence-in-depth against accidental shoulder-
- *     surf), with extra warning copy for system credentials
- *     and an Anthropic-specific banner for the provider key
+ *   * Pops a confirmation modal for operators that carry the
+ *     reveal role (`admin`); the modal is hard-coded to fire
+ *     for every reveal so the operator has to click twice —
+ *     defence-in-depth against accidental shoulder-surf, with
+ *     extra warning copy for system credentials and an
+ *     Anthropic-specific banner for the provider key
  *     (`INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`).
+ *   * For operators WITHOUT the reveal role, the click bypasses
+ *     the modal and round-trips to the kernel directly so the
+ *     kernel can emit a paired `RejectedPermission` audit row
+ *     and the FE can render the structured 403 inline. Silent
+ *     failure (button does nothing, no UI feedback, no audit
+ *     row) is forbidden by
+ *     `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`.
  *   * Renders the bytes in a Monaco viewer (read-only,
  *     `domReadOnly`, no minimap) below a red banner with the
  *     auto-hide countdown
@@ -27,6 +32,7 @@
  *   * `INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01`
  *   * `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`
  *   * `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`
+ *   * `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`
  *   * `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`
  *   * `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`
  */
@@ -235,6 +241,7 @@ export function CredentialsView({ scope, operatorRoles }: CredentialsViewProps) 
             credential={c}
             scope={scope}
             canReveal={canReveal && c.is_revealable}
+            operatorHasRevealRole={canReveal}
           />
         ))}
       </ul>
@@ -250,7 +257,18 @@ export function CredentialsView({ scope, operatorRoles }: CredentialsViewProps) 
 interface CredentialRowProps {
   credential: CredentialMetadata;
   scope: CredentialsScope;
+  /// Combined gate: operator carries the reveal role AND the
+  /// credential itself advertises `is_revealable`. When false
+  /// because of the role, we still round-trip the click so
+  /// the kernel can audit the denial; when false because the
+  /// credential is intrinsically non-revealable, we surface a
+  /// local error instead — the kernel cannot satisfy the
+  /// request regardless of role.
   canReveal: boolean;
+  /// Disambiguates the two reasons `canReveal` may be false so
+  /// the row can pick the right click behaviour
+  /// (`INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`).
+  operatorHasRevealRole: boolean;
 }
 
 type RowState =
@@ -260,17 +278,56 @@ type RowState =
   | { kind: "revealed"; reveal: CredentialReveal }
   | { kind: "error"; error: ApiError };
 
-function CredentialRow({ credential: c, scope, canReveal }: CredentialRowProps) {
+function CredentialRow({
+  credential: c,
+  scope,
+  canReveal,
+  operatorHasRevealRole,
+}: CredentialRowProps) {
   const [state, setState] = useState<RowState>({ kind: "masked" });
   const isAnthropic = isAnthropicCredential(c);
   const isSystem = scope.kind === "system";
 
-  const onRevealClicked = () => {
-    if (!canReveal) return;
-    setState({ kind: "confirming" });
-  };
-
   const performReveal = useCredentialRevealCallback(scope, c.name, setState);
+
+  // Per `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`:
+  // the click MUST always produce visible UI feedback AND
+  // (where the kernel can record it) an audit row. Three
+  // cases:
+  //
+  //   1. canReveal=true — pop the confirmation modal; admin
+  //      operator picks whether to fire the audited POST.
+  //   2. canReveal=false because of the role gate — skip the
+  //      modal, round-trip directly so the kernel emits the
+  //      paired `RejectedPermission` audit row, then render
+  //      the structured 403 inline.
+  //   3. canReveal=false because `is_revealable=false` — the
+  //      kernel cannot satisfy this regardless of role; we
+  //      surface the explanation locally instead of generating
+  //      a 4xx that just looks like a kernel bug.
+  const onRevealClicked = () => {
+    if (canReveal) {
+      setState({ kind: "confirming" });
+      return;
+    }
+    if (!operatorHasRevealRole) {
+      setState({ kind: "revealing" });
+      void performReveal();
+      return;
+    }
+    // is_revealable=false branch — the kernel will not return
+    // plaintext for this credential under any role; surface an
+    // explanation inline instead of rounding-trip for a 4xx
+    // that the operator has no way to resolve.
+    setState({
+      kind: "error",
+      error: new ApiError(
+        0,
+        "FAIL_DASHBOARD_CREDENTIAL_NOT_REVEALABLE",
+        `Credential "${c.name}" is marked is_revealable=false; the kernel will not surface its plaintext. See the format hint for the on-disk path.`,
+      ),
+    });
+  };
 
   const onHideNow = () => setState({ kind: "masked" });
 
@@ -367,13 +424,14 @@ function CredentialRow({ credential: c, scope, canReveal }: CredentialRowProps) 
               type="button"
               className={clsx("btn", canReveal ? "btn-primary" : "")}
               onClick={onRevealClicked}
-              disabled={!canReveal || state.kind === "revealing"}
-              aria-disabled={!canReveal || state.kind === "revealing"}
+              disabled={state.kind === "revealing"}
+              aria-disabled={state.kind === "revealing"}
               title={
                 canReveal
                   ? "Reveal plaintext (audited)"
-                  : `Requires the "${REQUIRED_REVEAL_ROLE}" role`
+                  : `Requires the "${REQUIRED_REVEAL_ROLE}" role — clicking will round-trip to the kernel for an audited denial`
               }
+              data-reveal-eligible={canReveal ? "true" : "false"}
               data-testid={TID.revealBtn(c.name)}
             >
               {state.kind === "revealing"

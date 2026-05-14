@@ -4,11 +4,15 @@
  *   1. masked: row renders metadata only; no plaintext in the
  *      DOM, no listing-side request for bytes.
  *   2. role-gated: a non-admin operator sees the Reveal button
- *      disabled with a tooltip; clicking it does NOT POST.
- *   3. confirming: clicking Reveal pops a modal naming the
- *      credential + the audit class. Anthropic credentials get
- *      Critical-tier copy; system credentials get High-tier
- *      copy; per-initiative credentials get the default copy.
+ *      enabled with a tooltip; clicking it round-trips to the
+ *      kernel for an audited denial — silent failure is
+ *      forbidden by
+ *      `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`.
+ *   3. confirming: clicking Reveal as an admin pops a modal
+ *      naming the credential + the audit class. Anthropic
+ *      credentials get Critical-tier copy; system credentials
+ *      get High-tier copy; per-initiative credentials get the
+ *      default copy.
  *   4. revealing → revealed: confirming the modal POSTs the
  *      reveal endpoint and inserts the plaintext into a
  *      Monaco viewer (mocked to a `<textarea>`).
@@ -208,14 +212,25 @@ describe("<CredentialsView> — masked baseline", () => {
 });
 
 describe("<CredentialsView> — role gate", () => {
-  it("renders the read-only badge and a disabled Reveal button for non-admin operators", async () => {
+  it("round-trips the reveal click as a read operator and renders the kernel-audited 403 inline", async () => {
+    // INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01:
+    // silent failure (button does nothing, no UI feedback, no
+    // audit row) is forbidden. A read operator's click MUST
+    // round-trip so the kernel can emit a paired
+    // `RejectedPermission` audit row, and the FE MUST render
+    // the structured 403 inline.
     vi.spyOn(dashboardApi.initiatives, "credentials").mockResolvedValue(
       listOf(meta()),
     );
-    const revealSpy = vi.spyOn(
-      dashboardApi.initiatives,
-      "revealCredential",
-    );
+    const revealSpy = vi
+      .spyOn(dashboardApi.initiatives, "revealCredential")
+      .mockRejectedValue(
+        new ApiError(
+          403,
+          "FAIL_DASHBOARD_FORBIDDEN",
+          'this action requires the "admin" role',
+        ),
+      );
 
     renderWithProviders(
       <CredentialsView
@@ -228,11 +243,51 @@ describe("<CredentialsView> — role gate", () => {
       await screen.findByTestId("credentials-role-warning"),
     ).toHaveTextContent(/read-only/i);
     const btn = screen.getByTestId("credential-reveal-test-pg-dev");
-    expect(btn).toBeDisabled();
+    // Button is NOT HTML-disabled — clicks must reach the
+    // handler so the kernel can audit the denial.
+    expect(btn).not.toBeDisabled();
+    expect(btn).toHaveAttribute("data-reveal-eligible", "false");
+
     fireEvent.click(btn);
-    // No modal, no POST.
+
+    // No modal — the modal exists to gate the plaintext, not
+    // the denial. We round-trip directly.
     expect(screen.queryByTestId("credential-confirm-modal")).toBeNull();
+    await waitFor(() => {
+      expect(revealSpy).toHaveBeenCalledWith("init-1", "test-pg-dev");
+    });
+    const err = await screen.findByTestId("credential-reveal-error");
+    expect(err).toHaveTextContent(/admin/i);
+    expect(screen.queryByTestId("credential-revealed-banner")).toBeNull();
+    // Plaintext never made it to the DOM.
+    expect(screen.queryByTestId("monaco-mock")).toBeNull();
+  });
+
+  it("surfaces the local explanation when the credential itself is non-revealable (admin role + is_revealable=false)", async () => {
+    vi.spyOn(dashboardApi.initiatives, "credentials").mockResolvedValue(
+      listOf(meta({ is_revealable: false })),
+    );
+    const revealSpy = vi.spyOn(
+      dashboardApi.initiatives,
+      "revealCredential",
+    );
+
+    renderWithProviders(
+      <CredentialsView
+        scope={{ kind: "initiative", initiativeId: "init-1" }}
+        operatorRoles={["admin"]}
+      />,
+    );
+    const btn = await screen.findByTestId("credential-reveal-test-pg-dev");
+    expect(btn).toHaveAttribute("data-reveal-eligible", "false");
+    fireEvent.click(btn);
+
+    // No POST — the kernel has already told us this credential
+    // is non-revealable; the FE explains locally instead of
+    // generating a 4xx with no recourse.
     expect(revealSpy).not.toHaveBeenCalled();
+    const err = await screen.findByTestId("credential-reveal-error");
+    expect(err).toHaveTextContent(/is_revealable=false/);
   });
 });
 
