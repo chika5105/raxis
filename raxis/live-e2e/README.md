@@ -127,11 +127,15 @@ Two compose files live in this directory:
 
 * `docker-compose.e2e.yml` — the minimum stack the live-e2e
   slices and `kernel/tests/full_e2e_session_lifecycle.rs` need.
-* `docker-compose.extended.e2e.yml` — superset that pre-seeds
-  `appdb.seeded_docs` and `raxis_e2e.seeded_rows` for
-  `kernel/tests/extended_e2e_*.rs`. It publishes the same ports
-  on the same loopback addresses so a slice configured for one
-  works against the other unchanged.
+* `docker-compose.extended.e2e.yml` — true superset of
+  `docker-compose.e2e.yml`: same upstream-service blocks plus the
+  observability triple (otel-collector / prometheus / grafana on
+  the same `127.0.0.1:4318` / `:9090` / `:3000` ports), and
+  additionally pre-seeds `appdb.seeded_docs` and
+  `raxis_e2e.seeded_rows` for `kernel/tests/extended_e2e_*.rs`.
+  It publishes the same ports on the same loopback addresses so
+  a slice configured for one works against the other unchanged
+  and dashboards populate end-to-end either way.
 
 > **Path A3 / Mediated egress.** After the Tier1Tproxy deletion
 > (TODO `tier1-deletion-fold-into-cleanup-sweep`) every executor /

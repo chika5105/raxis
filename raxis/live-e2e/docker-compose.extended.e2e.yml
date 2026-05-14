@@ -19,6 +19,14 @@
 #   * Mounts `live-e2e/seed/mongo/` into the mongo container's
 #     `/docker-entrypoint-initdb.d/` for the same reason.
 #
+# Includes observability triple (OTel/Prom/Grafana) so live-e2e
+# dashboards populate end-to-end. Service blocks, ports, and
+# `../observability/...` mount paths mirror `docker-compose.e2e.yml`
+# byte-for-byte; both compose files share the
+# `raxis-live-e2e-test_prometheus_data` /
+# `raxis-live-e2e-test_grafana_data` named volumes via the common
+# `name:` namespace.
+#
 # Storage: tmpfs only — every `up` is a clean slate. The seeds are
 # idempotent, so re-applying them via `psql` / `mongosh` from the
 # harness's preflight is safe and the test never depends on
@@ -214,3 +222,81 @@ services:
       - /var/opt/mssql/data
       - /var/opt/mssql/log
       - /var/opt/mssql/secrets
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: raxis-e2e-otel
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ../observability/otel-collector/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:8889:8889"
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:13133:13133"
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "components"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: raxis-e2e-prom
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=14d"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+      - "--web.listen-address=:9090"
+    volumes:
+      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: raxis-e2e-grafana
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_ANONYMOUS_ORG_NAME: "Main Org."
+      GF_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/00-overview.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: raxis-e2e
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  prometheus_data:
+  grafana_data:
