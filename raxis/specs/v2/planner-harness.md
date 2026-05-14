@@ -2103,6 +2103,11 @@ static review or merge:
 ├── /bin/sh         → /bin/bash
 ├── /usr/bin/{node, npm, npx, yarn, pnpm}    (Node 20 LTS)
 ├── /usr/bin/{python3, pip, pip3}            (Python 3.11)
+├── /usr/local/bin/ruff                      (ruff 0.7.4 — Python lint;
+│                                             also importable as `python -m ruff`)
+├── /usr/bin/{eslint, prettier, tsc, tsx}    (eslint 9.15.0, prettier 3.3.3,
+│                                             typescript 5.6.3, tsx 4.19.2;
+│                                             npm install -g globals)
 ├── /usr/bin/{cargo, rustc}                  (Rust stable)
 ├── /usr/bin/{go, gofmt}                     (Go 1.22)
 ├── /usr/bin/{git, gh}                       (git ≥ 2.30, GitHub CLI)
@@ -2170,6 +2175,54 @@ canonical credential proxies (`DATABASE_URL` / `MONGO_URL` /
 for SMTP. Operators pinning a BYO image are NOT bound to this
 list — the in-VM discovery surface (next paragraph) is what
 the LLM consults.
+
+**Pre-installed lint toolchain (canonical-only,
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` +
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`).** Symmetric to the
+Rust toolchain (rustup-installed `cargo` + `rustfmt` + `clippy`),
+the starter image pre-bakes the Python and JavaScript / TypeScript
+lint stacks the realistic-scenario per-language
+`lint-runner-{python,rust,js}` tasks (iter55 split) drive:
+
+| Language   | Tool                  | Pinned version | Resolved via                              |
+| ---------- | --------------------- | -------------- | ----------------------------------------- |
+| Rust       | `cargo fmt --check`   | rustup stable  | `/root/.cargo/bin/cargo` (already baked)  |
+| Rust       | `cargo clippy`        | rustup stable  | `/root/.cargo/bin/cargo` (already baked)  |
+| Python     | `python -m ruff check`/`format --check` | `ruff==0.7.4` | `pip3 --break-system-packages` into system site-packages; `python -m ruff` resolves through the same import path the seed `ruff.toml` targets. CLI shim at `/usr/local/bin/ruff` |
+| JavaScript | `npx --no-install eslint --max-warnings 0`   | `eslint@9.15.0`     | `npm install -g` global node_modules; `/usr/bin/eslint` shim |
+| JavaScript | `npx --no-install prettier --check`          | `prettier@3.3.3`    | `npm install -g`; `/usr/bin/prettier` shim |
+| TypeScript | `npx --no-install tsc --noEmit`              | `typescript@5.6.3`  | `npm install -g`; `/usr/bin/tsc` shim |
+| TypeScript | (test runtime) `tsx`                         | `tsx@4.19.2`        | `npm install -g`; `/usr/bin/tsx` shim |
+| TypeScript | (types) `@types/node`                        | `20.17.6`           | `npm install -g` |
+
+The pre-bake is structurally necessary: the executor VM ships
+with **no preconfigured egress allowlist** (the §10.6 "Egress
+posture" paragraph above), so a per-task `pip install ruff` or
+`npm install eslint` would deterministically fail at the
+credential-proxy gate. The lint-runner tasks invoke `python -m
+ruff check` / `npx --no-install eslint` against the seed's
+`live-e2e/seed/repo/rich-multilang-001/{py-pkg,ts-pkg}/`
+worktrees verbatim; the seed materializer (`scripts/
+materialize_seed.sh`) intentionally does NOT pre-fetch
+`node_modules/` or a `.venv/` (the seed git history would
+balloon with every fixture refresh). The image is the right
+place to land the toolchain because it is mtime-stable
+(`INV-IMAGE-BAKE-NO-STALE-CACHE-01`), signed
+(`§14.4` manifest-trust pipeline), and shared across every
+executor-starter session.
+
+Pin policy: every linter is `name@<exact-version>`; the
+Containerfile MUST NEVER use `pip install ruff` or `npm install
+-g eslint` without a pinned suffix, and `verify.sh` cross-checks
+the bake against the documented pins by asserting the matching
+`.dist-info` (Python) and `node_modules/<pkg>/package.json` (JS)
+trees exist in the rootfs. `manifest.toml` mirrors the pinned
+versions in a documentary `[lint_toolchain]` table so an
+operator auditing a built image can answer "which ruff /
+eslint / prettier / tsc shipped here?" without re-running
+`pip show` / `npm ls -g` inside the rootfs. Operators pinning a
+BYO image are NOT bound to this list — the in-VM discovery
+surface (next paragraph) is what the LLM consults.
 
 **LLM discovery of pre-installed surface (`INV-EXEC-DISCOVERY-01`).**
 Because the LLM cannot trial-and-error `pip install` /
@@ -2982,7 +3035,13 @@ required-binary cpio walk), `raxis/kernel/tests/extended_e2e_support/
 kernel_driver.rs::require_canonical_images` (auto-bake call site),
 `raxis/images/executor-starter/Containerfile` (the source of truth
 for executor-starter rootfs content; cross-arch + ca-certificates +
-build-essential per L-2 in `known-latent-issues.md`).
+build-essential per L-2 in `known-latent-issues.md`; pinned
+`ruff==0.7.4` Python lint and `eslint@9.15.0` / `prettier@3.3.3` /
+`typescript@5.6.3` / `tsx@4.19.2` / `@types/node@20.17.6` JS lint
+per `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` +
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`),
+`raxis/images/executor-starter/verify.sh` (asserts the lint
+toolchain is present + pin-matched in the baked rootfs).
 
 ### §14.5 Test fixtures and test-support helpers
 

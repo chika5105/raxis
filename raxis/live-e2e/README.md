@@ -208,6 +208,75 @@ service to start, which env var to set) on failure.
 
 ---
 
+## Executor image lint-toolchain contract (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` + `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`)
+
+The realistic-scenario plan's per-language `lint-runner-{python,
+rust,js}` Executor tasks (iter55 split,
+[`kernel/tests/extended_e2e_support/plan_realistic.rs`](../kernel/tests/extended_e2e_support/plan_realistic.rs))
+invoke language-native lint pipelines verbatim inside the
+executor VM:
+
+```bash
+# lint-runner-python (TASK_LINT_RUNNER_PYTHON)
+( cd py-pkg && python -m ruff check . && python -m ruff format --check . )
+
+# lint-runner-rust (TASK_LINT_RUNNER_RUST)
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+
+# lint-runner-js (TASK_LINT_RUNNER_JS)
+( cd ts-pkg && \
+    npx --no-install eslint --max-warnings 0 . && \
+    npx --no-install prettier --check . && \
+    npx --no-install tsc --noEmit )
+```
+
+The executor VM ships with an **empty default egress allowlist**
+(`planner-harness.md §10.6` egress posture; `INV-VM-EGRESS-01`),
+so the runner cannot `pip install ruff` or `npm install eslint`
+at task time — the binaries / modules must already exist in the
+rootfs. The seed materializer
+([`live-e2e/seed/repo/rich-multilang-001/scripts/materialize_seed.sh`](seed/repo/rich-multilang-001/scripts/materialize_seed.sh))
+deliberately ships no `node_modules/` or `.venv/` (every fixture
+refresh would otherwise drag thousands of files through git);
+the executor-starter Containerfile is the structural answer:
+
+| Lane     | Pre-baked binaries                                                                                                          | Pinned in                                              |
+| -------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Rust     | `cargo`, `rustfmt`, `clippy` (rustup stable)                                                                                | [`images/executor-starter/Containerfile`](../images/executor-starter/Containerfile) |
+| Python   | `ruff==0.7.4` (pip → system site-packages; CLI shim at `/usr/local/bin/ruff`; importable as `python -m ruff`)               | Containerfile + [`manifest.toml`](../images/executor-starter/manifest.toml) `[lint_toolchain] ruff_version` |
+| JS / TS  | `eslint@9.15.0`, `prettier@3.3.3`, `typescript@5.6.3`, `tsx@4.19.2`, `@types/node@20.17.6` (npm install -g; `/usr/bin/<bin>` shims) | Containerfile + `manifest.toml` `[lint_toolchain]` |
+
+[`images/executor-starter/verify.sh`](../images/executor-starter/verify.sh)
+asserts the bake actually contains both:
+
+* Python — `usr/local/bin/ruff` exists AND
+  `usr/lib/python3*/dist-packages/ruff-0.7.4.dist-info/` (or the
+  `/usr/local/lib/python3*/...` mirror) is present. On a
+  Linux-on-Linux bake the verifier additionally runs
+  `python3 -c "import ruff" && python3 -m ruff --version` and
+  asserts the version matches the pin.
+* JS — `usr/lib/node_modules/{eslint,prettier,typescript,tsx}/`
+  (or the `usr/local/lib/...` mirror) plus the
+  `/usr/bin/{eslint,prettier,tsc}` (or `/usr/local/bin/...`)
+  CLI shims so `npx --no-install` can resolve them via `$PATH`
+  fallback.
+
+If a future Containerfile change drops one of the lint
+toolchains silently, `verify.sh` fails with `INV-EXECUTOR-IMAGE-
+LINT-TOOLCHAIN-{PYTHON,JS}-01 VIOLATED` and a copy-pastable
+`cargo xtask images bake-rootfs --role executor-starter`
+remediation. Witness coverage:
+[`xtask/tests/executor_starter_lint_toolchain.rs`](../xtask/tests/executor_starter_lint_toolchain.rs).
+
+Pin bumps require updating BOTH the Containerfile and the
+`manifest.toml` `[lint_toolchain]` table; the verifier
+cross-checks one against the other so an asymmetric bump
+surfaces at bake time rather than at the next iter's
+`lint-runner-*` task run.
+
+---
+
 ## Dashboard FE bundle contract (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`)
 
 Every realistic-scenario / full-lifecycle live-e2e run mounts

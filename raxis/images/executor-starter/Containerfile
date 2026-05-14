@@ -80,6 +80,47 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install --no-install-recommends -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Pre-baked JavaScript / TypeScript lint toolchain
+# (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`).
+#
+# Sibling of the Python lint-toolchain block below: the
+# realistic-scenario `lint-runner-js` task (iter55 split,
+# kernel/tests/extended_e2e_support/plan_realistic.rs::TASK_LINT_RUNNER_JS)
+# runs `npx --no-install eslint --max-warnings 0 . && npx
+# --no-install prettier --check . && npx --no-install tsc
+# --noEmit` against `live-e2e/seed/repo/rich-multilang-001/ts-pkg/`,
+# whose `package.json` lists `eslint`, `prettier`, `tsx`, and
+# `typescript` as devDependencies. The seed materializer
+# (`scripts/materialize_seed.sh`) does NOT pre-fetch a
+# `ts-pkg/node_modules/` (every node_modules ships ~thousands of
+# files; baking it into the seed git history would dwarf the
+# fixture). The executor VM also ships with no egress allowlist
+# by default — `npx --no-install` therefore needs to resolve
+# `eslint` / `prettier` / `tsc` from a path the VM image
+# pre-populates, not from `registry.npmjs.org`.
+#
+# npx 7+ resolves binaries in this order:
+#   1. `./node_modules/.bin/<cmd>`
+#   2. walking up parents
+#   3. `npm root -g` global node_modules
+#   4. `$PATH` (only when above miss)
+# Installing via `npm install -g` puts the packages at
+# `/usr/lib/node_modules/<pkg>` with `.bin` symlinks in
+# `/usr/bin/`, so step 3 matches and `--no-install` succeeds.
+#
+# Pin policy mirrors the Python block: explicit semver pins,
+# `latest` forbidden. The chosen versions satisfy the seed
+# `package.json`'s `^` ranges (eslint ^9.0.0, prettier ^3.2.5,
+# typescript ^5.4.0, tsx ^4.7.0, @types/node ^20.11.0) AND are
+# stable November-2024 / late-2024 releases so the rule surface
+# does not drift under a transitive bump.
+RUN npm install -g --no-audit --no-fund --loglevel=error \
+        "eslint@9.15.0" \
+        "prettier@3.3.3" \
+        "typescript@5.6.3" \
+        "tsx@4.19.2" \
+        "@types/node@20.17.6"
+
 # Python 3.11 (Debian bookworm ships 3.11 in the default repo).
 RUN apt-get update && apt-get install --no-install-recommends -y \
     python3 python3-pip \
@@ -110,6 +151,40 @@ RUN pip3 install --no-cache-dir --break-system-packages \
         "redis==5.2.1" \
         "PyMySQL==1.1.1" \
         "pymssql==2.3.2"
+
+# Pre-baked Python lint toolchain
+# (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01`).
+#
+# The realistic-scenario `lint-runner-python` task (iter55 split,
+# kernel/tests/extended_e2e_support/plan_realistic.rs::TASK_LINT_RUNNER_PYTHON)
+# runs `python -m ruff check . && python -m ruff format --check .`
+# against `live-e2e/seed/repo/rich-multilang-001/py-pkg/`, whose
+# `ruff.toml` selects the `E,F,W,I,B,UP,SIM` rule families. The
+# executor VM ships with **no egress allowlist by default**
+# (`§10.6` egress posture; `INV-VM-EGRESS-01`), so the task cannot
+# `pip install ruff` at runtime — the lint capture has to find
+# `ruff` already importable from system site-packages.
+#
+# This mirrors how `cargo fmt --check` + `cargo clippy` already
+# work for the parallel `lint-runner-rust` task: the Rust
+# toolchain is rustup-installed earlier in this Containerfile and
+# the seed crate's `[dependencies]` is empty, so `cargo` runs
+# against the pre-baked binaries without ever needing network
+# access. The Python side reaches the same shape by pinning ruff
+# at image-bake time into system site-packages; `python -m ruff`
+# from the task body then resolves through the same import path
+# the seed `ruff.toml` already targets.
+#
+# Pin policy: NEVER `latest`; the version bump is an explicit,
+# auditable diff against this file. The choice of 0.7.4
+# (released 2024-11-07) satisfies the seed's
+# `target-version = "py310"` + `E,F,W,I,B,UP,SIM` rule selection
+# without depending on bleeding-edge rule churn. Bumping requires
+# re-running the realistic-scenario witness to confirm the seed's
+# canonical `F401` defect (unused `import os`) still surfaces
+# verbatim.
+RUN pip3 install --no-cache-dir --break-system-packages \
+        "ruff==0.7.4"
 
 # Rust stable via rustup.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable

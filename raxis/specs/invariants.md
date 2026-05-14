@@ -96,7 +96,8 @@
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
 | Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01, INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01 | 2 |
 | Integration-merge completion cascade — V3 (iter54) | INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01, INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01 | 2 |
-| **Total** | | **127** |
+| Executor image lint-toolchain pre-bake — V3 (iter56) | INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01, INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 | 2 |
+| **Total** | | **129** |
 
 ---
 
@@ -4282,6 +4283,196 @@ operator-facing recipe `guides/recipes/ops/...` notes the
 auto-rebake behaviour so operators know they can simply run
 `build-all` after editing planner-core without remembering to
 chain `dev-stage` per role.
+
+---
+
+### INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01 — Canonical executor-starter image MUST ship a working `ruff` without task-time egress
+
+**Statement.** The kernel-built canonical executor-starter image
+(`raxis-executor-starter-<kver>.img`, distributed under
+`$RAXIS_INSTALL_DIR/images/`) MUST ship the Python lint
+toolchain (`ruff`) at a pinned, declared version in the
+rootfs's system Python site-packages, such that both
+`/usr/local/bin/ruff --version` AND `python3 -m ruff --version`
+succeed without any task-time network access. The pin is
+declared in two places that the image-build verifier
+cross-checks: the `RUN pip3 install --break-system-packages
+"ruff==<X.Y.Z>"` line in `raxis/images/executor-starter/
+Containerfile` and the `[lint_toolchain] ruff_version = "X.Y.Z"`
+field in `raxis/images/executor-starter/manifest.toml`. The
+post-bake verifier `raxis/images/executor-starter/verify.sh`
+MUST refuse the bake if the matching `ruff-<X.Y.Z>.dist-info/`
+directory is absent from any `usr/lib/python3*/dist-packages/`
+or `usr/local/lib/python3*/dist-packages/` root in the rootfs.
+Bumping the pin requires a synchronous edit of the Containerfile,
+the manifest, AND the verifier's `RUFF_PINNED_VERSION` shell
+constant; an asymmetric bump surfaces at bake time as
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01 VIOLATED`.
+
+**Justification.** Iter56's `lint-runner-python` task burned
+the entirety of its 60-turn budget on the lit failure shape
+`/usr/bin/python: No module named ruff / raxis_check_sh_exit_code=1`.
+The task prompt
+([`kernel/tests/extended_e2e_support/plan_realistic.rs::TASK_LINT_RUNNER_PYTHON`](../kernel/tests/extended_e2e_support/plan_realistic.rs))
+invokes `python -m ruff check . && python -m ruff format
+--check .` against the seed `py-pkg/`, whose `ruff.toml`
+selects `E,F,W,I,B,UP,SIM` rule families. The executor VM
+ships with **no preconfigured egress allowlist** by default
+(`planner-harness.md §10.6` egress posture, `INV-VM-EGRESS-01`),
+so the runner cannot `pip install ruff` at runtime — the
+binary / module must already be importable from the rootfs's
+own site-packages. Parallel `lint-runner-rust` works because
+`cargo` + `rustfmt` + `clippy` are rustup-baked at image build
+time AND the seed crate's `[dependencies]` is empty (cargo
+makes no network call against an empty dep tree). The Python
+side reaches identical structural shape via the
+`pip3 --break-system-packages "ruff==..."` layer in the
+Containerfile.
+
+The verifier's pin-version cross-check is the load-bearing
+guard against a silent bump on the next bake. Without it, an
+operator who replaces `ruff==0.7.4` with `ruff` (no pin) in the
+Containerfile would silently start shipping whatever PyPI's
+HEAD ruff is, breaking the `lint_defect.md` reproduction shape
+(the seed defect is `F401 unused-import` — a rule whose
+fixture-stable wording the dual-Reviewer pair in
+`ReviewerSubstantiveDisagreementWitness` keys on).
+
+**Scenario.** An operator runs `cargo xtask images bake-rootfs
+--role executor-starter` against a worktree whose Containerfile
+pins `ruff==0.7.4`. The bake completes and the image-builder
+invokes `images/executor-starter/verify.sh`:
+
+* `usr/local/bin/ruff` exists → pass.
+* `usr/lib/python3.11/dist-packages/ruff-0.7.4.dist-info/`
+  exists → pin matches.
+* (On a Linux-on-Linux bake host) `python3 -c "import ruff" &&
+  python3 -m ruff --version` returns `ruff 0.7.4` → dynamic
+  check passes.
+
+The realistic-scenario test then submits `lint-runner-python`;
+the task body runs `python -m ruff check .` inside the VM and
+produces a non-zero exit code (the upstream `lint-defect`
+introduced an `F401 unused-import` defect that ruff 0.7.4
+diagnoses verbatim), commits the capture, and `task_complete`s
+within ~5 turns. The downstream dual-Reviewer pair reads the
+capture, names `greet.py` in the critique, and the witness
+asserts `ReviewerSubstantiveDisagreementWitness::Verdict::
+SubstantivelyDisagreed` per the canonical iter55 trajectory.
+
+The fail-closed scenario: an operator hand-edits the
+Containerfile from `ruff==0.7.4` to `ruff==0.8.0` but forgets
+to bump `manifest.toml` `[lint_toolchain] ruff_version` and
+`verify.sh` `RUFF_PINNED_VERSION`. The bake's `pip install`
+succeeds (pip happily installs the newer version), but
+`verify.sh` then looks for `ruff-0.7.4.dist-info/` in the
+rootfs, finds `ruff-0.8.0.dist-info/` instead, and bails with
+`verify: ruff-0.7.4.dist-info not found ... INV-EXECUTOR-IMAGE-
+LINT-TOOLCHAIN-PYTHON-01 VIOLATED`. The bake is rejected before
+the manifest is signed.
+
+**Witness.**
+[`xtask::tests::executor_starter_lint_toolchain::inv_executor_image_lint_toolchain_python_01_*`](../xtask/tests/executor_starter_lint_toolchain.rs)
+— a set of synthetic-rootfs witnesses that build a tempdir
+fixture mirroring the Containerfile's expected layout
+(`usr/local/bin/ruff`, the matching dist-info dir, and a
+stubbed `manifest.toml` + `verify.sh`) and run `verify.sh`
+against it. The witnesses pin:
+
+* Happy path — `verify.sh <fixture>` exits 0 when the pinned
+  ruff dist-info is present and the CLI shim is in place.
+* Missing dist-info — `verify.sh` exits non-zero with the
+  literal `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01 VIOLATED`
+  token AND the `bake-rootfs --role executor-starter`
+  remediation command in the error body.
+* Version drift — a fixture carrying `ruff-0.8.0.dist-info`
+  (instead of the pin `0.7.4`) trips the same invariant token,
+  so a silent transitive bump surfaces at bake time rather than
+  at the next `lint-runner-python` task run.
+
+**Canonical home.** `v2/planner-harness.md §10.6` (canonical
+executor starter image manifest — "Pre-installed lint
+toolchain" subsection) and `§14.4` (image-build pipeline,
+normative-pins paragraph). The witness binds the Containerfile
+pin, the manifest pin, and the verifier-script pin into one
+auditable triple.
+
+---
+
+### INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 — Canonical executor-starter image MUST ship working `eslint` + `prettier` + `tsc` + `tsx` without task-time egress
+
+**Statement.** Sibling of
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` for the
+JavaScript / TypeScript lane. The canonical executor-starter
+image MUST ship `eslint`, `prettier`, `typescript` (which
+provides the `tsc` shim), `tsx`, and `@types/node` at pinned
+versions in the rootfs's global node_modules root
+(`usr/lib/node_modules/<pkg>/` or
+`usr/local/lib/node_modules/<pkg>/`), with executable shims
+on `$PATH` at `/usr/bin/<bin>` or `/usr/local/bin/<bin>`.
+`npx --no-install <bin>` from the realistic-scenario
+`lint-runner-js` task body MUST succeed against the seed
+`ts-pkg/` directory (which has NO local `node_modules/`)
+because npx's resolution fallback order — local node_modules
+→ parent walk → global node_modules → `$PATH` — terminates on
+the global install before the `--no-install` clause errors out.
+Pin declaration mirrors the Python invariant: the Containerfile,
+the `manifest.toml` `[lint_toolchain]` table, and `verify.sh`
+all carry the same version triple; an asymmetric bump surfaces
+as `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED` at bake
+time.
+
+**Justification.** Iter56's `lint-runner-js` task captured the
+failing shape
+`npm error code EAI_AGAIN / npm error request to
+https://registry.npmjs.org/eslint failed, reason: getaddrinfo
+EAI_AGAIN registry.npmjs.org / raxis_check_sh_exit_code=1` —
+exactly mirroring the Python failure mode, structurally
+explained by the same root cause: the seed materializer ships
+no `node_modules/`, the VM has no egress, and the task body's
+`npx --no-install` correctly refuses to fetch from the
+registry. The fix is parity: pre-bake the four linters
+globally at image-build time so `npx --no-install`'s
+resolution-fallback to `$PATH` finds them before the
+`--no-install` branch fires. The fail-closed contract on
+`verify.sh` is what prevents the asymmetric-bump regression
+(e.g. an operator updating only the Containerfile to
+`eslint@10.x` without updating the documented pin in
+`manifest.toml`).
+
+**Scenario.** Symmetric to the Python invariant's scenario.
+Happy path: bake completes, verifier asserts
+`usr/lib/node_modules/{eslint,prettier,typescript,tsx}/`
+exists AND `/usr/bin/{eslint,prettier,tsc}` shims are in place;
+realistic-scenario `lint-runner-js` task runs `npx --no-install
+eslint --max-warnings 0 .`, npx resolves through `$PATH` to the
+global eslint, and the capture lands with exit code 0 (or with
+the Python-only seed defect's exit-code-zero clean shape on a
+JS-not-targeted iter). Fail-closed: dropping `eslint` from the
+`npm install -g` line in the Containerfile (or hand-editing the
+rootfs to remove the dist tree) trips `verify.sh` with
+`missing global node_modules/eslint under either
+/usr/lib/node_modules/ or /usr/local/lib/node_modules/ ...
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED` plus the
+`bake-rootfs --role executor-starter` remediation.
+
+**Witness.**
+[`xtask::tests::executor_starter_lint_toolchain::inv_executor_image_lint_toolchain_js_01_*`](../xtask/tests/executor_starter_lint_toolchain.rs)
+— synthetic-rootfs witnesses covering happy path, each linter
+removed individually (one witness per `eslint` / `prettier` /
+`typescript` / `tsx` so a future regression that drops just
+one surfaces with the correct package name in the violation
+message), and CLI-shim-missing-but-module-present (`npm
+install -g` succeeded but the symlink step failed — the verifier
+must still reject because `$PATH` resolution is the load-bearing
+mechanism, not the module presence alone).
+
+**Canonical home.** `v2/planner-harness.md §10.6` (canonical
+executor starter image manifest — "Pre-installed lint
+toolchain" subsection) and `§14.4` (image-build pipeline). The
+witness binds the Containerfile pin, the manifest pin, and the
+verifier-script pin into one auditable triple, identical in
+shape to the Python invariant.
 
 ---
 

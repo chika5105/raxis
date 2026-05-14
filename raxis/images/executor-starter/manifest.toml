@@ -21,3 +21,22 @@ source_date_epoch = 1700000000
 erofs_version     = "1.7.1"
 tar_version       = "1.34"
 zstd_version      = "1.5.5"
+
+# Pre-baked lint toolchain pins
+# (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01`,
+# `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`).
+#
+# These are documentary fields — the kernel does not consume them
+# at boot. They exist so an operator auditing the manifest can
+# answer "which ruff / eslint / prettier / tsc version is in this
+# bake?" without re-running the rootfs through `dpkg-query` /
+# `pip show` / `npm ls -g`. The Containerfile is the source of
+# truth; `verify.sh` cross-checks the bake against the values
+# below by asserting the matching `.dist-info` dirs (Python) and
+# `node_modules/<pkg>` trees (JS) exist in the rootfs.
+[lint_toolchain]
+ruff_version = "0.7.4"
+eslint_version = "9.15.0"
+prettier_version = "3.3.3"
+typescript_version = "5.6.3"
+tsx_version = "4.19.2"
