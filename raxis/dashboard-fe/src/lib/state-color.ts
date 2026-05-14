@@ -55,6 +55,61 @@ export type StateBadgeTone =
   | "block"
   | "muted";
 
+/// Canonical kernel `TaskState` SQL strings — the eight variants of
+/// `raxis_types::fsm::TaskState` as encoded in the
+/// `tasks.state` SQL CHECK constraint
+/// (`kernel-store.md §2.5.1 Table 5`).
+///
+/// **`INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`** — the dashboard
+/// state-color map (`MAP` below) MUST carry a non-fallback entry
+/// for every value in this array; the matching test in
+/// `dashboard-fe/src/test/state-color.test.ts` walks the array and
+/// asserts `MAP` is exhaustive. The kernel-side companion witness
+/// (`crates/dashboard-kernel/src/lib.rs::inv_dashboard_task_state_completeness_*`)
+/// pins the enum length so a future variant cannot land without
+/// updating both sides in the same commit.
+export const KERNEL_TASK_STATES = [
+  "Admitted",
+  "Running",
+  "GatesPending",
+  "Completed",
+  "Failed",
+  "Aborted",
+  "Cancelled",
+  "BlockedRecoveryPending",
+] as const;
+
+/// Canonical kernel `InitiativeState` SQL strings — the seven
+/// variants of `raxis_types::fsm::InitiativeState`. Mirrors the
+/// `initiatives.state` SQL CHECK constraint
+/// (`kernel-store.md §2.5.1 Table 2`).
+export const KERNEL_INITIATIVE_STATES = [
+  "Draft",
+  "ApprovedPlan",
+  "Executing",
+  "Blocked",
+  "Completed",
+  "Failed",
+  "Aborted",
+] as const;
+
+/// Canonical session-row state strings the dashboard kernel-glue
+/// emits via `session_row_state()` in
+/// `crates/dashboard-kernel/src/lib.rs`. The session FSM in
+/// `raxis_types::fsm::SessionState` carries `Spawning`/`Running`/
+/// `Paused`/`Completed`/`Failed`, plus the dashboard-derived
+/// terminal classifications `Revoked` and `Expired`
+/// (`INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`).
+export const KERNEL_SESSION_STATES = [
+  "Spawning",
+  "Running",
+  "Paused",
+  "Completed",
+  "Failed",
+  "Revoked",
+  "Expired",
+] as const;
+
 const MAP: Record<string, StateBadgeTone> = {
   // ── InitiativeState (raxis-types::fsm::InitiativeState) ─────
   Draft: "muted",
@@ -114,6 +169,26 @@ export function stateTone(state: string | null | undefined): StateBadgeTone {
   const norm =
     state.charAt(0).toUpperCase() + state.slice(1).toLowerCase();
   return MAP[norm] ?? "muted";
+}
+
+/// Whether the dashboard's state-color map has an EXPLICIT entry
+/// for this PascalCase kernel state — i.e. not via the
+/// case-normalised fallback and not via the "unknown → muted"
+/// trap door. Used by the exhaustiveness test for
+/// `INV-DASHBOARD-TASK-STATE-COMPLETENESS-01` to assert every
+/// kernel `TaskState` variant is registered as a first-class
+/// renderer entry rather than silently collapsing into
+/// `Admitted`-style muted styling.
+///
+/// We intentionally do NOT consult the normalised-fallback path
+/// here: the contract is "every kernel state has a distinct
+/// visual representation", which is only satisfied by a direct
+/// `MAP[state]` hit. The legacy-alias bucket (Pending / Active /
+/// Reviewing / …) lives behind this seam — those strings count
+/// as explicit entries for their own keys but do not give cover
+/// to a missing canonical `TaskState` entry.
+export function hasExplicitStateEntry(state: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MAP, state);
 }
 
 // Each tone bakes in BOTH light and dark Tailwind palette steps.
@@ -193,6 +268,57 @@ export function isTerminalFailureState(
 /// Always-readable upper-bound: 10 characters. Falls back to a
 /// raw uppercase truncation if the splitter yields nothing
 /// useful, so a future state name can never crash the renderer.
+// ---------------------------------------------------------------------------
+// IntegrationMerge synthetic-task display surface
+// `INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`
+// ---------------------------------------------------------------------------
+//
+// The kernel inserts a synthetic "coordinator task" whose
+// `task_id == initiative_id` at `approve_plan` time
+// (`auto_spawn_orchestrator_session_in_tx` in
+// `kernel/src/initiatives/lifecycle.rs`). The dashboard-kernel
+// projection stamps a fixed human title (`Integration merge`)
+// for that row; the FE then substitutes a stable display id
+// (`«integration-merge»`) wherever it would otherwise render the
+// initiative UUID as the task's <Mono> id chip. Routing keeps
+// using the real UUID so `/tasks/<initiative_id>` continues to
+// resolve and deep-links survive.
+
+/// Stable display id rendered in place of the IntegrationMerge
+/// coordinator's UUID. Spec-pinned at this exact string by
+/// `INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01` so
+/// operators can grep the dashboard for the string and reach
+/// the merge task immediately.
+export const INTEGRATION_MERGE_DISPLAY_ID = "«integration-merge»";
+
+/// True when this `task_id` denotes the synthetic IntegrationMerge
+/// coordinator row for the supplied initiative. The kernel
+/// admits the row with `task_id == initiative_id` by construction
+/// (`v2-deep-spec.md §Step 11 IntegrationMerge`); sub-task ids
+/// are operator-authored strings and live in a disjoint space.
+export function isIntegrationMergeTask(
+  taskId: string | null | undefined,
+  initiativeId: string | null | undefined,
+): boolean {
+  if (!taskId || !initiativeId) return false;
+  return taskId === initiativeId;
+}
+
+/// What the dashboard renders inside the per-initiative task
+/// list's `<Mono>` task-id chip. Returns the stable
+/// `«integration-merge»` display id for the synthetic
+/// coordinator row and the verbatim `task_id` otherwise. The
+/// wire `task_id` is unchanged — this helper is render-time
+/// only.
+export function taskDisplayId(
+  taskId: string,
+  initiativeId: string | null | undefined,
+): string {
+  return isIntegrationMergeTask(taskId, initiativeId)
+    ? INTEGRATION_MERGE_DISPLAY_ID
+    : taskId;
+}
+
 export function shortStateLabel(state: string | null | undefined): string {
   if (!state) return "—";
   const trimmed = state.trim();

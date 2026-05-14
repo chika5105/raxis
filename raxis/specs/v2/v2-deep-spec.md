@@ -673,6 +673,45 @@ operations, no operator key required). The `IntegrationMergeCompleted` audit emi
 SQLite Phase 1/3 transitions land alongside these in subsequent iterations as the
 `subtask_activations` row population (Step 25) comes online.
 
+**Operator surface (`INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`).** The
+`IntegrationMerge` coordinator-task row that
+`kernel/src/initiatives/lifecycle.rs::auto_spawn_orchestrator_session_in_tx`
+admits in the same SQLite transaction as the Orchestrator session
+has `task_id == initiative_id` by construction so downstream FK
+consumers (`task_intent_ranges`, `lane_budget_reservations`,
+`subtask_activations`) can join against a real `tasks` row without
+a synthetic-task carve-out. The dashboard hardening invariant
+covering this row (`specs/v2/dashboard-hardening.md §5.12`)
+selects **option (A) — first-class visible task**: the kernel
+projection
+(`crates/dashboard-kernel/src/lib.rs::task_row_to_view`) detects
+the identity predicate and stamps `TaskView.title =
+"Integration merge"` (the canonical literal lives at
+`INTEGRATION_MERGE_TITLE`), and the FE
+(`dashboard-fe/src/lib/state-color.ts::taskDisplayId`) swaps the
+opaque UUID id chip for the stable sigil `«integration-merge»` in
+`InitiativeDetail.tsx`, `InitiativeDag.tsx`, and `TaskDetail.tsx`
+while preserving the verbatim `task_id` for routing,
+copy-to-clipboard, and deep-link hrefs. The row counts toward
+`task_count` and `completed_tasks` exactly as authored, so the
+Overview progress widget reads "N done / M total" without a
+denominator-exclusion bookkeeping path; for an initiative with
+one executor sub-task the widget therefore shows "1 / 2 = 50%"
+while the executor row is `Completed` and the coordinator is
+`Running`. The state pill flows through the same `StateBadge`
+mapping as every other task and renders the full
+`Admitted → Running → Completed`/`Failed` trajectory, with the
+`Running` tone guaranteed visually distinct by
+`INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`
+(`specs/v2/dashboard-hardening.md §5.11`). Rationale: option (A)
+is a pure render-time substitution (title + id chip), preserves
+the kernel-side audit and FK semantics verbatim, and avoids the
+projection-wide accounting churn that option (B) — exclude from
+`task_count` and surface a separate "Merge phase" pill — would
+require across every consumer of the progress arithmetic; a
+future migration to (B) does not have to re-litigate the title
+contract because the kernel column is unchanged.
+
 ---
 
 ### Step 9: Bundle Routing — Orchestrator's Clone Only

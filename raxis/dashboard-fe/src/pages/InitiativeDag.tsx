@@ -19,6 +19,7 @@ import {
   serializeStatusParam,
   toggleStatus,
 } from "@/lib/status-filter";
+import { taskDisplayId } from "@/lib/state-color";
 // `stateTone`/`toneClasses` previously colored static badge chips
 // in this view; they now live inside the interactive
 // `<StatusLegend>` component above.
@@ -255,7 +256,11 @@ export function InitiativeDagPage() {
                 {focusedNode.title}
               </Link>
               <div className="text-xs text-ink-subtle mt-0.5 flex items-center gap-1">
-                <Mono>{focusedNode.task_id}</Mono>
+                {/* INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
+                    substitute the stable display id for the
+                    synthetic IntegrationMerge coordinator row;
+                    copy still emits the wire-stable UUID. */}
+                <Mono>{taskDisplayId(focusedNode.task_id, id)}</Mono>
                 <CopyButton value={focusedNode.task_id} />
               </div>
               <div className="mt-3 flex items-center gap-2">

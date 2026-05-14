@@ -17,7 +17,10 @@ import { InitiativePlanView } from "@/components/InitiativePlanView";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
-import { isTerminalFailureState } from "@/lib/state-color";
+import {
+  isTerminalFailureState,
+  taskDisplayId,
+} from "@/lib/state-color";
 import {
   StatusFilterPills,
   StatusLegend,
@@ -282,7 +285,14 @@ export function InitiativeDetailPage() {
                         {t.title}
                       </Link>
                       <div className="text-[11px] text-ink-subtle">
-                        <Mono>{t.task_id}</Mono>
+                        {/* INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
+                            render `«integration-merge»` instead of the
+                            initiative UUID for the synthetic coordinator
+                            row. Routing in the parent `<Link>` keeps using
+                            the real `task_id` so deep-links survive. */}
+                        <Mono>
+                          {taskDisplayId(t.task_id, init.initiative_id)}
+                        </Mono>
                       </div>
                     </td>
                     <td className="px-4 py-2 align-top">
@@ -338,7 +348,13 @@ export function InitiativeDetailPage() {
                 {focusedTask.title}
               </Link>
               <div className="text-xs text-ink-subtle mt-0.5 flex items-center gap-1">
-                <Mono>{focusedTask.task_id}</Mono>
+                <Mono>
+                  {taskDisplayId(focusedTask.task_id, init.initiative_id)}
+                </Mono>
+                {/* Copy still uses the real task_id so operators
+                    can paste a wire-stable id into kernel CLI /
+                    audit queries. The display ribbon is a
+                    render-time friendly label only. */}
                 <CopyButton value={focusedTask.task_id} />
               </div>
               <div className="mt-3 flex items-center gap-2">

@@ -82,7 +82,7 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 | 10 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01 | 12 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
@@ -93,7 +93,7 @@
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
 | Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
-| **Total** | | **119** |
+| **Total** | | **121** |
 
 ---
 
@@ -5484,6 +5484,176 @@ inside one boot does NOT survive a restart.
 end-to-end mint → authorise flow). The genesis emitter
 witness (`crates/genesis-tools/src/policy_toml.rs::dashboard_section_is_emitted_with_enabled_true_and_loopback_defaults`)
 asserts the on-disk artifact carries `jwt_ttl_secs = 86400`.
+
+---
+
+### INV-DASHBOARD-TASK-STATE-COMPLETENESS-01 — Every kernel TaskState renders as a distinct dashboard badge
+
+**Statement.** Every variant of the kernel `TaskState` FSM
+(`raxis_types::fsm::TaskState`, eight values pinned by the
+`tasks.state` SQL CHECK constraint in
+`kernel-store.md §2.5.1 Table 5`: `Admitted`, `Running`,
+`GatesPending`, `Completed`, `Failed`, `Aborted`, `Cancelled`,
+`BlockedRecoveryPending`) MUST have an explicit, non-fallback
+entry in the dashboard state-color map
+(`dashboard-fe/src/lib/state-color.ts::MAP`). The map MUST NOT
+collapse two variants onto the same tone — `Running` and
+`Admitted` in particular MUST resolve to distinct
+[`StateBadgeTone`] values so an operator can tell a queued task
+apart from an executing one at a glance. The wire string the
+kernel-side projection emits on `TaskView.state`
+(`crates/dashboard-kernel/src/lib.rs::task_row_to_view`) MUST
+be the canonical SQL form (the `TaskState::as_sql_str` output)
+for every variant, so the FE renderer never has to normalise.
+
+The contract is two-sided: the kernel-side witness pins the
+enum length (`TaskState::ALL.len() == 8`) AND round-trips every
+variant through `task_row_to_view` to assert the projection
+preserves the canonical SQL string; the FE-side witness imports
+the canonical 8-tuple, walks it, and asserts every entry resolves
+to an explicit `MAP[state]` hit (not the case-normalised fallback,
+not the "unknown → muted" trap door). A new `TaskState` variant
+landed in the Rust enum without a matching FE entry trips both
+witnesses in the same commit.
+
+**Justification.** iter53 saw the IntegrationMerge coordinator
+task sit in `Running` for the full lifetime of an initiative
+while the operator dashboard showed only `Admitted` and
+`Completed` rows — the FE renderer's "unknown → muted" fallback
+swallowed any kernel state that lacked an explicit entry, and a
+visual collision between `Running` (`info`) and `Admitted`
+(`muted`) would have made the intermediate state effectively
+invisible even if the renderer had picked it up. Operators
+inferred "nothing is running" from the dashboard while live-e2e
+runs were silently mid-flight.
+
+The completeness invariant forecloses the silent-degradation
+shape: any future addition to the kernel enum either lands with
+a paired FE update (both witnesses green) or fails admission
+(both witnesses red) — there is no "renders as muted, pretend
+it's Admitted" middle path. This is the same shape as
+`INV-DASHBOARD-FAILURE-VISIBILITY-01` ("no failure goes
+unsurfaced") but lifted one tier up: no FSM state goes
+unsurfaced either.
+
+**Canonical home.** `v2/dashboard-hardening.md §task-state-rendering`.
+
+**Witness.**
+  * Frontend: `dashboard-fe/src/test/state-color.test.ts`
+    suite `INV-DASHBOARD-TASK-STATE-COMPLETENESS-01` walks
+    `KERNEL_TASK_STATES` and asserts `hasExplicitStateEntry`
+    holds for every variant; a separate case pins
+    `stateTone("Running") !== stateTone("Admitted")` to catch
+    a tone-collision regression. Companion checks cover
+    `KERNEL_INITIATIVE_STATES` and `KERNEL_SESSION_STATES`.
+  * Kernel: `crates/dashboard-kernel/src/lib.rs::tests::inv_dashboard_task_state_completeness_projection_round_trips_every_variant`
+    builds a `TaskRow` for every `TaskState::ALL` variant,
+    pushes it through the production `task_row_to_view`
+    projection, and asserts `TaskView.state ==
+    TaskState::as_sql_str()` for each. The same test pins
+    `TaskState::ALL.len() == 8` as the cross-language
+    drift trip-wire.
+
+---
+
+### INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01 — IntegrationMerge coordinator task is first-class in the dashboard
+
+**Statement.** The synthetic IntegrationMerge coordinator-task
+row (inserted by
+`kernel/src/initiatives/lifecycle.rs::auto_spawn_orchestrator_session_in_tx`
+with `task_id == initiative_id` in lockstep with the
+Orchestrator session, per `v2-deep-spec.md §Step 11
+IntegrationMerge`) MUST NOT render as an opaque UUID-titled row
+in the dashboard's per-initiative task list. The chosen surface
+is **option (A) — first-class visible task**:
+
+  1. The kernel-side projection
+     (`crates/dashboard-kernel/src/lib.rs::task_row_to_view`)
+     detects the coordinator row by the
+     `task_id == initiative_id` predicate and stamps a fixed
+     human title (`Integration merge`) on the wire `TaskView`.
+     The constant lives at
+     `crates/dashboard-kernel/src/lib.rs::INTEGRATION_MERGE_TITLE`.
+  2. The FE substitutes a stable display id
+     (`«integration-merge»`, pinned at
+     `dashboard-fe/src/lib/state-color.ts::INTEGRATION_MERGE_DISPLAY_ID`)
+     wherever the task-id chip would otherwise render the same
+     UUID as the parent initiative. Routing and copy-to-clipboard
+     keep using the real `task_id` so `/tasks/<initiative_id>`
+     deep-links remain valid and audit-chain joins against the
+     wire id are stable.
+  3. The coordinator task counts toward `task_count` /
+     `completed_tasks` in the initiative summary (current
+     behaviour preserved); the Overview progress widget
+     therefore reads "N done / M total = M%" without any
+     option-(B) bookkeeping carve-out.
+  4. The coordinator's FSM state is rendered through the same
+     `StateBadge` as every other task. Per
+     `INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`, all eight
+     `TaskState` variants surface with distinct visual styling,
+     so the merge-task's `Admitted → Running → Completed`
+     trajectory is operator-legible.
+
+The **current behaviour is forbidden**: counted in the
+denominator AND either hidden from the list (option B without
+the matching surface) OR rendered as an opaque UUID row that
+looks like a duplicate of the parent initiative.
+
+**Option (B)** ("exclude from `task_count`/`completed_tasks`,
+render a separate `Merge: pending / running / done / failed`
+pill beside the progress bar") is documented as a future
+candidate but **NOT** wired today. Selecting it requires
+touching every consumer of `task_count` / `completed_tasks` to
+ensure they exclude the synthetic row; option (A) preserves the
+existing arithmetic for minimum impedance, per the iter53
+fix-loop decision.
+
+**Justification.** Without the title carve-out, the
+coordinator's task_id (which equals the initiative UUID by
+construction) reads in the dashboard as a duplicate of the
+initiative row. Operators see "1 done / 50%" with no second
+declared task and conclude either "the dashboard is broken" or
+"the merge will never run"; both readings are wrong — the
+merge task IS in flight, but the dashboard offered no surface
+to make that fact visible. iter53's live SQLite confirmed the
+row was in `Running` state at the very moment operators reported
+"nothing is happening on the dashboard".
+
+The option-(A) surface is the minimum operator-visible
+intervention that surfaces the merge phase: a human title, a
+stable display id distinct from the initiative chip, and the
+same `StateBadge` taxonomy every other task uses. It also
+preserves the option-(B) escape hatch: the kernel-side title
+constant + the FE display-id helper are both render-time
+substitutions, so a future migration to option (B) only needs
+to change the consumers of `task_count` / `completed_tasks` and
+introduce the dedicated `<MergePhasePill>` component without
+re-litigating the title contract.
+
+**Canonical home.** `v2/v2-deep-spec.md §IntegrationMerge / Operator
+surface` and `v2/dashboard-hardening.md §integration-merge-visibility`.
+
+**Witness.**
+  * Kernel: `crates/dashboard-kernel/src/lib.rs::tests::inv_integration_merge_visible_coordinator_renames_to_human_title`
+    asserts `task_display_title(initiative_id, initiative_id)
+    == "Integration merge"` and pins `INTEGRATION_MERGE_TITLE`
+    to its spec-pinned literal. The companion
+    `inv_integration_merge_visible_subtask_keeps_authored_id`
+    asserts ordinary sub-task rows echo their operator-authored
+    `task_id` (so the carve-out cannot accidentally rename a
+    real sub-task).
+  * Frontend: `dashboard-fe/src/test/state-color.test.ts` suite
+    `INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`
+    pins `INTEGRATION_MERGE_DISPLAY_ID === "«integration-merge»"`,
+    asserts `isIntegrationMergeTask` fires iff
+    `task_id == initiative_id`, and verifies `taskDisplayId`
+    substitutes the stable display id for the coordinator row
+    while echoing the operator-authored id for sub-tasks.
+  * Renderer wiring: the helper is consumed by
+    `dashboard-fe/src/pages/InitiativeDetail.tsx` (task list +
+    focused-task aside), `dashboard-fe/src/pages/InitiativeDag.tsx`
+    (focused-node panel), and
+    `dashboard-fe/src/pages/TaskDetail.tsx` (breadcrumb chip).
 
 ---
 

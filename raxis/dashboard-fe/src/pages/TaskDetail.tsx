@@ -10,7 +10,10 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
-import { isTerminalFailureState } from "@/lib/state-color";
+import {
+  isTerminalFailureState,
+  taskDisplayId,
+} from "@/lib/state-color";
 
 export function TaskDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -40,7 +43,14 @@ export function TaskDetailPage() {
               {t.initiative_id}
             </Link>
             <span>/</span>
-            <Mono className="text-ink-muted">{t.task_id}</Mono>
+            {/* INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
+                render the stable `«integration-merge»` display id for
+                the synthetic coordinator row instead of the verbatim
+                initiative UUID. Copy + routing stay on `t.task_id` so
+                wire identifiers remain stable. */}
+            <Mono className="text-ink-muted">
+              {taskDisplayId(t.task_id, t.initiative_id)}
+            </Mono>
             <CopyButton value={t.task_id} />
           </div>
           <h1 className="mt-1 text-xl font-semibold text-ink text-balance">

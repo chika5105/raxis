@@ -2701,6 +2701,43 @@ fn session_row_state(s: &raxis_store::views::sessions::SessionRow) -> String {
 /// `title` falls back to the `task_id` because the `tasks` table
 /// does not store a human title; rendering an empty `<h1>` was a
 /// blank-view paper-cut on every drill-in.
+///
+/// **IntegrationMerge coordinator carve-out
+/// (`INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`).** When
+/// `task_id == initiative_id` the row is the synthetic
+/// orchestrator-coordinator task that
+/// `initiatives::lifecycle::auto_spawn_orchestrator_session_in_tx`
+/// admits in lockstep with the Orchestrator session
+/// (`v2-deep-spec.md §Step 11 IntegrationMerge`). Without an
+/// override the dashboard renders both `title` and `task_id` as
+/// the same UUID, which reads like a duplicate of the initiative
+/// row and hides the row's actual FSM state (`Admitted → Running`
+/// for the lifetime of the merge) behind an opaque hex string.
+/// We pick option (A) — "first-class visible task" — by stamping
+/// a fixed human title `Integration merge` here. The wire
+/// `task_id` stays the real UUID so the FE can route to
+/// `/tasks/<initiative_id>` and the kernel-store joins
+/// (`task_intent_ranges`, `lane_budget_reservations`) remain
+/// referentially valid; the FE is responsible for substituting
+/// the stable display id (`«integration-merge»`) at render time.
+pub(crate) const INTEGRATION_MERGE_TITLE: &str = "Integration merge";
+
+/// Compute the dashboard-visible title for a kernel task row.
+///
+/// Returns `Integration merge` for the synthetic coordinator
+/// row whose `task_id == initiative_id`
+/// (`INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`),
+/// otherwise echoes the operator-authored `task_id` (the
+/// `tasks` table has no separate name column, so the id is the
+/// best human label we have).
+pub(crate) fn task_display_title(task_id: &str, initiative_id: &str) -> String {
+    if task_id == initiative_id {
+        INTEGRATION_MERGE_TITLE.to_owned()
+    } else {
+        task_id.to_owned()
+    }
+}
+
 fn task_row_to_view(
     conn: &raxis_store::ro::RoConn,
     t: &raxis_store::views::tasks::TaskRow,
@@ -2717,10 +2754,19 @@ fn task_row_to_view(
     let path_allowlist = raxis_store::views::plan_fields::reveal_for_task(conn, &t.task_id)
         .map(|f| f.path_allowlist)
         .unwrap_or_default();
+    // INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
+    // detect the synthetic coordinator row by the
+    // `task_id == initiative_id` predicate and stamp a stable
+    // human title. The detection is exact — sub-task ids are
+    // operator-authored strings and live in a disjoint space
+    // from UUID-shaped initiative ids by construction
+    // (`initiatives::lifecycle::auto_spawn_orchestrator_session_in_tx`
+    // doc comment §"task_id == initiative_id by construction").
+    let title = task_display_title(&t.task_id, &t.initiative_id);
     TaskView {
         task_id: t.task_id.clone(),
         initiative_id: t.initiative_id.clone(),
-        title: t.task_id.clone(),
+        title,
         state: t.state.clone(),
         session_id: t.session_id.clone(),
         reviewer_verdicts: Vec::<ReviewerVerdictView>::new(),
@@ -3003,5 +3049,132 @@ mod tests {
         // wall clock at test time.
         let row = mk_row(false, 200);
         assert_eq!(session_row_state(&row), "Expired");
+    }
+
+    // ── INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01 ──────────
+    //
+    // The synthetic IntegrationMerge coordinator row
+    // (`auto_spawn_orchestrator_session_in_tx` inserts it with
+    // `task_id == initiative_id`) MUST surface a human title in the
+    // dashboard, not the raw initiative UUID. The projection
+    // helper `task_display_title` is the single seam — the
+    // exhaustive variants below pin that seam against:
+    //
+    //   * the coordinator carve-out fires when the predicate
+    //     holds (option A: first-class visible task),
+    //   * sub-task rows fall back to the operator-authored
+    //     `task_id` (forbidden current behaviour: opaque UUID
+    //     row in the per-initiative task list).
+
+    #[test]
+    fn inv_integration_merge_visible_coordinator_renames_to_human_title() {
+        let init_id = "019e254f-c2b1-7db2-8733-72753668a5d8";
+        // task_id == initiative_id ⇒ Integration merge.
+        assert_eq!(
+            task_display_title(init_id, init_id),
+            INTEGRATION_MERGE_TITLE,
+            "coordinator row MUST stamp the stable human title, not the UUID",
+        );
+        // Stability: the title string is exactly the spec-pinned
+        // value — the FE renders `«integration-merge»` as the
+        // display id alongside this title, and a drift here
+        // would break the operator-visible contract.
+        assert_eq!(INTEGRATION_MERGE_TITLE, "Integration merge");
+    }
+
+    #[test]
+    fn inv_integration_merge_visible_subtask_keeps_authored_id() {
+        let init_id = "019e254f-c2b1-7db2-8733-72753668a5d8";
+        let sub_id = "sibling-materialize-records";
+        assert_eq!(
+            task_display_title(sub_id, init_id),
+            sub_id,
+            "sub-task rows MUST echo the operator-authored task_id (no rename)",
+        );
+    }
+
+    // ── INV-DASHBOARD-TASK-STATE-COMPLETENESS-01 ───────────────────────
+    //
+    // Wire-shape witness: for every variant of the kernel
+    // `TaskState` enum the dashboard projection must emit the
+    // canonical SQL string on `TaskView.state`. The FE's
+    // `state-color.ts` MAP and its companion
+    // `state-color.test.ts` exhaustiveness witness consume these
+    // strings verbatim; a typo on either side would collapse a
+    // distinct state into the `muted` fallback bucket and hide
+    // it from the operator (the iter53 `Running` invisibility
+    // bug).
+    //
+    // We synthesize a `TaskRow` per variant and pass it through
+    // `task_row_to_view` against an empty store so the
+    // projection sees no `structured_outputs` / `path_allowlist`
+    // — the shape of those auxiliary lookups doesn't affect the
+    // state-string projection we're pinning.
+
+    fn synth_task_row(state: raxis_types::TaskState) -> raxis_store::views::tasks::TaskRow {
+        raxis_store::views::tasks::TaskRow {
+            task_id:                  "t-state".into(),
+            initiative_id:            "init-state".into(),
+            initiative_state:         "Executing".into(),
+            lane_id:                  "default".into(),
+            state:                    state.as_sql_str().into(),
+            block_reason:             None,
+            actor:                    "kernel".into(),
+            policy_epoch:             1,
+            admitted_at:              100,
+            transitioned_at:          200,
+            session_id:               None,
+            evaluation_sha:           None,
+            base_sha:                 None,
+            admission_reserved_units: None,
+            actual_cost:              0,
+        }
+    }
+
+    #[test]
+    fn inv_dashboard_task_state_completeness_projection_round_trips_every_variant() {
+        // Open an in-memory store + RoConn just so the
+        // auxiliary lookups inside `task_row_to_view` have a
+        // valid connection to no-op against. Every variant
+        // round-trips through the SQL CHECK strings.
+        let tmp = tempfile::tempdir().unwrap();
+        // The RO open needs a kernel.db file in the data dir;
+        // create one with the standard migrations applied.
+        let store_path = tmp.path().join("kernel.db");
+        {
+            let _store = raxis_store::Store::open(&store_path).unwrap();
+        }
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        for &variant in &raxis_types::TaskState::ALL {
+            let row = synth_task_row(variant);
+            let view = task_row_to_view(&conn, &row);
+            assert_eq!(
+                view.state,
+                variant.as_sql_str(),
+                "task_row_to_view MUST preserve the canonical SQL string \
+                 for variant {variant:?} — the FE state-color map keys \
+                 against these literals.",
+            );
+            // The wire state string is non-empty — `StateBadge`
+            // and `stateTone` both treat empty/null as the
+            // muted fallback, which would silently hide a
+            // legitimate FSM state.
+            assert!(
+                !view.state.is_empty(),
+                "task_row_to_view emitted an empty state string for {variant:?}",
+            );
+        }
+        // Spec-drift trip-wire: bumping `TaskState::ALL` must be
+        // matched by an entry on the FE side (state-color.ts
+        // KERNEL_TASK_STATES + its exhaustiveness test). The
+        // length pin here is the simplest cross-language witness
+        // we can express without parsing the TS source.
+        assert_eq!(
+            raxis_types::TaskState::ALL.len(),
+            8,
+            "TaskState enum length drift — update KERNEL_TASK_STATES in \
+             dashboard-fe/src/lib/state-color.ts in the same commit \
+             (INV-DASHBOARD-TASK-STATE-COMPLETENESS-01).",
+        );
     }
 }

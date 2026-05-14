@@ -1093,6 +1093,153 @@ Cross-reference: `INV-DASHBOARD-KERNEL-LIFECYCLE-01`
 `crates/dashboard/src/routes/health.rs`,
 `dashboard-fe/src/components/KernelLifecycleBanner.tsx`.
 
+## 5.11 Task-state rendering completeness (`INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`)
+
+The dashboard MUST render every variant of the kernel
+`TaskState` FSM with a **distinct visual representation**. The
+canonical 8-tuple — pinned by the `tasks.state` SQL CHECK
+constraint in `kernel-store.md §2.5.1 Table 5` and by
+`raxis_types::fsm::TaskState::ALL` — is:
+
+| TaskState                | Dashboard tone | Visual hint                                |
+|--------------------------|----------------|--------------------------------------------|
+| `Admitted`               | `muted`        | grey badge — queued, awaiting first intent |
+| `Running`                | `info`         | blue badge w/ pulse — actively executing   |
+| `GatesPending`           | `warn`         | amber — paused awaiting gate verdict       |
+| `Completed`              | `ok`           | emerald — terminal success                 |
+| `Failed`                 | `bad`          | rose — terminal failure                    |
+| `Aborted`                | `block`        | violet — operator/initiative abort         |
+| `Cancelled`              | `block`        | violet — bulk-cancelled by `abort_initiative` |
+| `BlockedRecoveryPending` | `warn`         | amber — kernel-crash recovery in flight    |
+
+The exhaustiveness contract is enforced on BOTH sides:
+
+* **FE side** (`dashboard-fe/src/lib/state-color.ts`): the
+  module exports `KERNEL_TASK_STATES`, `KERNEL_INITIATIVE_STATES`,
+  and `KERNEL_SESSION_STATES` as the canonical pinned tuples,
+  plus a `hasExplicitStateEntry(state)` helper that returns
+  `true` iff the state has a direct `MAP[state]` entry (the
+  helper deliberately does NOT consult the case-normalised
+  fallback path or the "unknown → muted" trap door). The
+  exhaustiveness witness lives at
+  `dashboard-fe/src/test/state-color.test.ts` and walks
+  `KERNEL_TASK_STATES` asserting `hasExplicitStateEntry` for
+  each. A companion case specifically pins
+  `stateTone("Running") !== stateTone("Admitted")` so a
+  tone-collision regression (the iter53 invisibility shape)
+  trips at TSC time rather than during a live-e2e run.
+
+* **Kernel side** (`crates/dashboard-kernel/src/lib.rs`): the
+  test
+  `inv_dashboard_task_state_completeness_projection_round_trips_every_variant`
+  synthesises a `TaskRow` for every variant of
+  `TaskState::ALL`, pushes it through the production
+  `task_row_to_view` projection, and asserts
+  `TaskView.state == TaskState::as_sql_str()` for each. The
+  same test pins `TaskState::ALL.len() == 8` as a
+  cross-language drift trip-wire — a new variant in the Rust
+  enum MUST be matched by a new entry in `KERNEL_TASK_STATES`
+  on the TS side or both witnesses fail in the same commit.
+
+**Why the cross-language pin.** iter53 saw the IntegrationMerge
+coordinator task sit in `Running` for the full lifetime of an
+initiative while the operator dashboard surface only ever
+displayed `Admitted` and `Completed` rows. The root cause was
+two-tiered: the executor sub-task FSM transitions
+`Admitted → Running → Completed` move so quickly that a 4 s
+polling cadence routinely misses the `Running` window, AND the
+coordinator's `task_id == initiative_id` rendering made its
+long-running `Running` row invisible behind an opaque UUID
+title (see §5.12 below). The completeness invariant is the
+structural defence: even when a variant becomes the ONLY
+visible state for a non-trivial window (the coordinator's
+multi-minute merge phase), the badge MUST be visually distinct
+from every other state so operators can read the current
+trajectory at a glance.
+
+Cross-reference: `INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`
+(`specs/invariants.md §11.9`),
+`raxis_types::fsm::TaskState` (kernel-store.md §2.5.1 Table 5),
+`crates/dashboard-kernel/src/lib.rs::task_row_to_view`,
+`dashboard-fe/src/lib/state-color.ts::MAP`.
+
+## 5.12 IntegrationMerge visibility (`INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`)
+
+The synthetic IntegrationMerge coordinator-task row that
+`kernel/src/initiatives/lifecycle.rs::auto_spawn_orchestrator_session_in_tx`
+admits in lockstep with the Orchestrator session
+(`v2-deep-spec.md §Step 11 IntegrationMerge`) has
+`task_id == initiative_id` by construction so that downstream
+FK consumers (`task_intent_ranges`,
+`lane_budget_reservations`) can join against a real `tasks`
+row. Without an explicit dashboard carve-out, that
+identity-by-construction reads in the operator surface as a
+duplicate row of the initiative — same UUID in the title slot
+and the id chip — which hides the row's actual FSM state
+behind an opaque hex string and inflates the
+`task_count` / `completed_tasks` denominator without
+explaining where the missing 50% went.
+
+**Chosen surface: option (A) — first-class visible task.**
+The dashboard renders the coordinator row inline with every
+other task, plus a stable human title (`Integration merge`)
+and a stable display id (`«integration-merge»`):
+
+  1. **Kernel-side projection** stamps the title:
+     `crates/dashboard-kernel/src/lib.rs::task_row_to_view`
+     detects the `task_id == initiative_id` predicate and
+     overrides `TaskView.title = "Integration merge"`. The
+     constant lives at
+     `crates/dashboard-kernel/src/lib.rs::INTEGRATION_MERGE_TITLE`
+     and is reused by tests.
+  2. **FE substitution** swaps the id chip:
+     `dashboard-fe/src/lib/state-color.ts` exports
+     `taskDisplayId(task_id, initiative_id)` which returns
+     `«integration-merge»` for the coordinator row and the
+     verbatim `task_id` otherwise. Wired into
+     `InitiativeDetail.tsx`, `InitiativeDag.tsx`, and
+     `TaskDetail.tsx`. Routing and copy-to-clipboard keep
+     using the real `task_id` so deep-links and audit-chain
+     joins remain stable.
+  3. **Progress arithmetic preserved**: the coordinator row
+     counts toward `task_count` AND (eventually)
+     `completed_tasks`. The Overview progress widget reads
+     "N done / M total = M%" without any
+     denominator-exclusion bookkeeping. For an initiative with
+     one declared sub-task, the widget therefore reads
+     "1 done / 2 total = 50%" while the executor task is
+     `Completed` and the merge phase is `Running`. When the
+     merge finishes the same widget reaches `100%` without an
+     option-(B) Merge-phase-pill carve-out.
+  4. **State pill is the full FSM**: the coordinator's
+     `Admitted → Running → Completed` trajectory renders
+     through the same `StateBadge` as every other task,
+     guaranteed visible-and-distinct by §5.11 above.
+
+**Forbidden behaviour.** A future change that hides the
+coordinator from the task list AND keeps counting it in the
+denominator (the iter53 paper-cut), or renders it as an
+opaque UUID-titled row that looks like a duplicate of the
+parent initiative, is forbidden. Option (B) — "exclude from
+`task_count` / `completed_tasks` and render a separate
+`<MergePhasePill>` beside the progress bar" — is documented
+as a future candidate but is **NOT** wired today; selecting it
+requires touching every consumer of `task_count` /
+`completed_tasks` in the FE plus the kernel-side projection,
+and option (A) preserves the existing arithmetic for minimum
+impedance per the iter53 fix-loop decision. The title carve-out
++ FE display-id helper are pure render-time substitutions, so
+a future migration to (B) does not need to re-litigate the
+title contract.
+
+Cross-reference:
+`INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`
+(`specs/invariants.md §11.9`),
+`v2/v2-deep-spec.md §IntegrationMerge / Operator surface`,
+`kernel/src/initiatives/lifecycle.rs::auto_spawn_orchestrator_session_in_tx`,
+`crates/dashboard-kernel/src/lib.rs::task_row_to_view`,
+`dashboard-fe/src/lib/state-color.ts::taskDisplayId`.
+
 ## 6. Rationale (why these bounds)
 
 * **30 s handler timeout.** Gives the audit-chain walk
