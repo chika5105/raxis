@@ -520,6 +520,30 @@ async fn main() {
             }
         };
 
+    // Per-task LLM-turn capture (`task-llm-capture.md`). Sibling
+    // to the session-stream capture above; keyed by `task_id` so
+    // raw provider responses survive VM restarts within the same
+    // task and an operator debugging a Failed task can read the
+    // exact bytes the planner saw across every session that
+    // worked on it. Construction failure (read-only data dir /
+    // EROFS / ENOSPC) logs and yields `None` — the dashboard
+    // route then returns 404 on `GET /api/tasks/:task_id/llm-turns`
+    // but every other kernel surface stays up.
+    let task_llm_capture: Option<Arc<raxis_dashboard_kernel::TaskLlmCapture>> =
+        match raxis_dashboard_kernel::TaskLlmCapture::new(
+            &data_dir,
+            raxis_dashboard_kernel::TaskCaptureConfig::default(),
+        ) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"TaskLlmCaptureInitFailed\",\
+                     \"reason\":\"{e}\"}}"
+                );
+                None
+            }
+        };
+
     // Hoist the observability hub construction so the
     // `NotifyingAuditSink` can hold a reference and bridge V3 §3
     // metrics (egress admit/deny/default-grant/stall, credential-proxy
@@ -1316,6 +1340,71 @@ async fn main() {
     // forward a fetch via `ctx.gateway.fetch(...)`. A single Arc is
     // cloned three ways below; cheap.
     let gateway_client = Arc::new(gateway::client::GatewayClient::new());
+
+    /// Adapter from [`gateway::client::LlmTurnObserver`] to
+    /// [`raxis_dashboard_kernel::TaskLlmCapture`]. The observer
+    /// trait lives in `kernel::gateway::client` (so it can be
+    /// `install_observer`-ed against the pump without inverting
+    /// the dep), and the canonical impl in main.rs forwards to
+    /// the per-task on-disk file ring.
+    struct GatewayLlmTurnObserver {
+        capture: Arc<raxis_dashboard_kernel::TaskLlmCapture>,
+    }
+    impl gateway::client::LlmTurnObserver for GatewayLlmTurnObserver {
+        fn observe(
+            &self,
+            task_id:     &str,
+            session_id:  Option<&str>,
+            fetch_id:    uuid::Uuid,
+            status_code: Option<u16>,
+            latency_ms:  u32,
+            body_bytes:  Option<&[u8]>,
+            error:       Option<&str>,
+        ) {
+            let body = body_bytes
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let record = raxis_dashboard_kernel::LlmTurnRecord {
+                at_ms: now_ms,
+                task_id: task_id.to_owned(),
+                session_id: session_id.map(str::to_owned),
+                fetch_id: fetch_id.to_string(),
+                status_code,
+                latency_ms,
+                body,
+                body_truncated: false,
+                original_body_bytes: 0,
+                error: error.map(str::to_owned),
+            };
+            if let Err(e) = self.capture.append(task_id, record) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"TaskLlmCaptureAppendFailed\",\
+                     \"task_id\":\"{task_id}\",\"reason\":\"{e}\"}}"
+                );
+            }
+        }
+    }
+
+    // Wire the per-task LLM-turn capture into the gateway pump.
+    // Every successful + failed `FetchResponse` that carried a
+    // `task_id` in its corresponding `FetchRequest` will fan to
+    // the capture's per-task file ring (see `task_llm_capture.rs`
+    // for the bounded-disk + truncation contract). The observer
+    // is installed BEFORE any gateway connection is set up so
+    // even the very first `GatewayReady`-handshake-driven fetch
+    // is captured. Falls back to a no-op when the capture failed
+    // to construct above (read-only data dir / EROFS / ENOSPC).
+    if let Some(cap) = task_llm_capture.as_ref() {
+        gateway_client
+            .install_observer(Arc::new(GatewayLlmTurnObserver {
+                capture: Arc::clone(cap),
+            }))
+            .await;
+    }
     // The EpochBinding is the in-memory v1 substitute for the spec's
     // `sessions.prompt_epoch_valid` column. Read by `prompt::assemble`,
     // written by `policy_manager::advance_epoch` after every epoch
@@ -1814,6 +1903,13 @@ async fn main() {
                         // handler context — there is exactly one
                         // hub per kernel process.
                         Some(Arc::clone(&observability_hub)),
+                        // Task-LLM capture (`task_llm_capture.rs`) —
+                        // shared with the gateway pump so dashboard
+                        // routes read the SAME on-disk file ring the
+                        // pump writes. `None` ⇒ early init failed
+                        // (logged at boot); the dashboard route
+                        // returns 404 in that case.
+                        task_llm_capture.clone(),
                     )
                     .await
                     {

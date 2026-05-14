@@ -393,6 +393,7 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Tasks.
         .route("/api/tasks/:id",                   get(tasks::detail::<D>))
         .route("/api/tasks/:id/outputs",           get(tasks::outputs::<D>))
+        .route("/api/tasks/:id/llm-turns",         get(tasks::llm_turns::<D>))
         // Sessions.
         .route("/api/sessions",                    get(sessions::list::<D>))
         .route("/api/sessions/:id",                get(sessions::detail::<D>))

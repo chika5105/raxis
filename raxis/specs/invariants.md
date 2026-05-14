@@ -82,7 +82,7 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 | 15 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01, INV-DASHBOARD-TASK-LLM-CAPTURE-01, INV-DASHBOARD-TASK-LLM-CAPTURE-02, INV-DASHBOARD-TASK-LLM-CAPTURE-03 | 18 |
 | Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01, INV-FAILURE-REASON-CONCRETE-01 | 2 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
@@ -9982,6 +9982,102 @@ Most security properties at the system level are emergent from
 When auditing a code path, look for which combination of invariants
 governs it; a single invariant in isolation rarely tells the full
 story.
+
+---
+
+## §11.16 — Per-task LLM-turn capture (INV-DASHBOARD-TASK-LLM-CAPTURE-*)
+
+V3 (iter58) wires a per-task on-disk capture of every raw upstream
+LLM response into the dashboard backend so an operator debugging
+a Failed task can read the bytes the planner actually saw — not
+just the post-hoc audit-event timeline. The capture lives in
+`raxis-dashboard-kernel::task_llm_capture` and is keyed by
+`task_id` (NOT `session_id`) so records survive VM restarts
+within the same task — the canonical case where one task spans
+orchestrator → executor → reviewer plus retries on premature
+exit.
+
+### INV-DASHBOARD-TASK-LLM-CAPTURE-01 — Every gateway response with task_id MUST flow into the per-task ring
+
+**Statement.** Every successful or failed `GatewayMessage::FetchResponse`
+that the kernel's gateway pump dispatches MUST, when its
+originating `FetchRequest` carried a `task_id`, fan to the
+installed `LlmTurnObserver` BEFORE the per-fetch `oneshot::Sender`
+is signalled. The canonical observer impl
+(`GatewayLlmTurnObserver` in `kernel/src/main.rs`) appends one
+`LlmTurnRecord` to the per-task file ring at
+`<data_dir>/llm-turns/<task_id>.jsonl`.
+
+**Why structural.** Without happens-before ordering between the
+observer append and the dispatch caller's `reply_rx.await`
+return, an operator opening the dashboard the instant a turn
+completes could see the dispatch loop react to the response
+(audit emit, FSM transition) before the raw bytes were durable
+on disk. Capture lag is the one observability surface where
+"slightly stale" is materially worse than "nothing yet" — the
+operator's mental model is "the dashboard is the ground truth
+for what the planner saw", so capture MUST land first.
+
+**Witness.**
+* `raxis-kernel/gateway/client.rs::tests::pump_fans_observer_for_every_response_with_task_id`
+  — recording observer captures exactly one record per fetch.
+* `raxis-kernel/gateway/client.rs::tests::pump_skips_observer_when_no_task_id`
+  — `task_id = None` ⇒ no observer record, so kernel-internal
+  warm-up probes and similar do not pollute the per-task ring.
+* `raxis-dashboard-kernel/task_llm_capture.rs::tests::multiple_sessions_of_same_task_share_one_file`
+  — three sessions of the same task append to one file, so the
+  `task_id`-keyed durability promise is mechanical not
+  aspirational.
+
+### INV-DASHBOARD-TASK-LLM-CAPTURE-02 — Per-task file ring is bounded in disk
+
+**Statement.** The per-task file at `<data_dir>/llm-turns/<task_id>.jsonl`
+MUST never exceed `TaskCaptureConfig::max_file_bytes` (4 MiB
+default). When an append would push the file over the cap,
+`TaskLlmCapture::compact_locked` MUST rewrite it keeping only
+the most recent ~50 % of records, then perform the new append.
+Per-record bodies above `TaskCaptureConfig::max_body_bytes`
+(256 KiB default) MUST be truncated with a trailing
+`<truncated N bytes>` marker before serialization, with
+`body_truncated = true` and `original_body_bytes` set to the
+upstream length.
+
+**Why structural.** The gateway honours a 16 MiB upstream cap
+per response. Without per-task disk + per-record body bounds, a
+single task that issues a runaway sequence of huge responses
+could fill the operator's data dir and DoS the dashboard. The
+50 % compaction strategy keeps amortised cost flat (one
+compaction per overflow, not per append).
+
+**Witness.**
+* `task_llm_capture.rs::tests::compaction_kicks_in_when_max_file_bytes_exceeded`
+  — file size stays near the cap across 50 over-cap appends.
+* `task_llm_capture.rs::tests::body_above_max_body_bytes_is_truncated_with_marker`
+  — 1000-byte body with 32-byte cap surfaces with the truncation
+  pill set and `original_body_bytes = 1000`.
+
+### INV-DASHBOARD-TASK-LLM-CAPTURE-03 — Capture survives VM teardown for the task lifetime
+
+**Statement.** `LlmTurnRecord`s appended for `task_id = T` MUST
+remain readable via `GET /api/tasks/T/llm-turns` after every
+session that worked on `T` has terminated, until either (a) the
+file is rotated by the next compaction past the disk cap, or
+(b) the operator explicitly purges `<data_dir>/llm-turns/T.jsonl`.
+Specifically: a planner VM exiting (orderly or not) MUST NOT
+remove the file or any of its records.
+
+**Why structural.** The single most common debug ask after a
+Failed task is "what did the model actually return on the turn
+that broke?" — a session-lifetime-only capture would lose
+exactly the records the operator needs at exactly the moment
+they need them. The kernel is the writer (NOT the planner VM),
+so VM teardown does not affect the file.
+
+**Witness.** Production-side: the writer is the gateway pump,
+which lives in the kernel process; the VM's lifetime is
+unrelated to the file's. The
+`multiple_sessions_of_same_task_share_one_file` test pins the
+key-shape contract that makes this property work.
 
 ---
 

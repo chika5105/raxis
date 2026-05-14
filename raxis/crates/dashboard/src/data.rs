@@ -357,6 +357,58 @@ pub struct TaskView {
     pub blocked_downstream: Vec<String>,
 }
 
+/// One captured raw LLM turn surfaced via
+/// `GET /api/tasks/:task_id/llm-turns`.
+///
+/// Mirrors `raxis_dashboard_kernel::LlmTurnRecord`. Lives in the
+/// dashboard crate so the trait + route layer can name the type
+/// without importing the kernel-glue crate (which would close a
+/// dep cycle).
+///
+/// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskLlmTurnView {
+    /// Unix milliseconds when the gateway returned the upstream
+    /// response.
+    pub at_ms: u64,
+    /// Owning task id (matches the URL path parameter — carried
+    /// in the body so global "recent LLM activity" views can
+    /// merge across tasks).
+    pub task_id: String,
+    /// Session that issued the upstream request. Multiple
+    /// sessions per task is the canonical case
+    /// (orchestrator + executor + reviewer); retries on
+    /// premature exit also bump this.
+    pub session_id: Option<String>,
+    /// Gateway-minted fetch identifier, useful for cross-
+    /// referencing with `audit.fetch_completed.fetch_id`.
+    pub fetch_id: String,
+    /// Upstream HTTP status code. `None` when the gateway
+    /// never got a response (transport / DNS / timeout).
+    pub status_code: Option<u16>,
+    /// Observed end-to-end latency (gateway outbound write →
+    /// first response byte received).
+    pub latency_ms: u32,
+    /// Raw response body, decoded as UTF-8. Bodies above
+    /// `TaskCaptureConfig::max_body_bytes` are truncated; see
+    /// `body_truncated`.
+    pub body: String,
+    /// `true` when [`Self::body`] was truncated to fit the per-
+    /// record body cap.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub body_truncated: bool,
+    /// Original body length in bytes, before truncation.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub original_body_bytes: u64,
+    /// Structured upstream error category from the gateway.
+    /// `None` on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[allow(dead_code)]
+fn is_false(b: &bool) -> bool { !*b }
+
 /// Reviewer verdict surface for the dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewerVerdictView {
@@ -1116,6 +1168,28 @@ pub trait DashboardData: Send + Sync + 'static {
 
     /// One task by id.
     fn get_task(&self, task_id: &str) -> Result<TaskView, ApiError>;
+
+    /// Tail the last `n` raw LLM-turn records captured for a
+    /// task. The records are the upstream provider's raw
+    /// response envelopes (status + body + latency), keyed by
+    /// `task_id` so the buffer survives VM restarts within the
+    /// same task. Backed by the kernel's per-task on-disk file
+    /// ring (see `raxis-dashboard-kernel::TaskLlmCapture`).
+    ///
+    /// Default impl returns `Ok(vec![])` so older test fixtures
+    /// (and the in-memory data layer used by the auth /
+    /// integration tests) compile without the new capability.
+    /// The kernel-glue impl in `raxis-dashboard-kernel`
+    /// overrides this to call the file-ring tail.
+    ///
+    /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01` (raxis/specs/invariants.md).
+    fn tail_task_llm_turns(
+        &self,
+        _task_id: &str,
+        _n: u32,
+    ) -> Result<Vec<TaskLlmTurnView>, ApiError> {
+        Ok(Vec::new())
+    }
 
     /// Sessions newest first. `limit ≤ 200`.
     /// Active session list. When `initiative_id` is `Some(_)` the

@@ -104,6 +104,60 @@ struct Pending {
     fetch_id: Uuid,
     payload:  GatewayMessage, // ALWAYS GatewayMessage::FetchRequest
     reply_tx: oneshot::Sender<Result<FetchResult, GatewayCallError>>,
+    /// Task identifier mirrored from the `FetchRequest`. Threaded
+    /// here so the pump can route the response to a per-task
+    /// observer (e.g. the dashboard's [`LlmTurnObserver`]) as
+    /// soon as the gateway returns the body — the
+    /// `GatewayMessage::FetchResponse` wire frame does NOT carry
+    /// `task_id` (the gateway has no business with task-id
+    /// semantics), so the inflight slot is the only place the
+    /// kernel can correlate response → task.
+    task_id:  Option<String>,
+    /// Session id, mirrored for the same reason as `task_id`.
+    /// The observer uses this to attribute one task's records
+    /// to the specific VM that produced them.
+    session_id: Option<Uuid>,
+}
+
+/// Hook invoked by the gateway pump for every successful
+/// `GatewayMessage::FetchResponse` that carried a `task_id` in
+/// the corresponding `FetchRequest`. The kernel's main wires a
+/// [`raxis_dashboard_kernel::TaskLlmCapture`]-backed
+/// implementation; tests use a no-op or a recording fake.
+///
+/// **Wire contract.**
+///   * Invoked from the gateway pump task. MUST NOT block (the
+///     pump uses `tokio::select!` to interleave inbound and
+///     outbound traffic; a blocking observer would stall every
+///     in-flight fetch). The default `TaskLlmCapture` impl
+///     uses a `parking_lot::Mutex` + buffered file write, both
+///     of which return promptly under steady-state load.
+///   * Invoked AFTER the inflight slot is removed but BEFORE
+///     the per-fetch `oneshot::Sender` is signalled, so the
+///     observer's append happens-before the dispatch loop
+///     observes the response.
+///   * Errors (file-full, broadcast disconnect) are swallowed
+///     by the observer; they MUST NOT propagate back to the
+///     pump (the audit chain + dashboard timeline are the
+///     authoritative observability surfaces — best-effort
+///     LLM-turn capture must never break the dispatch path).
+pub trait LlmTurnObserver: Send + Sync {
+    /// Record one upstream LLM turn.
+    ///
+    /// `body_bytes` is the raw response body the gateway
+    /// received from the upstream (or `None` on error). The
+    /// observer is responsible for any size capping / UTF-8
+    /// validation it wants to apply before storing.
+    fn observe(
+        &self,
+        task_id:     &str,
+        session_id:  Option<&str>,
+        fetch_id:    Uuid,
+        status_code: Option<u16>,
+        latency_ms:  u32,
+        body_bytes:  Option<&[u8]>,
+        error:       Option<&str>,
+    );
 }
 
 /// A one-way frame the kernel pushes to the gateway with no response
@@ -155,6 +209,13 @@ struct Inner {
     /// Sender into the active pump task. `None` when no gateway is
     /// connected. Dropped to terminate the pump.
     submit:         Mutex<Option<mpsc::UnboundedSender<PumpJob>>>,
+    /// Optional observer fanned every successful + failed
+    /// `FetchResponse` so per-task capture (the dashboard's
+    /// `TaskLlmCapture` file ring) can record raw LLM turns
+    /// for operator-side debugging. `None` ⇒ no observer
+    /// installed (matches every pre-iter58 deployment); the
+    /// pump's hot path stays branch-light when absent.
+    observer:       Mutex<Option<Arc<dyn LlmTurnObserver>>>,
 }
 
 impl GatewayClient {
@@ -185,6 +246,19 @@ impl GatewayClient {
         self.inner.submit.lock().await.is_some()
     }
 
+    /// Install (or replace) the per-fetch observer fanned by the
+    /// pump on every `FetchResponse` that carried a `task_id` in
+    /// the corresponding `FetchRequest`. The observer is kept in
+    /// the `GatewayClient`'s shared inner so a fresh
+    /// `install_connection` (gateway respawn) inherits the
+    /// previously-installed observer transparently.
+    pub async fn install_observer(
+        &self,
+        observer: Arc<dyn LlmTurnObserver>,
+    ) {
+        *self.inner.observer.lock().await = Some(observer);
+    }
+
     /// Replace the active gateway connection. Spawns a fresh pump task
     /// around `stream`; tears down any pre-existing pump (whose mpsc
     /// will be dropped).
@@ -196,7 +270,8 @@ impl GatewayClient {
         let _previous = slot.take();
         *slot = Some(tx);
         drop(slot);
-        tokio::spawn(pump(stream, rx));
+        let observer = self.inner.observer.lock().await.clone();
+        tokio::spawn(pump(stream, rx, observer));
     }
 
     /// Disconnect the active gateway, if any. Used by the supervisor
@@ -228,6 +303,14 @@ impl GatewayClient {
         task_id:       Option<String>,
     ) -> Result<FetchResult, GatewayCallError> {
         let fetch_id = Uuid::new_v4();
+        // Clone the correlation ids BEFORE moving them into the
+        // payload so `Pending` can keep its own copy for the
+        // pump's response-side observer fan-out (the on-the-wire
+        // `FetchResponse` does NOT echo task_id; the inflight
+        // slot is the only place the kernel can correlate
+        // response → task).
+        let task_id_for_inflight    = task_id.clone();
+        let session_id_for_inflight = session_id;
         let payload  = GatewayMessage::FetchRequest {
             gateway_token,
             fetch_id,
@@ -251,7 +334,13 @@ impl GatewayClient {
             let Some(tx) = slot.as_ref() else {
                 return Err(GatewayCallError::Unavailable);
             };
-            tx.send(PumpJob::Fetch(Pending { fetch_id, payload, reply_tx }))
+            tx.send(PumpJob::Fetch(Pending {
+                fetch_id,
+                payload,
+                reply_tx,
+                task_id:    task_id_for_inflight,
+                session_id: session_id_for_inflight,
+            }))
                 .map_err(|_| GatewayCallError::Unavailable)?;
         }
 
@@ -320,9 +409,24 @@ impl GatewayClient {
 ///
 /// Either exit reason drops `inflight`, signalling Unavailable to every
 /// pending caller via the broken oneshot.
-async fn pump(mut stream: UnixStream, mut rx: mpsc::UnboundedReceiver<PumpJob>) {
-    let mut inflight: HashMap<Uuid, oneshot::Sender<Result<FetchResult, GatewayCallError>>> =
-        HashMap::new();
+async fn pump(
+    mut stream: UnixStream,
+    mut rx: mpsc::UnboundedReceiver<PumpJob>,
+    observer: Option<Arc<dyn LlmTurnObserver>>,
+) {
+    /// Per-fetch slot we keep across the request → response round trip.
+    /// Carries `(reply_tx, task_id, session_id)` so the response-side
+    /// handler can both unblock the dispatch caller AND fan a record
+    /// to the observer keyed by task. Pulling these into a small
+    /// struct (instead of a tuple) keeps the pump's bookkeeping
+    /// self-documenting.
+    struct InflightSlot {
+        reply_tx:   oneshot::Sender<Result<FetchResult, GatewayCallError>>,
+        task_id:    Option<String>,
+        session_id: Option<Uuid>,
+    }
+
+    let mut inflight: HashMap<Uuid, InflightSlot> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -339,7 +443,11 @@ async fn pump(mut stream: UnixStream, mut rx: mpsc::UnboundedReceiver<PumpJob>) 
                         // Track the in-flight fetch BEFORE writing — if
                         // the write succeeds and the gateway races us
                         // with a response, we MUST already be in the map.
-                        inflight.insert(pending.fetch_id, pending.reply_tx);
+                        inflight.insert(pending.fetch_id, InflightSlot {
+                            reply_tx:   pending.reply_tx,
+                            task_id:    pending.task_id,
+                            session_id: pending.session_id,
+                        });
                         if let Err(e) = write_frame(&mut stream, &pending.payload).await {
                             eprintln!(
                                 "{{\"level\":\"warn\",\"event\":\"gateway_write_failed\",\
@@ -347,8 +455,8 @@ async fn pump(mut stream: UnixStream, mut rx: mpsc::UnboundedReceiver<PumpJob>) 
                             );
                             // Notify just this caller and exit; subsequent
                             // sends would also fail.
-                            if let Some(reply) = inflight.remove(&pending.fetch_id) {
-                                let _ = reply.send(Err(GatewayCallError::Dropped));
+                            if let Some(slot) = inflight.remove(&pending.fetch_id) {
+                                let _ = slot.reply_tx.send(Err(GatewayCallError::Dropped));
                             }
                             break;
                         }
@@ -383,7 +491,7 @@ async fn pump(mut stream: UnixStream, mut rx: mpsc::UnboundedReceiver<PumpJob>) 
                     Ok(GatewayMessage::FetchResponse {
                         fetch_id, status_code, headers, body_bytes, latency_ms, error,
                     }) => {
-                        let Some(reply) = inflight.remove(&fetch_id) else {
+                        let Some(slot) = inflight.remove(&fetch_id) else {
                             // Response for an unknown fetch_id — log
                             // and drop. Could happen during a swap if
                             // the new gateway echoes a stale id.
@@ -393,13 +501,33 @@ async fn pump(mut stream: UnixStream, mut rx: mpsc::UnboundedReceiver<PumpJob>) 
                             );
                             continue;
                         };
+                        // Fan the response to the per-task observer
+                        // BEFORE signalling the dispatch caller so
+                        // the observer's append happens-before the
+                        // dispatch loop gets to react. The observer
+                        // contract requires non-blocking calls (the
+                        // canonical `TaskLlmCapture` impl uses a
+                        // `parking_lot::Mutex` + buffered file
+                        // write).
+                        if let (Some(obs), Some(tid)) = (observer.as_ref(), slot.task_id.as_deref()) {
+                            let sid = slot.session_id.map(|u| u.to_string());
+                            obs.observe(
+                                tid,
+                                sid.as_deref(),
+                                fetch_id,
+                                status_code,
+                                latency_ms,
+                                body_bytes.as_deref(),
+                                error.as_deref(),
+                            );
+                        }
                         let outcome = match error {
                             Some(s) => Err(GatewayCallError::GatewayError(s)),
                             None => Ok(FetchResult {
                                 fetch_id, status_code, headers, body_bytes, latency_ms,
                             }),
                         };
-                        let _ = reply.send(outcome);
+                        let _ = slot.reply_tx.send(outcome);
                     }
                     Ok(other) => {
                         eprintln!(
@@ -490,6 +618,105 @@ mod tests {
                 None,
             ).await
         })
+    }
+
+    /// Recording observer used by the
+    /// `pump_fans_observer_for_every_response_with_task_id` and
+    /// `pump_skips_observer_when_no_task_id` tests below.
+    /// Captures every `(task_id, fetch_id, status, body_str, error)`
+    /// tuple it sees so the test can assert on order + content.
+    #[derive(Default)]
+    struct RecordingObserver {
+        seen: parking_lot::Mutex<Vec<(String, Uuid, Option<u16>, String, Option<String>)>>,
+    }
+
+    impl LlmTurnObserver for RecordingObserver {
+        fn observe(
+            &self,
+            task_id:     &str,
+            _session_id: Option<&str>,
+            fetch_id:    Uuid,
+            status_code: Option<u16>,
+            _latency_ms: u32,
+            body_bytes:  Option<&[u8]>,
+            error:       Option<&str>,
+        ) {
+            let body = body_bytes
+                .map(|b| String::from_utf8_lossy(b).to_string())
+                .unwrap_or_default();
+            self.seen.lock().push((
+                task_id.to_owned(),
+                fetch_id,
+                status_code,
+                body,
+                error.map(str::to_owned),
+            ));
+        }
+    }
+
+    /// **`INV-DASHBOARD-TASK-LLM-CAPTURE-01` witness.** Every
+    /// successful gateway response with a `task_id` MUST flow
+    /// through the installed `LlmTurnObserver`.
+    #[tokio::test]
+    async fn pump_fans_observer_for_every_response_with_task_id() {
+        let (kernel_side, gateway_side) = UnixStream::pair().unwrap();
+        let _gw = spawn_echo_gateway(gateway_side).await;
+
+        let client = GatewayClient::new();
+        let obs = Arc::new(RecordingObserver::default());
+        client.install_observer(obs.clone()).await;
+        client.install_connection(kernel_side).await;
+
+        let result = client.fetch(
+            "tok".into(),
+            FetchKind::Inference,
+            "https://api.anthropic.com/v1/messages".into(),
+            "POST".into(),
+            vec![],
+            vec![],
+            5_000,
+            None,
+            Some("task-cap-1".into()),
+        ).await.expect("fetch must succeed");
+        assert_eq!(result.status_code, Some(200));
+
+        let seen = obs.seen.lock().clone();
+        assert_eq!(seen.len(), 1, "observer MUST receive exactly one record");
+        assert_eq!(seen[0].0, "task-cap-1");
+        assert_eq!(seen[0].2, Some(200));
+        assert_eq!(seen[0].3, "OK");
+        assert!(seen[0].4.is_none());
+    }
+
+    /// Fetches without a `task_id` (e.g. early gateway warm-up
+    /// pings, future kernel-internal probes) MUST NOT emit
+    /// observer records — there is no task to attribute them to,
+    /// and forwarding `None` would force every observer to
+    /// branch on it.
+    #[tokio::test]
+    async fn pump_skips_observer_when_no_task_id() {
+        let (kernel_side, gateway_side) = UnixStream::pair().unwrap();
+        let _gw = spawn_echo_gateway(gateway_side).await;
+
+        let client = GatewayClient::new();
+        let obs = Arc::new(RecordingObserver::default());
+        client.install_observer(obs.clone()).await;
+        client.install_connection(kernel_side).await;
+
+        let _ = client.fetch(
+            "tok".into(),
+            FetchKind::DataFetch,
+            "https://example.com".into(),
+            "GET".into(),
+            vec![],
+            vec![],
+            5_000,
+            None,
+            None, // task_id is None
+        ).await.expect("fetch must succeed");
+
+        assert!(obs.seen.lock().is_empty(),
+            "no task_id ⇒ no observer record");
     }
 
     #[tokio::test]

@@ -69,12 +69,14 @@ mod git;
 pub mod notification_filter;
 pub mod stream_capture;
 pub mod streaming_audit;
+pub mod task_llm_capture;
 
 pub use notification_filter::{
     notification_priority, notification_priority_for_kind_str, NotificationPriority,
 };
 pub use stream_capture::{CaptureConfig, SessionStreamCapture};
 pub use streaming_audit::StreamingAuditSink;
+pub use task_llm_capture::{LlmTurnRecord, TaskCaptureConfig, TaskLlmCapture};
 
 // ---------------------------------------------------------------------------
 // PolicyAdvancer — kernel-side write callback for the dashboard
@@ -255,6 +257,12 @@ pub struct KernelDashboardData {
     /// window so a script-against-the-endpoint attack can't
     /// silently page through the credential set.
     reveal_rate_limit: parking_lot::Mutex<RevealRateLimitState>,
+    /// Optional per-task raw-LLM-turn capture. When set, the
+    /// `GET /api/tasks/:task_id/llm-turns` route reads from the
+    /// task's bounded file ring; when `None` (older test
+    /// fixtures or read-only data dirs) the route returns
+    /// `404 NotFound` so the absent capability is observable.
+    task_llm_capture: Option<Arc<TaskLlmCapture>>,
 }
 
 /// Sliding-window rate-limit state for the credential reveal
@@ -314,6 +322,7 @@ impl KernelDashboardData {
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
+            task_llm_capture: None,
         })
     }
 
@@ -341,7 +350,19 @@ impl KernelDashboardData {
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
+            task_llm_capture: None,
         }
+    }
+
+    /// Wire the per-task raw-LLM-turn capture (`task_llm_capture.rs`).
+    /// Builder-style: returns `Self` so the kernel main can
+    /// chain the call onto `with_capture(...).with_task_llm_capture(...)`.
+    pub fn with_task_llm_capture(
+        mut self,
+        capture: Arc<TaskLlmCapture>,
+    ) -> Self {
+        self.task_llm_capture = Some(capture);
+        self
     }
 
     /// Wire the kernel's audit sink onto the data layer so
@@ -919,6 +940,27 @@ impl DashboardData for KernelDashboardData {
             .map_err(|e| ApiError::Internal { log_only: format!("tasks::by_id: {e}") })?
             .ok_or(ApiError::NotFound { kind: "task".into() })?;
         Ok(task_row_to_view(&conn, &row))
+    }
+
+    /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`. Tail the per-task
+    /// raw-LLM-turn ring and project each
+    /// [`crate::LlmTurnRecord`] to the dashboard's
+    /// [`raxis_dashboard::data::TaskLlmTurnView`]. Returns
+    /// `Err(ApiError::NotFound { kind: "task_llm_turns" })` when
+    /// the kernel did not wire a capture (read-only data dir /
+    /// EROFS / ENOSPC at boot) so the absent capability is
+    /// observable to the operator.
+    fn tail_task_llm_turns(
+        &self,
+        task_id: &str,
+        n: u32,
+    ) -> Result<Vec<raxis_dashboard::data::TaskLlmTurnView>, ApiError> {
+        let cap = self.task_llm_capture.as_ref().ok_or(
+            ApiError::NotFound { kind: "task_llm_turns".into() },
+        )?;
+        let n = (n.min(500)) as usize;
+        let records = cap.tail(task_id, n);
+        Ok(records.into_iter().map(record_to_view).collect())
     }
 
     fn list_sessions(
@@ -2767,6 +2809,28 @@ pub(crate) fn task_display_title(task_id: &str, initiative_id: &str) -> String {
     }
 }
 
+/// Project a kernel-glue [`crate::LlmTurnRecord`] to the
+/// dashboard-side [`raxis_dashboard::data::TaskLlmTurnView`].
+/// Field order MUST stay identity — the FE consumes the
+/// dashboard view shape and the JSON wire shape is pinned by
+/// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`.
+fn record_to_view(
+    r: crate::LlmTurnRecord,
+) -> raxis_dashboard::data::TaskLlmTurnView {
+    raxis_dashboard::data::TaskLlmTurnView {
+        at_ms:               r.at_ms,
+        task_id:             r.task_id,
+        session_id:          r.session_id,
+        fetch_id:            r.fetch_id,
+        status_code:         r.status_code,
+        latency_ms:          r.latency_ms,
+        body:                r.body,
+        body_truncated:      r.body_truncated,
+        original_body_bytes: r.original_body_bytes,
+        error:               r.error,
+    }
+}
+
 fn task_row_to_view(
     conn: &raxis_store::ro::RoConn,
     t: &raxis_store::views::tasks::TaskRow,
@@ -2943,19 +3007,22 @@ pub async fn start_dashboard_with_advancer(
     advancer: Arc<dyn PolicyAdvancer>,
     audit_sink: Arc<dyn raxis_audit_tools::AuditSink>,
     observability: Option<Arc<raxis_observability::ObservabilityHub>>,
+    task_llm_capture: Option<Arc<TaskLlmCapture>>,
 ) -> Result<ServerHandle, String> {
-    let data = Arc::new(
-        KernelDashboardData::with_capture(
-            store,
-            policy,
-            data_dir,
-            policy_path,
-            booted_at,
-            stream_capture,
-        )
-        .with_advancer(advancer)
-        .with_audit_sink(audit_sink),
-    );
+    let mut data = KernelDashboardData::with_capture(
+        store,
+        policy,
+        data_dir,
+        policy_path,
+        booted_at,
+        stream_capture,
+    )
+    .with_advancer(advancer)
+    .with_audit_sink(audit_sink);
+    if let Some(cap) = task_llm_capture {
+        data = data.with_task_llm_capture(cap);
+    }
+    let data = Arc::new(data);
     let server = DashboardServer::bind_with_observability(cfg, data, observability)
         .await
         .map_err(|e| format!("dashboard bind failed: {e}"))?;
