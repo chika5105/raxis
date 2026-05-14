@@ -803,7 +803,7 @@ fn run_phase_a(
     // already (intent_kind, session_agent_type)-authorized.
     match req.intent_kind {
         IntentKind::ReportFailure => {
-            return match handle_report_failure(req, task_state, &session_id, seq, store, policy) {
+            return match handle_report_failure(req, task_state, &session_id, seq, store, policy, ctx.as_ref()) {
                 Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
                 Err((code, st))  => PreGateOutcome::Reject(code, st),
             };
@@ -1935,10 +1935,11 @@ fn run_phase_c(
 fn handle_report_failure(
     req: IntentRequest,
     task_state: TaskState,
-    _session_id: &SessionId,
+    session_id: &SessionId,
     seq: u64,
     store: &Store,
     policy: &raxis_policy::PolicyBundle,
+    ctx: &HandlerContext,
 ) -> HandlerResult {
     // V2.5 — accept both `Admitted` and `Running` states.
     //
@@ -7023,9 +7024,10 @@ mod tests {
     /// failure is emitted.
     #[test]
     fn report_failure_from_admitted_transitions_to_failed() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         seed_task(&store, "t-fail-from-admitted");
         let policy = default_test_policy();
+        let ctx = build_failure_test_ctx(store.clone());
 
         assert_eq!(
             task_state_of(&store, "t-fail-from-admitted"),
@@ -7044,6 +7046,7 @@ mod tests {
             1,
             &store,
             &policy,
+            ctx.as_ref(),
         )
         .expect("ReportFailure from Admitted must be Accepted, not stranded");
 
@@ -7062,9 +7065,10 @@ mod tests {
     /// regress the existing edge.
     #[test]
     fn report_failure_from_running_transitions_to_failed() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         seed_running_task(&store, "t-fail-from-running");
         let policy = default_test_policy();
+        let ctx = build_failure_test_ctx(store.clone());
 
         let req = make_report_failure_request(
             "t-fail-from-running",
@@ -7077,6 +7081,7 @@ mod tests {
             1,
             &store,
             &policy,
+            ctx.as_ref(),
         )
         .expect("ReportFailure from Running must be Accepted (regression guard)");
 
@@ -7093,10 +7098,11 @@ mod tests {
     /// `FailTaskNotRunning`. The leniency is narrow.
     #[test]
     fn report_failure_from_completed_is_rejected() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         seed_running_task(&store, "t-completed");
         commit_task_completion("t-completed", "default", &[], None, &store).unwrap();
         let policy = default_test_policy();
+        let ctx = build_failure_test_ctx(store.clone());
 
         assert_eq!(
             task_state_of(&store, "t-completed"),
@@ -7111,6 +7117,7 @@ mod tests {
             1,
             &store,
             &policy,
+            ctx.as_ref(),
         )
         .expect_err("ReportFailure on Completed must reject");
 
@@ -7255,10 +7262,11 @@ mod tests {
     /// (c986e6d cascade).
     #[test]
     fn report_failure_bumps_crash_retry_count_by_one_from_running() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         seed_running_task(&store, "t-bump-once");
         seed_active_executor_activation(&store, "t-bump-once", /*crash*/ 0);
         let policy = default_test_policy();
+        let ctx = build_failure_test_ctx(store.clone());
 
         let req = make_report_failure_request(
             "t-bump-once",
@@ -7271,6 +7279,7 @@ mod tests {
             1,
             &store,
             &policy,
+            ctx.as_ref(),
         )
         .expect("ReportFailure must succeed");
 
@@ -7299,12 +7308,13 @@ mod tests {
     /// SQLite transaction so the bump and the cascade are atomic.
     #[test]
     fn report_failure_bumps_crash_retry_count_from_admitted() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         seed_task(&store, "t-bump-from-admitted");
         seed_active_executor_activation(
             &store, "t-bump-from-admitted", /*crash*/ 0,
         );
         let policy = default_test_policy();
+        let ctx = build_failure_test_ctx(store.clone());
 
         let req = make_report_failure_request(
             "t-bump-from-admitted",
@@ -7317,6 +7327,7 @@ mod tests {
             1,
             &store,
             &policy,
+            ctx.as_ref(),
         )
         .expect("ReportFailure from Admitted must succeed");
 
@@ -7355,8 +7366,9 @@ mod tests {
     /// This test pins the bump-half of the budget contract.
     #[test]
     fn three_consecutive_report_failures_reach_default_crash_ceiling() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let policy = default_test_policy();
+        let ctx = build_failure_test_ctx(store.clone());
         seed_task(&store, "t-crash-loop");
 
         for (attempt, prior_count) in [(1u64, 0i64), (2, 1), (3, 2)].iter() {
@@ -7372,6 +7384,7 @@ mod tests {
                 *attempt,
                 &store,
                 &policy,
+                ctx.as_ref(),
             ).unwrap();
             assert_eq!(
                 read_latest_crash_retry_count(&store, "t-crash-loop"),
@@ -7399,9 +7412,10 @@ mod tests {
     /// to stderr and lets the FSM transition through.
     #[test]
     fn report_failure_succeeds_when_no_active_activation_row() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         seed_running_task(&store, "t-no-activation");
         let policy = default_test_policy();
+        let ctx = build_failure_test_ctx(store.clone());
 
         let req = make_report_failure_request(
             "t-no-activation",
@@ -7414,6 +7428,7 @@ mod tests {
             1,
             &store,
             &policy,
+            ctx.as_ref(),
         )
         .expect("ReportFailure must succeed even without an activation row");
 
@@ -8081,6 +8096,17 @@ mod tests {
 
     fn dummy_session_id() -> SessionId {
         SessionId::parse("11111111-1111-1111-1111-111111111111").unwrap()
+    }
+
+    /// Minimal `HandlerContext` for tests of handlers that only touch
+    /// `ctx.audit` (e.g. `handle_report_failure`'s
+    /// `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit emit).
+    /// Wraps `build_review_test_ctx` so the failure tests do not have
+    /// to reproduce the placeholder spawn / credentials / isolation
+    /// wiring inline; we just discard the returned audit sink.
+    fn build_failure_test_ctx(store: Arc<Store>) -> Arc<HandlerContext> {
+        let (ctx, _sink) = build_review_test_ctx(store, default_test_policy());
+        ctx
     }
 
     /// Build a minimal `HandlerContext` over the supplied store + a
