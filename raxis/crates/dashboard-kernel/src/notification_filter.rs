@@ -241,10 +241,16 @@ pub fn notification_priority_for_kind_str(
 ///     [`tests::every_variant_has_a_decision`] doubles as a wire-
 ///     shape regression test against silent additions.
 #[allow(clippy::too_many_lines)]
-// Deprecated `OperatorViewed*` variants are still matched here so
-// already-persisted chains continue to classify deterministically.
-// Emit sites for these variants were retired in
-// `worker/audit-tightening`; see signal-vs-noise policy in
+// Deprecated `OperatorViewed*` variants (retired in
+// `worker/audit-tightening`) and `OperatorWorktreeAccessed` /
+// `OperatorDiffViewed` / `OperatorFileContentFetched` /
+// `OperatorAuditChainReverified` / `OperatorHealthQueried` /
+// `OperatorListedCredentials` / `OperatorListedSystemCredentials`
+// / `OperatorOpenedSessionStream` / `OperatorNotificationViewed`
+// (retired in `worker/audit-noise-sweep-r2`) are still matched
+// here so already-persisted chains continue to classify
+// deterministically — every retired variant routes to `None`
+// (audit-chain only). See signal-vs-noise policy in
 // `specs/v2/dashboard-operator-action-audit-coverage.md`.
 #[allow(deprecated)]
 pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriority> {
@@ -1012,6 +1018,7 @@ mod tests {
     /// was added without its string counterpart — which makes
     /// the read-side priority projection silently misclassify.
     #[test]
+    #[allow(deprecated)] // constructs round-2 retired variants on purpose
     fn typed_and_string_apis_agree_on_all_constructed_variants() {
         // Kitchen-sink list: every variant the unit tests
         // construct above PLUS one representative per priority

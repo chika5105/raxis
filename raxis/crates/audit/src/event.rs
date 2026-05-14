@@ -3302,6 +3302,17 @@ pub enum AuditEventKind {
     /// read of the kernel's git-worktree pool. Mirror events fire
     /// on the directory-listing endpoints (tree / log / status)
     /// that share the same path-safety surface.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired. The worktrees are operator-blessed and the read
+    /// does not affect kernel state; the kernel-side
+    /// `policy.allowed_worktree_roots()` containment still
+    /// rejects anything outside the blessed surface BEFORE the
+    /// data-layer call. See `specs/v2/dashboard-operator-action-
+    /// audit-coverage.md §signal-vs-noise`.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorWorktreeAccessed {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3316,8 +3327,16 @@ pub enum AuditEventKind {
     },
 
     /// Operator rendered a worktree diff (`GET /api/git/worktrees/:id/diff`).
-    /// Diffs leak file contents at scale, so the read is audited
-    /// even though no kernel state changed.
+    /// Diffs leak file contents at scale, so the read was once
+    /// audited even though no kernel state changed.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired. The diff is a read of operator-blessed source
+    /// material and emitting a per-click chain row only ever
+    /// proved "someone browsed".
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorDiffViewed {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3339,6 +3358,15 @@ pub enum AuditEventKind {
     /// record the operator-supplied path AFTER our canonicaliser
     /// rejects it, so leaking the rejected path is no worse than
     /// the operator-supplied query string).
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired. The route-layer + kernel-side path-safety
+    /// validation still rejects traversal / NUL / `.git` /
+    /// absolute paths BEFORE the data-layer call — none of that
+    /// containment depended on the audit emission.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorFileContentFetched {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3354,11 +3382,19 @@ pub enum AuditEventKind {
     },
 
     /// Operator triggered an audit-chain re-verify via
-    /// `GET /api/audit/chain-status?reverify=true`. Audited even
-    /// though the underlying walker is a pure read — the action
-    /// pins a worker thread on a chain walk, so the audit chain
-    /// also records who asked for it. Implicit (cache-hit) reads
-    /// are NOT audited; only the explicit re-verify path is.
+    /// `GET /api/audit/chain-status?reverify=true`. Pinned a
+    /// worker thread on a chain walk but did not mutate kernel
+    /// state.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired — emitting an audit row about verifying the audit
+    /// chain is recursive noise. The data-layer rate-limit
+    /// (≤ 1 reverify per ~30 s per operator) plus the cache-hit
+    /// short-circuit keep the walker from being abused without
+    /// the chain row.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorAuditChainReverified {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3373,9 +3409,15 @@ pub enum AuditEventKind {
     /// Operator opened a session detail / notification detail
     /// surface that returns a single per-resource view
     /// (`GET /api/notifications/:id`, dashboard's session-detail
-    /// endpoint, etc.). Recorded so a `[notification, viewer]`
-    /// audit trail exists even when the operator never marks
-    /// read or escalates.
+    /// endpoint, etc.). Reserved-but-never-emitted on the
+    /// dashboard side; this variant is included in the round-2
+    /// retirement so future contributors don't reintroduce
+    /// per-view emissions.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorNotificationViewed {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3386,11 +3428,18 @@ pub enum AuditEventKind {
     },
 
     /// Operator queried the subsystem-health snapshot via
-    /// `GET /api/health/subsystems`. The endpoint is a privileged
-    /// read of every kernel subsystem's last-known health
-    /// verdict; auditing surfaces "who polled the kernel for
-    /// dashboard health and when" without leaking the verdict
-    /// itself (which is in the response, not the audit row).
+    /// `GET /api/health/subsystems` (or the kernel-lifecycle
+    /// banner poll). The endpoint is a privileged read of every
+    /// kernel subsystem's last-known health verdict; it does
+    /// not affect kernel state.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired — health pings are dashboard heartbeat telemetry
+    /// (Prom / OTel records them at a fraction of the chain's
+    /// per-row cost), not forensic events.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorHealthQueried {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3414,10 +3463,17 @@ pub enum AuditEventKind {
     /// Operator listed the credentials bound to one initiative via
     /// `GET /api/initiatives/:id/credentials`. The response carries
     /// only metadata (name, proxy type, mount target, file path,
-    /// byte size, sha256 prefix) — never plaintext. `count` records
-    /// how many credentials were surfaced so the audit chain can
-    /// answer "did the operator see something they shouldn't have"
-    /// without re-querying the kernel state.
+    /// byte size, sha256 prefix) — never plaintext.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired — the reveal endpoint's
+    /// `OperatorRevealedCredential` event records the security-
+    /// relevant moment, and the listing endpoint only ever
+    /// surfaced metadata an admin already had role-gated access
+    /// to enumerate.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorListedCredentials {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3457,9 +3513,17 @@ pub enum AuditEventKind {
 
     /// Operator listed system-wide credentials (provider keys, etc.)
     /// via `GET /api/system/credentials`. Admin-only; a `read`-role
-    /// caller never reaches this audit because the route returns 403
-    /// before the data layer is invoked. `count` mirrors
-    /// `OperatorListedCredentials.count`.
+    /// caller never reaches the data layer because the route returns
+    /// 403 before any kernel call.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired for the same reason as
+    /// `OperatorListedCredentials` — the reveal-side
+    /// `OperatorRevealedSystemCredential` event records the
+    /// security-relevant moment.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorListedSystemCredentials {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3628,9 +3692,19 @@ pub enum AuditEventKind {
     },
 
     /// Operator opened a session SSE stream via
-    /// `GET /api/sessions/:id/stream`. Every SSE attach audits once;
-    /// the keepalive frames the server emits every 15s do NOT audit
-    /// (see `dashboard-operator-action-audit-coverage.md §exclusions`).
+    /// `GET /api/sessions/:id/stream`. Each SSE attach used to
+    /// emit one row; the keepalive frames the server emits
+    /// every 15s never did.
+    ///
+    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// on the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired. The session is already running before the attach
+    /// and the operator's window into its capture stream does
+    /// not affect kernel state — the chain row only ever
+    /// recorded "someone looked", which the audit chain itself
+    /// records via the events the stream mirrors.
+    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
     OperatorOpenedSessionStream {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
