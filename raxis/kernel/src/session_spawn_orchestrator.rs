@@ -1189,6 +1189,27 @@ pub fn spawn_planner_dispatcher(
     let session_id = handle.session_id.clone();
     tokio::spawn(async move {
         let dispatch_result = crate::ipc::server::drive_planner_stream(stream, Arc::clone(&ctx)).await;
+        // INV-FAILURE-REASON-MANDATORY-01: capture the planner-side
+        // dispatch error string (if any) so the Mode-B premature-exit
+        // synthesis below can inline it as the operator-facing
+        // failure_reason instead of the generic
+        // "MaxTurnsExceeded/TokensExceeded/DispatchIdle/process death"
+        // umbrella. The actual error from `drive_planner_stream` is
+        // the closest the kernel ever gets to the planner's view of
+        // why the VM exited (planner-boot-error string, transport
+        // EOF reason, codec failure, etc.). Truncated to keep the
+        // failure_reason within `MAX_FAILURE_REASON_LEN`.
+        let dispatch_err_for_post_exit: Option<String> = dispatch_result
+            .as_ref()
+            .err()
+            .map(|e| {
+                let s = e.to_string();
+                if s.len() > 1024 {
+                    format!("{}…(truncated)", &s[..1024])
+                } else {
+                    s
+                }
+            });
         if let Err(e) = &dispatch_result {
             // Per the planner-dispatch logging convention, the
             // structured log keys on `step:"planner-dispatch"` so a
@@ -1402,6 +1423,7 @@ pub fn spawn_planner_dispatcher(
         // `SessionVmExited` from the substrate.
         let store_for_post_exit = Arc::clone(&ctx.store);
         let session_for_post_exit = session_id.clone();
+        let dispatch_err_for_synth = dispatch_err_for_post_exit.clone();
         let preflight = tokio::task::spawn_blocking(
             move || -> Option<PostExitAction> {
                 use raxis_store::Table;
@@ -1669,14 +1691,31 @@ pub fn spawn_planner_dispatcher(
                     // Continue: the FSM transition is the structural
                     // unstall; a missed counter increment is forensic.
                 }
-                let justification = format!(
-                    "session_spawn_orchestrator: {role} VM exited without \
-                     submitting a terminal intent (MaxTurnsExceeded / \
-                     TokensExceeded / DispatchIdle / process death). \
-                     Kernel synthesised Running → Failed so the orchestrator \
-                     can decide retry_subtask vs. settle Blocked.",
-                    role = if is_executor { "executor" } else { "reviewer" },
-                );
+                // INV-FAILURE-REASON-MANDATORY-01: prefer the
+                // dispatch-side error string captured above (the
+                // planner's own view of why it exited) so the
+                // dashboard's per-task FailureReasonPanel surfaces
+                // the actual cause (planner-boot-error, transport
+                // EOF reason, codec failure, etc.) rather than the
+                // generic umbrella message. Falls back to the
+                // umbrella when the dispatch error is unavailable
+                // (clean EOF after a planner-side reboot powers off
+                // the VM).
+                let role_str = if is_executor { "executor" } else { "reviewer" };
+                let justification = match dispatch_err_for_synth.as_deref() {
+                    Some(err) => format!(
+                        "session_spawn_orchestrator: {role_str} VM exited \
+                         without submitting a terminal intent. \
+                         planner_dispatch error: {err}",
+                    ),
+                    None => format!(
+                        "session_spawn_orchestrator: {role_str} VM exited \
+                         without submitting a terminal intent (MaxTurnsExceeded \
+                         / TokensExceeded / DispatchIdle / process death). \
+                         Kernel synthesised Running → Failed so the orchestrator \
+                         can decide retry_subtask vs. settle Blocked.",
+                    ),
+                };
                 if let Err(e) = transition_task_in_tx(
                     &tx,
                     &task_id,
@@ -2052,6 +2091,39 @@ pub async fn respawn_orchestrator_for_initiative(
                     init = raxis_store::Table::Initiatives.as_str(),
                 ),
                 rusqlite::params![&init_for_ceiling],
+            )?;
+
+            // INV-FAILURE-REASON-MANDATORY-01: cascade non-terminal
+            // tasks under this initiative to `Failed` with an
+            // explicit `block_reason`. Without this cascade the
+            // initiative shows `Failed` on the dashboard while the
+            // tasks under it remain stranded in `Admitted` /
+            // `Running` / `GatesPending` / `BlockedRecoveryPending`
+            // — the operator sees a Failed initiative whose tasks
+            // appear in-flight and whose per-task FailureReasonPanel
+            // is empty (the iter54 visibility bug class). The raw
+            // UPDATE here bypasses `transition_task_in_tx` because
+            // the ceiling-exceeded mass-failure pathology can fan
+            // over many tasks and the per-task FSM walk would
+            // multiply the SQLite work; the audit anchor for the
+            // mass cascade is the single `OrchestratorRespawnCeilingExceeded`
+            // event the caller emits post-commit, keyed on
+            // `initiative_id`, which the dashboard joins for the
+            // initiative-wide explanation. The `block_reason` text
+            // is the operator-facing per-task surface.
+            let cascade_reason =
+                "parent initiative failed: orchestrator no-progress respawn ceiling exceeded \
+                 (INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01)";
+            tx.execute(
+                &format!(
+                    "UPDATE {tasks}
+                        SET state        = 'Failed',
+                            block_reason = ?2
+                      WHERE initiative_id = ?1
+                        AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')",
+                    tasks = raxis_store::Table::Tasks.as_str(),
+                ),
+                rusqlite::params![&init_for_ceiling, cascade_reason],
             )?;
         }
         tx.commit()?;

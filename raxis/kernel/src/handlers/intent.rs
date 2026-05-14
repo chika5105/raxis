@@ -1525,6 +1525,56 @@ fn run_phase_c(
                      \"target_ref\":\"{initiative_target_ref}\",\
                      \"category\":\"{category}\",\"reason\":\"{reason}\"}}",
                 );
+                // INV-FAILURE-REASON-MANDATORY-01: surface the merge
+                // failure as a real `block_reason` on the synthetic
+                // coordinator task (`task_id == initiative_id`) and
+                // cascade the parent initiative to `Failed` so the
+                // dashboard's failure-surface attributes the cause
+                // instead of leaving them stranded in `Running` /
+                // `Executing`. Best-effort raw UPDATE: a SQL failure
+                // here is logged and ignored — the merge already
+                // didn't succeed and re-trying boot recovery is the
+                // operator's recourse.
+                let merge_failure_reason = format!(
+                    "IntegrationMerge fast-forward failed ({category}): {reason}",
+                );
+                {
+                    let conn = store.lock_sync();
+                    if let Err(e) = conn.execute(
+                        &format!(
+                            "UPDATE {tasks}
+                                SET state        = 'Failed',
+                                    block_reason = ?2
+                              WHERE task_id = ?1
+                                AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')",
+                            tasks = raxis_store::Table::Tasks.as_str(),
+                        ),
+                        rusqlite::params![&task_id_owned, &merge_failure_reason],
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeFailedTaskCascadeSqlFailed\",\
+                             \"initiative_id\":\"{initiative_id_owned}\",\"task_id\":\"{task_id_owned}\",\
+                             \"diagnostic\":\"{e}\"}}",
+                        );
+                    }
+                    if let Err(e) = conn.execute(
+                        &format!(
+                            "UPDATE {init}
+                                SET state        = 'Failed',
+                                    completed_at = strftime('%s','now')
+                              WHERE initiative_id = ?1
+                                AND state IN ('Executing','Approved','PendingApproval','AwaitingApproval')",
+                            init = raxis_store::Table::Initiatives.as_str(),
+                        ),
+                        rusqlite::params![&initiative_id_owned],
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeFailedInitiativeCascadeSqlFailed\",\
+                             \"initiative_id\":\"{initiative_id_owned}\",\
+                             \"diagnostic\":\"{e}\"}}",
+                        );
+                    }
+                }
                 if let Err(e) = ctx.audit.emit(
                     raxis_audit_tools::AuditEventKind::MergeFastForwardFailed {
                         initiative_id: initiative_id_owned.clone(),
@@ -4889,9 +4939,34 @@ async fn handle_activate_sub_task(
                 task_id_owned, lookup.new_session_id, lookup.initiative_id,
                 lookup.agent_kind, e,
             );
-            // Best-effort: revoke the freshly-minted session row.
+            // INV-FAILURE-REASON-MANDATORY-01: surface the
+            // substrate spawn error as a real `block_reason` on
+            // the task row so the dashboard's per-task
+            // FailureReasonPanel attributes the cause (e.g.
+            // ImageVerificationFailed / SubstrateBootError /
+            // VsockBindFailed) instead of leaving the operator
+            // to guess. The task FSM stays in its current state
+            // — the orchestrator's transient-retry loop is what
+            // owns the eventual terminal transition; this write
+            // is purely the operator-facing reason and does not
+            // affect the FSM.
+            let spawn_err_truncated = {
+                let s = e.to_string();
+                if s.len() > 1024 {
+                    format!("{}…(truncated)", &s[..1024])
+                } else {
+                    s
+                }
+            };
+            let spawn_block_reason = format!(
+                "ActivateSubTask substrate spawn failed (agent_kind={:?}): {}",
+                lookup.agent_kind, spawn_err_truncated,
+            );
+            // Best-effort: revoke the freshly-minted session row
+            // AND set the task's block_reason in one round-trip.
             let store_arc = Arc::clone(&ctx.store);
             let revoke_session_id = lookup.new_session_id.clone();
+            let task_id_for_block = task_id_owned.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let conn = store_arc.lock_sync();
                 let _ = conn.execute(
@@ -4900,6 +4975,13 @@ async fn handle_activate_sub_task(
                            WHERE session_id = ?2"
                     ),
                     rusqlite::params![unix_now_secs(), revoke_session_id],
+                );
+                let _ = conn.execute(
+                    &format!(
+                        "UPDATE {TASKS} SET block_reason = ?2
+                           WHERE task_id = ?1"
+                    ),
+                    rusqlite::params![task_id_for_block, spawn_block_reason],
                 );
             }).await;
             return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));

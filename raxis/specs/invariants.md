@@ -5954,6 +5954,30 @@ this invariant.
   (debug_assert! defense-in-depth)
 - `kernel/src/recovery.rs::reconcile_tasks` (bulk-sweep
   block_reason population)
+- `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`
+  (Mode-B premature-exit synthesis — captures the
+  `drive_planner_stream` dispatch error as the operator-facing
+  reason; falls back to the umbrella `MaxTurnsExceeded /
+  TokensExceeded / DispatchIdle / process death` when the
+  dispatch channel returned `Ok(())` after a clean planner-side
+  reboot)
+- `kernel/src/session_spawn_orchestrator.rs` ceiling cascade
+  (`OrchestratorRespawnCeilingExceeded` arm — non-terminal
+  tasks under the ceiling-exceeded initiative get
+  `block_reason = "parent initiative failed: orchestrator
+  no-progress respawn ceiling exceeded
+  (INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01)"`)
+- `kernel/src/handlers/intent.rs::handle_inner` IntegrationMerge
+  fast-forward failure cascade (`MergeFastForwardFailed` arm —
+  synthetic coordinator task + parent initiative both flip to
+  `Failed` with `block_reason = "IntegrationMerge fast-forward
+  failed (<category>): <reason>"`)
+- `kernel/src/handlers/intent.rs::activate_subtask_substrate_spawn`
+  (`ActivateSubTaskSpawnFailed` arm — task `block_reason`
+  captures the substrate `SpawnError` text so the dashboard's
+  per-task FailureReasonPanel attributes the substrate-level
+  cause; FSM state untouched so the orchestrator's
+  transient-retry loop still owns terminality)
 - `kernel/tests/failure_reason_invariant_witness.rs`
   (cross-crate witness — newtype contract + audit-event variant
   shapes + SQL projection)
