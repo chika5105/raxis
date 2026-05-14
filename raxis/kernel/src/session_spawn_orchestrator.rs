@@ -1290,7 +1290,20 @@ pub fn spawn_planner_dispatcher(
     };
     let session_id = handle.session_id.clone();
     tokio::spawn(async move {
-        let dispatch_result = crate::ipc::server::drive_planner_stream(stream, Arc::clone(&ctx)).await;
+        // INV-FAILURE-REASON-CONCRETE-01 (P2 fallback): pass
+        // `Some(session_id)` so the dispatch loop records every
+        // successful `IntentRequest` round-trip into
+        // `ctx.session_activity` keyed by this session. The
+        // Mode-B post-exit synthesiser below `take`s the entry
+        // when neither a `PlannerExitNotice` (P3) nor a
+        // dispatch-stream error (P1) is available, producing a
+        // CONCRETE breadcrumb-derived reason instead of the
+        // generic "no terminal intent" fallback.
+        let dispatch_result = crate::ipc::server::drive_planner_stream(
+            stream,
+            Arc::clone(&ctx),
+            Some(session_id.to_string()),
+        ).await;
         // INV-FAILURE-REASON-MANDATORY-01 + INV-FAILURE-REASON-CONCRETE-01:
         // capture two distinct signals from `drive_planner_stream` so
         // the Mode-B premature-exit synthesis below can produce a
@@ -1553,6 +1566,14 @@ pub fn spawn_planner_dispatcher(
         let session_for_post_exit = session_id.clone();
         let dispatch_err_for_synth = dispatch_err_for_post_exit.clone();
         let exit_notice_for_synth  = exit_notice_for_post_exit.clone();
+        // INV-FAILURE-REASON-CONCRETE-01 (P2 ladder slot): clone
+        // the activity tracker handle so the spawn_blocking body
+        // can `take` the per-session breadcrumb when neither a
+        // structured `PlannerExitNotice` (P3) nor a dispatch
+        // stream error (P1) is available. The `take` consumes
+        // the entry so a re-spawned session under the same id
+        // starts with a clean slate.
+        let session_activity_for_post_exit = Arc::clone(&ctx.session_activity);
         let preflight = tokio::task::spawn_blocking(
             move || -> Option<PostExitAction> {
                 use raxis_store::Table;
@@ -1858,10 +1879,18 @@ pub fn spawn_planner_dispatcher(
                 //      so the operator does not have to infer it
                 //      from the absence of forensic context.
                 let role_str = if is_executor { "executor" } else { "reviewer" };
+                // INV-FAILURE-REASON-CONCRETE-01 P2 fallback:
+                // consume the activity breadcrumb (if any) so
+                // the synthesiser can name the last-seen intent
+                // when neither a `PlannerExitNotice` (P3) nor a
+                // dispatch-stream error (P1) is available.
+                let last_activity = session_activity_for_post_exit
+                    .take(&session_for_post_exit);
                 let justification = build_worker_post_exit_failure_reason(
                     role_str,
                     exit_notice_for_synth.as_ref(),
                     dispatch_err_for_synth.as_deref(),
+                    last_activity.as_ref(),
                 );
                 if let Err(e) = transition_task_in_tx(
                     &tx,
