@@ -452,48 +452,174 @@ for the defect; do NOT modify any other file.
 """
 
 
+# ── Lint-runner Executor (captures check.sh output) ─────
+[[tasks]]
+task_id            = "lint-runner"
+name               = "Capture scripts/check.sh output for the Reviewer panel"
+session_agent_type = "Executor"
+predecessors       = ["lint-defect"]
+path_allowlist     = ["out/lint/", "rust-crate/", "ts-pkg/", "py-pkg/"]
+description = """
+You are the RAXIS lint-runner executor. The diff from
+`lint-defect` is already committed on the working branch; your
+job is to surface its strict-lint verdict to the downstream
+Reviewer panel.
+
+The Reviewer VM image (`raxis-reviewer-core`) is structurally
+forbidden from executing scripts: it ships ONLY `raxis-planner`
+and `ripgrep` per `INV-PLANNER-HARNESS-02` (no shell, no
+language runtimes, no `git`, no network utilities). The
+Reviewers therefore cannot run `scripts/check.sh` themselves —
+they read its captured output from a committed artifact you
+produce here.
+
+## Round 1 — capture
+
+1. Create the capture directory: `mkdir -p out/lint`.
+2. Run `scripts/check.sh` and capture stdout + stderr + the
+   exit code in a single file:
+   ```bash
+   {
+     bash scripts/check.sh 2>&1
+     echo "raxis_check_sh_exit_code=$?"
+   } > out/lint/check-output.txt
+   ```
+   The trailing `raxis_check_sh_exit_code=<n>` line is the
+   wire signal the Reviewers key on; do NOT omit it. Use
+   `bash scripts/check.sh` (not `./scripts/check.sh`) so the
+   script's `set -euo pipefail` does not abort the wrapping
+   shell when `check.sh` exits non-zero (which it WILL — the
+   `lint-defect` task by construction introduced one real lint
+   defect).
+3. `git add out/lint/check-output.txt`
+4. `git commit -m "chore: capture check.sh output for reviewer panel"`
+5. Call `task_complete` with a one-line summary that includes
+   the captured exit code.
+
+## Round 2+ — substantive critique fix-up
+
+If your prior round was rejected by the Reviewer panel, the
+critique appended to your prompt names a specific defective
+file (one of `rust-crate/src/greeting.rs`,
+`ts-pkg/src/greet.ts`, `py-pkg/src/sample_py/greet.py`). Your
+`path_allowlist` includes the three language source trees
+precisely so you can land the fix on this round:
+
+1. Edit the defective file to remove the lint diagnostic the
+   critique names (e.g. drop a `useless_conversion`, restore
+   `const`-over-`let`, remove an unused import).
+2. Re-run the capture step above. `out/lint/check-output.txt`
+   should now end with `raxis_check_sh_exit_code=0`.
+3. `git add` the fixed file AND `out/lint/check-output.txt`.
+4. `git commit -m "fix: <one-line lint repair> + refresh
+   check-output capture"` (your commit message MAY name the
+   defect on the fix round; the lint-defect's "no suggestive
+   commit message" constraint applies only to its own commit).
+5. `task_complete`.
+
+## Constraints
+
+* The capture MUST live at the exact path
+  `out/lint/check-output.txt`. The Reviewer prompts hard-code
+  that path; any other location is a witness failure.
+* Do NOT modify `scripts/check.sh` itself, or any file outside
+  the four allowed roots. Writes to `scripts/`, `fixtures/`,
+  `.gitignore`, `README.md`, etc. trip
+  `FailPathPolicyViolation` at `task_complete`.
+* Do NOT swallow the failing exit code on Round 1. The whole
+  point of the round is to surface the lint failure honestly
+  — wrapping with `|| true` or stripping the exit-code tail
+  defeats the Reviewer's substantive check.
+"""
+
+
+
 # ── Lint-defect substantive Reviewers (P3-7) ────────────
 [[tasks]]
 task_id            = "review-lint-defect-A"
 name               = "Reviewer A — substantive review of lint-defect diff"
 session_agent_type = "Reviewer"
-predecessors       = ["lint-defect"]
+predecessors       = ["lint-runner"]
 description = """
-You are the FIRST Reviewer for the `lint-defect` Executor's diff
-on the rich-multilang-001 repo. The repo configures strict
-language-specific linters:
-  * Rust:   `cargo clippy -- -D warnings`
-  * TS:     `npx eslint --max-warnings 0`
-  * Python: `python -m ruff check`
+You are the FIRST Reviewer in a panel reviewing the rich-
+multilang-001 lint-defect pipeline. The upstream `lint-defect`
+Executor introduced exactly one real lint defect in one of:
+  * `rust-crate/src/greeting.rs`  (clippy: `cargo clippy -- -D warnings`)
+  * `ts-pkg/src/greet.ts`         (eslint: `npx eslint --max-warnings 0`)
+  * `py-pkg/src/sample_py/greet.py` (ruff: `python -m ruff check`)
 A single `scripts/check.sh` runs all three.
 
-Your job is mechanical: run `scripts/check.sh`, observe the output,
-and rule on the diff. If `check.sh` exits non-zero, submit
-`SubmitReview` with `approved = false` and a critique whose text
-NAMES the file that produced the failing lint diagnostic (one of
-`rust-crate/src/greeting.rs`, `ts-pkg/src/greet.ts`,
-`py-pkg/src/sample_py/greet.py`). If `check.sh` exits zero,
-approve.
+The `lint-runner` Executor has ALREADY committed
+`out/lint/check-output.txt` containing the captured stdout +
+stderr of `scripts/check.sh`, terminated by a sentinel line
+`raxis_check_sh_exit_code=<n>` carrying the script's exit code.
 
-Do NOT invent defects, do NOT reject for vibes, do NOT cite a
-file that did not appear in the linter output. The witness
-verifies the critique mentions one of the three filenames
-verbatim.
+Your job is mechanical: `read_file` the captured artifact,
+observe the exit code, and rule on the diff. If the captured
+`raxis_check_sh_exit_code` is non-zero, submit `SubmitReview`
+with `approved = false` and a critique whose text NAMES the
+file that produced the failing lint diagnostic (one of the
+three listed above — the captured output names it verbatim).
+If the captured exit code is zero, submit `SubmitReview` with
+`approved = true`.
+
+You MUST NOT attempt to execute `scripts/check.sh` yourself —
+your VM image (`raxis-reviewer-core`) ships ONLY
+`raxis-planner` and `ripgrep` per `INV-PLANNER-HARNESS-02`;
+there is no shell, no `cargo`, no `npx`, no `python`. Use
+`read_file` for `out/lint/check-output.txt` and any diff hunk
+you want to confirm, and `grep_search` to locate the failing
+file's mention inside the captured output.
+
+As Reviewer A you take a STRICT stance on lint failures: any
+non-zero exit code in the captured artifact is a hard reject
+naming the specific failing file. Do NOT invent defects, do
+NOT reject for vibes, do NOT cite a file that did not appear
+in the captured output. The witness verifies the critique
+mentions one of the three filenames verbatim.
 """
 
 [[tasks]]
 task_id            = "review-lint-defect-B"
 name               = "Reviewer B — substantive review of lint-defect diff"
 session_agent_type = "Reviewer"
-predecessors       = ["lint-defect"]
+predecessors       = ["lint-runner"]
 description = """
-You are the SECOND Reviewer for the `lint-defect` Executor's
-diff. Same protocol as Reviewer A — run `scripts/check.sh` and
-rule mechanically. The aggregator will only mark the executor
-`AllPassed` after both Reviewers approve, which requires the
-Executor to first land a corrected diff in response to the
-Round-1 rejection.
+You are the SECOND Reviewer in a panel reviewing the rich-
+multilang-001 lint-defect pipeline. The `lint-runner` Executor
+has committed `out/lint/check-output.txt` (stdout + stderr +
+`raxis_check_sh_exit_code=<n>` sentinel) capturing the strict
+output of `scripts/check.sh`.
+
+Your job is mechanical: `read_file` the captured artifact,
+observe the exit code, and rule on the diff. If
+`raxis_check_sh_exit_code` is non-zero, submit `SubmitReview`
+with `approved = false` and a critique whose text NAMES the
+specific failing file (one of `rust-crate/src/greeting.rs`,
+`ts-pkg/src/greet.ts`, `py-pkg/src/sample_py/greet.py`). If the
+exit code is zero, approve.
+
+You MUST NOT attempt to execute `scripts/check.sh` yourself —
+your VM image (`raxis-reviewer-core`) has no shell, no
+language runtimes, and no `git`. Use `read_file` for the
+captured artifact and `grep_search` / `read_file` for the diff
+itself.
+
+Reviewer B is the SLIGHTLY-LENIENT counterweight to Reviewer A:
+cosmetic-only diagnostics (e.g. a stray trailing whitespace
+that does NOT trip the strict-warnings gate at `cargo clippy
+-- -D warnings`, or a `prettier` whitespace nit on a file
+that does NOT also trigger an eslint diagnostic) are NOT by
+themselves a reject. The substantive line is "did the captured
+exit_code surface a real linter ERROR against a target file".
+If yes, reject and name the file; if no, approve. The
+aggregator marks the upstream Executor pipeline `AllPassed`
+only when BOTH Reviewers approve, which on the substantive
+path requires `lint-runner` to land a corrected diff in
+response to the Round-1 rejection.
 """
+
+
 
 # ── Positive path-allowlist Executor (P3-4) ─────────────
 [[tasks]]

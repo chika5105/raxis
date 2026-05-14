@@ -16,11 +16,26 @@
 //! ([`super::plan_realistic::TASK_LINT_DEFECT`]) with two
 //! reviewer tasks
 //! (`review-lint-defect-A`, `review-lint-defect-B`) configured
-//! with plain prompts (no directive). The reviewers must detect
-//! the executor's deliberately-introduced lint defect against
-//! `scripts/check.sh`, reject with a critique that names the
-//! defective file, and approve on the round following the
-//! executor's re-spawn.
+//! with plain prompts (no directive). Because the Reviewer VM
+//! image (`raxis-reviewer-core`) is barred from executing
+//! `scripts/check.sh` itself (no shell, no language runtimes —
+//! `INV-PLANNER-HARNESS-02`; `specs/v2/planner-harness.md
+//! §4.5`), a small in-image Executor task
+//! [`super::plan_realistic::TASK_LINT_RUNNER`] sits between the
+//! diff-author Executor and the two Reviewers: it runs
+//! `scripts/check.sh`, commits the captured stdout + stderr +
+//! exit-code at `out/lint/check-output.txt`, and that committed
+//! artifact is what the Reviewers `read_file` to derive their
+//! verdict. The reviewers must detect the executor's
+//! deliberately-introduced lint defect by reading the captured
+//! output, reject with a critique that names the defective
+//! file, and approve on the round following the lint-runner
+//! Executor's re-spawn (the kernel's
+//! `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` anchor fires
+//! against the Reviewer's *immediate* Executor predecessor —
+//! `lint-runner`, not `lint-defect` — and `lint-runner`'s
+//! `path_allowlist` covers the three language source trees so
+//! the Round-2 path can land the corrective edit there).
 //!
 //! ## What [`ReviewerSubstantiveDisagreementWitness`] asserts
 //!
@@ -150,10 +165,23 @@ impl ReviewerSubstantiveReport {
 }
 
 impl ReviewerSubstantiveDisagreementWitness {
+    /// The Reviewer's immediate Executor predecessor is
+    /// `lint-runner` (the in-image execution stage for
+    /// `scripts/check.sh`; see [`super::plan_realistic::TASK_LINT_RUNNER`]
+    /// and the module docs above for the
+    /// `INV-PLANNER-HARNESS-02` rationale). The kernel's
+    /// `ExecutorRespawnFromReviewRejection` anchor and
+    /// `ReviewAggregationCompleted` aggregator both key on the
+    /// Reviewer's immediate predecessor, so the witness's
+    /// `executor_task_id` mirrors that: a substantive critique
+    /// against `lint-runner`'s commit (which surfaces the
+    /// upstream `lint-defect` defect via the captured
+    /// `out/lint/check-output.txt`) drives the chain shape this
+    /// witness asserts.
     #[must_use]
     pub fn for_realistic_plan(sqlite_path: &Path) -> Self {
         Self {
-            executor_task_id:   super::plan_realistic::TASK_LINT_DEFECT
+            executor_task_id:   super::plan_realistic::TASK_LINT_RUNNER
                                     .to_owned(),
             reviewer_a_task_id: TASK_REVIEW_LINT_A.to_owned(),
             reviewer_b_task_id: TASK_REVIEW_LINT_B.to_owned(),

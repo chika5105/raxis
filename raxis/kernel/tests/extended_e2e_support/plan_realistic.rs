@@ -49,6 +49,27 @@ pub const TASK_XFILE_REFACTOR: &str = "xfile-refactor";
 /// is the executor's) that the reviewer must catch.
 pub const TASK_LINT_DEFECT: &str = "lint-defect";
 
+/// Lint-runner executor task id — captures `scripts/check.sh`
+/// stdout/stderr/exit_code into `out/lint/check-output.txt` and
+/// commits it for the downstream Reviewer panel. The Reviewer's
+/// `raxis-reviewer-core` VM image ships only `raxis-planner` and
+/// `ripgrep` (`INV-PLANNER-HARNESS-02`, `planner-harness.md
+/// §4.5`); execution of any script — `scripts/check.sh` included
+/// — is structurally impossible from inside the Reviewer harness.
+/// This task is the in-image execution stage so the Reviewer's
+/// rule-on-the-diff step can stay read-only.
+///
+/// The Reviewer also gets respawned via this task on rejection
+/// (the kernel's `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
+/// anchor lands on the reviewer's immediate Executor predecessor
+/// — which is `lint-runner`, not `lint-defect`). The task's
+/// `path_allowlist` therefore covers BOTH `out/lint/` (the
+/// capture file) AND the three language source trees, so the
+/// Round-2 re-spawn driven by a substantive Reviewer critique can
+/// land a corrected diff. See [`super::reviewer_substantive_disagreement`]
+/// for the witness shape the round-2 path satisfies.
+pub const TASK_LINT_RUNNER: &str = "lint-runner";
+
 /// Positive path-allowlist executor task id (P3-4) — the
 /// executor legitimately writes to `target/codegen/` under an
 /// allowlist that admits exactly that path. Witness asserts both
@@ -213,6 +234,8 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(lint);
     s.push_str("\n\"\"\"\n");
     s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_LINT_RUNNER);
+    s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_LINT_REVIEWERS);
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD);
@@ -295,48 +318,197 @@ path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 "#;
 
+// ── Lint-runner Executor (captures scripts/check.sh output) ──
+//
+// Inserted between `lint-defect` and the two substantive
+// Reviewers so the Reviewer panel reads a captured artifact
+// rather than attempting in-VM script execution: the Reviewer
+// VM image (`raxis-reviewer-core`) ships only `raxis-planner`
+// and `ripgrep` per `INV-PLANNER-HARNESS-02`
+// (`specs/v2/planner-harness.md §4.5`) — no `bash`, no
+// `cargo`, no `npx`, no `python`. Telling the Reviewer to
+// "run scripts/check.sh" instructs a behavior the architecture
+// forbids; the captured-output handoff is the only coherent
+// alternative.
+//
+// `path_allowlist` admits BOTH the capture path (`out/lint/`)
+// AND the three language source trees. The defect-bearing diff
+// lives upstream on `lint-defect`'s commit; on a Reviewer
+// rejection the kernel's
+// `ExecutorRespawnFromReviewRejection` anchor fires for the
+// Reviewer's *immediate* Executor predecessor (this task), so
+// the Round-2 path that responds to the critique by editing
+// the defective file must land HERE. The witness in
+// [`super::reviewer_substantive_disagreement`] tracks
+// `lint-runner` for that reason.
+const REALISTIC_PLAN_LINT_RUNNER: &str = r#"# ── Lint-runner Executor (captures check.sh output) ─────
+[[tasks]]
+task_id            = "lint-runner"
+name               = "Capture scripts/check.sh output for the Reviewer panel"
+session_agent_type = "Executor"
+predecessors       = ["lint-defect"]
+path_allowlist     = ["out/lint/", "rust-crate/", "ts-pkg/", "py-pkg/"]
+description = """
+You are the RAXIS lint-runner executor. The diff from
+`lint-defect` is already committed on the working branch; your
+job is to surface its strict-lint verdict to the downstream
+Reviewer panel.
+
+The Reviewer VM image (`raxis-reviewer-core`) is structurally
+forbidden from executing scripts: it ships ONLY `raxis-planner`
+and `ripgrep` per `INV-PLANNER-HARNESS-02` (no shell, no
+language runtimes, no `git`, no network utilities). The
+Reviewers therefore cannot run `scripts/check.sh` themselves —
+they read its captured output from a committed artifact you
+produce here.
+
+## Round 1 — capture
+
+1. Create the capture directory: `mkdir -p out/lint`.
+2. Run `scripts/check.sh` and capture stdout + stderr + the
+   exit code in a single file:
+   ```bash
+   {
+     bash scripts/check.sh 2>&1
+     echo "raxis_check_sh_exit_code=$?"
+   } > out/lint/check-output.txt
+   ```
+   The trailing `raxis_check_sh_exit_code=<n>` line is the
+   wire signal the Reviewers key on; do NOT omit it. Use
+   `bash scripts/check.sh` (not `./scripts/check.sh`) so the
+   script's `set -euo pipefail` does not abort the wrapping
+   shell when `check.sh` exits non-zero (which it WILL — the
+   `lint-defect` task by construction introduced one real lint
+   defect).
+3. `git add out/lint/check-output.txt`
+4. `git commit -m "chore: capture check.sh output for reviewer panel"`
+5. Call `task_complete` with a one-line summary that includes
+   the captured exit code.
+
+## Round 2+ — substantive critique fix-up
+
+If your prior round was rejected by the Reviewer panel, the
+critique appended to your prompt names a specific defective
+file (one of `rust-crate/src/greeting.rs`,
+`ts-pkg/src/greet.ts`, `py-pkg/src/sample_py/greet.py`). Your
+`path_allowlist` includes the three language source trees
+precisely so you can land the fix on this round:
+
+1. Edit the defective file to remove the lint diagnostic the
+   critique names (e.g. drop a `useless_conversion`, restore
+   `const`-over-`let`, remove an unused import).
+2. Re-run the capture step above. `out/lint/check-output.txt`
+   should now end with `raxis_check_sh_exit_code=0`.
+3. `git add` the fixed file AND `out/lint/check-output.txt`.
+4. `git commit -m "fix: <one-line lint repair> + refresh
+   check-output capture"` (your commit message MAY name the
+   defect on the fix round; the lint-defect's "no suggestive
+   commit message" constraint applies only to its own commit).
+5. `task_complete`.
+
+## Constraints
+
+* The capture MUST live at the exact path
+  `out/lint/check-output.txt`. The Reviewer prompts hard-code
+  that path; any other location is a witness failure.
+* Do NOT modify `scripts/check.sh` itself, or any file outside
+  the four allowed roots. Writes to `scripts/`, `fixtures/`,
+  `.gitignore`, `README.md`, etc. trip
+  `FailPathPolicyViolation` at `task_complete`.
+* Do NOT swallow the failing exit code on Round 1. The whole
+  point of the round is to surface the lint failure honestly
+  — wrapping with `|| true` or stripping the exit-code tail
+  defeats the Reviewer's substantive check.
+"""
+
+"#;
+
 const REALISTIC_PLAN_LINT_REVIEWERS: &str = r#"# ── Lint-defect substantive Reviewers (P3-7) ────────────
 [[tasks]]
 task_id            = "review-lint-defect-A"
 name               = "Reviewer A — substantive review of lint-defect diff"
 session_agent_type = "Reviewer"
-predecessors       = ["lint-defect"]
+predecessors       = ["lint-runner"]
 description = """
-You are the FIRST Reviewer for the `lint-defect` Executor's diff
-on the rich-multilang-001 repo. The repo configures strict
-language-specific linters:
-  * Rust:   `cargo clippy -- -D warnings`
-  * TS:     `npx eslint --max-warnings 0`
-  * Python: `python -m ruff check`
+You are the FIRST Reviewer in a panel reviewing the rich-
+multilang-001 lint-defect pipeline. The upstream `lint-defect`
+Executor introduced exactly one real lint defect in one of:
+  * `rust-crate/src/greeting.rs`  (clippy: `cargo clippy -- -D warnings`)
+  * `ts-pkg/src/greet.ts`         (eslint: `npx eslint --max-warnings 0`)
+  * `py-pkg/src/sample_py/greet.py` (ruff: `python -m ruff check`)
 A single `scripts/check.sh` runs all three.
 
-Your job is mechanical: run `scripts/check.sh`, observe the output,
-and rule on the diff. If `check.sh` exits non-zero, submit
-`SubmitReview` with `approved = false` and a critique whose text
-NAMES the file that produced the failing lint diagnostic (one of
-`rust-crate/src/greeting.rs`, `ts-pkg/src/greet.ts`,
-`py-pkg/src/sample_py/greet.py`). If `check.sh` exits zero,
-approve.
+The `lint-runner` Executor has ALREADY committed
+`out/lint/check-output.txt` containing the captured stdout +
+stderr of `scripts/check.sh`, terminated by a sentinel line
+`raxis_check_sh_exit_code=<n>` carrying the script's exit code.
 
-Do NOT invent defects, do NOT reject for vibes, do NOT cite a
-file that did not appear in the linter output. The witness
-verifies the critique mentions one of the three filenames
-verbatim.
+Your job is mechanical: `read_file` the captured artifact,
+observe the exit code, and rule on the diff. If the captured
+`raxis_check_sh_exit_code` is non-zero, submit `SubmitReview`
+with `approved = false` and a critique whose text NAMES the
+file that produced the failing lint diagnostic (one of the
+three listed above — the captured output names it verbatim).
+If the captured exit code is zero, submit `SubmitReview` with
+`approved = true`.
+
+You MUST NOT attempt to execute `scripts/check.sh` yourself —
+your VM image (`raxis-reviewer-core`) ships ONLY
+`raxis-planner` and `ripgrep` per `INV-PLANNER-HARNESS-02`;
+there is no shell, no `cargo`, no `npx`, no `python`. Use
+`read_file` for `out/lint/check-output.txt` and any diff hunk
+you want to confirm, and `grep_search` to locate the failing
+file's mention inside the captured output.
+
+As Reviewer A you take a STRICT stance on lint failures: any
+non-zero exit code in the captured artifact is a hard reject
+naming the specific failing file. Do NOT invent defects, do
+NOT reject for vibes, do NOT cite a file that did not appear
+in the captured output. The witness verifies the critique
+mentions one of the three filenames verbatim.
 """
 
 [[tasks]]
 task_id            = "review-lint-defect-B"
 name               = "Reviewer B — substantive review of lint-defect diff"
 session_agent_type = "Reviewer"
-predecessors       = ["lint-defect"]
+predecessors       = ["lint-runner"]
 description = """
-You are the SECOND Reviewer for the `lint-defect` Executor's
-diff. Same protocol as Reviewer A — run `scripts/check.sh` and
-rule mechanically. The aggregator will only mark the executor
-`AllPassed` after both Reviewers approve, which requires the
-Executor to first land a corrected diff in response to the
-Round-1 rejection.
-""""#;
+You are the SECOND Reviewer in a panel reviewing the rich-
+multilang-001 lint-defect pipeline. The `lint-runner` Executor
+has committed `out/lint/check-output.txt` (stdout + stderr +
+`raxis_check_sh_exit_code=<n>` sentinel) capturing the strict
+output of `scripts/check.sh`.
+
+Your job is mechanical: `read_file` the captured artifact,
+observe the exit code, and rule on the diff. If
+`raxis_check_sh_exit_code` is non-zero, submit `SubmitReview`
+with `approved = false` and a critique whose text NAMES the
+specific failing file (one of `rust-crate/src/greeting.rs`,
+`ts-pkg/src/greet.ts`, `py-pkg/src/sample_py/greet.py`). If the
+exit code is zero, approve.
+
+You MUST NOT attempt to execute `scripts/check.sh` yourself —
+your VM image (`raxis-reviewer-core`) has no shell, no
+language runtimes, and no `git`. Use `read_file` for the
+captured artifact and `grep_search` / `read_file` for the diff
+itself.
+
+Reviewer B is the SLIGHTLY-LENIENT counterweight to Reviewer A:
+cosmetic-only diagnostics (e.g. a stray trailing whitespace
+that does NOT trip the strict-warnings gate at `cargo clippy
+-- -D warnings`, or a `prettier` whitespace nit on a file
+that does NOT also trigger an eslint diagnostic) are NOT by
+themselves a reject. The substantive line is "did the captured
+exit_code surface a real linter ERROR against a target file".
+If yes, reject and name the file; if no, approve. The
+aggregator marks the upstream Executor pipeline `AllPassed`
+only when BOTH Reviewers approve, which on the substantive
+path requires `lint-runner` to land a corrected diff in
+response to the Round-1 rejection.
+"""
+
+"#;
 
 const REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD: &str = r#"# ── Positive path-allowlist Executor (P3-4) ─────────────
 [[tasks]]
@@ -492,6 +664,7 @@ mod tests {
             TASK_MATERIALIZE,
             TASK_XFILE_REFACTOR,
             TASK_LINT_DEFECT,
+            TASK_LINT_RUNNER,
             TASK_REVIEW_LINT_A,
             TASK_REVIEW_LINT_B,
             TASK_ALLOWLIST_POSITIVE,
@@ -532,6 +705,163 @@ mod tests {
                 prompt.contains(needle),
                 "lint-defect prompt must reference {needle} (got len={})",
                 prompt.len(),
+            );
+        }
+    }
+
+    /// Pins the in-image execution stage between `lint-defect`
+    /// and the two substantive Reviewers: the Reviewer VM image
+    /// (`raxis-reviewer-core`) is barred from executing
+    /// `scripts/check.sh` (no `bash`, no language runtimes —
+    /// `INV-PLANNER-HARNESS-02`); the Executor `lint-runner`
+    /// runs the script in-image and commits the captured output
+    /// for the Reviewers to read. The witness in
+    /// [`super::reviewer_substantive_disagreement`] keys on the
+    /// new task being the Reviewer's immediate predecessor (it
+    /// tracks `ExecutorRespawnFromReviewRejection { task_id =
+    /// "lint-runner" }` per the kernel's reverse-DAG resolution
+    /// in `handle_activate_sub_task`'s reviewer evaluation_sha
+    /// lookup).
+    #[test]
+    fn lint_runner_bridges_lint_defect_and_reviewers() {
+        let toml_text = realistic_plan_toml();
+        let v: toml::Value = toml::from_str(&toml_text).unwrap();
+        let tasks = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("[[tasks]] array present");
+
+        let runner = tasks
+            .iter()
+            .find(|t| {
+                t.get("task_id").and_then(|i| i.as_str()) == Some(TASK_LINT_RUNNER)
+            })
+            .expect("lint-runner task present");
+
+        assert_eq!(
+            runner
+                .get("session_agent_type")
+                .and_then(|s| s.as_str()),
+            Some("Executor"),
+            "lint-runner MUST be an Executor — the whole point of \
+             this task is that the Reviewer VM image cannot execute \
+             scripts (INV-PLANNER-HARNESS-02)",
+        );
+
+        let runner_preds: Vec<&str> = runner
+            .get("predecessors")
+            .and_then(|p| p.as_array())
+            .expect("lint-runner.predecessors array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            runner_preds.contains(&TASK_LINT_DEFECT),
+            "lint-runner must depend on lint-defect; got {runner_preds:?}",
+        );
+
+        let runner_allowlist: Vec<&str> = runner
+            .get("path_allowlist")
+            .and_then(|a| a.as_array())
+            .expect("lint-runner.path_allowlist present")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            runner_allowlist.contains(&"out/lint/"),
+            "lint-runner must admit out/lint/ for the capture file; \
+             got {runner_allowlist:?}",
+        );
+        for tree in ["rust-crate/", "ts-pkg/", "py-pkg/"] {
+            assert!(
+                runner_allowlist.contains(&tree),
+                "lint-runner must admit {tree} so the Round-2 \
+                 re-spawn after a Reviewer rejection can land a \
+                 corrected diff on the defective file (the witness \
+                 in reviewer_substantive_disagreement.rs keys on \
+                 AllPassed); got {runner_allowlist:?}",
+            );
+        }
+
+        for reviewer_task_id in [TASK_REVIEW_LINT_A, TASK_REVIEW_LINT_B] {
+            let reviewer = tasks
+                .iter()
+                .find(|t| {
+                    t.get("task_id").and_then(|i| i.as_str())
+                        == Some(reviewer_task_id)
+                })
+                .unwrap_or_else(|| {
+                    panic!("reviewer task `{reviewer_task_id}` present")
+                });
+            let preds: Vec<&str> = reviewer
+                .get("predecessors")
+                .and_then(|p| p.as_array())
+                .unwrap_or_else(|| {
+                    panic!("{reviewer_task_id}.predecessors array")
+                })
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+            assert_eq!(
+                preds,
+                vec![TASK_LINT_RUNNER],
+                "{reviewer_task_id} MUST depend on lint-runner so the \
+                 kernel's reverse-DAG evaluation_sha resolution \
+                 (handle_activate_sub_task) returns the SHA carrying \
+                 out/lint/check-output.txt; got {preds:?}",
+            );
+        }
+    }
+
+    /// The Reviewer prompts MUST NOT instruct the planner to
+    /// execute `scripts/check.sh` (the original-bug witness for
+    /// this commit). The Reviewer VM image
+    /// (`raxis-reviewer-core`) has no shell or runtimes per
+    /// `INV-PLANNER-HARNESS-02`; the captured artifact at
+    /// `out/lint/check-output.txt` is the only legitimate
+    /// surface for the Reviewer panel.
+    #[test]
+    fn reviewer_prompts_point_at_captured_artifact_not_script_execution() {
+        let toml_text = realistic_plan_toml();
+        let v: toml::Value = toml::from_str(&toml_text).unwrap();
+        let tasks = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("[[tasks]] array present");
+
+        for reviewer_task_id in [TASK_REVIEW_LINT_A, TASK_REVIEW_LINT_B] {
+            let reviewer = tasks
+                .iter()
+                .find(|t| {
+                    t.get("task_id").and_then(|i| i.as_str())
+                        == Some(reviewer_task_id)
+                })
+                .unwrap_or_else(|| {
+                    panic!("reviewer task `{reviewer_task_id}` present")
+                });
+            let desc = reviewer
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or_else(|| {
+                    panic!("{reviewer_task_id} description present")
+                });
+
+            assert!(
+                desc.contains("out/lint/check-output.txt"),
+                "{reviewer_task_id} prompt MUST reference the \
+                 captured artifact path verbatim — that's the only \
+                 path the Reviewer's read_file can target; got prompt \
+                 of len {}",
+                desc.len(),
+            );
+            assert!(
+                !desc.contains("run `scripts/check.sh`")
+                    && !desc.contains("run scripts/check.sh"),
+                "{reviewer_task_id} prompt MUST NOT tell the \
+                 Reviewer to run scripts/check.sh — the Reviewer VM \
+                 image (raxis-reviewer-core) ships only \
+                 raxis-planner + ripgrep per INV-PLANNER-HARNESS-02; \
+                 prompt leak found",
             );
         }
     }
