@@ -612,6 +612,14 @@ fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
             "CreateInitiative".to_owned(),
             "ApprovePlan".to_owned(),
             "AbortInitiative".to_owned(),
+            // Together with `OperatorCertInstall` below, these grant
+            // the dashboard `Admin` role per
+            // `crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`.
+            // Live-e2e operators run as Admin so the test exercises
+            // the full operator surface (reveal-plaintext, policy
+            // install via dashboard, every grant/deny audit path).
+            "RotateEpoch".to_owned(),
+            "OperatorCertInstall".to_owned(),
         ],
         display_name: "e2e-operator".to_owned(),
         ..CertOpts::default()

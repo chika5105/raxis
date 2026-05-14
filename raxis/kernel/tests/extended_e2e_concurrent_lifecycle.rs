@@ -559,6 +559,10 @@ fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
             "CreateInitiative".to_owned(),
             "ApprovePlan".to_owned(),
             "AbortInitiative".to_owned(),
+            // Grants dashboard `Admin` per
+            // `crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`.
+            "RotateEpoch".to_owned(),
+            "OperatorCertInstall".to_owned(),
         ],
         display_name: "ext-e2e-operator".to_owned(),
         ..CertOpts::default()

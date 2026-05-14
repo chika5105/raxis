@@ -85,6 +85,14 @@ permitted_ops      = [
   "CreateInitiative",
   "ApprovePlan",
   "AbortInitiative",
+  # `RotateEpoch` + `OperatorCertInstall` together grant the
+  # dashboard `Admin` role (per
+  # `crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`).
+  # Live-e2e operators run as Admin so the test exercises the full
+  # operator surface (reveal-plaintext, dashboard policy install,
+  # every grant/deny audit path).
+  "RotateEpoch",
+  "OperatorCertInstall",
 ]
 
 [operators.entries.cert]
@@ -94,7 +102,7 @@ permitted_ops      = [
 display_name  = "realism-e2e-operator"
 issued_at     = 1700000000
 expires_at    = 1700090000
-permitted_ops = ["CreateInitiative", "ApprovePlan", "AbortInitiative"]
+permitted_ops = ["CreateInitiative", "ApprovePlan", "AbortInitiative", "RotateEpoch", "OperatorCertInstall"]
 signature_hex = "PLACEHOLDER_CERT_SIGNATURE_HEX_PER_RUN"
 
 [[lanes]]

@@ -738,12 +738,22 @@ pub fn bootstrap_with_custom_cert(
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is post-epoch")
         .as_secs() as i64;
+    // The realism-e2e operator runs as **dashboard Admin** so live-e2e
+    // exercises the full operator surface (reveal-plaintext on system
+    // credentials, policy install via dashboard, every audit-emitting
+    // grant/deny path) — not just the read-only subset. Admin is granted
+    // by the dashboard-kernel mapping
+    // (`crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`)
+    // when both `RotateEpoch` AND `OperatorCertInstall` appear in
+    // `permitted_ops`.
     let cert = ephemeral_cert_with_key(signing_key, CertOpts {
         now_unix_secs,
         permitted_ops: vec![
             "CreateInitiative".to_owned(),
             "ApprovePlan".to_owned(),
             "AbortInitiative".to_owned(),
+            "RotateEpoch".to_owned(),
+            "OperatorCertInstall".to_owned(),
         ],
         display_name: "realism-e2e-operator".to_owned(),
         ..CertOpts::default()
