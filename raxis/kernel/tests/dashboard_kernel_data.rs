@@ -272,6 +272,7 @@ async fn http_server_serves_initiatives_endpoint_after_jwt_handshake() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
+        None,
     )
     .await
     .expect("start_dashboard");

@@ -271,6 +271,7 @@ async fn plan_endpoint_returns_v1_signed_bytes_byte_for_byte_with_cache_header()
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
+        None,
     ).await.expect("start_dashboard");
 
     let base   = format!("http://{}", handle.local_addr());
@@ -371,6 +372,7 @@ async fn plan_endpoint_returns_v2_1_bundle_bytes_with_bundle_sha_metadata() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
+        None,
     ).await.expect("start_dashboard");
 
     let base   = format!("http://{}", handle.local_addr());
@@ -427,6 +429,7 @@ async fn plan_endpoint_disambiguates_404_from_410() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
+        None,
     ).await.expect("start_dashboard");
     let base   = format!("http://{}", handle.local_addr());
     let client = reqwest::Client::new();
@@ -493,6 +496,7 @@ async fn plan_endpoint_emits_no_store_for_pending_drafts_and_requires_auth() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
+        None,
     ).await.expect("start_dashboard");
 
     let base   = format!("http://{}", handle.local_addr());

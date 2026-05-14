@@ -371,6 +371,40 @@ the kernel crate; `kernel/src/observability.rs` re-exports the
 three so any kernel-side caller can still use
 `crate::observability::record_dashboard_*` unchanged.
 
+### 3.14.5 Boot-path seam (V3 Part 2 follow-up)
+
+`DashboardServer::bind_with_observability(cfg, data, hub)` is the
+entry point that propagates the `Arc<ObservabilityHub>` into
+`AppStateInner`, where the HTTP middleware + SSE handlers in
+§3.14.4 read it. The kernel boot path threads the same hub
+through both surface APIs in `crates/dashboard-kernel`:
+
+- `start_dashboard(cfg, store, policy, data_dir, policy_path,
+  booted_at, observability)` — read-only deployments / smoke
+  tests (no policy-write capability).
+- `start_dashboard_with_advancer(cfg, store, policy, data_dir,
+  policy_path, booted_at, stream_capture, advancer, audit_sink,
+  observability)` — production boot in `kernel/src/main.rs`,
+  which passes `Some(Arc::clone(&observability_hub))` from the
+  hub already constructed by `observability_boot::build_obs_hub`
+  for the periodic flush, the `NotifyingAuditSink` bridge, and
+  the IPC `HandlerContext`. A single hub instance per kernel
+  process serves all five observability seams.
+
+Tests / embedded harnesses that build the dashboard without a
+hub continue to pass `None`, which falls through to the same
+noop path the helpers used before V3 — they do not need the
+HTTP / SSE counters to land in any exporter.
+
+The seam is now closed: in the live boot path the three
+`record_dashboard_*` helpers from §3.14.4 fire against the same
+`ObservabilityHub` the rest of the kernel writes to, so the
+`70-dashboard.json` Grafana panel (§4) populates from production
+and not only from in-process unit tests. The surface remains
+covered by the existing `INV-OBS-DASHBOARD-*` family — no new
+INV-* is added for the seam itself; closing the wiring gap is
+an implementation refinement of the contracts already in §3.14.
+
 ## 4. Grafana dashboards
 
 Eleven dashboards live under

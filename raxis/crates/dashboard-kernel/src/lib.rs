@@ -2795,10 +2795,20 @@ pub fn load_dashboard_config(policy_path: &Path) -> Result<Option<DashboardConfi
 ///
 /// Returns an `Err(String)` for both the streams-directory
 /// IO failure surfaced by `KernelDashboardData::new` AND any
-/// downstream `DashboardServer::bind` failure — the caller
-/// chooses whether to disable the dashboard or take the
-/// kernel down. The previous version panicked on the streams-
-/// dir failure and only surfaced bind errors.
+/// downstream `DashboardServer::bind_with_observability`
+/// failure — the caller chooses whether to disable the
+/// dashboard or take the kernel down. The previous version
+/// panicked on the streams-dir failure and only surfaced bind
+/// errors.
+///
+/// The `observability` argument is the kernel's boot-time
+/// `Arc<ObservabilityHub>` (the same one that backs
+/// `with_observability` / `spawn_periodic_flush`). When `Some`,
+/// the dashboard HTTP middleware + SSE handlers fire the V3
+/// §3.14 `record_dashboard_*` helpers; when `None` (tests,
+/// embedded harnesses that never instantiate a hub) the
+/// helpers degrade to the standard noop path — preserving the
+/// pre-V3 behaviour for callers that don't care.
 pub async fn start_dashboard(
     cfg: DashboardConfig,
     store: Arc<Store>,
@@ -2806,6 +2816,7 @@ pub async fn start_dashboard(
     data_dir: PathBuf,
     policy_path: PathBuf,
     booted_at: u64,
+    observability: Option<Arc<raxis_observability::ObservabilityHub>>,
 ) -> Result<ServerHandle, String> {
     let data = Arc::new(
         KernelDashboardData::new(
@@ -2817,7 +2828,7 @@ pub async fn start_dashboard(
         )
         .map_err(|e| format!("dashboard streams dir init failed: {e}"))?,
     );
-    let server = DashboardServer::bind(cfg, data)
+    let server = DashboardServer::bind_with_observability(cfg, data, observability)
         .await
         .map_err(|e| format!("dashboard bind failed: {e}"))?;
     Ok(ServerHandle::spawn(server))
@@ -2832,6 +2843,16 @@ pub async fn start_dashboard(
 /// `SessionStreamCapture` instance with the gateway bridge so
 /// SSE subscribers see the same events the kernel persists to
 /// `<data_dir>/streams/<session>.jsonl`.
+///
+/// The `observability` argument is the kernel's boot-time
+/// `Arc<ObservabilityHub>` (the same one that backs
+/// `with_observability` / `spawn_periodic_flush`). When `Some`,
+/// the dashboard HTTP middleware + SSE handlers fire the V3
+/// §3.14 `record_dashboard_*` helpers in the live boot path;
+/// when `None` (older test fixtures that build the dashboard
+/// without a hub) the helpers degrade to the standard noop
+/// path. Production boot in `kernel/src/main.rs` MUST pass
+/// `Some(_)` — that's the seam the V3 Part 2 wiring closes.
 pub async fn start_dashboard_with_advancer(
     cfg: DashboardConfig,
     store: Arc<Store>,
@@ -2842,6 +2863,7 @@ pub async fn start_dashboard_with_advancer(
     stream_capture: Arc<SessionStreamCapture>,
     advancer: Arc<dyn PolicyAdvancer>,
     audit_sink: Arc<dyn raxis_audit_tools::AuditSink>,
+    observability: Option<Arc<raxis_observability::ObservabilityHub>>,
 ) -> Result<ServerHandle, String> {
     let data = Arc::new(
         KernelDashboardData::with_capture(
@@ -2855,7 +2877,7 @@ pub async fn start_dashboard_with_advancer(
         .with_advancer(advancer)
         .with_audit_sink(audit_sink),
     );
-    let server = DashboardServer::bind(cfg, data)
+    let server = DashboardServer::bind_with_observability(cfg, data, observability)
         .await
         .map_err(|e| format!("dashboard bind failed: {e}"))?;
     Ok(ServerHandle::spawn(server))

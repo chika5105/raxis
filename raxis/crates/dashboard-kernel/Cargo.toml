@@ -14,6 +14,14 @@ raxis-store         = { workspace = true }
 raxis-policy        = { workspace = true }
 raxis-audit-tools   = { workspace = true }
 raxis-dashboard     = { workspace = true }
+# V3 §3.14 observability seam: `start_dashboard{,_with_advancer}` thread
+# the kernel's `Arc<ObservabilityHub>` through to
+# `DashboardServer::bind_with_observability` so the dashboard HTTP/SSE
+# helpers (record_dashboard_http_request / record_dashboard_sse_active /
+# record_dashboard_sse_event) actually fire in the live boot path
+# instead of degrading to the noop hub. Tests / embedded harnesses
+# that don't construct a hub continue to pass `None`.
+raxis-observability = { workspace = true }
 # Credential viewer (INV-DASHBOARD-CREDENTIAL-*): the kernel-glue
 # layer reads `task_credential_proxies` via `raxis-plan-credentials`
 # (for the proxy variant taxonomy + ParsedUpstreamUrl-style hints)

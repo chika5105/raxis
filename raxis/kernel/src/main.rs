@@ -1802,6 +1802,17 @@ async fn main() {
                         stream_capture,
                         advancer,
                         Arc::clone(&audit),
+                        // V3 §3.14 seam: thread the boot-time
+                        // ObservabilityHub through to
+                        // `DashboardServer::bind_with_observability`
+                        // so the dashboard HTTP middleware + SSE
+                        // handlers can fire record_dashboard_* in
+                        // the live boot path. The same hub already
+                        // backs the periodic flush, the
+                        // notification-sink bridge, and the IPC
+                        // handler context — there is exactly one
+                        // hub per kernel process.
+                        Some(Arc::clone(&observability_hub)),
                     )
                     .await
                     {
