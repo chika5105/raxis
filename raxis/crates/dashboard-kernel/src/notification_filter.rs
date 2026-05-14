@@ -574,6 +574,21 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::TproxyAdmissionGranted { .. } => None,
         K::TproxyAdmissionDenied { .. } => None,
         K::DnsResolveRequested { .. } => None,
+
+        // 12. Planner budget scaling.
+        //     `PlannerMaxTurnsProgressivelyScaled` is the structural
+        //     audit trail emitted by INV-PLANNER-MAX-TURNS-PROGRESSIVE-
+        //     ON-RETRY-01 every time a retry attempt receives a
+        //     larger `max_turns` budget than the prior attempt. It is
+        //     observability-only — operators see the same scaling on
+        //     the task detail panel via the `MaxTurnsScalingView` KSB
+        //     projection. Surfacing each scale event in the inbox
+        //     would create one notification per retry attempt with no
+        //     actionable signal; if the scaling actually fails to
+        //     unblock the task, the eventual `TaskFailed*` /
+        //     `TaskBlockedForRecovery` arm above is the operator-
+        //     attention surface.
+        K::PlannerMaxTurnsProgressivelyScaled { .. } => None,
     }
 }
 
