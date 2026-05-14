@@ -55,7 +55,8 @@ const TASK_DAG_EDGES:              &str = Table::TaskDagEdges.as_str();
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
 use crate::initiatives::task_transitions::{
-    transition_task as fsm_transition, transition_task_in_tx, TransitionActor,
+    emit_task_state_changed_audit, transition_task as fsm_transition,
+    transition_task_in_tx, TaskTransitionRecord, TransitionActor,
 };
 use crate::ipc::context::HandlerContext;
 use crate::observability::record_intent_admission;
@@ -1276,14 +1277,21 @@ fn run_phase_c(
     // Done before the budget consume so a task that is GatesPending due
     // to outstanding witnesses does not get charged a second time when
     // the witness eventually arrives and the same intent is re-submitted.
+    //
+    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — capture the
+    // `TaskTransitionRecord` so the post-commit audit emit fires
+    // and the dashboard's `SubscribeInitiative` push stream observes
+    // the Admitted → GatesPending transition without polling.
+    let mut pending_audits: Vec<TaskTransitionRecord> = Vec::new();
     if !pending_gates.is_empty() && task_state == TaskState::Admitted {
-        transition_task_in_tx(
+        let rec = transition_task_in_tx(
             &tx,
             task_id_owned.as_str(),
             TaskState::GatesPending,
             Some("gates pending: witnesses required"),
             TransitionActor::Kernel,
         ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, TaskState::GatesPending))?;
+        pending_audits.push(rec);
     }
 
     // ── Step 10: Atomic budget check + reserve (Pattern A fix) ───────────
@@ -1306,13 +1314,14 @@ fn run_phase_c(
     // ── Step 11: FSM transition via task_transitions (INV-INIT-04) ───────
     if task_state == TaskState::Admitted && pending_gates.is_empty() {
         // Admitted + all gates pass → Running.
-        transition_task_in_tx(
+        let rec = transition_task_in_tx(
             &tx,
             task_id_owned.as_str(),
             TaskState::Running,
             None,
             TransitionActor::Kernel,
         ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Running))?;
+        pending_audits.push(rec);
     }
     // Running + gate pass: no transition needed; task stays Running.
     // Running + gates pending: task stays Running (the GatesPending
@@ -1367,6 +1376,22 @@ fn run_phase_c(
 
     tx.commit().map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
     drop(conn);
+
+    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit emit —
+    // every captured FSM transition becomes an
+    // `AuditEventKind::TaskStateChanged` row, which the
+    // `BroadcastingAuditSink` translates into an
+    // `InitiativeEvent::TaskStateChanged` push for any
+    // `SubscribeInitiative` operator. Without this loop the
+    // dashboard never sees Running / GatesPending and Admitted
+    // appears to jump straight to Completed/Failed.
+    for rec in &pending_audits {
+        emit_task_state_changed_audit(
+            ctx.audit.as_ref(),
+            rec,
+            Some(session_id_str.as_str()),
+        );
+    }
 
     // ── Step 13: Audit stub + Accepted response ───────────────────────────
     // Audit emission is post-commit per kernel-store.md §2.5.2 ordering.
@@ -1645,33 +1670,53 @@ fn run_phase_c(
                 initiative_id_owned.as_str(),
                 task_id_owned.as_str(),
             ) {
-                Ok(Some((from_state, to_state))) => {
+                Ok(Some(outcome)) => {
                     // Reflect the synthetic coordinator's terminal
                     // state in the IntentResponse so the dashboard
                     // (and the orchestrator's own KSB) sees Completed
                     // immediately, not Running.
                     task_state = TaskState::Completed;
 
-                    if let Err(e) = ctx.audit.emit(
-                        raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
-                            initiative_id: initiative_id_owned.clone(),
-                            from_state:    from_state.clone(),
-                            to_state:      to_state.clone(),
-                        },
+                    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` —
+                    // post-commit `TaskStateChanged` emit for the
+                    // synthetic coordinator's Running → Completed.
+                    // Without this the dashboard's
+                    // `«integration-merge»` row appears to stall
+                    // in `Running` forever (until it was the
+                    // notification_filter's only path to surface
+                    // the completion).
+                    emit_task_state_changed_audit(
+                        ctx.audit.as_ref(),
+                        &outcome.task_record,
                         Some(session_id_str.as_str()),
-                        Some(task_id_owned.as_str()),
-                        Some(initiative_id_owned.as_str()),
-                    ) {
+                    );
+
+                    let from_state = outcome.initiative_from.clone();
+                    let to_state   = outcome.initiative_to.clone();
+                    if !from_state.is_empty()
+                        && from_state != to_state
+                    {
+                        if let Err(e) = ctx.audit.emit(
+                            raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
+                                initiative_id: initiative_id_owned.clone(),
+                                from_state:    from_state.clone(),
+                                to_state:      to_state.clone(),
+                            },
+                            Some(session_id_str.as_str()),
+                            Some(task_id_owned.as_str()),
+                            Some(initiative_id_owned.as_str()),
+                        ) {
+                            eprintln!(
+                                "{{\"level\":\"error\",\"event\":\"InitiativeStateChanged\",\
+                                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                            );
+                        }
                         eprintln!(
-                            "{{\"level\":\"error\",\"event\":\"InitiativeStateChanged\",\
-                             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                            "{{\"level\":\"info\",\"event\":\"InitiativeCompletedAfterIntegrationMerge\",\
+                             \"initiative_id\":\"{initiative_id_owned}\",\
+                             \"from\":\"{from_state}\",\"to\":\"{to_state}\"}}",
                         );
                     }
-                    eprintln!(
-                        "{{\"level\":\"info\",\"event\":\"InitiativeCompletedAfterIntegrationMerge\",\
-                         \"initiative_id\":\"{initiative_id_owned}\",\
-                         \"from\":\"{from_state}\",\"to\":\"{to_state}\"}}",
-                    );
                 }
                 Ok(None) => {
                     // Cascade was structurally inapplicable (initiative
@@ -1946,18 +1991,20 @@ fn handle_report_failure(
     // before this fix).
     //
     // block_reason carries the planner's justification for operator review.
+    let mut pending_audits: Vec<TaskTransitionRecord> = Vec::new();
     {
         let mut conn = store.lock_sync();
         let tx = conn.transaction()
             .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
         if task_state == TaskState::Admitted {
-            transition_task_in_tx(
+            let rec = transition_task_in_tx(
                 &tx,
                 req.task_id.as_str(),
                 TaskState::Running,
                 None,
                 TransitionActor::Kernel,
             ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+            pending_audits.push(rec);
         }
         // Bump BEFORE the Failed cascade — `transition_task_in_tx`
         // sets `terminated_at` on the active activation row when
@@ -1986,13 +2033,14 @@ fn handle_report_failure(
                 );
             }
         }
-        transition_task_in_tx(
+        let rec_failed = transition_task_in_tx(
             &tx,
             req.task_id.as_str(),
             TaskState::Failed,
             Some(justification.as_str()),
             TransitionActor::Kernel,
         ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        pending_audits.push(rec_failed);
 
         // Release the lane budget reservation in the same tx as the
         // Running → Failed flip — same INV-STORE-02 contract as the
@@ -2026,6 +2074,18 @@ fn handle_report_failure(
 
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+    }
+
+    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit emit —
+    // ReportFailure may have walked Admitted → Running → Failed
+    // (two distinct edges), and BOTH need to land on the
+    // dashboard's `SubscribeInitiative` push stream.
+    for rec in &pending_audits {
+        emit_task_state_changed_audit(
+            ctx.audit.as_ref(),
+            rec,
+            Some(session_id.as_str()),
+        );
     }
 
     // Surface a redacted-but-substantially-fuller justification in
@@ -2274,6 +2334,14 @@ fn handle_complete_task(
 
             // Insert range + transition Admitted → Running atomically.
             // Same SQLite tx pattern as Phase A's Step 11 + Step 12A.
+            //
+            // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — capture
+            // the transition record so the post-commit audit emit
+            // surfaces the Admitted → Running edge to the
+            // dashboard. Without this, the CompleteTask Admitted-
+            // inline path collapses the entire Admitted → Running
+            // → Completed walk into a single observable jump
+            // (Admitted → Completed), which is the iter56 paper-cut.
             {
                 let mut conn = store.lock_sync();
                 let tx = conn.transaction()
@@ -2281,7 +2349,7 @@ fn handle_complete_task(
                 insert_task_intent_range_in_tx(
                     &tx, req.task_id.as_str(), &base_str, &head_str,
                 ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
-                transition_task_in_tx(
+                let rec = transition_task_in_tx(
                     &tx,
                     req.task_id.as_str(),
                     TaskState::Running,
@@ -2290,6 +2358,11 @@ fn handle_complete_task(
                 ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
                 tx.commit()
                     .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                emit_task_state_changed_audit(
+                    ctx.audit.as_ref(),
+                    &rec,
+                    Some(session_id.as_str()),
+                );
             }
             admitted_inline = true;
         }
@@ -2903,20 +2976,35 @@ fn handle_submit_review(
         // signal that gates the rest of the handler's work. A failure
         // here leaves the task in `Admitted` for retry — same shape
         // as a witness-intent rejection at Phase A.
-        if let Err(_) = fsm_transition(
+        match fsm_transition(
             req.task_id.as_str(),
             TaskState::Running,
             None,
             TransitionActor::Kernel,
             store,
         ) {
-            eprintln!(
-                "{{\"level\":\"error\",\"event\":\"SubmitReviewAdmitTransitionFailed\",\
-                 \"task_id\":\"{}\",\"reviewer_session\":\"{}\"}}",
-                req.task_id.as_str(),
-                session_id.as_str(),
-            );
-            return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+            Ok(rec) => {
+                // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — the
+                // SubmitReview-on-Admitted auto-promote is a real
+                // FSM edge that the dashboard must see, not just a
+                // structural set-up step. Without this emit the
+                // Reviewer task appears to jump from Admitted
+                // straight to Completed.
+                emit_task_state_changed_audit(
+                    ctx.audit.as_ref(),
+                    &rec,
+                    Some(session_id.as_str()),
+                );
+            }
+            Err(_) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"SubmitReviewAdmitTransitionFailed\",\
+                     \"task_id\":\"{}\",\"reviewer_session\":\"{}\"}}",
+                    req.task_id.as_str(),
+                    session_id.as_str(),
+                );
+                return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+            }
         }
         // The downstream SQL update flips `Running → Completed`
         // (filter `state = 'Running'`); the row now matches.
@@ -3058,7 +3146,7 @@ fn handle_submit_review(
         // self-fail (Step 20 dispatch matrix forbids ReportFailure for
         // Reviewers); its only terminal output is SubmitReview, and
         // that output is the activation lifecycle terminator.
-        transition_task_in_tx(
+        let rec_completed = transition_task_in_tx(
             &tx,
             req.task_id.as_str(),
             TaskState::Completed,
@@ -3068,6 +3156,13 @@ fn handle_submit_review(
 
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+
+        // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit emit.
+        emit_task_state_changed_audit(
+            ctx.audit.as_ref(),
+            &rec_completed,
+            Some(session_id.as_str()),
+        );
 
         predecessors
     };
@@ -6442,31 +6537,54 @@ fn wait_for_git_apply_pending_clear(
 /// no-op — `transition_task_in_tx` rejects the illegal
 /// `Completed → Completed` edge with `LifecycleError::TaskNotAbortable`
 /// which we map to `Ok(None)`.
+/// Outcome of [`finalize_integration_merge_completion`]. Carries
+/// the data the caller needs to emit two paired-write audits
+/// post-commit:
+///
+///  * `task_record`  → `AuditEventKind::TaskStateChanged` for the
+///    synthetic coordinator task (Running → Completed).
+///  * `(initiative_from, initiative_to)` →
+///    `AuditEventKind::InitiativeStateChanged` for the parent
+///    initiative (Executing → Completed).
+///
+/// Returned ONLY when both transitions actually fired. The
+/// synthetic-task-only fallback (initiative not in `Executing`,
+/// initiative row missing, etc.) collapses to `Ok(None)` so the
+/// caller does not double-emit a stale `InitiativeStateChanged`.
+pub(crate) struct IntegrationMergeFinalizeOutcome {
+    pub task_record:      TaskTransitionRecord,
+    pub initiative_from:  String,
+    pub initiative_to:    String,
+}
+
 fn finalize_integration_merge_completion(
     store:         &Store,
     initiative_id: &str,
     task_id:       &str,
-) -> Result<Option<(String, String)>, rusqlite::Error> {
+) -> Result<Option<IntegrationMergeFinalizeOutcome>, rusqlite::Error> {
     let now = unix_now_secs();
     let mut conn = store.lock_sync();
     let tx = conn.transaction()?;
 
-    if let Err(e) = transition_task_in_tx(
+    let task_record = match transition_task_in_tx(
         &tx,
         task_id,
         TaskState::Completed,
         None,
         TransitionActor::Kernel,
     ) {
-        eprintln!(
-            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeSyntheticTaskTransitionSkipped\",\
-             \"initiative_id\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
-        );
-        // Tx rolls back via Drop on early return — the synthetic
-        // task row is left untouched and the initiative-state UPDATE
-        // never fires. Caller treats this as Ok(None) (skip cascade).
-        return Ok(None);
-    }
+        Ok(rec) => rec,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"IntegrationMergeSyntheticTaskTransitionSkipped\",\
+                 \"initiative_id\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
+            );
+            // Tx rolls back via Drop on early return — the synthetic
+            // task row is left untouched and the initiative-state UPDATE
+            // never fires. Caller treats this as Ok(None) (skip cascade).
+            return Ok(None);
+        }
+    };
 
     let cur_state: Result<String, rusqlite::Error> = tx.query_row(
         &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
@@ -6485,12 +6603,26 @@ fn finalize_integration_merge_completion(
             // (a Running coordinator task on a now-Aborted initiative
             // is just stale state from before the abort cascade ran).
             // Commit it; skip the initiative-state UPDATE.
+            //
+            // The `task_record` is intentionally dropped here: the
+            // caller still wants the `TaskStateChanged` audit emitted
+            // so the dashboard observes the synthetic coordinator
+            // moving to Completed even when the parent initiative
+            // skip-cascades. We surface that via a partial outcome.
             tx.commit()?;
-            return Ok(None);
+            return Ok(Some(IntegrationMergeFinalizeOutcome {
+                task_record,
+                initiative_from: s.clone(),
+                initiative_to:   s,
+            }));
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             tx.commit()?;
-            return Ok(None);
+            return Ok(Some(IntegrationMergeFinalizeOutcome {
+                task_record,
+                initiative_from: String::new(),
+                initiative_to:   String::new(),
+            }));
         }
         Err(e) => return Err(e),
     };
@@ -6509,10 +6641,11 @@ fn finalize_integration_merge_completion(
 
     tx.commit()?;
 
-    Ok(Some((
-        from_state,
-        InitiativeState::Completed.as_sql_str().to_owned(),
-    )))
+    Ok(Some(IntegrationMergeFinalizeOutcome {
+        task_record,
+        initiative_from: from_state,
+        initiative_to:   InitiativeState::Completed.as_sql_str().to_owned(),
+    }))
 }
 
 fn lane_budget_snapshot(

@@ -1607,8 +1607,19 @@ async fn handle_reject_plan(
 async fn handle_retry_task(task_id: String, ctx: &HandlerContext) -> OperatorResponse {
     let store_for_blocking   = Arc::clone(&ctx.store);
     let task_id_for_blocking = task_id.clone();
+    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — pass the audit
+    // sink through so the operator-driven `Failed → Admitted` edge
+    // surfaces on the dashboard's `SubscribeInitiative` push
+    // stream. Pre-fix this transition only emitted a structured
+    // log line and the dashboard never observed the retry.
+    let audit_for_blocking: Arc<dyn raxis_audit_tools::AuditSink> =
+        Arc::clone(&ctx.audit);
     let join_result = tokio::task::spawn_blocking(move || {
-        lifecycle::retry_task(&task_id_for_blocking, &store_for_blocking)
+        lifecycle::retry_task(
+            &task_id_for_blocking,
+            &store_for_blocking,
+            Some(audit_for_blocking.as_ref()),
+        )
     }).await;
     let outcome = match join_result {
         Ok(r) => r,
@@ -1637,15 +1648,30 @@ async fn handle_resume_task(
     resumed_by: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    use crate::initiatives::task_transitions::{transition_task, TransitionActor};
+    use crate::initiatives::task_transitions::{transition_task_with_audit, TransitionActor};
     use raxis_types::TaskState;
 
     let store_for_blocking   = Arc::clone(&ctx.store);
     let task_id_for_blocking = task_id.clone();
     let resumed_by_for_blocking = resumed_by.clone();
+    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — operator-driven
+    // `BlockedRecoveryPending → Admitted` MUST surface on the
+    // dashboard's `SubscribeInitiative` push stream. Use the
+    // audit-aware `transition_task_with_audit` wrapper so the
+    // paired-write fires post-commit.
+    let audit_for_blocking: Arc<dyn raxis_audit_tools::AuditSink> =
+        Arc::clone(&ctx.audit);
     let join_result = tokio::task::spawn_blocking(move || {
         let actor = TransitionActor::Operator { fingerprint: resumed_by_for_blocking };
-        transition_task(&task_id_for_blocking, TaskState::Admitted, None, actor, &store_for_blocking)
+        transition_task_with_audit(
+            &task_id_for_blocking,
+            TaskState::Admitted,
+            None,
+            actor,
+            &store_for_blocking,
+            audit_for_blocking.as_ref(),
+            None,
+        )
     }).await;
     let outcome = match join_result {
         Ok(r) => r,
@@ -1655,7 +1681,7 @@ async fn handle_resume_task(
         },
     };
     match outcome {
-        Ok(()) => OperatorResponse::Ack {
+        Ok(_record) => OperatorResponse::Ack {
             message: format!("task {task_id} resumed (→ Admitted)"),
         },
         Err(e) => OperatorResponse::Error {

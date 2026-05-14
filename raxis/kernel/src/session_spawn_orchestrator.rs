@@ -1471,6 +1471,15 @@ pub fn spawn_planner_dispatcher(
         // session under the same id (re-spawn after retry)
         // inherit a predecessor's activity.
         let last_activity_for_synth = ctx.session_activity.take(&session_id);
+        // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — capture the
+        // audit sink so the closure can fire `TaskStateChanged`
+        // paired-writes for the synthetic `Admitted → Running →
+        // Failed` walk it performs on a worker premature-exit. The
+        // audit chain is the dashboard push protocol's only
+        // trigger; without it the dashboard sees the worker session
+        // disappear without any task-state evidence.
+        let audit_for_post_exit: Arc<dyn raxis_audit_tools::AuditSink> =
+            Arc::clone(&ctx.audit);
         let preflight = tokio::task::spawn_blocking(
             move || -> Option<PostExitAction> {
                 use raxis_store::Table;
@@ -1683,7 +1692,8 @@ pub fn spawn_planner_dispatcher(
                 // row close commit atomically. Matches the
                 // `handle_report_failure` shape verbatim.
                 use crate::initiatives::task_transitions::{
-                    transition_task_in_tx, TransitionActor,
+                    emit_task_state_changed_audit, transition_task_in_tx,
+                    TaskTransitionRecord, TransitionActor,
                 };
                 let tx = match conn.transaction() {
                     Ok(t) => t,
@@ -1700,24 +1710,28 @@ pub fn spawn_planner_dispatcher(
                         return None;
                     }
                 };
+                let mut pending_audits: Vec<TaskTransitionRecord> = Vec::new();
                 if matches!(task_state, raxis_types::TaskState::Admitted) {
-                    if let Err(e) = transition_task_in_tx(
+                    match transition_task_in_tx(
                         &tx,
                         &task_id,
                         raxis_types::TaskState::Running,
                         None,
                         TransitionActor::Kernel,
                     ) {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\
-                             \"event\":\"worker_post_exit_synth_admitted_to_running_failed\",\
-                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
-                             \"error\":\"{err}\"}}",
-                            sid = &session_for_post_exit,
-                            tid = &task_id,
-                            err = e,
-                        );
-                        return None;
+                        Ok(rec) => pending_audits.push(rec),
+                        Err(e) => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\
+                                 \"event\":\"worker_post_exit_synth_admitted_to_running_failed\",\
+                                 \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                                 \"error\":\"{err}\"}}",
+                                sid = &session_for_post_exit,
+                                tid = &task_id,
+                                err = e,
+                            );
+                            return None;
+                        }
                     }
                 }
                 // V2 §Step 12 crash-retry bump — must land BEFORE the
@@ -1796,23 +1810,26 @@ pub fn spawn_planner_dispatcher(
                         ),
                     },
                 };
-                if let Err(e) = transition_task_in_tx(
+                match transition_task_in_tx(
                     &tx,
                     &task_id,
                     raxis_types::TaskState::Failed,
                     Some(justification.as_str()),
                     TransitionActor::Kernel,
                 ) {
-                    eprintln!(
-                        "{{\"level\":\"warn\",\
-                         \"event\":\"worker_post_exit_synth_failed_transition_failed\",\
-                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
-                         \"error\":\"{err}\"}}",
-                        sid = &session_for_post_exit,
-                        tid = &task_id,
-                        err = e,
-                    );
-                    return None;
+                    Ok(rec) => pending_audits.push(rec),
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"worker_post_exit_synth_failed_transition_failed\",\
+                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                             \"error\":\"{err}\"}}",
+                            sid = &session_for_post_exit,
+                            tid = &task_id,
+                            err = e,
+                        );
+                        return None;
+                    }
                 }
                 if let Err(e) = tx.commit() {
                     eprintln!(
@@ -1825,6 +1842,18 @@ pub fn spawn_planner_dispatcher(
                         err = e,
                     );
                     return None;
+                }
+                // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit
+                // emit. Drop our `conn` lock first so the audit sink
+                // (which may itself acquire SQLite for the audit row)
+                // does not contend on the same mutex.
+                drop(conn);
+                for rec in &pending_audits {
+                    emit_task_state_changed_audit(
+                        audit_for_post_exit.as_ref(),
+                        rec,
+                        Some(&session_for_post_exit),
+                    );
                 }
                 eprintln!(
                     "{{\"level\":\"info\",\

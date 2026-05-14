@@ -668,6 +668,14 @@ pub fn reconcile_after_supervisor_restart(
         // pre-sweep state is recorded on the audit event for
         // forensics, and the kernel re-derives the post-Admitted
         // path through normal scheduling.
+        //
+        // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — emit the
+        // generic `AuditEventKind::TaskStateChanged` paired-write
+        // for the resumed transition AS WELL AS the existing
+        // `TaskAutoResumedAfterSupervisorRestart` event below. The
+        // dashboard's push protocol only translates `TaskStateChanged`
+        // into `InitiativeEvent::TaskStateChanged`; the
+        // supervisor-specific event is forensic-only.
         let transition_outcome = transition_task(
             &record.task_id,
             TaskState::Admitted,
@@ -675,6 +683,12 @@ pub fn reconcile_after_supervisor_restart(
             TransitionActor::Kernel,
             store,
         );
+
+        if let Ok(rec) = &transition_outcome {
+            crate::initiatives::task_transitions::emit_task_state_changed_audit(
+                audit, rec, None,
+            );
+        }
 
         if let Err(e) = transition_outcome {
             let reason = e.to_string();

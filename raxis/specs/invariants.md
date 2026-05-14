@@ -82,7 +82,7 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01 | 13 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 | 15 |
 | Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01 | 1 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
@@ -6544,6 +6544,142 @@ unsurfaced either.
     TaskState::as_sql_str()` for each. The same test pins
     `TaskState::ALL.len() == 8` as the cross-language
     drift trip-wire.
+
+---
+
+### INV-DASHBOARD-FSM-STATE-VISIBILITY-01 — Every FSM state has a unique (tone, glyph, label) treatment
+
+**Statement.** Every kernel FSM state surfaced on the dashboard
+— `TaskState`, `InitiativeState`, dashboard-derived session-row
+state — MUST resolve to a `(tone, glyph, label, description)`
+visual treatment in
+`dashboard-fe/src/lib/state-color.ts::VISUAL`, and the
+`(tone, glyph)` pair MUST be unique within each enum so an
+operator can tell two states apart at a glance even when
+colour collapses on a colour-blindness filter or a tinted
+monitor. Colour alone is insufficient — `Aborted` (operator
+stop) and `Cancelled` (kernel-driven cascade) both naturally
+land on the `block` tone; `GatesPending` and `ApprovedPlan`
+both naturally land on `warn` — and the glyph is the canonical
+disambiguator. `<StateBadge>` and `<StatusLegend>` MUST render
+the glyph alongside the colour and label, and the
+`description` MUST surface on hover (`title=`) so a new
+operator does not have to leave the page to learn what each
+state means.
+
+This invariant is the visual half of the
+"`Admitted → Running` not visible" iter56 paper-cut. The other
+half (`INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` below) ensures
+the kernel actually emits a push event for every transition;
+this invariant ensures that when the push lands, the operator
+SEES the new state.
+
+**Justification.** Pre-fix the dashboard distinguished
+`Admitted` from `Running` purely on tone (`muted` vs `info`)
+plus a pulsing dot conditional on `tone === "info"`. When the
+kernel emitted no push for `Admitted → Running` (the iter56
+audit chain held zero `TaskStateChanged` rows), the
+dashboard's only fallback was a side-by-side near-identical
+badge label. Operators read the dashboard as "every task is
+queued" and concluded the kernel had stalled, while live-e2e
+runs were silently mid-flight. Adding a glyph as a third axis
+of disambiguation means even when two states share a tone, the
+visual treatment is unambiguous; and pinning the glyph in a
+witness test means a future refactor cannot regress the
+distinction.
+
+**Canonical home.** `v2/dashboard-hardening.md §fsm-state-visibility-contract`.
+
+**Witness.**
+  * Frontend: `dashboard-fe/src/test/state-color.test.ts`
+    suite `INV-DASHBOARD-FSM-STATE-VISIBILITY-01` walks every
+    `KERNEL_*_STATES` array, asserts each state resolves to a
+    non-`null` `stateVisualTreatment(...)` with non-empty
+    `glyph` / `label` / `description`, and asserts the
+    `(tone, glyph)` pair is unique within the enum. Two
+    targeted regression cases pin the original user-reported
+    pairs: `Admitted ≠ Running` (glyph + tone + pulse) and
+    `Aborted ≠ Cancelled` (same `block` tone, distinct glyphs,
+    descriptions name the operator-vs-kernel distinction).
+
+---
+
+### INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 — Every kernel TaskState transition fires a TaskStateChanged audit row
+
+**Statement.** Every legal task FSM transition that lands
+through `kernel::initiatives::task_transitions::transition_task_in_tx`
+(or its wrapper `transition_task` /
+`transition_task_with_audit`) MUST cause a paired-write
+`AuditEventKind::TaskStateChanged { task_id, from_state,
+to_state, actor, policy_epoch }` to land in the audit chain
+post-commit. The audit row is the dashboard push protocol's
+ONLY trigger for `InitiativeEvent::TaskStateChanged` (see
+`kernel/src/push/initiative_bus.rs::audit_kind_to_initiative_event`
+and the matching arm at line 143); without it the dashboard's
+`SubscribeInitiative` SSE/WS stream goes silent on the
+transition and the operator only sees the change on the next
+full snapshot poll.
+
+`from_state` and `to_state` MUST be the canonical
+`TaskState::as_sql_str()` form so audit-replay tooling and the
+push translator can both round-trip the values without parsing
+divergence. `actor` MUST be the canonical wire string —
+`"kernel"` for kernel-driven transitions, `"operator:<fingerprint>"`
+for operator-driven ones — pinned by the `as_audit_string()`
+helper on `TransitionActor`.
+
+The audit emit is best-effort post-commit: a SQLite write that
+already succeeded MUST NOT be rolled back because the audit
+sink failed (mirrors the `InitiativeStateChanged` emit pattern
+in `intent.rs`). Audit-emit failures are logged structurally
+as `AuditEmitFailed { audit_event: "TaskStateChanged", ... }`
+so operators can reconcile from the structured log even when
+the audit chain is missing a row.
+
+**Justification.** iter56 reproduced the silent-FSM-progress
+shape on the live `lint-runner-python` task. The kernel
+flipped the task `Admitted → Running` inside `handle_complete_task`
+in a single SQLite transaction, then immediately flipped it
+to `Completed` in the next transaction. The intermediate
+`Running` state existed in the database for sub-millisecond
+windows and was never observed by a dashboard polling loop —
+the dashboard's snapshot endpoint sampled at second-scale and
+the realtime push stream was the only path that could surface
+the transition. Pre-fix `transition_task_in_tx` only emitted
+an `eprintln!` log line and never called `audit.emit(...)`; the
+audit chain therefore held zero `TaskStateChanged` rows for
+ANY task in iter56's evidence database, the push translator
+had nothing to translate, and the dashboard surfaced
+`Admitted → Completed` (or `Admitted → Failed`) as if
+`Running` had never existed.
+
+The fix lifts the audit emit to a paired-write contract:
+`transition_task_in_tx` returns a `TaskTransitionRecord` with
+`(from_state, to_state, actor, transitioned_at,
+initiative_id, policy_epoch)`, every callsite captures it and
+fires `emit_task_state_changed_audit(...)` post-`tx.commit()`,
+and the `transition_task_with_audit` wrapper folds both steps
+together for callsites that own their own commit. The witness
+exercises the canonical `Admitted → Running` edge end-to-end
+through `transition_task_with_audit` and asserts the
+`FakeAuditSink` captured exactly one `TaskStateChanged` event
+with the canonical wire shape.
+
+**Canonical home.** `v2/kernel-push-protocol.md §13` +
+`kernel/src/initiatives/task_transitions.rs`.
+
+**Witness.**
+  * Kernel: `kernel/src/initiatives/task_transitions.rs::tests::
+    inv_dashboard_push_fsm_completeness_01_admitted_to_running_emits_audit`
+    drives a seeded task through `transition_task_with_audit`
+    and asserts the captured `TaskStateChanged` audit carries
+    the canonical `(task_id, "Admitted" → "Running",
+    actor=kernel)` tuple plus a non-zero `policy_epoch`.
+    Sibling tests pin the `actor` wire string (`Kernel` →
+    `"kernel"`, `Operator` → `"operator:<fp>"`) and assert
+    that an illegal transition (Cancelled → Running)
+    short-circuits BEFORE the audit emit so a forbidden FSM
+    edge never produces a misleading audit row.
 
 ---
 

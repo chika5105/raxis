@@ -110,56 +110,188 @@ export const KERNEL_SESSION_STATES = [
   "Expired",
 ] as const;
 
-const MAP: Record<string, StateBadgeTone> = {
+/// Per-state visual treatment — one row per kernel FSM variant.
+///
+/// `INV-DASHBOARD-FSM-STATE-VISIBILITY-01` — every kernel
+/// `TaskState` / `InitiativeState` / dashboard session-row state
+/// MUST resolve to a `(tone, glyph, label, description)` tuple
+/// here, and the `(tone, glyph)` pair MUST be unique within each
+/// enum so an operator can tell two states apart at a glance even
+/// when colour collapses on a colour-blindness filter or a tinted
+/// monitor. Colour alone is insufficient (Aborted vs Cancelled
+/// both naturally land on `block`; GatesPending vs ApprovedPlan
+/// both naturally land on `warn`); the glyph is the
+/// disambiguator. The witness in
+/// `dashboard-fe/src/test/state-color.test.ts` walks every
+/// `KERNEL_*_STATES` array and asserts the glyph + label + tone
+/// triple is unique within the enum.
+///
+/// **Glyph vocabulary** — all glyphs are single-codepoint
+/// monospace-friendly Unicode chosen to render on stock system
+/// fonts WITHOUT requiring an icon font dependency. The
+/// `pulse` flag turns on the `pulse-dot` animation in
+/// `StateBadge.tsx` for the few "actively in motion" states (any
+/// `Running`-class state plus `Executing`).
+export interface StateVisualTreatment {
+  tone:        StateBadgeTone;
+  /// Single-codepoint glyph rendered before the label in
+  /// `<StateBadge>` and `<StatusLegend>`. Non-empty by contract.
+  glyph:       string;
+  /// Human-readable label. Exposed for tooltips and the
+  /// status-legend chip; usually mirrors the wire string but
+  /// CAN differ for legacy aliases.
+  label:       string;
+  /// One-line description shown on hover / in the legend's
+  /// expanded pop-out — the canonical operator-facing meaning of
+  /// this state. Helps a new operator distinguish e.g. Aborted
+  /// (operator-driven stop) from Cancelled (kernel-driven
+  /// abort cascade).
+  description: string;
+  /// Whether the badge should show a pulsing dot. Reserved for
+  /// the few "actively executing" states where the pulse mirrors
+  /// the absence of a steady-state.
+  pulse?:      boolean;
+}
+
+const VISUAL: Record<string, StateVisualTreatment> = {
   // ── InitiativeState (raxis-types::fsm::InitiativeState) ─────
-  Draft: "muted",
-  ApprovedPlan: "warn", // approved but not yet executing — at-rest
-  Executing: "info",
-  Blocked: "block",
-  Completed: "ok",
-  Failed: "bad",
-  Aborted: "block", // terminal-but-unnatural — surfaced as "block"
-  // so it visually distinguishes from the muted "queued" states
+  Draft: {
+    tone: "muted", glyph: "◇", label: "Draft",
+    description: "plan not yet approved by an operator",
+  },
+  ApprovedPlan: {
+    tone: "warn", glyph: "◆", label: "ApprovedPlan",
+    description: "operator approved the plan; orchestrator not yet spawned",
+  },
+  Executing: {
+    tone: "info", glyph: "▶", label: "Executing", pulse: true,
+    description: "orchestrator is driving sub-tasks toward terminality",
+  },
+  Blocked: {
+    tone: "block", glyph: "⏸", label: "Blocked",
+    description: "no admissible task; operator unblock or escalation required",
+  },
+  Completed: {
+    tone: "ok", glyph: "✓", label: "Completed",
+    description: "terminal success — every required task reached Completed",
+  },
+  Failed: {
+    tone: "bad", glyph: "✗", label: "Failed",
+    description: "terminal failure — a required task or merge step failed",
+  },
+  Aborted: {
+    tone: "block", glyph: "⊠", label: "Aborted",
+    description: "operator-initiated stop via `abort_initiative`",
+  },
 
   // ── TaskState (raxis-types::fsm::TaskState) ─────────────────
-  Admitted: "muted", // queued, waiting for first intent
-  Running: "info",
-  GatesPending: "warn", // paused awaiting gate evaluation
-  Cancelled: "block", // bulk-cancelled by abort_initiative
-  BlockedRecoveryPending: "warn", // crash recovery in flight
-  // (Completed / Failed / Aborted shared with InitiativeState)
+  // Admitted vs Running used to be visually identical at a glance
+  // (Admitted=muted, Running=info+pulse). The pulse helped, but
+  // when the dashboard never received a push for the
+  // Admitted → Running edge (iter56 root cause) the operator's
+  // only fallback was reading two near-identical badge labels.
+  // The glyph column makes the two trivially distinguishable in
+  // every surface (badge, DAG node chip, legend).
+  Admitted: {
+    tone: "muted", glyph: "◌", label: "Admitted",
+    description: "queued; awaiting first planner intent or session spawn",
+  },
+  Running: {
+    tone: "info", glyph: "▶", label: "Running", pulse: true,
+    description: "an executor is actively processing intents on this task",
+  },
+  GatesPending: {
+    tone: "warn", glyph: "⏳", label: "GatesPending",
+    description: "paused awaiting witness records for one or more gates",
+  },
+  Cancelled: {
+    tone: "block", glyph: "⊘", label: "Cancelled",
+    description: "kernel-initiated cancel via `abort_initiative` cascade",
+  },
+  BlockedRecoveryPending: {
+    tone: "warn", glyph: "↻", label: "BlockedRecoveryPending",
+    description: "in-flight at kernel crash; awaits operator `task resume`",
+  },
+  // (TaskState reuses Completed / Failed / Aborted entries above;
+  //  they keep the same (tone, glyph, label) triple deliberately
+  //  — the same wire string MUST mean the same thing across enums.)
 
-  // ── SessionState (raxis-types::fsm::SessionState) ───────────
-  Spawning: "muted",
-  Paused: "warn",
-  // Terminal session classifications surfaced by the dashboard's
-  // forensic-detail path (`INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`)
-  // — sessions that have terminated are still navigable from the
-  // list page, and the badge needs to spell out *why* the row is
-  // no longer active.
-  //
-  //  * `Revoked` — deliberate kernel / operator revocation; gets
-  //    the `block` tone (matches `Cancelled`/`Aborted` semantics:
-  //    terminal-but-unnatural cause).
-  //  * `Expired` — passive lapse of `expires_at`; rendered muted
-  //    because it's the expected terminal state, not a failure.
-  Revoked: "block",
-  Expired: "muted",
+  // ── SessionState (raxis-types::fsm::SessionState + dashboard-derived) ─
+  Spawning: {
+    tone: "muted", glyph: "◌", label: "Spawning",
+    description: "VM substrate is booting; planner has not connected yet",
+  },
+  Paused: {
+    tone: "warn", glyph: "⏸", label: "Paused",
+    description: "session blocked on an outstanding kernel push (e.g. escalation)",
+  },
+  Revoked: {
+    tone: "block", glyph: "⊠", label: "Revoked",
+    description: "kernel/operator revoked this session token; planner cannot resume",
+  },
+  Expired: {
+    tone: "muted", glyph: "…", label: "Expired",
+    description: "passive lapse of `expires_at`; expected terminal lifecycle end",
+  },
 
   // ── Legacy / human-typed aliases ────────────────────────────
   // Older callsites (and a few test fixtures) used these names
   // before the kernel FSM converged on the canonical set above;
   // we keep mapping them so a stale string does not flash
   // "unknown" at the operator.
-  Pending: "muted",
-  Ready: "muted",
-  Active: "info",
-  Activated: "info",
-  Reviewing: "warn",
-  AwaitingReview: "warn",
-  Closed: "muted",
-  Succeeded: "ok",
+  Pending:        { tone: "muted", glyph: "◌", label: "Pending",        description: "legacy alias for queued" },
+  Ready:          { tone: "muted", glyph: "◌", label: "Ready",          description: "legacy alias for ready-to-pickup" },
+  Active:         { tone: "info",  glyph: "▶", label: "Active", pulse: true,
+                    description: "legacy alias for Running" },
+  Activated:      { tone: "info",  glyph: "▶", label: "Activated", pulse: true,
+                    description: "legacy alias for Running" },
+  Reviewing:      { tone: "warn",  glyph: "⏳", label: "Reviewing",      description: "legacy alias for in-review" },
+  AwaitingReview: { tone: "warn",  glyph: "⏳", label: "AwaitingReview", description: "legacy alias for AwaitingReview" },
+  Closed:         { tone: "muted", glyph: "…", label: "Closed",         description: "legacy alias for terminal close" },
+  Succeeded:      { tone: "ok",    glyph: "✓", label: "Succeeded",      description: "legacy alias for Completed" },
 };
+
+const MAP: Record<string, StateBadgeTone> = Object.fromEntries(
+  Object.entries(VISUAL).map(([state, treatment]) => [state, treatment.tone]),
+);
+
+/// Lookup the per-state visual treatment. Returns `null` when the
+/// state is not registered — callers should fall through to the
+/// muted default. Case-normalises like [`stateTone`] so a
+/// lower-cased planner-emitted state still resolves.
+export function stateVisualTreatment(
+  state: string | null | undefined,
+): StateVisualTreatment | null {
+  if (!state) return null;
+  const direct = VISUAL[state];
+  if (direct) return direct;
+  const norm = state.charAt(0).toUpperCase() + state.slice(1).toLowerCase();
+  return VISUAL[norm] ?? null;
+}
+
+/// Single-codepoint glyph for the badge. Falls back to `•` for
+/// unknown states so the badge renders predictably.
+export function stateGlyph(state: string | null | undefined): string {
+  return stateVisualTreatment(state)?.glyph ?? "•";
+}
+
+/// Human-friendly state description (one line, surfaces on hover
+/// in `<StateBadge>` via `title=`).
+export function stateDescription(
+  state: string | null | undefined,
+): string {
+  return stateVisualTreatment(state)?.description ?? "";
+}
+
+/// Whether `<StateBadge>` should render the pulsing dot for this
+/// state. Pre-fix the pulse was conditional only on `tone === "info"`,
+/// which collapsed every active session/initiative under the same
+/// rule. The treatment table now drives this explicitly so e.g.
+/// `Executing` (initiative) and `Running` (task) both pulse but
+/// `Active` (legacy session alias) can opt in too.
+export function stateShouldPulse(state: string | null | undefined): boolean {
+  return Boolean(stateVisualTreatment(state)?.pulse);
+}
 
 export function stateTone(state: string | null | undefined): StateBadgeTone {
   if (!state) return "muted";

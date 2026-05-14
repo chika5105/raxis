@@ -2033,8 +2033,23 @@ pub fn abort_task(
 
 /// Retry a Failed task — transition back to Admitted.
 /// Uses `task_transitions::transition_task` to enforce FSM rules (INV-INIT-04).
-pub fn retry_task(task_id: &str, store: &Store) -> Result<(), LifecycleError> {
-    use crate::initiatives::task_transitions::{transition_task, TransitionActor};
+///
+/// `audit` is optional for backward compatibility with legacy
+/// callers that did not have an `AuditSink` in scope; when supplied,
+/// the post-commit `AuditEventKind::TaskStateChanged` paired-write
+/// fires per `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` so the
+/// dashboard observes the operator-driven `Failed → Admitted` edge
+/// in real time without polling. Modern callers SHOULD pass an
+/// audit sink — passing `None` silently regresses dashboard
+/// visibility for this transition.
+pub fn retry_task(
+    task_id: &str,
+    store:   &Store,
+    audit:   Option<&dyn raxis_audit_tools::AuditSink>,
+) -> Result<(), LifecycleError> {
+    use crate::initiatives::task_transitions::{
+        emit_task_state_changed_audit, transition_task, TransitionActor,
+    };
 
     let conn = store.lock_sync();
     let state: String = conn.query_row(
@@ -2053,8 +2068,12 @@ pub fn retry_task(task_id: &str, store: &Store) -> Result<(), LifecycleError> {
     }
     drop(conn); // release lock before calling transition_task which re-acquires
 
-    transition_task(task_id, TaskState::Admitted, None, TransitionActor::Kernel, store)
+    let record = transition_task(task_id, TaskState::Admitted, None, TransitionActor::Kernel, store)
         .map_err(|e| LifecycleError::Store(raxis_store::StoreError::Invariant(e.to_string())))?;
+
+    if let Some(audit_sink) = audit {
+        emit_task_state_changed_audit(audit_sink, &record, None);
+    }
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"TaskRetried\",\"task_id\":\"{task_id}\"}}",

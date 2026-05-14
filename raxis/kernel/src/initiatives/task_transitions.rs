@@ -11,6 +11,7 @@
 // Type-safety rule: all state strings in SQL use TaskState::as_sql_str().
 // No raw string literals for enum values — the compiler catches misspellings.
 
+use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
 use raxis_types::{unix_now_secs, TaskState};
 
@@ -26,6 +27,105 @@ pub enum TransitionActor {
     Operator { fingerprint: String },
 }
 
+impl TransitionActor {
+    /// Canonical wire string: `"kernel"` or `"operator:<fingerprint>"`.
+    /// Used by the structured log line AND by the
+    /// `AuditEventKind::TaskStateChanged.actor` field — both surfaces
+    /// MUST match bit-for-bit so audit-replay tooling can correlate.
+    pub fn as_audit_string(&self) -> String {
+        match self {
+            Self::Kernel => "kernel".to_owned(),
+            Self::Operator { fingerprint } => format!("operator:{fingerprint}"),
+        }
+    }
+}
+
+/// All the facts needed to emit
+/// `AuditEventKind::TaskStateChanged` post-commit. Returned by
+/// `transition_task_in_tx` so callers (whose surrounding SQLite
+/// transaction commits only when the entire Phase C succeeds) can
+/// fire the paired-write audit event AFTER `tx.commit()` per the
+/// `audit-paired-writes.md §2` "audit-then-broadcast" contract.
+///
+/// `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — every legal task
+/// FSM transition MUST be observable on the dashboard
+/// `SubscribeInitiative` stream. The stream is fed by
+/// `BroadcastingAuditSink` translating `AuditEventKind::
+/// TaskStateChanged` → `InitiativeEvent::TaskStateChanged` (see
+/// `kernel/src/push/initiative_bus.rs::audit_kind_to_initiative_event`).
+/// Callers that drop the returned record without emitting the audit
+/// event therefore black-hole the dashboard's only push trigger
+/// for that transition; the operator sees `Admitted` jump
+/// directly to `Completed`/`Failed` without observing
+/// `Running`/`GatesPending`/etc.
+#[derive(Debug, Clone)]
+pub struct TaskTransitionRecord {
+    /// Task whose FSM moved.
+    pub task_id:         String,
+    /// Initiative the task belongs to (loaded inside the same
+    /// SELECT that read `from_state` so the audit attribution
+    /// reflects the row at transition time).
+    pub initiative_id:   String,
+    /// Pre-transition state observed by `transition_task_in_tx`.
+    pub from_state:      TaskState,
+    /// Post-transition state written by `transition_task_in_tx`.
+    pub to_state:        TaskState,
+    /// Actor that triggered the transition (kernel / operator).
+    pub actor:           TransitionActor,
+    /// Wall-clock at which the row was UPDATEd, in unix seconds —
+    /// matches `tasks.transitioned_at`.
+    pub transitioned_at: i64,
+    /// Policy epoch in force on the task row at transition time.
+    /// Carried on the audit event so `raxis log -f --kind
+    /// TaskStateChanged` can be filtered per-epoch without joining
+    /// back to the tasks table.
+    pub policy_epoch:    u64,
+}
+
+/// Emit the `AuditEventKind::TaskStateChanged` paired-write for a
+/// successful task transition. Best-effort — audit emit failure
+/// is logged structurally but not returned (mirroring the
+/// `InitiativeStateChanged` emit pattern in
+/// `kernel/src/handlers/intent.rs::finalize_integration_merge_completion`
+/// callsite). The audit row is the canonical wire trigger for the
+/// dashboard push protocol per `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01`.
+///
+/// **Ordering.** This function MUST be called AFTER the
+/// surrounding SQLite transaction has committed — the audit row
+/// is the public claim that the transition is durable, and an
+/// emit before commit would create an "audit ghost" if the tx
+/// later rolled back.
+pub fn emit_task_state_changed_audit(
+    audit:      &dyn AuditSink,
+    record:     &TaskTransitionRecord,
+    session_id: Option<&str>,
+) {
+    let kind = AuditEventKind::TaskStateChanged {
+        task_id:      record.task_id.clone(),
+        from_state:   record.from_state.as_sql_str().to_owned(),
+        to_state:     record.to_state.as_sql_str().to_owned(),
+        actor:        record.actor.as_audit_string(),
+        policy_epoch: record.policy_epoch,
+    };
+    if let Err(e) = audit.emit(
+        kind,
+        session_id,
+        Some(record.task_id.as_str()),
+        Some(record.initiative_id.as_str()),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+             \"audit_event\":\"TaskStateChanged\",\"task_id\":\"{}\",\
+             \"initiative_id\":\"{}\",\"from\":\"{}\",\"to\":\"{}\",\
+             \"reason\":\"{e}\"}}",
+            record.task_id,
+            record.initiative_id,
+            record.from_state.as_sql_str(),
+            record.to_state.as_sql_str(),
+        );
+    }
+}
+
 /// Perform an atomic task state transition.
 ///
 /// Standalone wrapper that opens its own mutex acquisition and runs the
@@ -39,18 +139,52 @@ pub enum TransitionActor {
 /// Returns `Err(LifecycleError::TaskNotFound)` if no row for `task_id`.
 /// Returns `Err(LifecycleError::TaskNotAbortable)` if the transition is not
 /// legal from the current state.
+///
+/// Returns the [`TaskTransitionRecord`] for the now-committed
+/// transition. Wrapper callers that have access to an [`AuditSink`]
+/// SHOULD prefer [`transition_task_with_audit`] which performs the
+/// post-commit `TaskStateChanged` emit on the caller's behalf —
+/// this bare variant exists for tests and for the few legacy
+/// callers that do their own audit emit out-of-band.
 pub fn transition_task(
     task_id:      &str,
     new_state:    TaskState,
     block_reason: Option<&str>,
     actor:        TransitionActor,
     store:        &Store,
-) -> Result<(), LifecycleError> {
+) -> Result<TaskTransitionRecord, LifecycleError> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction()?;
-    transition_task_in_tx(&tx, task_id, new_state, block_reason, actor)?;
+    let record = transition_task_in_tx(&tx, task_id, new_state, block_reason, actor)?;
     tx.commit()?;
-    Ok(())
+    Ok(record)
+}
+
+/// Audit-aware companion to [`transition_task`]. Performs the FSM
+/// transition AND emits the paired-write
+/// `AuditEventKind::TaskStateChanged` post-commit so the dashboard's
+/// `SubscribeInitiative` push stream observes the change without
+/// polling. The audit emit is best-effort (mirrors the
+/// `InitiativeStateChanged` emit pattern in `intent.rs`); a failed
+/// audit emit does NOT roll back the transition, but a structured
+/// `AuditEmitFailed` log line is recorded so the operator can
+/// reconcile from the structured log.
+///
+/// `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — every kernel-driven
+/// task FSM transition that comes through this path is dashboard-
+/// observable in real time.
+pub fn transition_task_with_audit(
+    task_id:      &str,
+    new_state:    TaskState,
+    block_reason: Option<&str>,
+    actor:        TransitionActor,
+    store:        &Store,
+    audit:        &dyn AuditSink,
+    session_id:   Option<&str>,
+) -> Result<TaskTransitionRecord, LifecycleError> {
+    let record = transition_task(task_id, new_state, block_reason, actor, store)?;
+    emit_task_state_changed_audit(audit, &record, session_id);
+    Ok(record)
 }
 
 /// Atomic task state transition — transaction variant for callers
@@ -70,7 +204,7 @@ pub fn transition_task_in_tx(
     new_state:    TaskState,
     block_reason: Option<&str>,
     actor:        TransitionActor,
-) -> Result<(), LifecycleError> {
+) -> Result<TaskTransitionRecord, LifecycleError> {
     // `INV-FAILURE-REASON-MANDATORY-01` defense-in-depth: every
     // transition into a terminal-failure or operator-blocked
     // state MUST carry a non-empty, human-readable reason. The
@@ -104,17 +238,27 @@ pub fn transition_task_in_tx(
 
     let now = unix_now_secs();
 
-    // Load current state string and parse it through the enum.
-    let current_state_str: String = conn.query_row(
-        &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
-        rusqlite::params![task_id],
-        |r| r.get(0),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
-            task_id: task_id.to_owned(),
-        },
-        other => LifecycleError::Sql(other),
-    })?;
+    // Load current state string + initiative_id + policy_epoch in a
+    // single SELECT. The initiative_id and policy_epoch are needed
+    // by the post-commit `emit_task_state_changed_audit` helper —
+    // capturing them here under the same row lock as the FSM SELECT
+    // guarantees the audit attribution reflects the row at the
+    // moment of the transition (not whatever a follow-up SELECT
+    // would race into observing).
+    let (current_state_str, initiative_id, policy_epoch): (String, String, i64) =
+        conn.query_row(
+            &format!(
+                "SELECT state, initiative_id, policy_epoch \
+                 FROM {TASKS} WHERE task_id=?1"
+            ),
+            rusqlite::params![task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
+                task_id: task_id.to_owned(),
+            },
+            other => LifecycleError::Sql(other),
+        })?;
 
     let current_state = TaskState::from_sql_str(&current_state_str)
         .ok_or_else(|| LifecycleError::TaskNotAbortable {
@@ -128,10 +272,7 @@ pub fn transition_task_in_tx(
     }
 
     let new_state_str = new_state.as_sql_str();
-    let actor_desc = match &actor {
-        TransitionActor::Kernel => "kernel".to_owned(),
-        TransitionActor::Operator { fingerprint } => format!("operator:{fingerprint}"),
-    };
+    let actor_desc = actor.as_audit_string();
 
     // All transitions use the same DDL-canonical columns:
     //   state, transitioned_at, actor — always written.
@@ -230,17 +371,28 @@ pub fn transition_task_in_tx(
     // soft-fail: the UPDATE matches zero rows and the kernel-side
     // `respawn_orchestrator_for_initiative` preflight will short-
     // circuit on `is_executing == false` anyway.
-    if let Some(initiative_id) =
-        crate::orch_respawn_ceiling::lookup_initiative_id_for_task_in_tx(
-            conn, task_id,
-        ).map_err(LifecycleError::Sql)?
-    {
-        crate::orch_respawn_ceiling::reset_no_progress_count_in_tx(
-            conn, &initiative_id,
-        ).map_err(LifecycleError::Sql)?;
-    }
+    // We already loaded `initiative_id` above (under the same row
+    // lock as the FSM SELECT); reuse it instead of re-querying via
+    // `lookup_initiative_id_for_task_in_tx`. Behaviourally
+    // equivalent — the row hasn't moved within this transaction —
+    // and saves one round-trip per transition.
+    crate::orch_respawn_ceiling::reset_no_progress_count_in_tx(
+        conn, &initiative_id,
+    ).map_err(LifecycleError::Sql)?;
 
-    Ok(())
+    Ok(TaskTransitionRecord {
+        task_id:         task_id.to_owned(),
+        initiative_id,
+        from_state:      current_state,
+        to_state:        new_state,
+        actor,
+        transitioned_at: now,
+        // policy_epoch lives on the tasks row as INTEGER; SQLite
+        // stores it as i64 — coerce to u64 for the audit event
+        // shape (negative values are nonsensical here, so a
+        // saturating cast preserves the invariant).
+        policy_epoch:    policy_epoch.max(0) as u64,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -538,5 +690,132 @@ mod tests {
         assert_eq!(state, "Failed");
         assert_eq!(term, first_term,
             "terminated_at must be untouched by the failed retry");
+    }
+
+    // ── INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 ──────────────────────────
+    //
+    // Every legal task FSM transition that goes through
+    // `transition_task_in_tx` MUST surface a `TaskTransitionRecord`
+    // carrying enough information to fire the post-commit
+    // `AuditEventKind::TaskStateChanged` paired-write — which in
+    // turn is the `BroadcastingAuditSink`'s only push trigger for
+    // the dashboard's `SubscribeInitiative` realtime stream
+    // (`kernel/src/push/initiative_bus.rs::audit_kind_to_initiative_event`).
+    //
+    // Pre-fix: `transition_task_in_tx` returned `Result<(), _>` and
+    // emitted only an `eprintln!` log line. The audit chain in
+    // iter56 carried zero `TaskStateChanged` events for any task,
+    // which is why the dashboard never observed `Admitted →
+    // Running` on any executor.
+
+    use raxis_test_support::FakeAuditSink;
+
+    #[test]
+    fn inv_dashboard_push_fsm_completeness_01_admitted_to_running_emits_audit() {
+        let store = Store::open_in_memory().unwrap();
+        let task_id = "t-vis";
+        seed_active_executor(&store, task_id, "act-vis");
+        // The seed creates the task in `Running`; reset to `Admitted`
+        // so we can drive the canonical Admitted → Running edge that
+        // the user reported as invisible.
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {TASKS} SET state='Admitted' WHERE task_id=?1"
+                ),
+                rusqlite::params![task_id],
+            ).unwrap();
+        }
+
+        let sink = FakeAuditSink::new();
+        let record = transition_task_with_audit(
+            task_id,
+            TaskState::Running,
+            None,
+            TransitionActor::Kernel,
+            &store,
+            &sink,
+            Some("session-vis"),
+        ).expect("transition must succeed for Admitted → Running");
+
+        // Record carries the canonical (from, to, actor, initiative)
+        // tuple a downstream emit needs.
+        assert_eq!(record.from_state, TaskState::Admitted);
+        assert_eq!(record.to_state,   TaskState::Running);
+        assert_eq!(record.initiative_id, "init-fsm");
+        assert_eq!(record.policy_epoch, 1);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1,
+            "INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01: exactly one \
+             TaskStateChanged audit must fire per legal transition");
+        match &events[0].kind {
+            AuditEventKind::TaskStateChanged {
+                task_id: t, from_state, to_state, actor, ..
+            } => {
+                assert_eq!(t, task_id);
+                assert_eq!(from_state, "Admitted");
+                assert_eq!(to_state,   "Running");
+                assert_eq!(actor,      "kernel");
+            }
+            other => panic!(
+                "INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01: expected \
+                 TaskStateChanged audit, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn inv_dashboard_push_fsm_completeness_01_operator_actor_string_is_canonical() {
+        // The dashboard's audit-replay tooling parses `actor` as
+        // `"kernel"` or `"operator:<fingerprint>"`; pinning the
+        // wire form prevents a future refactor from silently
+        // breaking the operator-vs-kernel distinction.
+        assert_eq!(
+            TransitionActor::Kernel.as_audit_string(),
+            "kernel",
+        );
+        assert_eq!(
+            TransitionActor::Operator { fingerprint: "abc123".into() }
+                .as_audit_string(),
+            "operator:abc123",
+        );
+    }
+
+    #[test]
+    fn inv_dashboard_push_fsm_completeness_01_failed_transition_does_not_emit_audit() {
+        // Defensive: `transition_task_with_audit` short-circuits
+        // before the audit emit when the FSM rejects the
+        // transition. An audit row claiming a transition that
+        // never happened would mislead operator dashboards.
+        let store = Store::open_in_memory().unwrap();
+        seed_active_executor(&store, "t-no-emit", "act-no-emit");
+        // Seed leaves the task in `Running`; transition to
+        // Cancelled (a terminal state), then attempt an illegal
+        // Cancelled → Running flip via the audit-aware wrapper
+        // and assert the audit sink stays empty.
+        transition_task(
+            "t-no-emit",
+            TaskState::Cancelled,
+            None,
+            TransitionActor::Kernel,
+            &store,
+        ).unwrap();
+
+        let sink = FakeAuditSink::new();
+        let result = transition_task_with_audit(
+            "t-no-emit",
+            TaskState::Running,
+            None,
+            TransitionActor::Kernel,
+            &store,
+            &sink,
+            None,
+        );
+        assert!(result.is_err(),
+            "Cancelled → Running is an illegal terminal edge");
+        assert!(sink.events().is_empty(),
+            "no audit row may be emitted for an illegal transition");
     }
 }

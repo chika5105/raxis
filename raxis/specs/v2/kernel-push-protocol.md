@@ -693,6 +693,35 @@ When the recipient's `pending_pushes` reaches its configured `push_queue_cap`, t
 
 **Scenario it prevents:** A slow recipient causes either (a) silent message loss, (b) unbounded Kernel memory growth, (c) cross-session stalls, or (d) producer-state-rollback destroying valid work. INV-PUSH-05 chooses the only fail-closed-and-isolated option: terminate the slow recipient, preserve all producer state, leave other sessions untouched.
 
+### INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 — Every kernel TaskState transition fires a TaskStateChanged audit row
+
+The dashboard's `SubscribeInitiative` realtime stream — distinct from the planner-facing `KernelPush` / `pending_pushes` machinery covered by INV-PUSH-01..05 above — is fed by an entirely separate fanout (`kernel/src/push/initiative_bus.rs::InitiativeEventBus`) that translates `AuditEventKind` rows into `InitiativeEvent` frames. The translator carries one arm per relevant audit kind; the `TaskStateChanged` arm at line 143 is the ONLY path by which a task FSM transition reaches the operator dashboard in real time.
+
+Pre-fix the kernel's `transition_task_in_tx` helper updated `tasks.state` and emitted only an `eprintln!` log line — it never called `audit.emit(AuditEventKind::TaskStateChanged { ... })`. The audit chain in iter56's evidence held zero `TaskStateChanged` rows for ANY task across the entire run. The push translator therefore had nothing to translate; the dashboard's snapshot poll observed `Admitted → Completed` (or `Admitted → Failed`) jumps because the intermediate `Running` window was sub-millisecond and never landed in a snapshot. The user-visible bug ("Admitted to Running is not visible on the dashboard") was a direct consequence.
+
+The fix lifts the audit emit to a paired-write contract:
+
+- `transition_task_in_tx` now returns `TaskTransitionRecord { task_id, initiative_id, from_state, to_state, actor, transitioned_at, policy_epoch }` instead of `()`. The record carries every field needed to construct `AuditEventKind::TaskStateChanged`.
+- A new `emit_task_state_changed_audit(audit, &record, session_id)` helper performs the post-commit emit. Best-effort — audit-emit failure is logged structurally as `AuditEmitFailed { audit_event: "TaskStateChanged", ... }` but does NOT roll back the already-committed FSM transition (mirrors the `InitiativeStateChanged` emit pattern in `intent.rs`).
+- A new `transition_task_with_audit(...)` wrapper folds the standalone-tx form (`transition_task`) with the audit emit so callsites that own their own commit do not have to remember the post-commit step.
+- Every callsite of `transition_task_in_tx` (handlers/intent.rs, session_spawn_orchestrator.rs, finalize_integration_merge_completion) captures the returned record into a `pending_audits: Vec<TaskTransitionRecord>` and fires `emit_task_state_changed_audit(...)` after `tx.commit()` returns Ok.
+- Every callsite of `transition_task` (lifecycle.rs::retry_task, recovery.rs supervisor auto-resume, ipc/operator.rs::handle_resume_task) either uses `transition_task_with_audit(...)` directly or threads the audit sink through and emits the paired-write itself.
+
+`from_state` and `to_state` are always the canonical `TaskState::as_sql_str()` form; `actor` is `"kernel"` for kernel-driven transitions and `"operator:<fingerprint>"` for operator-driven ones (pinned by `TransitionActor::as_audit_string()`).
+
+**Where:**
+- `kernel/src/initiatives/task_transitions.rs::TaskTransitionRecord`,
+- `kernel/src/initiatives/task_transitions.rs::transition_task_in_tx`,
+- `kernel/src/initiatives/task_transitions.rs::emit_task_state_changed_audit`,
+- `kernel/src/initiatives/task_transitions.rs::transition_task_with_audit`,
+- `kernel/src/push/initiative_bus.rs::audit_kind_to_initiative_event` (consumer arm at line 143).
+
+**Scenario it prevents:** the iter56 silent-FSM-progress bug — a task walks `Admitted → Running → Completed` inside three back-to-back SQLite transactions over sub-millisecond windows; the dashboard polls at second-scale and sees only the terminal state; the operator concludes the kernel never executed the task because the `Running` chip never appeared. With `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` the dashboard's `SubscribeInitiative` stream receives one `InitiativeEvent::TaskStateChanged { from_state: "Admitted", to_state: "Running" }` frame followed by one `{ from_state: "Running", to_state: "Completed" }` frame — both wall-clock-ordered, both observable on a `raxis log -f --kind TaskStateChanged` tail.
+
+**Witness:** `kernel/src/initiatives/task_transitions.rs::tests::inv_dashboard_push_fsm_completeness_01_admitted_to_running_emits_audit` drives a seeded task through `transition_task_with_audit` and asserts the `FakeAuditSink` captured exactly one `TaskStateChanged` event with `(task_id, "Admitted" → "Running", actor=kernel, policy_epoch=1)`. Sibling tests pin the actor wire string and assert that an illegal transition (`Cancelled → Running`) short-circuits BEFORE the audit emit so a forbidden FSM edge never produces a misleading audit row.
+
+**Cross-reference:** `INV-DASHBOARD-FSM-STATE-VISIBILITY-01` (FE-side companion — every state has a unique (tone, glyph, label) treatment so the operator can SEE the freshly-pushed transition); `audit-paired-writes.md §4` (paired-write ordering — audit emit always post-commit); `dashboard-hardening.md §5.11.1` (FE state visibility contract).
+
 ---
 
 ## 13. Implementation Checklist

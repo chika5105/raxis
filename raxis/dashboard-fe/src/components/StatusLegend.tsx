@@ -1,6 +1,12 @@
 import clsx from "clsx";
 
-import { stateTone, toneClasses, type StateBadgeTone } from "@/lib/state-color";
+import {
+  stateDescription,
+  stateGlyph,
+  stateTone,
+  toneClasses,
+  type StateBadgeTone,
+} from "@/lib/state-color";
 
 interface StatusLegendProps {
   /// Per-state counts as a plain object — `{ Running: 3, Completed: 7 }`.
@@ -74,9 +80,28 @@ export function StatusLegend({
     >
       {entries.map(([status, count]) => {
         const tone = stateTone(status);
+        const glyph = stateGlyph(status);
+        const description = stateDescription(status);
         const active = activeSet.has(status);
         const dim = count === 0 && !active;
         const itemPlural = count === 1 ? itemNoun : `${itemNoun}s`;
+        // `INV-DASHBOARD-FSM-STATE-VISIBILITY-01` — the legend
+        // chip carries the same `(tone-coloured pill) + (glyph) +
+        // (label) + (count)` composition as `<StateBadge>` so the
+        // legend doubles as the per-state colour-key reference. The
+        // chip's `title=` text expands to the full operator-facing
+        // description (e.g. "Aborted: operator-initiated stop via
+        // `abort_initiative`") rather than the bare label so a new
+        // operator does not have to leave the page to learn what the
+        // states mean.
+        const baseTitle = active
+          ? `Clear ${status} filter (Cmd-click to keep others)`
+          : `Filter to ${status} ${itemPlural}${
+              count > 0 ? ` (${count})` : ""
+            } — Cmd-click for multi-select`;
+        const titleText = description
+          ? `${baseTitle}\n\n${status}: ${description}`
+          : baseTitle;
         return (
           <button
             key={status}
@@ -92,13 +117,7 @@ export function StatusLegend({
               }
             }}
             aria-pressed={active}
-            title={
-              active
-                ? `Clear ${status} filter (Cmd-click to keep others)`
-                : `Filter to ${status} ${itemPlural}${
-                    count > 0 ? ` (${count})` : ""
-                  } — Cmd-click for multi-select`
-            }
+            title={titleText}
             className={clsx(
               "badge cursor-pointer select-none transition-all",
               toneClasses(tone),
@@ -117,6 +136,9 @@ export function StatusLegend({
                 dotToneClass(tone),
               )}
             />
+            <span aria-hidden="true" className="mr-1 font-mono text-[0.95em] leading-none">
+              {glyph}
+            </span>
             <span>{status}</span>
             <span className="ml-1.5 tabular text-[11px] opacity-80">
               {count}
@@ -178,6 +200,7 @@ export function StatusFilterPills({
       <span className="text-ink-subtle">Active filter:</span>
       {activeStatuses.map((s) => {
         const tone = stateTone(s);
+        const glyph = stateGlyph(s);
         return (
           <span
             key={s}
@@ -195,6 +218,9 @@ export function StatusFilterPills({
                 dotToneClass(tone),
               )}
             />
+            <span aria-hidden="true" className="mr-1 font-mono text-[0.95em] leading-none">
+              {glyph}
+            </span>
             {s}
             <button
               type="button"

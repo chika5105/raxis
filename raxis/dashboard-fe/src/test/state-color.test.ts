@@ -8,7 +8,11 @@ import {
   hasExplicitStateEntry,
   isIntegrationMergeTask,
   shortStateLabel,
+  stateDescription,
+  stateGlyph,
+  stateShouldPulse,
   stateTone,
+  stateVisualTreatment,
   taskDisplayId,
   toneClasses,
 } from "@/lib/state-color";
@@ -130,6 +134,117 @@ describe("INV-DASHBOARD-TASK-STATE-COMPLETENESS-01", () => {
     // pins the same length from the Rust side, so the two are
     // forced to move together.
     expect(KERNEL_TASK_STATES).toHaveLength(8);
+  });
+});
+
+// ── INV-DASHBOARD-FSM-STATE-VISIBILITY-01 ─────────────────────────
+//
+// Every kernel FSM state MUST have a unique
+// `(tone, glyph, label)` triple within its enum so an operator
+// can tell two states apart at a glance even when colour
+// collapses on a colour-blindness filter or a tinted monitor.
+// Pre-fix the dashboard distinguished `Admitted` from `Running`
+// purely on tone (`muted` vs `info`) and a pulse — operators
+// reported the two looked identical, especially because the
+// kernel was emitting NO push events for the
+// `Admitted → Running` edge (audit chain held zero
+// `TaskStateChanged` rows in iter56).
+//
+// The fix is twofold:
+//   1. Kernel — every `transition_task_in_tx` callsite emits
+//      `AuditEventKind::TaskStateChanged` post-commit so the
+//      dashboard's `SubscribeInitiative` push stream observes
+//      the transition (`INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01`,
+//      witness in
+//      `kernel/src/initiatives/task_transitions.rs::tests`).
+//   2. FE — every state carries a distinct `(tone, glyph,
+//      label, description)` treatment in `state-color.ts::VISUAL`,
+//      and `<StateBadge>` / `<StatusLegend>` render the glyph
+//      alongside the colour and label so every variant has a
+//      third axis of disambiguation.
+//
+// This test walks every `KERNEL_*_STATES` array and asserts the
+// (tone, glyph) pair is unique within its enum, plus that every
+// state carries a non-empty description.
+describe("INV-DASHBOARD-FSM-STATE-VISIBILITY-01", () => {
+  function visualKey(state: string): string {
+    const t = stateVisualTreatment(state);
+    if (!t) return `<missing>:${state}`;
+    return `${t.tone}|${t.glyph}`;
+  }
+
+  it.each([
+    ["TaskState",        KERNEL_TASK_STATES],
+    ["InitiativeState",  KERNEL_INITIATIVE_STATES],
+    ["SessionRowState",  KERNEL_SESSION_STATES],
+  ] as const)(
+    "registers a (tone, glyph, label, description) treatment for every %s variant",
+    (enumName, states) => {
+      for (const state of states) {
+        const treatment = stateVisualTreatment(state);
+        expect(
+          treatment,
+          `${enumName} '${state}' has no entry in state-color.ts::VISUAL — ` +
+            `the dashboard will fall through to the muted/dot fallback ` +
+            `and operators cannot distinguish it from ${state === "Admitted" ? "Running" : "Admitted"}.`,
+        ).not.toBeNull();
+        expect(treatment!.label.length).toBeGreaterThan(0);
+        expect(treatment!.glyph.length).toBeGreaterThan(0);
+        expect(
+          treatment!.description.length,
+          `${enumName} '${state}' has an empty description — every kernel ` +
+            `state MUST carry a one-line operator-facing meaning so the ` +
+            `legend / badge tooltip is not just the wire string.`,
+        ).toBeGreaterThan(0);
+      }
+    },
+  );
+
+  it.each([
+    ["TaskState",        KERNEL_TASK_STATES],
+    ["InitiativeState",  KERNEL_INITIATIVE_STATES],
+    ["SessionRowState",  KERNEL_SESSION_STATES],
+  ] as const)(
+    "every %s variant has a unique (tone, glyph) pair within its enum",
+    (enumName, states) => {
+      const seen = new Map<string, string>();
+      for (const state of states) {
+        const key = visualKey(state);
+        const collision = seen.get(key);
+        expect(
+          collision,
+          `${enumName} '${state}' shares the visual tuple '${key}' with ` +
+            `'${collision}' — operators cannot tell them apart on the ` +
+            `dashboard. Pick a different glyph in state-color.ts::VISUAL.`,
+        ).toBeUndefined();
+        seen.set(key, state);
+      }
+    },
+  );
+
+  it("pins the iter56 regression: Admitted vs Running are visually distinct", () => {
+    // The original user report. Pre-fix the two states shared
+    // a `pulse-only` differentiator on a near-muted-vs-info
+    // tone pair; this assertion keeps the canonical
+    // disambiguator (the glyph) in place even if a future
+    // refactor collapses the tones.
+    expect(stateGlyph("Admitted")).not.toBe(stateGlyph("Running"));
+    expect(stateTone("Admitted")).not.toBe(stateTone("Running"));
+    expect(stateShouldPulse("Running")).toBe(true);
+    expect(stateShouldPulse("Admitted")).toBe(false);
+  });
+
+  it("pins Aborted ≠ Cancelled disambiguation (block tone, distinct glyphs)", () => {
+    // Pre-fix Aborted (operator stop) and Cancelled (kernel
+    // cascade) both rendered as `block` with no further
+    // visual cue — the user explicitly called out this gap in
+    // the iter56 audit ("Aborted vs Cancelled vs Failed —
+    // distinguishable in the FE? They have different
+    // semantic meanings"). The glyph axis disambiguates.
+    expect(stateTone("Aborted")).toBe(stateTone("Cancelled"));
+    expect(stateGlyph("Aborted")).not.toBe(stateGlyph("Cancelled"));
+    expect(stateDescription("Aborted")).toContain("operator");
+    expect(stateDescription("Cancelled")).toContain("kernel");
   });
 });
 

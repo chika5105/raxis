@@ -1252,6 +1252,86 @@ Cross-reference: `INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`
 `crates/dashboard-kernel/src/lib.rs::task_row_to_view`,
 `dashboard-fe/src/lib/state-color.ts::MAP`.
 
+## 5.11.1 FSM state visibility contract (`INV-DASHBOARD-FSM-STATE-VISIBILITY-01`)
+
+Completeness (every variant has an entry) is necessary but not
+sufficient — the iter56 paper-cut was that every variant DID
+have an entry, but `Admitted` and `Running` rendered with
+near-identical visual weight (muted vs info tone, plus a
+pulsing dot conditional on `tone === "info"`). When the
+kernel stopped emitting push events for the
+`Admitted → Running` edge (see
+`INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` below — the kernel
+fix that lands alongside this FE contract), operators reading
+the dashboard saw only `Admitted` rows and concluded the
+kernel had stalled. The FE contract therefore widens
+"completeness" into "visibility": every state MUST be
+distinguishable on a glance regardless of colour-vision
+profile, monitor calibration, or push-stream connectivity.
+
+**Visual treatment table (`state-color.ts::VISUAL`).** Every
+kernel FSM variant carries a tuple
+`(tone, glyph, label, description)`:
+
+| FSM            | State                    | Tone   | Glyph | Operator-facing description                                         |
+| -------------- | ------------------------ | ------ | ----- | ------------------------------------------------------------------- |
+| Initiative     | `Draft`                  | muted  | `◇`   | plan not yet approved by an operator                                |
+| Initiative     | `ApprovedPlan`           | warn   | `◆`   | operator approved the plan; orchestrator not yet spawned            |
+| Initiative     | `Executing`              | info   | `▶`   | orchestrator is driving sub-tasks toward terminality (pulses)       |
+| Initiative     | `Blocked`                | block  | `⏸`   | no admissible task; operator unblock or escalation required         |
+| Initiative     | `Completed`              | ok     | `✓`   | terminal success — every required task reached Completed            |
+| Initiative     | `Failed`                 | bad    | `✗`   | terminal failure — a required task or merge step failed             |
+| Initiative     | `Aborted`                | block  | `⊠`   | operator-initiated stop via `abort_initiative`                      |
+| Task           | `Admitted`               | muted  | `◌`   | queued; awaiting first planner intent or session spawn              |
+| Task           | `Running`                | info   | `▶`   | an executor is actively processing intents on this task (pulses)    |
+| Task           | `GatesPending`           | warn   | `⏳`  | paused awaiting witness records for one or more gates               |
+| Task           | `Completed`              | ok     | `✓`   | terminal success                                                    |
+| Task           | `Failed`                 | bad    | `✗`   | terminal failure                                                    |
+| Task           | `Aborted`                | block  | `⊠`   | operator-initiated stop                                             |
+| Task           | `Cancelled`              | block  | `⊘`   | kernel-initiated cancel via `abort_initiative` cascade              |
+| Task           | `BlockedRecoveryPending` | warn   | `↻`   | in-flight at kernel crash; awaits operator `task resume`            |
+| Session-row    | `Spawning`               | muted  | `◌`   | VM substrate is booting; planner has not connected yet              |
+| Session-row    | `Running`                | info   | `▶`   | session is connected and dispatching intents (pulses)               |
+| Session-row    | `Paused`                 | warn   | `⏸`   | session blocked on an outstanding kernel push (e.g. escalation)     |
+| Session-row    | `Completed`              | ok     | `✓`   | session reached its planned terminal state cleanly                  |
+| Session-row    | `Failed`                 | bad    | `✗`   | session crashed or surrendered with a failure reason                |
+| Session-row    | `Revoked`                | block  | `⊠`   | kernel/operator revoked this session token; planner cannot resume   |
+| Session-row    | `Expired`                | muted  | `…`   | passive lapse of `expires_at`; expected terminal lifecycle end      |
+
+`<StateBadge>` and `<StatusLegend>` render the glyph alongside
+the colour and label; the `description` surfaces on hover via
+`title=`. The pulsing dot (the `pulse-dot` animation in
+`StateBadge.tsx`) is now driven by an explicit `pulse` flag on
+the visual treatment rather than by `tone === "info"`, so a
+future state can opt-in (or opt-out) without colour-coupling
+side-effects.
+
+**Two-axis disambiguation (`(tone, glyph)` uniqueness within
+each enum).** The witness in
+`dashboard-fe/src/test/state-color.test.ts` walks every
+`KERNEL_*_STATES` array and asserts the `(tone, glyph)` pair
+is unique within the enum. This forecloses the
+"two states share a tone AND a glyph" trap: e.g. `Aborted`
+(operator stop) and `Cancelled` (kernel cascade) both land on
+`block`, but `⊠` ≠ `⊘`; `GatesPending` and `BlockedRecoveryPending`
+both land on `warn`, but `⏳` ≠ `↻`.
+
+**Failure mode this rules out.** A future refactor that
+collapses two tones (e.g. unifying `bad` and `block` for a
+"red category") cannot silently regress the visibility
+contract — the witness will trip the moment two states share
+the resulting `(tone, glyph)` pair. Likewise, dropping the
+glyph axis from `<StateBadge>` would trip the witness's
+`stateGlyph(...)` non-empty assertions.
+
+Cross-reference: `INV-DASHBOARD-FSM-STATE-VISIBILITY-01`
+(`specs/invariants.md`),
+`INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` (kernel-side
+push-protocol companion),
+`dashboard-fe/src/lib/state-color.ts::VISUAL`,
+`dashboard-fe/src/components/StateBadge.tsx`,
+`dashboard-fe/src/components/StatusLegend.tsx`.
+
 ## 5.12 IntegrationMerge visibility (`INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`)
 
 The synthetic IntegrationMerge coordinator-task row that
