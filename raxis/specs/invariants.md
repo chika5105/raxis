@@ -3726,6 +3726,188 @@ extensibility shape normative.
 
 ---
 
+### INV-IMAGE-BAKE-NO-STALE-CACHE-01 — `build-all` MUST refuse (or auto-rebake) any role whose staged planner binary predates its source tree
+
+**Statement.** When `cargo xtask images build-all` runs (the
+final step of the macOS-hermetic dev-host image-build pipeline
+defined in `planner-harness.md §14.4`), it MUST verify for each
+role being packed that the staged planner binary at
+`images/<role>-core/rootfs/usr/local/bin/<binary>` is at least as
+new as every regular file under both
+`crates/planner-<role>/src/**` and
+`crates/planner-core/src/**`. If any source file's mtime
+postdates the staged binary's mtime — i.e. the staging tree was
+left stale by a `dev-stage` skipped after a later source edit —
+`build-all` MUST take one of two actions:
+
+1. **Default (auto-rebake).** Synthesise a `DevStageArgs` for the
+   role and invoke `dev_stage(&DevStageArgs)` internally before
+   packing the cpio. The cross-compile re-runs (incrementally,
+   so the overhead is seconds when nothing else changed) and the
+   freshly-built binary overwrites the stale staging-tree entry.
+   The auto-rebake emits a structured `build_all_auto_stage_invoked`
+   warn line carrying the role, staged-binary mtime, newest
+   source-file path, and source-file mtime, so a build-log replay
+   can answer "did the guard fire on this role" without trawling
+   filesystems.
+2. **`--no-auto-stage` (hermetic CI).** Refuse to pack the cpio
+   and bail with an error whose message contains the literal
+   token `INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED`, the per-role
+   `cargo xtask images dev-stage --role <role>-core` remediation,
+   and the precise file pair (staged path, newest source path,
+   both mtimes) that drove the verdict. Reserved for release-CI
+   lanes that already ran `dev-stage` as a separate audit-tracked
+   step and want `build-all` to fail closed rather than silently
+   re-running the cross-compile.
+
+A `Missing` staged binary (the staging path does not exist at all
+because `dev-stage` was never run for this role) is treated
+identically to a `Stale` verdict: auto-rebake under the default,
+fail closed under `--no-auto-stage`. A `Fresh` verdict — every
+source file's mtime ≤ staged-binary mtime — emits a
+`build_all_freshness_check_fresh` info line and proceeds with no
+filesystem mutation.
+
+**Justification.** Iter53's reviewer-VM spawn failure
+(`ActivateSubTaskSpawnFailed { agent_kind: "Reviewer", error:
+"vsock CONNECT 1024: ... Connection reset by peer" }`, ~30 s into
+the first reviewer activation) had a structural root cause: the
+canonical reviewer image at
+`/usr/local/lib/raxis/images/raxis-reviewer-core-0.1.0.img`
+contained a planner binary built before
+`crates/planner-core/src/driver.rs::read_task_prompt` learned to
+read the `RAXIS_PLANNER_TASK_PROMPT_PATH` sidecar variable.
+After the sidecar codepath landed the operator ran `dev-stage`
+for orchestrator and executor-starter but not reviewer; the next
+`build-all` invocation happily packed the May-12 stale reviewer
+binary into a fresh May-13 cpio.gz, signed the manifest, and
+shipped it. The kernel's session-spawn intentionally drops the
+inline `RAXIS_PLANNER_TASK_PROMPT` env (see
+`kernel/src/session_spawn_orchestrator.rs` lines 3697-3744 — the
+inline prompt is cleared whenever the sidecar path is provided
+to avoid AVF cmdline truncation), so the stale binary saw an
+empty prompt, dropped into `DriverOutcome::Scaffold`, and called
+`park_on_signal()` — never opening the vsock listener the host
+was trying to connect to. The visible symptom 30 s later was
+`vsock CONNECT 1024: ... Connection reset by peer`, indistinguishable
+on the host side from a genuine VM boot failure.
+
+The fix has TWO load-bearing parts:
+
+1. The mtime-based freshness check itself, which mechanically
+   detects the iter53 reproduction shape (an operator who runs
+   `dev-stage` for some roles but not others, or who edits
+   `planner-core` and forgets to re-stage downstream).
+2. The auto-rebake default, which makes the fix invisible to
+   operators in the common case — a routine `build-all`
+   invocation simply does the right thing without needing to
+   remember to chain `dev-stage` per role. Hermetic CI keeps
+   the fail-closed behaviour via `--no-auto-stage`, so the
+   release-track audit trail is unaffected.
+
+The guard sits at the BUILD layer, not the BOOT layer:
+`build-all` is the gate every canonical image must traverse
+before reaching `<install_dir>/images/`, so a stale binary
+cannot make it into the operator-visible artefact in the first
+place. The orthogonal cpio-walk preflight described in
+`planner-harness.md §14.4` ("Per-role required-binary cpio-walk
+preflight") and `INV-PLANNER-HARNESS-02 / -05` (image digest
+verification) operate at the trust layer (post-pack); this
+invariant operates at the freshness layer (pre-pack). The two
+layers compose: even an attacker who somehow re-signs a stale
+manifest cannot evade the build-time freshness check, and
+even an operator who somehow disables auto-rebake cannot evade
+the boot-time digest check.
+
+**Scenario.** An operator edits
+`crates/planner-core/src/driver.rs` to add a new env-handling
+codepath (the iter53 reproduction shape was adding sidecar
+support to `read_task_prompt`). They run
+`cargo xtask images dev-stage --role orchestrator-core` and
+`cargo xtask images dev-stage --role executor-starter` then
+forget reviewer. The next
+`cargo xtask images build-all` invocation:
+
+* Reads `images/orchestrator-core/rootfs/usr/local/bin/raxis-orchestrator`,
+  observes `mtime ≥ driver.rs mtime` → emits
+  `build_all_freshness_check_fresh { role: "raxis-planner-orchestrator" }`,
+  packs.
+* Reads `images/reviewer-core/rootfs/usr/local/bin/raxis-reviewer`,
+  observes `mtime < driver.rs mtime` → emits
+  `build_all_auto_stage_invoked { role: "raxis-planner-reviewer",
+   reason: "stale_staged_binary", newest_source:
+   "crates/planner-core/src/driver.rs", … }`, then runs
+  `dev_stage(...)` for the reviewer role, then emits
+  `build_all_auto_stage_ok { role: "raxis-planner-reviewer" }`,
+  then packs the freshly-staged binary.
+* Reads `images/executor-starter/rootfs/usr/local/bin/raxis-executor`,
+  observes fresh → packs.
+
+The operator sees `build_all_role_ok` for all three roles and
+the canonical images at `/usr/local/lib/raxis/images/` are all
+binary-current. No manual remediation step is needed; the iter53
+silent-skew shape is structurally unreachable.
+
+Under `--no-auto-stage` the same scenario produces a bail with
+the literal `INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED for role
+Reviewer: staged planner binary
+images/reviewer-core/rootfs/usr/local/bin/raxis-reviewer
+(mtime <T1>) is older than source file
+crates/planner-core/src/driver.rs (mtime <T2>) …` plus the
+remediation command, so the CI lane operator can replay the
+exact dev-stage invocation that would have unblocked the build.
+
+**Witness.**
+[`xtask::images::tests::inv_image_bake_no_stale_cache_01_verdict_stale_when_planner_core_newer`](../xtask/src/images.rs):
+synthesises the iter53 reproduction shape (a staged reviewer
+binary plus a newer `crates/planner-core/src/driver.rs`),
+classifies the verdict via `check_staged_binary_freshness`, and
+pins that the verdict is `Stale` with `newest_source` pointing
+at the driver.rs path — the operator-visible fingerprint that
+explains *why* the auto-rebake fires.
+Pairs with
+[`…::inv_image_bake_no_stale_cache_01_verdict_stale_when_role_src_newer`](../xtask/src/images.rs)
+(symmetric for `crates/planner-<role>/src/main.rs`),
+[`…::inv_image_bake_no_stale_cache_01_verdict_fresh_when_staged_newer_than_source`](../xtask/src/images.rs)
+(no-op happy path),
+[`…::inv_image_bake_no_stale_cache_01_verdict_missing_when_no_staged_binary`](../xtask/src/images.rs)
+(dev-stage never ran for the role),
+[`…::inv_image_bake_no_stale_cache_01_verdict_fresh_when_no_source_tree`](../xtask/src/images.rs)
+(release-tarball worktree with no `crates/` — packing allowed),
+[`…::inv_image_bake_no_stale_cache_01_planner_source_dirs_per_role`](../xtask/src/images.rs)
+(pins the two-dir contract so a future role addition surfaces as
+a compile-time TODO rather than a silent miss),
+[`…::inv_image_bake_no_stale_cache_01_newest_mtime_walks_files_recursively`](../xtask/src/images.rs)
+(depth-first walk, deepest mtime wins),
+[`…::inv_image_bake_no_stale_cache_01_newest_mtime_returns_none_for_missing_root`](../xtask/src/images.rs)
+(absent-tree case),
+[`…::inv_image_bake_no_stale_cache_01_no_auto_stage_bails_on_stale_with_remediation`](../xtask/src/images.rs)
++
+[`…::inv_image_bake_no_stale_cache_01_no_auto_stage_bails_on_missing_with_remediation`](../xtask/src/images.rs)
+(fail-closed remediation contains the invariant token, the
+`dev-stage --role <role>-core` command, and the `--no-auto-stage`
+opt-out hint), and
+[`…::inv_image_bake_no_stale_cache_01_fresh_returns_ok_without_subprocess`](../xtask/src/images.rs)
+(fresh binary returns Ok without invoking the cargo subprocess).
+The CLI surface itself is pinned by
+[`…::build_all_args_default_no_auto_stage_is_false`](../xtask/src/images.rs)
++
+[`…::build_all_args_no_auto_stage_flag_parses`](../xtask/src/images.rs)
+— the auto-rebake default is the load-bearing UX bit; flipping
+that default would silently re-introduce the iter53 failure
+mode without any other test catching it.
+
+**Canonical home.** `v2/planner-harness.md §14.4` (image-build
+pipeline) — the freshness check is one of three guards listed
+in the "Why the dev-stage guard, the cpio-walk preflight, and
+the freshness check are all load-bearing" subsection. The
+operator-facing recipe `guides/recipes/ops/...` notes the
+auto-rebake behaviour so operators know they can simply run
+`build-all` after editing planner-core without remembering to
+chain `dev-stage` per role.
+
+---
+
 ## §11 — Verifier Processes (INV-VERIFIER-*)
 
 Canonical home: `v2/verifier-processes.md` §13. These invariants

@@ -2765,7 +2765,7 @@ layer that changed:
    exactly the failure mode the guard catches.
 
 3. **`cargo xtask images build-all [--role <ROLE>] [--install-dir
-   <PATH>]`**.
+   <PATH>] [--no-auto-stage]`**.
    Walks `images/<role>-core/rootfs/`, packs it into cpio.gz via
    `raxis-initramfs-builder`, and calls `raxis-image-builder` to
    emit the signed manifest with `image_format =
@@ -2774,6 +2774,24 @@ layer that changed:
    $RAXIS_INSTALL_DIR/images/raxis-<role>-core-<kver>.img
    $RAXIS_INSTALL_DIR/images/raxis-<role>-core-<kver>.manifest.toml
    ```
+
+   Before packing each role, build-all runs the **stale-cache
+   freshness check** (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`): it
+   compares the staged planner binary's mtime against the newest
+   regular-file mtime under both `crates/planner-<role>/src/**`
+   and `crates/planner-core/src/**`. If a source file is newer,
+   build-all auto-invokes `dev-stage` for that role (emitting a
+   structured `build_all_auto_stage_invoked` warn line with the
+   exact file pair) and then proceeds with the freshly-staged
+   binary. The `--no-auto-stage` flag flips this to fail-closed:
+   build-all bails with `INV-IMAGE-BAKE-NO-STALE-CACHE-01
+   VIOLATED` and the per-role `dev-stage` remediation command.
+   This guard closes the iter53 reviewer-VM spawn failure shape
+   (operator ran `dev-stage` for orchestrator + executor but not
+   reviewer after a `planner-core` edit; build-all then packed
+   the stale reviewer binary into a signed cpio.gz; the guest
+   planner dropped into scaffold mode because its env-contract
+   surface was behind the kernel's).
 
 **Live-e2e auto-bake (`7fbd2e1`).** The `extended_e2e_*`
 realistic-scenario harnesses call `require_canonical_images()` before
@@ -2817,14 +2835,32 @@ both call sites; unifying them by teaching the cpio walker to chase
 non-usrmerge base image (e.g. an Alpine reviewer-core variant) makes
 the divergence non-hypothetical.
 
-**Why the dev-stage guard and the cpio-walk preflight are both
-load-bearing.** The dev-stage guard runs against the **staging tree**
-(post-bake, pre-cpio); the cpio-walk preflight runs against the
-**packed cpio.gz archive** (post-`build-all`). The two layers catch
-different regressions: dev-stage catches "the operator skipped
-`bake-rootfs`", and the cpio-walk catches "the operator ran
-`build-all` with a stale staging tree or `--allow-stub`". Both are
-fail-fast; neither is overridable from inside a live-e2e run.
+**Why the dev-stage guard, the build-all freshness check, and the
+cpio-walk preflight are all load-bearing.** The dev-stage guard
+runs against the **staging tree** (post-bake, pre-cpio) and asserts
+the Containerfile-promised OS binaries (`bin/bash`, `usr/bin/git`,
+`usr/bin/python3` for executor-starter) are present. The build-all
+freshness check (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`, iter53) runs
+against the **staged planner binary's mtime** (pre-cpio) and
+asserts the binary is at least as new as the role's planner
+source tree, auto-rebaking by default or failing closed under
+`--no-auto-stage`. The cpio-walk preflight runs against the
+**packed cpio.gz archive** (post-`build-all`) and asserts the
+per-role required-binary list is present in the resulting image.
+The three layers catch different regressions:
+
+* dev-stage catches "the operator skipped `bake-rootfs`" (missing
+  OS tooling in the staging tree).
+* build-all freshness catches "the operator skipped `dev-stage`
+  after a `planner-core` edit" (iter53 reviewer skew).
+* cpio-walk catches "the operator ran `build-all` with a stale
+  staging tree or `--allow-stub`" (post-pack invariant).
+
+The dev-stage and cpio-walk preflights are fail-fast and not
+overridable from inside a live-e2e run; the build-all freshness
+guard fails closed only under `--no-auto-stage` and otherwise
+auto-recovers via dev-stage, removing the manual remediation
+step from the common case.
 
 Normative pins: `raxis/xtask/src/images.rs` (the three subcommands),
 `raxis/kernel/tests/extended_e2e_support/cpio_inspect.rs` (per-role

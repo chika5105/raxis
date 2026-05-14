@@ -461,6 +461,345 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Stale-cache guard (INV-IMAGE-BAKE-NO-STALE-CACHE-01)
+// ---------------------------------------------------------------------------
+
+/// Verdict from comparing the staged planner binary's mtime to the
+/// newest mtime under the role's planner source tree
+/// (`crates/planner-<role>/src/**` ∪ `crates/planner-core/src/**`).
+///
+/// `Fresh`   — staged binary is at least as new as every source file;
+///             `build-all` can pack the cpio without re-staging.
+/// `Stale`   — at least one source file is newer than the staged
+///             binary; `build-all` must auto-rebake (or fail closed
+///             under `--no-auto-stage`).
+/// `Missing` — no staged binary at all; either dev-stage never ran or
+///             the role's binary was deleted. Treated identically to
+///             `Stale` (auto-rebake or fail closed).
+///
+/// Canonical home: `specs/v2/planner-harness.md §14.4` (image-build
+/// pipeline) + the witness invariant
+/// `INV-IMAGE-BAKE-NO-STALE-CACHE-01` in `specs/invariants.md §10.5`.
+#[derive(Debug)]
+enum FreshnessVerdict {
+    /// Staged binary's mtime ≥ newest source mtime.
+    Fresh {
+        staged_mtime:   std::time::SystemTime,
+        source_mtime:   std::time::SystemTime,
+        staged_path:    PathBuf,
+        newest_source:  PathBuf,
+    },
+    /// A source file is newer than the staged binary.
+    Stale {
+        staged_mtime:   std::time::SystemTime,
+        source_mtime:   std::time::SystemTime,
+        staged_path:    PathBuf,
+        newest_source:  PathBuf,
+    },
+    /// No staged binary file exists at the canonical staging path.
+    Missing {
+        staged_path:    PathBuf,
+        newest_source:  Option<PathBuf>,
+    },
+}
+
+/// Per-role planner source dirs whose contents invalidate the staged
+/// binary. These two cover the dominant freshness-failure shapes: a
+/// change in the role's main.rs / role-specific code (`planner-<role>`)
+/// or a change in the shared driver / env / sidecar plumbing
+/// (`planner-core`). Other transitive deps (`types`, `ksb`, …) are
+/// rarer change points; an operator who edits one of those and wants
+/// the guard to trigger can `touch` the role's main.rs or run
+/// `cargo xtask images dev-stage --role <ROLE>` explicitly.
+///
+/// Returned paths are workspace-absolute; they may not exist (e.g.,
+/// a partial worktree). Missing dirs are treated as "no source files
+/// to consider", consistent with the iter54 baseline.
+fn planner_source_dirs(role: Role, workspace_root: &Path) -> [PathBuf; 2] {
+    let role_dir = match role {
+        Role::Orchestrator    => "planner-orchestrator",
+        Role::Reviewer        => "planner-reviewer",
+        Role::ExecutorStarter => "planner-executor",
+    };
+    [
+        workspace_root.join("crates").join(role_dir).join("src"),
+        workspace_root.join("crates").join("planner-core").join("src"),
+    ]
+}
+
+/// Walk `root` recursively (following non-link directories only) and
+/// return the newest `mtime` found plus the path that produced it. If
+/// `root` does not exist or contains no regular files, returns
+/// `Ok(None)`.
+///
+/// The walk follows `walkdir`'s default — depth-first, no
+/// `follow_links` — which matches the initramfs builder's tree walk
+/// in `pack_initramfs` and the planner crate's on-disk layout. Errors
+/// during the walk (permission, broken symlink, …) are surfaced as
+/// `Err` so the freshness guard fail-closes rather than silently
+/// returning `Fresh` on an incomplete walk.
+fn newest_mtime_in_tree(
+    root: &Path,
+) -> Result<Option<(std::time::SystemTime, PathBuf)>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry.with_context(|| {
+            format!("walk source tree under {}", root.display())
+        })?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let m = entry
+            .metadata()
+            .with_context(|| {
+                format!("stat {}", entry.path().display())
+            })?
+            .modified()
+            .with_context(|| {
+                format!("read mtime of {}", entry.path().display())
+            })?;
+        match best {
+            None => best = Some((m, entry.path().to_owned())),
+            Some((cur, _)) if m > cur => {
+                best = Some((m, entry.path().to_owned()));
+            }
+            _ => {}
+        }
+    }
+    Ok(best)
+}
+
+/// Classify the staging tree's planner binary against the role's
+/// planner source tree mtimes. Pure-data: no filesystem mutation, no
+/// subprocess invocations. The caller (`handle_staged_binary_freshness`)
+/// turns the verdict into either an auto-rebake or a fail-closed
+/// remediation message.
+fn check_staged_binary_freshness(
+    role:           Role,
+    workspace_root: &Path,
+) -> Result<FreshnessVerdict> {
+    let staged_path = workspace_root
+        .join(STAGING_PARENT)
+        .join(role.images_subdir())
+        .join("rootfs")
+        .join("usr").join("local").join("bin")
+        .join(role.binary_name());
+
+    let source_dirs = planner_source_dirs(role, workspace_root);
+    let mut newest_source: Option<(std::time::SystemTime, PathBuf)> = None;
+    for dir in &source_dirs {
+        if let Some((mtime, path)) = newest_mtime_in_tree(dir)? {
+            match &newest_source {
+                None => newest_source = Some((mtime, path)),
+                Some((cur, _)) if mtime > *cur => {
+                    newest_source = Some((mtime, path));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !staged_path.exists() {
+        return Ok(FreshnessVerdict::Missing {
+            staged_path,
+            newest_source: newest_source.map(|(_, p)| p),
+        });
+    }
+
+    let staged_mtime = fs::metadata(&staged_path)
+        .with_context(|| format!("stat {}", staged_path.display()))?
+        .modified()
+        .with_context(|| {
+            format!("read mtime of {}", staged_path.display())
+        })?;
+
+    let (source_mtime, newest_source_path) = match newest_source {
+        Some(pair) => pair,
+        // No source tree to compare against (e.g., the planner-core
+        // crate dir is missing from this worktree). Treat as fresh —
+        // there is nothing to invalidate the staged binary.
+        None => {
+            return Ok(FreshnessVerdict::Fresh {
+                staged_mtime,
+                source_mtime: staged_mtime,
+                staged_path,
+                newest_source: PathBuf::new(),
+            });
+        }
+    };
+
+    if source_mtime > staged_mtime {
+        Ok(FreshnessVerdict::Stale {
+            staged_mtime,
+            source_mtime,
+            staged_path,
+            newest_source: newest_source_path,
+        })
+    } else {
+        Ok(FreshnessVerdict::Fresh {
+            staged_mtime,
+            source_mtime,
+            staged_path,
+            newest_source: newest_source_path,
+        })
+    }
+}
+
+/// `build_one_role`-side wrapper: classify staleness, then either
+/// invoke `dev_stage` to auto-refresh (default) or bail with an
+/// `INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED` remediation message
+/// when `--no-auto-stage` is set. Emits structured audit log lines on
+/// every branch so a build log replay always answers "did the guard
+/// fire on this role, and which way".
+fn handle_staged_binary_freshness(
+    role: Role,
+    args: &BuildAllArgs,
+) -> Result<()> {
+    let verdict = check_staged_binary_freshness(role, &args.workspace_root)?;
+    match &verdict {
+        FreshnessVerdict::Fresh {
+            staged_mtime, source_mtime, staged_path, newest_source,
+        } => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"build_all_freshness_check_fresh\",\
+                 \"role\":{:?},\"staged_path\":{:?},\"staged_mtime_unix\":{},\
+                 \"newest_source\":{:?},\"source_mtime_unix\":{}}}",
+                role.workspace_crate(),
+                staged_path.display().to_string(),
+                mtime_to_unix(*staged_mtime),
+                newest_source.display().to_string(),
+                mtime_to_unix(*source_mtime),
+            );
+            Ok(())
+        }
+        FreshnessVerdict::Stale {
+            staged_mtime, source_mtime, staged_path, newest_source,
+        } => {
+            let reason = format!(
+                "staged planner binary {} (mtime {}) is older than source \
+                 file {} (mtime {})",
+                staged_path.display(),
+                mtime_to_unix(*staged_mtime),
+                newest_source.display(),
+                mtime_to_unix(*source_mtime),
+            );
+            if args.no_auto_stage {
+                bail!(
+                    "INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED for role {role:?}: \
+                     {reason}.\n\n\
+                     `build-all` was invoked with `--no-auto-stage` (the \
+                     hermetic-CI flow), so it refuses to silently pack a stale \
+                     binary into the signed cpio.gz. Remediation: re-run \
+                     `cargo xtask images dev-stage --role {arg}` (which \
+                     cross-compiles `{krate}` and overlays the fresh binary \
+                     into `images/{subdir}/rootfs/usr/local/bin/{bin}`), then \
+                     re-run this `build-all` invocation. \n\n\
+                     Alternative: drop `--no-auto-stage` and let `build-all` \
+                     auto-rebake the role for you (default behaviour).",
+                    role   = role,
+                    arg    = role.images_subdir(),
+                    krate  = role.workspace_crate(),
+                    subdir = role.images_subdir(),
+                    bin    = role.binary_name(),
+                );
+            }
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"build_all_auto_stage_invoked\",\
+                 \"role\":{:?},\"reason\":\"stale_staged_binary\",\
+                 \"staged_path\":{:?},\"staged_mtime_unix\":{},\
+                 \"newest_source\":{:?},\"source_mtime_unix\":{}}}",
+                role.workspace_crate(),
+                staged_path.display().to_string(),
+                mtime_to_unix(*staged_mtime),
+                newest_source.display().to_string(),
+                mtime_to_unix(*source_mtime),
+            );
+            invoke_auto_stage(role, args)?;
+            Ok(())
+        }
+        FreshnessVerdict::Missing { staged_path, newest_source } => {
+            if args.no_auto_stage {
+                bail!(
+                    "INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED for role {role:?}: \
+                     no staged planner binary at {staged}. \n\n\
+                     `build-all` was invoked with `--no-auto-stage`, so it \
+                     refuses to silently pack a rootfs missing the role's \
+                     planner binary. Remediation: run \
+                     `cargo xtask images dev-stage --role {arg}` first.",
+                    role  = role,
+                    staged = staged_path.display(),
+                    arg   = role.images_subdir(),
+                );
+            }
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"build_all_auto_stage_invoked\",\
+                 \"role\":{:?},\"reason\":\"missing_staged_binary\",\
+                 \"staged_path\":{:?},\"newest_source\":{:?}}}",
+                role.workspace_crate(),
+                staged_path.display().to_string(),
+                newest_source.as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(none)".to_owned()),
+            );
+            invoke_auto_stage(role, args)?;
+            Ok(())
+        }
+    }
+}
+
+/// Internal helper: synthesise a `DevStageArgs` from a `BuildAllArgs`
+/// context and run the cross-compile + overlay step for one role.
+/// Used by `handle_staged_binary_freshness` to satisfy
+/// `INV-IMAGE-BAKE-NO-STALE-CACHE-01` when the staged binary is stale
+/// or missing. The auto-staged path uses `default_target_triple()`
+/// and `allow_stub = false` so a partial bake-rootfs surfaces as the
+/// same stub-detection error an operator would see from running
+/// `dev-stage` directly. The cargo binary is resolved the same way
+/// `DevStageArgs::parse` does (env `CARGO`, falling back to "cargo").
+fn invoke_auto_stage(role: Role, args: &BuildAllArgs) -> Result<()> {
+    let dev_stage_args = DevStageArgs {
+        role,
+        target:         default_target_triple().to_owned(),
+        workspace_root: args.workspace_root.clone(),
+        cargo:          std::env::var("CARGO")
+                            .unwrap_or_else(|_| "cargo".to_owned()),
+        allow_stub:     false,
+    };
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"build_all_auto_stage_begin\",\
+         \"role\":{:?},\"target\":{:?}}}",
+        role.workspace_crate(),
+        dev_stage_args.target,
+    );
+    dev_stage(&dev_stage_args).with_context(|| {
+        format!(
+            "auto-rebake for role {role:?} failed under \
+             INV-IMAGE-BAKE-NO-STALE-CACHE-01 (pass --no-auto-stage to \
+             surface this as a fail-closed remediation message instead)",
+        )
+    })?;
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"build_all_auto_stage_ok\",\
+         \"role\":{:?}}}",
+        role.workspace_crate(),
+    );
+    Ok(())
+}
+
+/// Format a `SystemTime` as Unix seconds-since-epoch for structured
+/// log lines. Pre-epoch times (clock skew, replayed fixtures) clamp
+/// to `0`; the freshness comparison itself uses the raw
+/// `SystemTime` so the clamp here is cosmetic-only.
+fn mtime_to_unix(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // build-all
 // ---------------------------------------------------------------------------
 
@@ -477,6 +816,16 @@ struct BuildAllArgs {
     /// step requires this exists; mint one with
     /// `cargo xtask dev-keys init` if absent.
     signing_key:    PathBuf,
+    /// When true, skip the stale-cache auto-rebake guard. Default
+    /// `false`: build-all auto-invokes `dev-stage` for any role
+    /// whose staged planner binary is older than its `crates/
+    /// planner-<role>/src/**` or `crates/planner-core/src/**`
+    /// source tree (see `INV-IMAGE-BAKE-NO-STALE-CACHE-01`). With
+    /// this flag, build-all instead **fails closed** when the
+    /// staged binary is stale, telling the operator to run
+    /// `dev-stage` manually. Reserved for hermetic CI lanes that
+    /// already ran `dev-stage` as a separate audit-tracked step.
+    no_auto_stage:  bool,
 }
 
 impl BuildAllArgs {
@@ -484,6 +833,7 @@ impl BuildAllArgs {
         let mut role:        Option<Role>    = None;
         let mut install_dir: Option<PathBuf> = None;
         let mut signing_key: Option<PathBuf> = None;
+        let mut no_auto_stage: bool          = false;
 
         let mut i = 0;
         while i < argv.len() {
@@ -506,13 +856,26 @@ impl BuildAllArgs {
                         argv.get(i).context("--signing-key requires a path")?,
                     ));
                 }
+                "--no-auto-stage" => {
+                    no_auto_stage = true;
+                }
                 "-h" | "--help" => {
                     eprintln!(
                         "usage: cargo xtask images build-all [--role <ROLE>] \
-                         [--install-dir <PATH>] [--signing-key <PATH>]\n\
+                         [--install-dir <PATH>] [--signing-key <PATH>] \
+                         [--no-auto-stage]\n\
                          \n\
                          Pack staged rootfs trees into signed initramfs cpio.gz \
-                         blobs and lay them out at <install_dir>/images/.\n"
+                         blobs and lay them out at <install_dir>/images/.\n\
+                         \n\
+                         By default, build-all detects staged planner binaries \
+                         older than their `crates/planner-<role>/src/**` or \
+                         `crates/planner-core/src/**` source tree and auto-runs \
+                         `dev-stage` to refresh them before packing — pass \
+                         --no-auto-stage to opt out and instead fail closed on \
+                         stale binaries (hermetic-CI flow, where dev-stage was \
+                         already run as a separate audit-tracked step). See \
+                         `INV-IMAGE-BAKE-NO-STALE-CACHE-01`.\n"
                     );
                     std::process::exit(0);
                 }
@@ -532,7 +895,7 @@ impl BuildAllArgs {
         })?;
         let workspace_root = workspace_root_from_cwd()?;
 
-        Ok(Self { role, install_dir, signing_key, workspace_root })
+        Ok(Self { role, install_dir, signing_key, workspace_root, no_auto_stage })
     }
 }
 
@@ -648,6 +1011,36 @@ fn build_one_role(
         role.workspace_crate(),
         rootfs_dir.display().to_string(),
     );
+
+    // Stale-cache guard (INV-IMAGE-BAKE-NO-STALE-CACHE-01).
+    //
+    // Iter53's root cause: the canonical reviewer image's
+    // `/init`-target binary (`/usr/local/bin/raxis-reviewer`) was a
+    // May-12 build that pre-dated the May-13 landing of the
+    // `RAXIS_PLANNER_TASK_PROMPT_PATH` sidecar codepath in
+    // `crates/planner-core/src/driver.rs::read_task_prompt`. The
+    // operator had run `cargo xtask images dev-stage` for orchestrator
+    // and executor-starter after the sidecar lands but not for
+    // reviewer; `build-all` then packed the May-12 stale binary into
+    // a fresh cpio.gz and signed it. The kernel stamped
+    // `RAXIS_PLANNER_TASK_PROMPT_PATH` (intentionally clearing the
+    // inline `RAXIS_PLANNER_TASK_PROMPT` to avoid AVF cmdline
+    // truncation; see `kernel/src/session_spawn_orchestrator.rs`),
+    // the guest planner saw an empty prompt, dropped into
+    // `DriverOutcome::Scaffold`, and called `park_on_signal()` —
+    // never opening the vsock listener the host was trying to
+    // connect to. The visible symptom 30 s later was
+    // `vsock CONNECT 1024: ... Connection reset by peer` and
+    // `ActivateSubTaskSpawnFailed { agent_kind: "Reviewer" }`.
+    //
+    // The guard below catches that exact regression at the BUILD
+    // layer rather than the BOOT layer: it compares the staged
+    // binary's mtime to the newest mtime under
+    // `crates/planner-<role>/src/**` and `crates/planner-core/src/**`
+    // and either auto-invokes `dev-stage` (default) or fails closed
+    // with an actionable remediation message when `--no-auto-stage`
+    // is set.
+    handle_staged_binary_freshness(role, args)?;
 
     // Assemble the cpio.gz bytes with the initramfs-builder.
     let cpio_gz = pack_initramfs(&rootfs_dir, inputs.source_date_epoch)?;
@@ -1349,5 +1742,361 @@ mod tests {
         }
         // A binary that should never resolve.
         assert!(which("definitely-not-a-real-binary-xyz-9999").is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-BAKE-NO-STALE-CACHE-01 — stale-cache guard witnesses
+    // -----------------------------------------------------------------
+
+    /// Build a minimal three-file scaffold that mirrors the layout the
+    /// freshness guard inspects:
+    ///   <workspace>/crates/planner-<role>/src/main.rs
+    ///   <workspace>/crates/planner-core/src/driver.rs
+    ///   <workspace>/images/<role>/rootfs/usr/local/bin/<binary>
+    /// Returns the workspace tempdir (held until drop) plus the
+    /// per-role source-file and staged-binary paths so individual
+    /// witnesses can `touch` selected files to drive the mtime
+    /// comparison without depending on the real workspace tree.
+    fn build_freshness_scaffold(
+        role: Role,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let role_subdir = match role {
+            Role::Orchestrator    => "planner-orchestrator",
+            Role::Reviewer        => "planner-reviewer",
+            Role::ExecutorStarter => "planner-executor",
+        };
+        let role_src = workspace
+            .join("crates").join(role_subdir).join("src");
+        let core_src = workspace
+            .join("crates").join("planner-core").join("src");
+        std::fs::create_dir_all(&role_src).unwrap();
+        std::fs::create_dir_all(&core_src).unwrap();
+        let role_main = role_src.join("main.rs");
+        let core_driver = core_src.join("driver.rs");
+        std::fs::write(&role_main, b"// role main\n").unwrap();
+        std::fs::write(&core_driver, b"// shared driver\n").unwrap();
+
+        let staged = workspace
+            .join("images").join(role.images_subdir())
+            .join("rootfs")
+            .join("usr").join("local").join("bin")
+            .join(role.binary_name());
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+
+        (tmp, role_main, core_driver, staged)
+    }
+
+    /// Set a path's mtime to `(now - delta_secs)`. Used to inject
+    /// deterministic ordering between source and staged-binary
+    /// mtimes without relying on filesystem timestamp resolution
+    /// (which is 1 s or worse on macOS HFS+ / 1 µs on APFS).
+    fn set_mtime_secs_ago(p: &Path, delta_secs: u64) {
+        use std::time::{Duration, SystemTime};
+        let when = SystemTime::now()
+            .checked_sub(Duration::from_secs(delta_secs))
+            .expect("delta fits in SystemTime");
+        let ft = filetime::FileTime::from_system_time(when);
+        filetime::set_file_mtime(p, ft).expect("set mtime");
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_planner_source_dirs_per_role() {
+        // Map each role to (planner-<role>, planner-core). Pins the
+        // contract that adding a new role REQUIRES adding the new
+        // crate's src/ to this list — a silent omission would let a
+        // future role's binary go stale without the guard firing.
+        let root = PathBuf::from("/ws");
+        assert_eq!(
+            planner_source_dirs(Role::Orchestrator, &root),
+            [root.join("crates/planner-orchestrator/src"),
+             root.join("crates/planner-core/src")],
+        );
+        assert_eq!(
+            planner_source_dirs(Role::Reviewer, &root),
+            [root.join("crates/planner-reviewer/src"),
+             root.join("crates/planner-core/src")],
+        );
+        assert_eq!(
+            planner_source_dirs(Role::ExecutorStarter, &root),
+            [root.join("crates/planner-executor/src"),
+             root.join("crates/planner-core/src")],
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_newest_mtime_walks_files_recursively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let nested = root.join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("top.rs"),       b"top\n").unwrap();
+        std::fs::write(root.join("a/mid.rs"),     b"mid\n").unwrap();
+        std::fs::write(nested.join("deep.rs"),    b"deep\n").unwrap();
+        set_mtime_secs_ago(&root.join("top.rs"),       1000);
+        set_mtime_secs_ago(&root.join("a/mid.rs"),     500);
+        set_mtime_secs_ago(&nested.join("deep.rs"),    10);
+
+        let (mtime, path) = newest_mtime_in_tree(root).unwrap().unwrap();
+        assert_eq!(path, nested.join("deep.rs"));
+        let _ = mtime;
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_newest_mtime_returns_none_for_missing_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let absent = tmp.path().join("definitely-not-here");
+        assert!(newest_mtime_in_tree(&absent).unwrap().is_none());
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_verdict_fresh_when_staged_newer_than_source() {
+        let (tmp, role_main, core_driver, staged) =
+            build_freshness_scaffold(Role::Reviewer);
+        std::fs::write(&staged, b"fresh binary").unwrap();
+        // Sources older than staged → Fresh.
+        set_mtime_secs_ago(&role_main,    1000);
+        set_mtime_secs_ago(&core_driver,  1500);
+        set_mtime_secs_ago(&staged,       10);
+
+        let verdict = check_staged_binary_freshness(
+            Role::Reviewer,
+            tmp.path(),
+        ).unwrap();
+        match verdict {
+            FreshnessVerdict::Fresh { .. } => {}
+            other => panic!("expected Fresh, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_verdict_stale_when_planner_core_newer() {
+        // Iter53 reproduction shape: the reviewer binary was staged
+        // earlier, and `planner-core` got a later edit (the
+        // RAXIS_PLANNER_TASK_PROMPT_PATH sidecar) that the guard
+        // must detect even though planner-reviewer/src itself didn't
+        // change.
+        let (tmp, role_main, core_driver, staged) =
+            build_freshness_scaffold(Role::Reviewer);
+        std::fs::write(&staged, b"stale binary").unwrap();
+        set_mtime_secs_ago(&role_main,    1500);
+        set_mtime_secs_ago(&staged,       1000);
+        set_mtime_secs_ago(&core_driver,  10);
+
+        let verdict = check_staged_binary_freshness(
+            Role::Reviewer,
+            tmp.path(),
+        ).unwrap();
+        match verdict {
+            FreshnessVerdict::Stale { newest_source, .. } => {
+                assert_eq!(
+                    newest_source, core_driver,
+                    "the newest source must be the planner-core file \
+                     that drove the staleness — that's the iter53 \
+                     fingerprint the operator needs to see",
+                );
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_verdict_stale_when_role_src_newer() {
+        let (tmp, role_main, core_driver, staged) =
+            build_freshness_scaffold(Role::Orchestrator);
+        std::fs::write(&staged, b"stale orch binary").unwrap();
+        set_mtime_secs_ago(&core_driver,  1500);
+        set_mtime_secs_ago(&staged,       1000);
+        set_mtime_secs_ago(&role_main,    10);
+
+        let verdict = check_staged_binary_freshness(
+            Role::Orchestrator,
+            tmp.path(),
+        ).unwrap();
+        match verdict {
+            FreshnessVerdict::Stale { newest_source, .. } => {
+                assert_eq!(newest_source, role_main);
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_verdict_missing_when_no_staged_binary() {
+        let (tmp, _role_main, _core_driver, staged) =
+            build_freshness_scaffold(Role::Reviewer);
+        // Do not create `staged` — the role's binary was never staged.
+        assert!(!staged.exists());
+
+        let verdict = check_staged_binary_freshness(
+            Role::Reviewer,
+            tmp.path(),
+        ).unwrap();
+        match verdict {
+            FreshnessVerdict::Missing { newest_source, .. } => {
+                assert!(newest_source.is_some(),
+                    "newest_source must surface even when staged is missing");
+            }
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_verdict_fresh_when_no_source_tree() {
+        // A worktree pruned to images/* without crates/* (e.g., a
+        // release tarball that only ships the staged tree) MUST NOT
+        // trip the guard — there is nothing to compare against, so
+        // packing is allowed. Pin this contract.
+        let tmp = tempfile::tempdir().unwrap();
+        let staged = tmp.path()
+            .join("images").join(Role::Reviewer.images_subdir())
+            .join("rootfs")
+            .join("usr").join("local").join("bin")
+            .join(Role::Reviewer.binary_name());
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(&staged, b"binary").unwrap();
+        let verdict = check_staged_binary_freshness(
+            Role::Reviewer,
+            tmp.path(),
+        ).unwrap();
+        match verdict {
+            FreshnessVerdict::Fresh { .. } => {}
+            other => panic!("expected Fresh (no source tree), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_all_args_default_no_auto_stage_is_false() {
+        let prev_install = std::env::var_os("RAXIS_INSTALL_DIR");
+        let prev_home    = std::env::var_os("HOME");
+        // SAFETY: single-threaded test; restored at end.
+        unsafe {
+            std::env::remove_var("RAXIS_INSTALL_DIR");
+            std::env::set_var("HOME", "/tmp/nonexistent-home-for-test");
+        }
+        let argv = vec![];
+        let args = BuildAllArgs::parse(&argv).expect("parse");
+        assert!(!args.no_auto_stage,
+            "default must be auto-stage = ON (iter53 reproduction shape)");
+        // SAFETY: see above.
+        unsafe {
+            match prev_install {
+                Some(v) => std::env::set_var("RAXIS_INSTALL_DIR", v),
+                None    => std::env::remove_var("RAXIS_INSTALL_DIR"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None    => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_all_args_no_auto_stage_flag_parses() {
+        let prev_install = std::env::var_os("RAXIS_INSTALL_DIR");
+        let prev_home    = std::env::var_os("HOME");
+        // SAFETY: single-threaded test; restored at end.
+        unsafe {
+            std::env::remove_var("RAXIS_INSTALL_DIR");
+            std::env::set_var("HOME", "/tmp/nonexistent-home-for-test");
+        }
+        let argv = vec!["--no-auto-stage".to_owned()];
+        let args = BuildAllArgs::parse(&argv).expect("parse");
+        assert!(args.no_auto_stage);
+        // SAFETY: see above.
+        unsafe {
+            match prev_install {
+                Some(v) => std::env::set_var("RAXIS_INSTALL_DIR", v),
+                None    => std::env::remove_var("RAXIS_INSTALL_DIR"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None    => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_no_auto_stage_bails_on_stale_with_remediation() {
+        let (tmp, _role_main, core_driver, staged) =
+            build_freshness_scaffold(Role::Reviewer);
+        std::fs::write(&staged, b"stale").unwrap();
+        set_mtime_secs_ago(&staged,      1000);
+        set_mtime_secs_ago(&core_driver, 10);
+
+        let args = BuildAllArgs {
+            role:           Some(Role::Reviewer),
+            install_dir:    tmp.path().join("install"),
+            workspace_root: tmp.path().to_owned(),
+            signing_key:    tmp.path().join("key.hex"),
+            no_auto_stage:  true,
+        };
+        let err = handle_staged_binary_freshness(Role::Reviewer, &args)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED"),
+            "remediation must cite the invariant token: {err}",
+        );
+        assert!(
+            err.contains("dev-stage --role reviewer-core"),
+            "remediation must name the dev-stage command: {err}",
+        );
+        assert!(
+            err.contains("--no-auto-stage"),
+            "remediation must explain the opt-out: {err}",
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_no_auto_stage_bails_on_missing_with_remediation() {
+        let (tmp, _role_main, _core_driver, staged) =
+            build_freshness_scaffold(Role::Reviewer);
+        assert!(!staged.exists());
+
+        let args = BuildAllArgs {
+            role:           Some(Role::Reviewer),
+            install_dir:    tmp.path().join("install"),
+            workspace_root: tmp.path().to_owned(),
+            signing_key:    tmp.path().join("key.hex"),
+            no_auto_stage:  true,
+        };
+        let err = handle_staged_binary_freshness(Role::Reviewer, &args)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED"),
+            "remediation must cite the invariant token: {err}",
+        );
+        assert!(
+            err.contains("dev-stage --role reviewer-core"),
+            "remediation must name the dev-stage command: {err}",
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_no_stale_cache_01_fresh_returns_ok_without_subprocess() {
+        // When the staged binary is fresh, `handle_staged_binary_freshness`
+        // returns Ok without invoking dev_stage (which would shell out
+        // to `cargo build` and fail under a tempdir workspace). The
+        // test asserts the function returns within milliseconds and
+        // does not bail — a smoke test for the no-op happy path.
+        let (tmp, role_main, core_driver, staged) =
+            build_freshness_scaffold(Role::Reviewer);
+        std::fs::write(&staged, b"fresh").unwrap();
+        set_mtime_secs_ago(&role_main,   2000);
+        set_mtime_secs_ago(&core_driver, 1500);
+        set_mtime_secs_ago(&staged,      10);
+
+        let args = BuildAllArgs {
+            role:           Some(Role::Reviewer),
+            install_dir:    tmp.path().join("install"),
+            workspace_root: tmp.path().to_owned(),
+            signing_key:    tmp.path().join("key.hex"),
+            no_auto_stage:  false,
+        };
+        handle_staged_binary_freshness(Role::Reviewer, &args)
+            .expect("fresh binary must not error");
     }
 }
