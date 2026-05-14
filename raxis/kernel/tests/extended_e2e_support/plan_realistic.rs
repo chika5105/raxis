@@ -284,6 +284,12 @@ const REALISTIC_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Materializer Executor
 task_id            = "materialize-records"
 name               = "Materialize seeded postgres rows + mongo docs to JSON files"
 session_agent_type = "Executor"
+# 25 postgres rows + 25 mongo docs + 50 file writes + commit + verify.
+# `DEFAULT_PLANNER_MAX_TURNS` was bumped 20→50→100 specifically because
+# this task reproducibly exhausted lower budgets at iter25 + iter31.
+# 150 gives ~50% headroom over the 100-turn floor for natural tool-error
+# retry cycles. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 150
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
 description = """
 "#;
@@ -304,6 +310,10 @@ const REALISTIC_PLAN_XFILE_HEAD: &str = r#"# ── Cross-file refactor Executor
 task_id            = "xfile-refactor"
 name               = "Cross-file rename across Rust / TS / Python"
 session_agent_type = "Executor"
+# Mechanical cross-file rename across 3 language trees: read 3 files,
+# rewrite each, verify with grep, commit. ~5 turns per file × 3 = 15
+# plus retry/iteration headroom = 40. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 40
 path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 "#;
@@ -314,6 +324,11 @@ task_id            = "lint-defect"
 name               = "Introduce exactly one real lint defect"
 session_agent_type = "Executor"
 predecessors       = ["xfile-refactor"]
+# Single-edit task: open one of three files, introduce ONE lint defect,
+# commit. Trivially small budget; 25 covers the edit + commit + a couple
+# of retry cycles if the chosen language's lint rule is misremembered.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 25
 path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 "#;
@@ -347,6 +362,12 @@ task_id            = "lint-runner"
 name               = "Capture scripts/check.sh output for the Reviewer panel"
 session_agent_type = "Executor"
 predecessors       = ["lint-defect"]
+# Multi-round task: Round 1 = run scripts/check.sh + capture + commit
+# (~5 turns). Round 2+ = read critique + edit defective file + re-run
+# capture + commit (~15 turns). Reviewer-panel rejection drives the
+# Round-2 path; budget covers both rounds + a Round-3 safety net.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 30
 path_allowlist     = ["out/lint/", "rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 You are the RAXIS lint-runner executor. The diff from
@@ -429,6 +450,14 @@ task_id            = "review-lint-defect-A"
 name               = "Reviewer A — substantive review of lint-defect diff"
 session_agent_type = "Reviewer"
 predecessors       = ["lint-runner"]
+# Reviewer is mechanical: read_file the captured artifact, observe the
+# raxis_check_sh_exit_code sentinel line, decide. The Reviewer VM image
+# (`raxis-reviewer-core`) ships ONLY raxis-planner + ripgrep per
+# `INV-PLANNER-HARNESS-02`, so there's no shell, no language runtime,
+# no tool that could legitimately need many turns. A Reviewer that
+# hasn't decided in 10 turns is stuck on its own confusion, not on the
+# task. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 10
 description = """
 You are the FIRST Reviewer in a panel reviewing the rich-
 multilang-001 lint-defect pipeline. The upstream `lint-defect`
@@ -473,6 +502,9 @@ task_id            = "review-lint-defect-B"
 name               = "Reviewer B — substantive review of lint-defect diff"
 session_agent_type = "Reviewer"
 predecessors       = ["lint-runner"]
+# Same shape + budget as Reviewer A — mechanical read_file + decide.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 10
 description = """
 You are the SECOND Reviewer in a panel reviewing the rich-
 multilang-001 lint-defect pipeline. The `lint-runner` Executor
@@ -515,6 +547,10 @@ const REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD: &str = r#"# ── Positive path-a
 task_id            = "allowlist-positive-codegen"
 name               = "Generate a build-meta file into target/codegen/"
 session_agent_type = "Executor"
+# Trivial single-file generation task; write build_meta.txt under the
+# allowlisted path, commit. ~5 turns natural; 15 covers retry headroom.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 15
 path_allowlist     = ["target/codegen/"]
 description = """
 "#;
@@ -525,6 +561,12 @@ task_id            = "service-round-trip"
 name               = "Round-trip every credential-proxy upstream + commit per-service canonical outputs"
 session_agent_type = "Executor"
 predecessors       = ["allowlist-positive-codegen"]
+# Round-trip 4 service proxies (postgres + mongodb + redis + smtp) and
+# commit one canonical output file per service. ~12 turns per service
+# (auth + query + format + write) × 4 = ~48; 60 gives headroom for
+# auth retry on the historically-flaky SMTP path (iter34 root cause).
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 60
 path_allowlist     = ["out/services/"]
 description = """
 "#;
@@ -575,6 +617,11 @@ task_id            = "transparent-proxy-realscripts"
 name               = "Run stock-Python service-integrity scripts; commit per-service outputs"
 session_agent_type = "Executor"
 predecessors       = ["service-round-trip"]
+# Run 4 stock-Python service-integrity scripts + the run_all_services.sh
+# wrapper, commit per-service outputs + last_run_summary.txt. ~10 turns
+# per script × 4 = ~40 + summary write + retry headroom = 60.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 60
 path_allowlist     = ["out/services/", "scripts/last_run_summary.txt"]
 description = """
 "#;
@@ -629,6 +676,11 @@ task_id            = "credential-substitution-canary"
 name               = "Authenticate via operator-staged FAKE .env creds; proxy substitutes real creds upstream"
 session_agent_type = "Executor"
 predecessors       = ["service-round-trip"]
+# Single-service auth round-trip: read $DATABASE_URL, authenticate
+# against postgres via the substituting proxy, write one canonical
+# output, commit. ~10 turns natural; 25 covers retry headroom on a
+# bad first-pass auth attempt. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 25
 path_allowlist     = ["out/services/postgres-fake-creds.txt"]
 description = """
 "#;

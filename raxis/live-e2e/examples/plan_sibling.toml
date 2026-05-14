@@ -20,6 +20,11 @@ lane_id = "e2e-realistic-sibling-lane"
 task_id            = "sibling-materialize-records"
 name               = "Sibling-initiative materializer (audit-chain isolation witness)"
 session_agent_type = "Executor"
+# Same workload as `materialize-records` (25 pg rows + 25 mongo docs +
+# 50 file writes + commit). 150 mirrors the primary materializer for
+# the audit-chain isolation witness — both initiatives must converge.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 150
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
 description = """
 # Materializer Executor prompt — extended e2e scenario
