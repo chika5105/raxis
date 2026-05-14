@@ -2045,7 +2045,21 @@ pub fn realistic_lifecycle_deadline() -> Duration {
 
 /// Poll the audit chain until BOTH `initiative_ids` emit
 /// `IntegrationMergeCompleted`. Surfaces `SecurityViolation`
-/// instantly. Returns the merged chain at completion.
+/// AND `OrchestratorRespawnCeilingExceeded` (per
+/// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`) instantly.
+/// Returns the merged chain at completion.
+///
+/// **Fast-fail on `OrchestratorRespawnCeilingExceeded`** (per
+/// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`): when the per-
+/// initiative no-progress respawn counter exceeds its ceiling
+/// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`), the kernel
+/// commits `initiatives.state = 'Failed'` in the same paired
+/// write that emits the chain-side audit row. No further audit
+/// events fire on that initiative's lane, so polling for
+/// `IntegrationMergeCompleted` is a guaranteed indefinite wait.
+/// The chain-side scan in the poll loop panics immediately with
+/// the upstream blind-ask hypothesis cited so the operator can
+/// triage the LLM behaviour in seconds.
 ///
 /// **Fast-fail on terminal spawn failure** (extension of
 /// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`):
@@ -2179,6 +2193,60 @@ pub fn poll_for_dual_lifecycle_completion(
                      event_kind={}, payload={:#}",
                     e.event_kind, e.payload,
                 );
+            }
+            // Fast-fail on `OrchestratorRespawnCeilingExceeded` for
+            // either watched initiative. The kernel emits this event
+            // AND commits `initiatives.state = 'Failed'` in one paired
+            // write
+            // (`session_spawn_orchestrator.rs::orchestrator_post_exit_respawn_trigger`)
+            // — the initiative is now terminal and no further audit
+            // events fire on its lane. Without this branch the harness
+            // would poll the full `realistic_lifecycle_deadline` for an
+            // `IntegrationMergeCompleted` that will never arrive (the
+            // same indefinite-wait class the spawn-failure scanner
+            // above covers per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`).
+            // iter48 reproduced this on Tier1Tproxy supervisor-free
+            // when the orchestrator NNSP blind-asked `retry_subtask`
+            // against a `lint-defect` task whose
+            // `capabilities.tasks[*].retry_admissible=false reason="prior
+            // state PendingActivation; …"` — the kernel correctly
+            // rejected each retry per
+            // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` and the
+            // ceiling fired after three no-progress respawn cycles.
+            if e.event_kind == "OrchestratorRespawnCeilingExceeded" {
+                if let Some(bad_initiative) = e.initiative_id.as_deref() {
+                    if initiative_ids.iter().any(|w| *w == bad_initiative) {
+                        let stderr_tail = std::fs::read_to_string(&stderr_path)
+                            .ok()
+                            .map(|s| {
+                                let lines: Vec<&str> = s.lines().collect();
+                                let n = lines.len();
+                                let take = n.min(60);
+                                lines[n.saturating_sub(take)..].join("\n")
+                            })
+                            .unwrap_or_else(|| "<no kernel.stderr.log on disk>".to_owned());
+                        panic!(
+                            "kernel emitted terminal \
+                             `OrchestratorRespawnCeilingExceeded` for \
+                             initiative {bad_initiative} (payload: {payload:#}); \
+                             the per-initiative no-progress respawn ceiling \
+                             has been reached and the kernel has marked the \
+                             initiative `Failed` — the lifecycle cannot \
+                             complete without operator-driven recovery, so \
+                             the harness will not poll further (would be a \
+                             guaranteed indefinite wait per \
+                             INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01). \
+                             Common upstream cause: orchestrator NNSP \
+                             blind-asks `retry_subtask` against a task whose \
+                             `capabilities.tasks[*].retry_admissible=false` — \
+                             see `crates/planner-core/src/driver.rs` rule \
+                             3a + `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.\n\
+                             \n\
+                             ── kernel.stderr (tail) ──\n{stderr_tail}",
+                            payload = e.payload,
+                        );
+                    }
+                }
             }
         }
 

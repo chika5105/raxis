@@ -2631,11 +2631,32 @@ per `INV-PLANNER-HARNESS-06` — MUST instruct the model to:
 2. Call `retry_subtask { subtask_task_id: "<executor_task_id>" }`
    — NOT `integration_merge` — whenever any row of
    `reviewer_verdicts=` reads `approved=false` against an
-   executor whose task row is `complete`.
+   executor whose task row is `complete` AND the executor's
+   matching `capabilities.tasks[*]` row reads
+   `retry_admissible=true`.
+2a. When the executor's `capabilities.tasks[*]` row reads
+   `retry_admissible=false` with `reason="prior state
+   PendingActivation; …"`, a PRIOR `retry_subtask` already
+   landed and the kernel minted a fresh activation row in
+   `PendingActivation`. The Orchestrator MUST then call
+   `activate_subtask { subtask_task_id: "<executor_task_id>" }`
+   to spawn the executor VM for the fresh activation, per
+   `kernel/src/handlers/intent.rs::handle_retry_sub_task` step 6
+   ("the Orchestrator's next step is `ActivateSubTask` against
+   the same task_id, which will spawn the fresh VM"). Re-issuing
+   `retry_subtask` against the new row would be rejected with
+   `RetrySubTaskRejectedNotRetryable` and would burn a slot of
+   the per-initiative `orchestrator_no_progress_respawn_count`
+   ceiling (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`).
 3. Defer to the kernel's `[plan.tasks.<exec>.review].max_rounds`
    ceiling (per `agent-disagreement.md §3`) for the retry-loop
    ceiling — the Orchestrator MUST NOT itself enforce a separate
-   ceiling.
+   ceiling. When `capabilities.tasks[*]` reports
+   `retry_admissible=false` with `reason="review_reject_count …
+   >= max_review_rejections …"` (or `crash_retry_count …`), the
+   ceiling has fired; the Orchestrator falls through to
+   escalation per `agent-disagreement.md §3` rather than
+   reissuing `retry_subtask`.
 4. Only call `integration_merge` after every executor's
    `reviewer_verdicts=` row reads `approved=true`.
 
@@ -5046,6 +5067,30 @@ all-zero placeholder (see `release-and-distribution.md §8.2`).
 The scanner intentionally filters out the mid-flight
 `session_vm_transient_retry` lines so a substrate that
 self-recovers after a transient stall is not falsely failed.
+
+**Fast-fail on `OrchestratorRespawnCeilingExceeded`.** The
+poll loop scans the audit chain on every iteration and panics
+immediately when an `OrchestratorRespawnCeilingExceeded` audit
+event lands for either watched initiative. The kernel commits
+`initiatives.state = 'Failed'` in the same paired write that
+emits the chain-side audit row
+(`session_spawn_orchestrator.rs::orchestrator_post_exit_respawn_trigger`,
+paired per `audit-paired-writes.md §4`). No further audit
+events fire on that initiative's lane, so polling for
+`IntegrationMergeCompleted` is a guaranteed indefinite wait —
+the same indefinite-wait class the spawn-failure scanner above
+covers. Iter48 reproduced the gap: the orchestrator's planner
+LLM blind-asked `retry_subtask` against a task whose
+`capabilities.tasks[*].retry_admissible=false reason="prior
+state PendingActivation; …"`, the kernel correctly rejected
+each retry with `RetrySubTaskRejectedNotRetryable` per
+`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`, and after three
+no-progress respawn cycles the per-initiative ceiling
+(`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fired and marked
+the initiative `Failed`. Without the fast-fail the harness
+deadlined out after the full 65 min wait; with the fast-fail
+the operator sees the upstream blind-ask hypothesis (NNSP rule
+3a + the matching invariant cite) in seconds.
 
 [`SEED_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
 [`HEALTH_PROBE_TIMEOUT`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs

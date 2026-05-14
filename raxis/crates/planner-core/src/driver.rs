@@ -1124,19 +1124,58 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                  subtask_task_id: \"<task_id>\" }` instead.\n\
                               3a. SCAN the `dag=` block for Executor rows \
                                  reading `aggregate=AtLeastOneRejected`. \
-                                 For each such row you MUST call \
-                                 `retry_subtask { subtask_task_id: \
-                                 \"<executor_task_id>\" }` on that executor — \
-                                 NOT `integration_merge`. \
-                                 `aggregate=AtLeastOneRejected` is the \
-                                 kernel's TERMINAL cross-Reviewer verdict, \
-                                 meaning every sibling reviewer has voted \
-                                 AND at least one Rejected; the kernel \
-                                 has bumped the executor's \
-                                 `subtask_activations.review_reject_count` \
-                                 and a `retry_subtask` is now \
-                                 admission-eligible per \
-                                 `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. \
+                                 For each such row, look up the matching \
+                                 `task=<executor_task_id>` line in the \
+                                 `capabilities=` → `tasks=` block (same \
+                                 KSB) and BRANCH on the \
+                                 `retry_admissible=` field:\n\
+                                 \n\
+                                  - `retry_admissible=true` ⇒ MUST call \
+                                    `retry_subtask { subtask_task_id: \
+                                    \"<executor_task_id>\" }` on that \
+                                    executor — NOT `integration_merge`. \
+                                    `aggregate=AtLeastOneRejected` is the \
+                                    kernel's TERMINAL cross-Reviewer \
+                                    verdict, meaning every sibling reviewer \
+                                    has voted AND at least one Rejected; \
+                                    the kernel has bumped the executor's \
+                                    `subtask_activations.review_reject_count` \
+                                    and a `retry_subtask` is now \
+                                    admission-eligible per \
+                                    `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.\n\
+                                  - `retry_admissible=false` with \
+                                    `reason=\"prior state PendingActivation; \
+                                    …\"` ⇒ a PRIOR `retry_subtask` already \
+                                    landed and the kernel minted a fresh \
+                                    activation row that is currently in \
+                                    `PendingActivation` (no executor VM \
+                                    spawned yet). Per the kernel handler \
+                                    contract \
+                                    (`handle_retry_sub_task` step 6 — \
+                                    `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`) \
+                                    your NEXT step on this task is \
+                                    `activate_subtask { subtask_task_id: \
+                                    \"<executor_task_id>\" }`, which spawns \
+                                    the executor VM for the fresh \
+                                    activation. Re-issuing `retry_subtask` \
+                                    would be REJECTED with \
+                                    `FAIL_INVALID_REQUEST` and would burn \
+                                    one of your `orch_no_progress_respawns=` \
+                                    budget slots; do NOT do that.\n\
+                                  - `retry_admissible=false` with \
+                                    `reason=\"review_reject_count … >= \
+                                    max_review_rejections …\"` ⇒ the \
+                                    plan's review-rejection ceiling has \
+                                    been reached. Do NOT call \
+                                    `retry_subtask`; fall through to \
+                                    escalation per \
+                                    `agent-disagreement.md` §3.\n\
+                                  - `retry_admissible=false` with \
+                                    `reason=\"crash_retry_count … >= \
+                                    max_crash_retries …\"` ⇒ same as above, \
+                                    crash-retry budget exhausted; \
+                                    escalate, do NOT retry.\n\
+                                 \n\
                                  NEVER call `retry_subtask` while \
                                  `aggregate=Pending`: at least one sibling \
                                  reviewer still owes a verdict and the \
@@ -1149,9 +1188,12 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                  block is forensic (one row per submitted \
                                  reviewer verdict, includes intermediate \
                                  partial-rejection state); the \
-                                 `aggregate=` field on the Executor row is \
-                                 the wire-stable retry trigger. The \
-                                 plan's `[plan.tasks.<exec>.review].\
+                                 `aggregate=` field on the Executor row \
+                                 PLUS the \
+                                 `capabilities.tasks[*].retry_admissible` \
+                                 boolean are the wire-stable retry \
+                                 triggers. The plan's \
+                                 `[plan.tasks.<exec>.review].\
                                  max_rounds` ceiling (defaults from \
                                  `[plan.defaults.review]`) caps the retry \
                                  loop; if a retry would breach it, the \
@@ -1702,6 +1744,61 @@ mod tests {
             "orchestrator NNSP MUST explicitly forbid \
              `retry_subtask` while `aggregate=Pending` per \
              iter42 regression; got prompt: {prompt}",
+        );
+    }
+
+    /// Regression test for the `iter48` orchestrator-respawn-ceiling
+    /// loop: the orchestrator NNSP MUST gate `retry_subtask` on the
+    /// kernel-side `retry_admissible` boolean from the
+    /// `capabilities.tasks[*]` envelope, AND MUST direct the model
+    /// to `activate_subtask` when `retry_admissible=false reason="prior
+    /// state PendingActivation; …"` (the kernel's documented
+    /// follow-up step after a prior `RetrySubTask` admit per
+    /// `handle_retry_sub_task` step 6 +
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`). Without these
+    /// rules the planner LLM blind-asks `retry_subtask` against a
+    /// PendingActivation activation row, every retry is rejected
+    /// with `RetrySubTaskRejectedNotRetryable`, and the per-
+    /// initiative no-progress respawn ceiling
+    /// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fires; iter48
+    /// reproduced this on Tier1Tproxy supervisor-free with the
+    /// `lint-defect` task and surfaced
+    /// `OrchestratorRespawnCeilingExceeded` as the chain-side
+    /// terminal event.
+    #[test]
+    fn render_system_prompt_for_orchestrator_gates_retry_on_retry_admissible() {
+        let args = BootArgs {
+            initiative_id: "init-A".to_owned(),
+            task_id: None,
+        };
+        let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(
+            prompt.contains("retry_admissible=true"),
+            "orchestrator NNSP MUST require `retry_admissible=true` \
+             before issuing `retry_subtask` per iter48 regression; \
+             got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("prior state PendingActivation"),
+            "orchestrator NNSP MUST cite the kernel's \
+             `prior state PendingActivation` rejection reason so the \
+             LLM disambiguates post-retry-admit state; \
+             got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("activate_subtask")
+                && prompt.contains("PendingActivation"),
+            "orchestrator NNSP MUST direct `activate_subtask` (NOT \
+             `retry_subtask`) when capabilities reports \
+             `retry_admissible=false` with \
+             `reason=\"prior state PendingActivation; …\"`; \
+             got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("orch_no_progress_respawns="),
+            "orchestrator NNSP MUST cite the per-initiative respawn \
+             budget so the LLM understands the cost of a blind \
+             retry-on-PendingActivation; got prompt: {prompt}",
         );
     }
 
