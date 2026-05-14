@@ -2428,6 +2428,13 @@ pub mod recent_activity_filter {
         "KernelDeadlockDetected",
         "KernelCrashedBySignal",
         "SupervisorRefusedRestart",
+        // Terminal supervisor-circuit-open event: kernel reached
+        // its restart ceiling and the supervisor halted further
+        // restarts. Semantic peer of `SupervisorRefusedRestart`
+        // and `KernelBootedFromSupervisorRestart` — operators
+        // need this row in the curated feed to see that the
+        // self-healing path bottomed out.
+        "KernelRestartHaltedCircuitOpen",
         "OrchestratorRespawnCeilingExceeded",
         "CredentialProxyUpstreamFailed",
         "OperatorRotatedDashboardJwtSecret",
@@ -2453,6 +2460,13 @@ pub mod recent_activity_filter {
         "KernelRestartInitiated",
         "KernelRestartCompleted",
         "KernelBootedFromSupervisorRestart",
+        // Per-task auto-resume row emitted once per surviving
+        // task after a supervisor-driven kernel restart. Operator-
+        // relevant ("did MY task come back?"). Potentially noisy
+        // on many-task recoveries (one row per resumed task);
+        // trade-off accepted for operator visibility into
+        // per-task post-restart status.
+        "TaskAutoResumedAfterSupervisorRestart",
         "ExecutorRespawnFromReviewRejection",
     ];
 
@@ -2474,6 +2488,11 @@ pub mod recent_activity_filter {
             assert!(is_important("OperatorRevealedCredential"));
             assert!(is_important("SecurityViolationDetected"));
             assert!(is_important("KernelStarted"));
+            // Supervisor-circuit terminal + per-task auto-resume:
+            // the iter49 dashboards must surface both so the
+            // self-healing path stays observable to operators.
+            assert!(is_important("KernelRestartHaltedCircuitOpen"));
+            assert!(is_important("TaskAutoResumedAfterSupervisorRestart"));
         }
 
         #[test]
