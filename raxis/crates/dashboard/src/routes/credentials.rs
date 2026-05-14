@@ -654,6 +654,8 @@ mod tests {
             auth,
             config: cfg,
             shutdown: ShutdownSignal::new(),
+            observability: None,
+            sse_active: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         })
     }
 }
