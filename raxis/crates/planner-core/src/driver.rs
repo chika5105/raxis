@@ -490,11 +490,10 @@ where
     //
     // VM substrates (`Vsock` dial / `VsockListen`) run the planner
     // in an `EgressTier::None` (Orchestrator, Reviewer) or
-    // `Mediated` (Executor; the only non-`None` egress tier shipped
-    // in V2 after the Tier1Tproxy deletion). The kernel-mediated
-    // path is the ONLY way out for `EgressTier::None` and the only
-    // sanctioned path for `Mediated` (the audit chain gains a single
-    // anchor on the kernel side per
+    // `Tier1Tproxy` (Executor) guest. The kernel-mediated path is
+    // the ONLY way out for `EgressTier::None` and a strict
+    // architectural improvement for `Tier1Tproxy` (the audit chain
+    // gains a single anchor on the kernel side per
     // `provider-failure-handling.md §2.1`).
     let http_fetch: Arc<dyn crate::http_fetch::HttpFetch> = match &transport_cfg {
         crate::transport::KernelTransportConfig::Uds { .. } => {
@@ -1097,29 +1096,109 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               1. Look at the `dag=` block inside \
                                  `[RAXIS:KERNEL_STATE …]` (below). Each row \
                                  has the shape `<task_id> <state> reviewers=N \
-                                 [aggregate=<verdict>] sha=<40-hex|<none>> \
-                                 \"<title>\"`. The `sha=` field is the \
-                                 executor's commit SHA once the task \
-                                 completes; it is `<none>` while the task \
-                                 is pending / in-progress / \
-                                 failed-before-commit. The optional \
-                                 `aggregate=` field appears ONLY on \
-                                 Executor rows and carries the kernel's \
-                                 cross-Reviewer terminal verdict (one of \
-                                 `Pending`, `AllPassed`, \
+                                 preds_ready=<true|false> [aggregate=<verdict>] \
+                                 sha=<40-hex|<none>> \"<title>\"`. The \
+                                 `sha=` field is the executor's commit SHA \
+                                 once the task completes; it is `<none>` \
+                                 while the task is pending / in-progress / \
+                                 failed-before-commit. The \
+                                 `preds_ready=` field is the kernel's \
+                                 wire-stable boolean projection of \
+                                 \"every plan-declared predecessor of \
+                                 this task is in `tasks.state = \
+                                 'Completed'`\" — `true` ⇔ activatable \
+                                 NOW, `false` ⇔ at least one upstream \
+                                 task has not committed its closure yet. \
+                                 The optional `aggregate=` field appears \
+                                 ONLY on Executor rows and carries the \
+                                 kernel's cross-Reviewer terminal verdict \
+                                 (one of `Pending`, `AllPassed`, \
                                  `AtLeastOneRejected`, or `NoSuccessors`). \
                                  Reviewer / Orchestrator rows omit it.\n\
-                              2. Find the first task whose `state` is `pending` \
-                                 AND whose plan-declared predecessors are all \
-                                 `complete`. Call `activate_subtask { \
-                                 subtask_task_id: \"<task_id>\" }` with that \
-                                 row's task id (verbatim — case-sensitive). \
-                                 This includes reviewer tasks: an Executor \
-                                 row whose `aggregate=Pending` means at \
-                                 least one of its reviewer dependents is \
-                                 still `pending` — activate the missing \
-                                 reviewer(s) first, do NOT call \
-                                 `retry_subtask` while `aggregate=Pending`.\n\
+                              2. **PRIORITY** — review-rejection retry takes \
+                                 ABSOLUTE precedence over fresh activation. \
+                                 BEFORE evaluating this rule's \
+                                 activate-pending logic, scan the `dag=` \
+                                 block for any Executor row reading \
+                                 `aggregate=AtLeastOneRejected`. If at \
+                                 least one such row exists AND its matching \
+                                 `capabilities.tasks[*].retry_admissible=true`, \
+                                 JUMP to rule 3a below and call \
+                                 `retry_subtask { subtask_task_id: \
+                                 \"<executor_task_id>\" }` for that \
+                                 executor THIS turn — DO NOT activate any \
+                                 pending task. Rationale: the kernel's \
+                                 `IntegrationMerge` Step 3d gate (audit tag \
+                                 `IntegrationMergeBlockedByOutstandingReview` — \
+                                 see `specs/v2/agent-disagreement.md §3.6` \
+                                 \"Iter49 kernel-side fail-closed backstop\") \
+                                 will hard-reject any \
+                                 `integration_merge` while an Executor \
+                                 carries `aggregate=AtLeastOneRejected`, \
+                                 with `FAIL_REVIEW_OUTSTANDING` — but \
+                                 the orchestrator's positive obligation is \
+                                 to retry the rejected Executor, NOT to \
+                                 thrash on `integration_merge`. Each \
+                                 `FAIL_REVIEW_OUTSTANDING` rejection burns \
+                                 one of your `orch_no_progress_respawns=` \
+                                 budget slots. Activating other pending \
+                                 tasks while a Reviewer-rejected Executor \
+                                 is awaiting retry is also a SCENARIO BUG: \
+                                 every additional Completed Executor \
+                                 increases the gap between \
+                                 `aggregate=AllPassed` and the \
+                                 final-merge gate. The retry-then- \
+                                 activate ordering is mandatory. \
+                                 \n\
+                                 Otherwise (no Executor row carries \
+                                 `aggregate=AtLeastOneRejected` with \
+                                 `retry_admissible=true`), find the first \
+                                 task whose `state` is `pending` \
+                                 (or `admitted`) AND whose `preds_ready=true`. \
+                                 Call `activate_subtask { subtask_task_id: \
+                                 \"<task_id>\" }` with that row's task id \
+                                 (verbatim — case-sensitive). \
+                                 \n\
+                                 NEVER activate a row whose \
+                                 `preds_ready=false` — at least one of \
+                                 its plan-declared predecessors is still \
+                                 short of `Completed` and the kernel will \
+                                 reject the activation (Reviewer rows: \
+                                 `ActivateSubTaskReviewerNoEvalSha` \
+                                 because the immediate Executor \
+                                 predecessor has not stamped \
+                                 `evaluation_sha` yet; Executor rows: a \
+                                 worktree-provision miss because the \
+                                 predecessor's commit closure has not been \
+                                 copied into the orchestrator ODB). Each \
+                                 such rejection burns one of your \
+                                 `orch_no_progress_respawns=` budget slots \
+                                 and the kernel ceiling \
+                                 (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) \
+                                 will mark the initiative `Failed`. \
+                                 Examples that look tempting but are wrong: \
+                                 the realistic plan's `lint-defect → \
+                                 lint-runner → review-lint-defect-A/B` \
+                                 chain — when `lint-defect` reports \
+                                 `state=complete` and \
+                                 `aggregate=NoSuccessors`, the next ready \
+                                 task is `lint-runner` (its sole \
+                                 predecessor is now Completed → \
+                                 `preds_ready=true`), NOT \
+                                 `review-lint-defect-A` (its IMMEDIATE \
+                                 predecessor `lint-runner` is still \
+                                 Admitted → `preds_ready=false`). \
+                                 \n\
+                                 This rule subsumes reviewer activation: \
+                                 a reviewer row whose \
+                                 `preds_ready=true` is exactly the case \
+                                 where the immediate Executor predecessor \
+                                 has Completed and stamped \
+                                 `evaluation_sha`, which is the kernel's \
+                                 `ActivateSubTask` reviewer-branch \
+                                 admission predicate. Do NOT call \
+                                 `retry_subtask` while `aggregate=Pending` \
+                                 (covered by rule 3a below).\n\
                               3. If a row's `state` is `failed` and you judge \
                                  a retry is warranted, call `retry_subtask { \
                                  subtask_task_id: \"<task_id>\" }` instead.\n\
@@ -1762,8 +1841,7 @@ mod tests {
     /// with `RetrySubTaskRejectedNotRetryable`, and the per-
     /// initiative no-progress respawn ceiling
     /// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fires; iter48
-    /// reproduced this (then on the legacy Tier1Tproxy egress, since
-    /// removed) supervisor-free with the
+    /// reproduced this on Tier1Tproxy supervisor-free with the
     /// `lint-defect` task and surfaced
     /// `OrchestratorRespawnCeilingExceeded` as the chain-side
     /// terminal event.
@@ -1801,6 +1879,134 @@ mod tests {
             "orchestrator NNSP MUST cite the per-initiative respawn \
              budget so the LLM understands the cost of a blind \
              retry-on-PendingActivation; got prompt: {prompt}",
+        );
+    }
+
+    /// Iter50 regression — the orchestrator NNSP rule 2 MUST gate
+    /// `activate_subtask` on the wire-stable `preds_ready=` boolean
+    /// from the `dag=` block. Without this gate the planner LLM
+    /// activates Reviewer rows whose immediate Executor predecessor
+    /// has not stamped `evaluation_sha` yet (the realistic-plan
+    /// `lint-defect → lint-runner → review-lint-defect-A` chain in
+    /// iter49 reproduced this), the kernel rejects every attempt
+    /// with `ActivateSubTaskReviewerNoEvalSha`, and the per-
+    /// initiative no-progress respawn ceiling
+    /// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fires.
+    /// Closes `INV-PLANNER-ORCH-PREDS-READY-GATE-01` (added with
+    /// the iter50 fix).
+    #[test]
+    fn render_system_prompt_for_orchestrator_gates_activate_on_preds_ready() {
+        let args = BootArgs {
+            initiative_id: "init-A".to_owned(),
+            task_id: None,
+        };
+        let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(
+            prompt.contains("preds_ready="),
+            "orchestrator NNSP MUST cite the wire-stable `preds_ready=` \
+             field by name so the LLM parses it from the `dag=` block; \
+             got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("preds_ready=true"),
+            "orchestrator NNSP MUST teach the LLM the `true` admission \
+             form; got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("preds_ready=false"),
+            "orchestrator NNSP MUST teach the LLM the `false` deny \
+             form (and what it implies); got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("NEVER activate a row whose \
+                            `preds_ready=false`"),
+            "orchestrator NNSP MUST contain a categorical \
+             prohibition against activating rows with \
+             `preds_ready=false` per iter50 regression; \
+             got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("ActivateSubTaskReviewerNoEvalSha"),
+            "orchestrator NNSP MUST cite the kernel-side rejection \
+             class so the LLM understands the cost of activating a \
+             reviewer with `preds_ready=false`; got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("lint-defect")
+                && prompt.contains("lint-runner")
+                && prompt.contains("review-lint-defect-A"),
+            "orchestrator NNSP SHOULD include the realistic-plan \
+             chain as a worked example so the LLM grounds the rule \
+             on a concrete shape; got prompt: {prompt}",
+        );
+    }
+
+    /// Iter50 regression (the second failure mode the
+    /// `realistic_session_lifecycle` reproduction surfaced AFTER
+    /// the iter49 kernel-side `IntegrationMerge` fail-closed gate
+    /// landed at `810fa63`) — the orchestrator NNSP MUST give
+    /// review-rejection retry ABSOLUTE precedence over fresh
+    /// activation. Without this priority signal the planner LLM
+    /// scans pending tasks first (rule 2 fires before rule 3a in
+    /// the original numbered listing), activates them all, and
+    /// finally calls `integration_merge`. Even with the kernel's
+    /// `FAIL_REVIEW_OUTSTANDING` backstop the orchestrator can
+    /// thrash on `integration_merge` for many turns, burning
+    /// `orch_no_progress_respawns=` slots. The realistic
+    /// scenario's `ReviewerSubstantiveDisagreementWitness` then
+    /// panics with `saw_executor_respawn=false
+    /// saw_aggregation_pass=false` (the iter49 → iter50
+    /// reproduction). Closes
+    /// `INV-PLANNER-ORCH-RETRY-PRIORITY-OVER-ACTIVATE-01`
+    /// (added with the iter50 fix).
+    #[test]
+    fn render_system_prompt_for_orchestrator_prioritizes_retry_over_activate() {
+        let args = BootArgs {
+            initiative_id: "init-A".to_owned(),
+            task_id: None,
+        };
+        let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(
+            prompt.contains("PRIORITY"),
+            "orchestrator NNSP MUST flag the priority directive \
+             explicitly so the LLM does NOT scan rules linearly \
+             (iter50 regression); got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("ABSOLUTE precedence over fresh activation"),
+            "orchestrator NNSP MUST state that retry_subtask \
+             takes ABSOLUTE precedence over activate_subtask \
+             when an Executor reads aggregate=AtLeastOneRejected \
+             with retry_admissible=true (iter50 regression); \
+             got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("DO NOT activate any \
+                            pending task"),
+            "orchestrator NNSP MUST contain a categorical \
+             prohibition against activating pending tasks while a \
+             review-rejected executor awaits retry (iter50 \
+             regression); got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("FAIL_REVIEW_OUTSTANDING"),
+            "orchestrator NNSP MUST cite the kernel's Step 3d \
+             backstop error code so the LLM understands WHY \
+             thrashing on `integration_merge` is wasteful — \
+             every rejection burns a respawn slot; got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("IntegrationMergeBlockedByOutstandingReview"),
+            "orchestrator NNSP SHOULD reference the kernel-side \
+             audit tag (`IntegrationMergeBlockedByOutstandingReview`) \
+             the directive coordinates with so the rule stays \
+             auditable against the kernel handler; got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("orch_no_progress_respawns="),
+            "orchestrator NNSP MUST cite the per-initiative respawn \
+             budget so the LLM understands the cost of failing to \
+             retry; got prompt: {prompt}",
         );
     }
 

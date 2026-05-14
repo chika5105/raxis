@@ -45,6 +45,7 @@ use raxis_ksb::{
 };
 use raxis_store::Table;
 use raxis_types::SessionAgentType;
+use raxis_types::TaskState;
 
 use raxis_types::intent_admit::{
     admit_retry_subtask_check, AdmitOutcome, RetryAdmitInputs,
@@ -373,6 +374,24 @@ fn read_dag_rows_for_initiative(
     let reviewer_counts =
         read_reviewer_counts_per_executor(conn, initiative_id, registry)?;
 
+    // iter50 — `preds_ready` is the wire-stable boolean that gates
+    // the Orchestrator NNSP rule 2 `activate_subtask` decision. A
+    // task is `preds_ready=true` iff every plan-declared
+    // predecessor in `task_dag_edges` is in the
+    // `tasks.state = 'Completed'` terminal state. Tasks with no
+    // predecessor edges are vacuously ready. The same predicate
+    // (joined to `task_dag_edges` + `tasks.state`) is what the
+    // kernel-side `ActivateSubTask` reviewer-evaluation_sha
+    // gate observes; surfacing it directly in the KSB closes
+    // `INV-KSB-PREDS-READY-PROJECTION-01` (added alongside the
+    // iter50 fix for the `lint-defect → lint-runner →
+    // review-lint-defect-A` chain — the orchestrator activated
+    // the reviewer before its IMMEDIATE Executor predecessor
+    // `lint-runner` had even started, and the kernel rejected
+    // every attempt with `ActivateSubTaskReviewerNoEvalSha`
+    // until the orchestrator-respawn-no-progress ceiling fired).
+    let preds_ready_map = read_preds_ready_per_task(conn, initiative_id)?;
+
     rows.into_iter().map(|(task_id, state, evaluation_sha)| {
         let task_fields = registry
             .get(&TaskKey::new(initiative_id.to_owned(), task_id.clone()));
@@ -405,6 +424,10 @@ fn read_dag_rows_for_initiative(
             }
             _ => String::new(),
         };
+        let preds_ready = preds_ready_map
+            .get(task_id.as_str())
+            .copied()
+            .unwrap_or(true);
         Ok::<DagRow, rusqlite::Error>(DagRow {
             task_id,
             state: state.to_lowercase(),
@@ -412,8 +435,56 @@ fn read_dag_rows_for_initiative(
             reviewers,
             evaluation_sha: evaluation_sha.unwrap_or_default(),
             aggregate_verdict,
+            preds_ready,
         })
     }).collect()
+}
+
+/// For every task in the initiative, compute whether all of its
+/// `task_dag_edges` predecessors are in `tasks.state = 'Completed'`.
+/// Returned map only carries entries for tasks with at least one
+/// predecessor edge — the caller treats missing keys as
+/// `preds_ready=true` (the no-predecessor / root case).
+///
+/// The check intentionally pivots on `tasks.state = 'Completed'`
+/// rather than the unmaintained `task_dag_edges.predecessor_satisfied`
+/// column (the kernel never UPDATEs that column in v1, despite the
+/// schema comment — see iter50 audit). `Completed` is the only
+/// state where an Executor has stamped `evaluation_sha` (per
+/// `commit_task_completion` step 1) and is therefore the only
+/// state at which a downstream Reviewer activation will pass the
+/// kernel-side `ActivateSubTaskReviewerNoEvalSha` gate.
+fn read_preds_ready_per_task(
+    conn:          &Connection,
+    initiative_id: &str,
+) -> Result<std::collections::BTreeMap<String, bool>, rusqlite::Error> {
+    let sql = format!(
+        "SELECT e.successor_task_id, p.state \
+           FROM {edges} AS e \
+           JOIN {tasks} AS p ON p.task_id = e.predecessor_task_id \
+          WHERE e.initiative_id = ?1",
+        edges = Table::TaskDagEdges.as_str(),
+        tasks = Table::Tasks.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params![initiative_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Each successor starts as ready=true; a single non-Completed
+    // predecessor flips it to false (monotone; we never flip back).
+    let mut map: std::collections::BTreeMap<String, bool> =
+        std::collections::BTreeMap::new();
+    let completed = TaskState::Completed.as_sql_str();
+    for (successor, pred_state) in rows {
+        let entry = map.entry(successor).or_insert(true);
+        if pred_state != completed {
+            *entry = false;
+        }
+    }
+    Ok(map)
 }
 
 /// Count the number of `Reviewer`-typed successors per executor task
@@ -1307,6 +1378,140 @@ mod tests {
             "rendered KSB MUST NOT carry `AtLeastOneRejected` \
              while any sibling Reviewer is pending — that is the \
              iter42 race; got: {rendered}");
+    }
+
+    /// Iter50 regression — pin `DagRow::preds_ready` against the
+    /// `lint-defect → lint-runner → review-lint-defect-A` shape
+    /// the realistic-plan iter49 reproduction surfaced. The
+    /// orchestrator activated `review-lint-defect-A` while its
+    /// IMMEDIATE plan-declared Executor predecessor `lint-runner`
+    /// was still in `Admitted` (not `Completed`); the kernel
+    /// rejected every attempt with `ActivateSubTaskReviewerNoEvalSha`
+    /// until the orchestrator-respawn-no-progress ceiling fired.
+    /// With the projection in place the LLM sees
+    /// `review-lint-defect-A … preds_ready=false` directly on
+    /// the `dag=` block and the NNSP rule 2 gates the activation.
+    /// Closes `INV-KSB-PREDS-READY-PROJECTION-01`.
+    #[test]
+    fn dag_row_preds_ready_blocks_reviewer_when_immediate_executor_predecessor_not_completed() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init       = "init-iter50";
+        let lint_def   = "lint-defect";
+        let lint_run   = "lint-runner";
+        let rev_a      = "review-lint-defect-A";
+
+        registry.insert_orchestrator(init.to_owned(), OrchestratorPlanFields {
+            cross_cutting_artifacts: vec![],
+            description:             "drive lint-defect → lint-runner → review chain".to_owned(),
+            target_ref:              "refs/heads/main".to_owned(),
+            elastic:                 None,
+        });
+        for (tid, role) in &[
+            (lint_def, SessionAgentType::Executor),
+            (lint_run, SessionAgentType::Executor),
+            (rev_a,    SessionAgentType::Reviewer),
+        ] {
+            registry.insert(TaskKey::new(init.to_owned(), (*tid).to_owned()),
+                TaskPlanFields {
+                    description:        format!("{tid} description"),
+                    session_agent_type: *role,
+                    ..Default::default()
+                });
+        }
+
+        let conn = store.lock_sync();
+        // Initiatives row is the FK target for `tasks.initiative_id`
+        // and `task_dag_edges.initiative_id`; insert it first so
+        // SQLite's deferred-FK enforcement (PRAGMA foreign_keys=ON
+        // is set by `Store::open`) does not reject the task inserts.
+        conn.execute(
+            "INSERT INTO initiatives (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'ApprovedPlan', '{}', 'sha-test', 0)",
+            rusqlite::params![init],
+        ).expect("insert initiative");
+        // lint-defect has Completed (with evaluation_sha so the
+        // `aggregate=NoSuccessors` calculation does not panic on
+        // a missing column). lint-runner is still Admitted —
+        // never activated. review-lint-defect-A is Admitted.
+        for (tid, state, sha) in &[
+            (lint_def, "Completed", Some("a".repeat(40))),
+            (lint_run, "Admitted",  None),
+            (rev_a,    "Admitted",  None),
+        ] {
+            conn.execute(
+                "INSERT INTO tasks (
+                     task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     evaluation_sha
+                 ) VALUES (?1, ?2, 'default', ?3, 'op', 0, 0, 0, ?4)",
+                rusqlite::params![tid, init, state, sha.as_deref()],
+            ).expect("insert task");
+        }
+        // Realistic-plan DAG edges:
+        //   lint-runner ⟵ lint-defect    (executor depends on executor)
+        //   review-lint-defect-A ⟵ lint-runner  (reviewer depends on its runner)
+        for (pred, succ) in &[
+            (lint_def, lint_run),
+            (lint_run, rev_a),
+        ] {
+            conn.execute(
+                "INSERT INTO task_dag_edges (
+                    initiative_id, predecessor_task_id, successor_task_id,
+                    predecessor_satisfied
+                 ) VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![init, pred, succ],
+            ).expect("insert dag edge");
+        }
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &*conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id:       None,
+                role:          KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id:       "",
+            },
+        ).expect("assemble orchestrator snapshot");
+        drop(conn);
+
+        let by_id: std::collections::HashMap<&str, &DagRow> = snap.dag_rows
+            .iter()
+            .map(|r| (r.task_id.as_str(), r))
+            .collect();
+
+        // lint-defect has no upstream edges in this projection —
+        // vacuously preds_ready.
+        assert!(by_id[lint_def].preds_ready,
+            "lint-defect (no predecessors in this fixture) MUST read preds_ready=true");
+        // lint-runner's predecessor lint-defect is Completed —
+        // ready to activate.
+        assert!(by_id[lint_run].preds_ready,
+            "lint-runner MUST read preds_ready=true once lint-defect is Completed");
+        // review-lint-defect-A's IMMEDIATE predecessor lint-runner
+        // is still Admitted — NOT ready. This is the iter49
+        // reproduction.
+        assert!(!by_id[rev_a].preds_ready,
+            "review-lint-defect-A MUST read preds_ready=false while \
+             its immediate Executor predecessor lint-runner is still Admitted \
+             — iter49 reproduction; got row: {:?}", by_id[rev_a]);
+
+        // The rendered KSB MUST carry the wire-stable token the
+        // NNSP rule 2 parses on.
+        let rendered = raxis_ksb::render_ksb(&snap).expect("render");
+        assert!(
+            rendered.contains("review-lint-defect-A admitted reviewers=0 preds_ready=false sha=<none>"),
+            "rendered KSB MUST surface preds_ready=false on the \
+             reviewer row; got: {rendered}",
+        );
     }
 
     #[test]

@@ -75,7 +75,8 @@
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
 | Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
-| Planner harness — orchestrator NNSP — V2 | INV-PLANNER-ORCH-RETRY-ON-REJECT-01 | 1 |
+| Planner harness — orchestrator NNSP — V2 | INV-PLANNER-ORCH-RETRY-ON-REJECT-01, INV-PLANNER-ORCH-PREDS-READY-GATE-01, INV-PLANNER-ORCH-RETRY-PRIORITY-OVER-ACTIVATE-01 | 3 |
+| KSB projection — V2 | INV-KSB-PREDS-READY-PROJECTION-01 | 1 |
 | Retry preconditions — V2 | INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01 | 1 |
 | Executor / role-session capability discovery — V2 | INV-EXEC-DISCOVERY-01 | 1 |
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
@@ -2737,6 +2738,219 @@ fired.
 - `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
   (end-to-end audit-chain witness wired into
   `kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`).
+
+---
+
+### INV-KSB-PREDS-READY-PROJECTION-01 — Every `dag=` row carries a wire-stable `preds_ready` boolean
+
+**Statement.** The orchestrator KSB renderer
+(`crates/ksb/src/lib.rs::render_ksb`) MUST emit a
+`preds_ready=<true|false>` token on every `dag=` row, between
+the `reviewers=<N>` field and any optional `aggregate=` field.
+The token's value MUST be the exact projection of:
+
+> "every plan-declared predecessor of this task in
+> `task_dag_edges` is in the `tasks.state = 'Completed'`
+> terminal state".
+
+Tasks with no predecessor edges are vacuously `preds_ready=true`.
+The projection is computed by
+`kernel/src/initiatives/ksb_assembly.rs::read_preds_ready_per_task`
+inside the same `&Connection` snapshot the rest of the
+`assemble_ksb_snapshot` projection reads from, so the rendered
+row is a coherent witness of one SQLite read-snapshot.
+
+**Why `tasks.state = 'Completed'` and NOT
+`task_dag_edges.predecessor_satisfied = 1`.** The kernel never
+UPDATEs the `predecessor_satisfied` column in v1 (despite the
+schema comment); only INSERTs at admission set it from the
+plan-validator side. `tasks.state = 'Completed'` is the only
+ground-truth signal that an Executor has stamped
+`evaluation_sha` (per `commit_task_completion` step 1 — the
+Running → Completed flip and the SHA stamp happen in the same
+SQLite tx). The kernel-side `ActivateSubTask` reviewer-branch
+(`kernel/src/handlers/intent.rs::handle_activate_sub_task`)
+gates reviewer activation on the *same* predicate (it joins
+`task_dag_edges → tasks.evaluation_sha IS NOT NULL` to surface
+`ActivateSubTaskReviewerNoEvalSha`); the wire field
+`preds_ready` is therefore a sound lower bound on the kernel's
+own admission predicate — a row with `preds_ready=true` is
+guaranteed to pass the gate, and a row with `preds_ready=false`
+is guaranteed to be rejected.
+
+**Justification (iter49 reproduction).** The realistic plan's
+`lint-defect → lint-runner → review-lint-defect-A/B` chain
+requires the orchestrator LLM to activate `lint-runner`
+(its sole predecessor `lint-defect` Completes first) BEFORE
+`review-lint-defect-A`. With no wire-stable predecessor
+indicator the LLM activated `review-lint-defect-A` directly
+after `lint-defect` Completed, expecting `lint-defect`'s SHA
+to satisfy the reviewer. The kernel rejected every attempt
+with `ActivateSubTaskReviewerNoEvalSha` because the reviewer's
+*immediate* DAG predecessor in the realistic plan is
+`lint-runner`, not `lint-defect`. The respawn loop fired the
+per-initiative `OrchestratorRespawnCeilingExceeded` ceiling
+(`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`). With this
+projection in place the LLM sees
+`review-lint-defect-A admitted reviewers=0 preds_ready=false`
+on the wire and the NNSP rule 2
+(`INV-PLANNER-ORCH-PREDS-READY-GATE-01`) prevents the
+activation in the first place.
+
+**Wire shape stability.** The field is unconditionally emitted
+(no compactness optimisation). The LLM relies on its presence
+to tell apart "predecessors actually all complete" from "row
+is from a pre-iter50 renderer that never emitted the field"
+— a missing field would be ambiguous. The
+`#[serde(default)]` on `DagRow::preds_ready` covers
+backward-compat for any pre-iter50 dashboard / replay tool
+decoding a stale snapshot from disk: the safe (over-blocking)
+default is `false`.
+
+**Pinned regression coverage.**
+- `crates/ksb/src/lib.rs::tests::render_includes_required_fields`
+  (renderer wire shape).
+- `crates/ksb/src/lib.rs::tests::render_emits_aggregate_when_set`
+  (positional placement: `preds_ready=` precedes `aggregate=`).
+- `kernel/src/initiatives/ksb_assembly.rs::tests::dag_row_preds_ready_blocks_reviewer_when_immediate_executor_predecessor_not_completed`
+  (kernel-side projection unit test, iter49 shape).
+
+**Canonical home.**
+`crates/ksb/src/lib.rs::DagRow::preds_ready`,
+`kernel/src/initiatives/ksb_assembly.rs::read_preds_ready_per_task`.
+
+---
+
+### INV-PLANNER-ORCH-PREDS-READY-GATE-01 — Orchestrator NNSP rule 2 gates `activate_subtask` on `preds_ready=true`
+
+**Statement.** The Orchestrator's NNSP — rendered by
+`crates/planner-core/src/driver.rs::render_system_prompt_for_role(
+Role::Orchestrator, …)` — MUST instruct the model to:
+
+1. Parse the `preds_ready=` field from every `dag=` row (the
+   wire-stable token defined by
+   `INV-KSB-PREDS-READY-PROJECTION-01`).
+2. Call `activate_subtask { subtask_task_id: "<task_id>" }`
+   ONLY for rows whose `state` is `pending` (or `admitted`)
+   AND `preds_ready=true`.
+3. NEVER call `activate_subtask` against a row whose
+   `preds_ready=false` — at least one plan-declared
+   predecessor is short of `Completed` and the kernel will
+   reject the activation
+   (`ActivateSubTaskReviewerNoEvalSha` for reviewer rows;
+   worktree-provision miss for executor rows whose predecessor
+   ODB closure is not yet copied). Each rejection burns one
+   slot of the per-initiative
+   `orchestrator_no_progress_respawn_count` ceiling
+   (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`).
+
+The NNSP MUST also cite the realistic-plan
+`lint-defect → lint-runner → review-lint-defect-A/B` chain as
+a worked example so the LLM grounds the rule on a concrete
+shape (the iter49 reproduction).
+
+**Justification.** Without this rule the planner LLM has to
+reconstruct predecessor satisfaction from per-task description
+text it was never handed (the executor / reviewer prompts ship
+their own descriptions but no machine-readable predecessor
+table). Iter49 demonstrated the failure mode: the orchestrator
+activated `review-lint-defect-A` directly after `lint-defect`
+Completed, the kernel rejected three attempts with
+`ActivateSubTaskReviewerNoEvalSha`, and the respawn ceiling
+fired. Pairing the rule with the wire-stable
+`preds_ready=` projection
+(`INV-KSB-PREDS-READY-PROJECTION-01`) makes the gate
+mechanical: the LLM never has to recompute predecessor
+satisfaction.
+
+**Pinned regression coverage.**
+- `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_gates_activate_on_preds_ready`
+  (NNSP unit test).
+- `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
+  (end-to-end audit-chain witness wired into
+  `kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`).
+
+**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
+responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
+NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
+
+---
+
+### INV-PLANNER-ORCH-RETRY-PRIORITY-OVER-ACTIVATE-01 — Orchestrator NNSP gives review-rejection retry ABSOLUTE priority over fresh activation
+
+**Statement.** The Orchestrator's NNSP — rendered by
+`crates/planner-core/src/driver.rs::render_system_prompt_for_role(
+Role::Orchestrator, …)` — MUST instruct the model to apply
+its per-turn decision algorithm in this STRICT order, firing
+the FIRST matching action and STOPPING:
+
+1. **(highest priority)** Scan `dag=` for any Executor row
+   reading `aggregate=AtLeastOneRejected`. If at least one
+   such row exists AND its matching
+   `capabilities.tasks[*].retry_admissible=true`, call
+   `retry_subtask { subtask_task_id: "<executor_task_id>" }`
+   THIS turn — DO NOT activate any pending task.
+2. (failed-task retry) If a row's `state=failed` and a retry
+   is warranted, call `retry_subtask`.
+3. (fresh activation) Otherwise find the first task whose
+   `state` is `pending` (or `admitted`) AND whose
+   `preds_ready=true` and call `activate_subtask` (per
+   `INV-PLANNER-ORCH-PREDS-READY-GATE-01`).
+4. (terminal merge) When EVERY executor row is `complete`
+   AND every reviewer row is `complete` AND every executor
+   row reads `aggregate=AllPassed` (or `NoSuccessors`), call
+   `integration_merge`.
+
+The NNSP MUST flag the priority directive explicitly with the
+literal token `PRIORITY` and state that retry-on-rejection
+takes "ABSOLUTE precedence over fresh activation". It MUST
+also cite the kernel-side audit tag
+`IntegrationMergeBlockedByOutstandingReview` (the Step 3d gate
+documented in `specs/v2/agent-disagreement.md §3.6`'s "Iter49
+kernel-side fail-closed backstop") so the LLM understands that
+thrashing on `integration_merge` is wasteful: every rejection
+burns one slot of the per-initiative
+`orch_no_progress_respawns=` budget
+(`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`).
+
+**Justification (iter49 → iter50 reproduction).** In the
+realistic_session_lifecycle e2e the orchestrator successfully
+drove `lint-defect → lint-runner` to Completed (with the
+`scripts/check.sh` defect intact in `lint-runner`'s commit),
+both reviewers `review-lint-defect-A`/`-B` rejected with
+substantive critiques naming `greeting.rs`, the kernel emitted
+`ReviewAggregationCompleted{verdict=AtLeastOneRejected}` and
+bumped `subtask_activations.review_reject_count` per
+`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`. The orchestrator
+NNSP at the time numbered the rules as `2. activate_subtask`,
+`3. failed-retry`, `3a. retry on AtLeastOneRejected`,
+`4. integration_merge`. The LLM scanned rules in order, found
+pending tasks (`service-round-trip`, `transparent-proxy-realscripts`,
+`xfile-refactor`, …) that satisfied rule 2's `preds_ready=true`
+predicate, activated them in sequence, and never returned to
+retry `lint-runner`. When all other tasks Completed, the LLM
+proceeded directly to rule 4 and submitted `integration_merge
+{ head_sha = …/xfile-refactor }`. Iter49 closed by adding the
+kernel Step 3d hard-reject (commit `810fa63` — fast-forwards
+no longer ship defective heads); iter50 closes the LLM-side
+behaviour: the orchestrator now retries `lint-runner` BEFORE
+activating any other pending task, so the kernel's structural
+backstop never has to fire in the first place. The realistic
+scenario's `ReviewerSubstantiveDisagreementWitness` then sees
+`saw_executor_respawn=true` AND `saw_aggregation_pass=true`
+on the round-2 review cycle.
+
+**Pinned regression coverage.**
+- `crates/planner-core/src/driver.rs::tests::render_system_prompt_for_orchestrator_prioritizes_retry_over_activate`
+  (NNSP unit test).
+- `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs::ReviewerSubstantiveDisagreementWitness`
+  (end-to-end audit-chain witness wired into
+  `kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`
+  — the iter49 → iter50 reproduction's full chain).
+
+**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
+responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
+NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
 
 ---
 

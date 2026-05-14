@@ -401,19 +401,13 @@ pub struct TaskCapabilityView {
     /// admissible="false"}` was tracking).
     pub retry_admissible:           bool,
     /// Human-readable reason when `retry_admissible == false`. Empty
-    /// (`None`) when the retry would be admissible. Stable lexemes
-    /// (substring-matched by the orchestrator NNSP):
-    /// `"prior state {state}; need Failed or Completed-with-review-rejection or PendingActivation-with-review-rejection"`,
+    /// (`None`) when the retry would be admissible. Stable lexemes:
+    /// `"prior state {state}; need Failed or Completed-with-rejection"`,
     /// `"crash_retry_count {n} >= max_crash_retries {m}"`,
     /// `"review_reject_count {n} >= max_review_rejections {m}"`,
-    /// `"no prior activation"`. The leading lexemes (`prior state`,
-    /// `crash_retry_count`, `review_reject_count`, `no prior
-    /// activation`) are byte-stable across kernel revisions; the
-    /// trailing constraint enumeration (`Failed or Completed-…`)
-    /// grows additively as new admit branches land (e.g. the iter48
-    /// `PendingActivation-with-review-rejection` branch). The
-    /// planner-core driver is allowed to substring-match against
-    /// the leading lexemes in the system prompt.
+    /// `"no prior activation"`. The strings are lexeme-stable across
+    /// kernel revisions because the planner-core driver is allowed
+    /// to substring-match against them in the system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_inadmissible_reason: Option<String>,
 }
@@ -531,6 +525,42 @@ pub struct DagRow {
     /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
     #[serde(default)]
     pub aggregate_verdict: String,
+
+    /// Wire-stable boolean: `true` iff every plan-declared
+    /// predecessor of this task in `task_dag_edges` is in the
+    /// `tasks.state = 'Completed'` terminal state. Tasks with no
+    /// declared predecessors are vacuously `preds_ready=true`.
+    ///
+    /// This field is the **only** signal the Orchestrator LLM is
+    /// permitted to use to decide whether `activate_subtask` is
+    /// admission-eligible for a row whose `state=pending`. Without
+    /// it the LLM has to reconstruct predecessor satisfaction from
+    /// the plan TOML it was never handed (it sees only the
+    /// per-task description blob), and the iter49 reproduction on
+    /// the realistic plan showed this is exactly the
+    /// blind-asking pattern that gets rejected by the kernel
+    /// (`ActivateSubTaskReviewerNoEvalSha` in the lint-defect →
+    /// lint-runner → review-lint-defect-A chain — the LLM
+    /// activated the reviewer expecting `lint-defect`'s SHA to
+    /// satisfy it, but the reviewer's IMMEDIATE plan-declared
+    /// predecessor was the in-image lint-runner Executor whose
+    /// activation had not even started). The kernel-side gate
+    /// (`kernel/src/handlers/intent.rs::handle_activate_sub_task`
+    /// reviewer branch — `ActivateSubTaskReviewerNoEvalSha`)
+    /// remains the authoritative invariant; this field merely
+    /// projects the same predecessor-satisfaction predicate
+    /// directly into the LLM-visible KSB so the rejection class
+    /// becomes self-preventing rather than respawn-loop-discoverable.
+    ///
+    /// `serde(default)` for forward / backward wire compat with
+    /// any pre-iter50 dashboard / replay tool that decodes a KSB
+    /// snapshot from disk: the renderer always emits the field on
+    /// the wire so a fresh KSB carries it, but a stale
+    /// JSON-decoded snapshot without the field defaults to
+    /// `false`, which is the safe (over-blocking) behaviour for
+    /// any retroactive consumer.
+    #[serde(default)]
+    pub preds_ready: bool,
 }
 
 /// One reviewer verdict against a prior executor attempt.
@@ -827,6 +857,21 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
             buf.push_str(&row.state);
             buf.push_str(" reviewers=");
             buf.push_str(&row.reviewers.to_string());
+            // iter50 — `preds_ready=<true|false>` is the
+            // wire-stable projection of "every plan-declared
+            // predecessor of this task is in `tasks.state =
+            // 'Completed'`". The Orchestrator NNSP rule 2 gates
+            // `activate_subtask` on this boolean: the LLM is
+            // forbidden from activating a row whose
+            // `preds_ready=false`. Always emitted (no compactness
+            // optimisation): the LLM relies on the field's
+            // presence to tell apart "predecessors actually all
+            // complete" from "row is from an older renderer that
+            // never emitted the field". Closes
+            // `INV-KSB-PREDS-READY-PROJECTION-01` (added
+            // alongside the iter50 fix).
+            buf.push_str(" preds_ready=");
+            buf.push_str(if row.preds_ready { "true" } else { "false" });
             // V2.5 — `aggregate=` carries the cross-Reviewer
             // aggregator's terminal verdict for this Executor row
             // when the kernel has projected one. Omitted for
@@ -1057,6 +1102,7 @@ mod tests {
                     reviewers:         2,
                     evaluation_sha:    String::new(),
                     aggregate_verdict: String::new(),
+                    preds_ready:       true,
                 },
                 DagRow {
                     task_id:           "task-43".to_owned(),
@@ -1065,6 +1111,7 @@ mod tests {
                     reviewers:         1,
                     evaluation_sha:    String::new(),
                     aggregate_verdict: String::new(),
+                    preds_ready:       false,
                 },
             ],
             task_description:              "Make the executor land a commit.".to_owned(),
@@ -1109,8 +1156,8 @@ mod tests {
         assert!(s.contains("token_budget_remaining=12345"));
         assert!(s.contains("wallclock_budget_remaining_s=600"));
         assert!(s.contains("Make the executor land a commit."));
-        assert!(s.contains("- task-42 in_progress reviewers=2 sha=<none> \"First sub-task\""));
-        assert!(s.contains("- task-43 pending reviewers=1 sha=<none> \"\""));
+        assert!(s.contains("- task-42 in_progress reviewers=2 preds_ready=true sha=<none> \"First sub-task\""));
+        assert!(s.contains("- task-43 pending reviewers=1 preds_ready=false sha=<none> \"\""));
     }
 
     #[test]
@@ -1200,8 +1247,8 @@ mod tests {
             "AtLeastOneRejected".to_owned();
         let s = render_ksb(&snap).unwrap();
         assert!(
-            s.contains("reviewers=2 aggregate=AtLeastOneRejected sha="),
-            "renderer must place `aggregate=` between `reviewers=` \
+            s.contains("reviewers=2 preds_ready=true aggregate=AtLeastOneRejected sha="),
+            "renderer must place `aggregate=` between `preds_ready=` \
              and `sha=`; got: {s}",
         );
     }
