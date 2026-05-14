@@ -18,24 +18,43 @@
 //! (`review-lint-defect-A`, `review-lint-defect-B`) configured
 //! with plain prompts (no directive). Because the Reviewer VM
 //! image (`raxis-reviewer-core`) is barred from executing
-//! `scripts/check.sh` itself (no shell, no language runtimes —
+//! language linters (no shell, no language runtimes —
 //! `INV-PLANNER-HARNESS-02`; `specs/v2/planner-harness.md
-//! §4.5`), a small in-image Executor task
-//! [`super::plan_realistic::TASK_LINT_RUNNER`] sits between the
-//! diff-author Executor and the two Reviewers: it runs
-//! `scripts/check.sh`, commits the captured stdout + stderr +
-//! exit-code at `out/lint/check-output.txt`, and that committed
-//! artifact is what the Reviewers `read_file` to derive their
-//! verdict. The reviewers must detect the executor's
-//! deliberately-introduced lint defect by reading the captured
-//! output, reject with a critique that names the defective
-//! file, and approve on the round following the lint-runner
+//! §4.5`), an in-image Executor task
+//! [`super::plan_realistic::TASK_LINT_RUNNER_PYTHON`] sits
+//! between the diff-author Executor and the two Reviewers: it
+//! runs `python -m ruff check` against `py-pkg/`, commits the
+//! captured stdout + stderr + exit-code at
+//! `out/lint/check-python.txt`, and that committed artifact is
+//! what the Reviewers `read_file` to derive their verdict. The
+//! reviewers must detect the executor's deliberately-introduced
+//! Python lint defect by reading the captured output, reject
+//! with a critique that names the defective file (`greet.py`),
+//! and approve on the round following the lint-runner-python
 //! Executor's re-spawn (the kernel's
 //! `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` anchor fires
 //! against the Reviewer's *immediate* Executor predecessor —
-//! `lint-runner`, not `lint-defect` — and `lint-runner`'s
-//! `path_allowlist` covers the three language source trees so
+//! `lint-runner-python`, not `lint-defect` — and
+//! `lint-runner-python`'s `path_allowlist` covers `py-pkg/` so
 //! the Round-2 path can land the corrective edit there).
+//!
+//! **Iter55 per-language split — `lint-runner-python`, not
+//! `lint-runner`.** Pre-iter55 the realistic plan carried a
+//! single monolithic `lint-runner` task that ran the full
+//! `scripts/check.sh` (Rust + TS + Python) against any defect
+//! the executor introduced. Iter54 surfaced the over-broad
+//! budget: the repair path deterministically exhausted
+//! `max_crash_retries=3` on every review-rejection retry. The
+//! structural fix splits the monolithic task into three
+//! per-language children — `lint-runner-python`,
+//! `lint-runner-rust`, `lint-runner-js` — each scoped to ONE
+//! language's lint + source tree. The dual-Reviewer
+//! disagreement pair is pinned to `lint-runner-python` (the
+//! upstream `lint-defect` prompt is correspondingly pinned to
+//! the Python F401 unused-import target), and this witness's
+//! `executor_task_id` mirrors that pin. The Rust and JS
+//! children carry single rubber-stamp Reviewers that don't
+//! drive a disagreement scenario.
 //!
 //! ## What [`ReviewerSubstantiveDisagreementWitness`] asserts
 //!
@@ -109,9 +128,29 @@ pub const TASK_REVIEW_LINT_A: &str = "review-lint-defect-A";
 /// executor task.
 pub const TASK_REVIEW_LINT_B: &str = "review-lint-defect-B";
 
-/// Set of file basenames the lint-defect prompt offers the
-/// executor; the reviewer critique MUST mention at least one of
-/// these for the substantive check to pass.
+/// Set of file basenames the witness recognizes as a valid
+/// substantive critique target. The reviewer critique MUST
+/// mention at least one of these for the substantive check to
+/// pass.
+///
+/// **Iter55 note.** Pre-iter55, all three basenames were live
+/// — the lint-defect prompt offered the executor a choice of
+/// Rust / TS / Python defects, and any of the three could surface
+/// in the captured `out/lint/check-output.txt`. Post-iter55, the
+/// lint-defect prompt is PINNED to Python
+/// (`py-pkg/src/sample_py/greet.py` ruff F401 unused-import) so
+/// the dual-Reviewer disagreement pair on `lint-runner-python`
+/// fires deterministically. In practice only `greet.py` will
+/// match here; the other two basenames remain in the set as a
+/// non-narrow witness — the substantive check is "the critique
+/// names ONE of the canonical lint-defect targets", not "the
+/// critique names exactly the Python target" — so unit-test
+/// fixtures synthesising Rust / TS critique strings (for
+/// historical regression of the witness's matching logic
+/// itself) still evaluate. A future iter that re-broadens the
+/// pin or rotates the pinned target needs only to update the
+/// `lint_defect.md` prompt; the witness keeps matching as long
+/// as the chosen target's basename is in this set.
 pub const LINT_DEFECT_TARGET_BASENAMES: &[&str] = &[
     "greeting.rs",
     "greet.ts",
@@ -166,22 +205,23 @@ impl ReviewerSubstantiveReport {
 
 impl ReviewerSubstantiveDisagreementWitness {
     /// The Reviewer's immediate Executor predecessor is
-    /// `lint-runner` (the in-image execution stage for
-    /// `scripts/check.sh`; see [`super::plan_realistic::TASK_LINT_RUNNER`]
-    /// and the module docs above for the
-    /// `INV-PLANNER-HARNESS-02` rationale). The kernel's
+    /// `lint-runner-python` (the iter55 per-language in-image
+    /// execution stage for `python -m ruff check`; see
+    /// [`super::plan_realistic::TASK_LINT_RUNNER_PYTHON`] and
+    /// the module docs above for the `INV-PLANNER-HARNESS-02`
+    /// rationale + iter55 split context). The kernel's
     /// `ExecutorRespawnFromReviewRejection` anchor and
     /// `ReviewAggregationCompleted` aggregator both key on the
     /// Reviewer's immediate predecessor, so the witness's
     /// `executor_task_id` mirrors that: a substantive critique
-    /// against `lint-runner`'s commit (which surfaces the
-    /// upstream `lint-defect` defect via the captured
-    /// `out/lint/check-output.txt`) drives the chain shape this
-    /// witness asserts.
+    /// against `lint-runner-python`'s commit (which surfaces
+    /// the upstream `lint-defect` Python F401 defect via the
+    /// captured `out/lint/check-python.txt`) drives the chain
+    /// shape this witness asserts.
     #[must_use]
     pub fn for_realistic_plan(sqlite_path: &Path) -> Self {
         Self {
-            executor_task_id:   super::plan_realistic::TASK_LINT_RUNNER
+            executor_task_id:   super::plan_realistic::TASK_LINT_RUNNER_PYTHON
                                     .to_owned(),
             reviewer_a_task_id: TASK_REVIEW_LINT_A.to_owned(),
             reviewer_b_task_id: TASK_REVIEW_LINT_B.to_owned(),

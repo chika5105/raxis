@@ -374,15 +374,19 @@ MUST propagate consistently across all three trees:
 # ── Lint-defect Executor (P3-3) ─────────────────────────
 [[tasks]]
 task_id            = "lint-defect"
-name               = "Introduce exactly one real lint defect"
+name               = "Introduce exactly one real Python lint defect (iter55 pin)"
 session_agent_type = "Executor"
 predecessors       = ["xfile-refactor"]
-# Single-edit task: open one of three files, introduce ONE lint defect,
-# commit. Trivially small budget; 25 covers the edit + commit + a couple
-# of retry cycles if the chosen language's lint rule is misremembered.
-# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 25
-path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
+# Single-edit task: open `py-pkg/src/sample_py/greet.py` (iter55
+# pin — see prompt), append an unused `import os`, commit. Trivially
+# small natural budget (~5 turns); iter55 budget audit bumps the
+# ceiling 25 → 35 for headroom against the lint-defect prompt's
+# "no suggestive commit message" constraint (the planner may
+# retry the commit step once or twice if it accidentally
+# mentions "lint" or "defect" in the message). Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 35
+path_allowlist     = ["py-pkg/"]
 description = """
 # Lint-defect Executor prompt — extended e2e realistic scenario
 
@@ -396,70 +400,81 @@ description = """
 
 You are the RAXIS lint-defect executor. The worktree contains the
 `rich-multilang-001` multi-language project (Rust + TypeScript +
-Python), each tree configured with a strict linter:
+Python), each tree configured with a strict linter. For
+**iter55** the scenario is **PINNED to the Python target**: the
+downstream per-language `lint-runner-python` Executor + the dual-
+Reviewer disagreement pair (`review-lint-defect-A`/`-B`) only
+see Python lint output, so a Rust or TypeScript defect would
+never reach those Reviewers and the substantive-disagreement
+witness would not fire. Do NOT introduce defects in
+`rust-crate/` or `ts-pkg/`; this prompt offers a single Python
+defect only.
 
-* **Rust** — `cargo clippy -- -D warnings`. The crate is
-  warning-clean today; any new clippy lint that fires at warn-level
-  WILL fail the lint stage.
-* **TypeScript** — `npx eslint --max-warnings 0`. The config is
-  in `ts-pkg/eslint.config.cjs` and treats `no-unused-vars`,
-  `no-var`, `prefer-const`, `eqeqeq`, `curly`, and
-  `no-trailing-spaces` as errors.
-* **Python** — `python -m ruff check`. The config is in
-  `py-pkg/ruff.toml` and selects `E,F,W,I,B,UP,SIM` rule families.
+For context (the Reviewers' VM image has none of these tools and
+reads the captured output instead):
+
+* **Python** — `python -m ruff check` + `ruff format --check`,
+  run by `lint-runner-python` against `py-pkg/`. Config is in
+  `py-pkg/ruff.toml`, selecting `E,F,W,I,B,UP,SIM` rule families.
+* (Rust / TypeScript lint pipelines exist on sibling
+  `lint-runner-rust` / `lint-runner-js` children but are NOT
+  in scope for this task — their per-language captures will run
+  clean and their single Reviewers will rubber-stamp.)
 
 ## What to do
 
-This task is a **deliberate breakage** — the executor is asked to
-introduce ONE small, real lint defect AND nothing else. The purpose
-is to exercise the reviewer's ability to catch substantive (not
-synthetic) defects against real tooling: the prior reviewer-
-disagreement scenario used a directive prompt ("Reviewer A always
-rejects") that does NOT exercise that path against a real
-defect.
+This task is a **deliberate Python breakage** — introduce ONE
+small, real Python lint defect AND nothing else. The purpose is
+to exercise the dual-Reviewer pair on `lint-runner-python`
+against a real ruff diagnostic (not a synthetic / directive
+"always-reject" prompt).
 
-Pick exactly ONE of the following minimal-impact lint defects.
-Implement it, commit it, and `task_complete`. Do NOT introduce
-more than one; the witness counts on the diff being a single
-focused change so the reviewer's critique is unambiguous.
+Introduce the following defect verbatim, commit it, and call
+`task_complete`. Do NOT introduce additional defects; do NOT
+attempt the Rust or TS variants from any historical version of
+this prompt; the witness counts on the diff being a single
+focused Python change so the Reviewers' critique unambiguously
+names `greet.py`.
 
-1. **Rust (`rust-crate/src/greeting.rs`)** — append a redundant
-   clone clippy lint by changing the `format!("Hello, {who}!")` to
-   `format!("Hello, {}!", who.to_string())`. `clippy::useless_conversion`
-   fires.
-2. **TypeScript (`ts-pkg/src/greet.ts`)** — replace `const who = ...`
-   with `let who = ...` (still never reassigned). `prefer-const`
-   fires.
-3. **Python (`py-pkg/src/sample_py/greet.py`)** — append an
-   unused import: add `import os` at the top of the file but never
-   reference `os`. Ruff's `F401` (unused-import) fires.
+**Python (`py-pkg/src/sample_py/greet.py`)** — append an
+unused import: add `import os` at the top of the file but never
+reference `os`. Ruff's `F401` (unused-import) fires; the
+`lint-runner-python` capture will end with a non-zero
+`raxis_check_sh_exit_code=` sentinel and name `greet.py` in the
+diagnostic body.
 
-You may pick whichever defect feels least likely to break unrelated
-code paths. Do NOT introduce two defects; do NOT also add a fix
-for the defect; do NOT modify any other file.
+Do NOT modify any other file. Do NOT also add a fix for the
+defect on this commit (the upstream task's job is to introduce;
+`lint-runner-python` on its Round-2 re-spawn is the only task
+that legitimately edits `greet.py` to remove the defect).
 
 ## Constraints
 
-* Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`
-  ONLY. Same allowlist as the cross-file refactor task; you MUST
-  NOT touch `scripts/`, `fixtures/`, `.gitignore`, or `README.md`.
-* Do NOT run `scripts/check.sh` before committing — the WHOLE
-  point of this task is to land a diff that the reviewer's
-  subsequent `check.sh` run will reject. Running it locally and
-  reverting would defeat the scenario.
-* Commit message MUST start with `feat:` or `chore:` and MUST NOT
-  mention the words "lint", "defect", "warning", or "test fixture"
-  — the reviewer is asked to discover the defect from the DIFF,
-  not from the commit message.
-* Determinism: the test scenario expects the executor to land
-  exactly one diff with exactly one defect. The witness in
-  `extended_e2e_support/lint_defect.rs` asserts the reviewer
-  ROUND 1 produced a critique that mentions the file the
-  defect is in.
+* Your `path_allowlist` is `py-pkg/` ONLY (narrowed from the
+  three-tree allowlist in pre-iter55 versions of this prompt).
+  You MUST NOT touch `rust-crate/`, `ts-pkg/`, `scripts/`,
+  `fixtures/`, `.gitignore`, or `README.md`.
+* Do NOT run `scripts/check.sh` (or `python -m ruff check`)
+  before committing — the WHOLE point of this task is to land a
+  diff that the downstream `lint-runner-python` capture +
+  Reviewer pair will reject. Running it locally and reverting
+  would defeat the scenario.
+* Commit message MUST start with `feat:` or `chore:` and MUST
+  NOT mention the words "lint", "defect", "warning", or "test
+  fixture" — the Reviewers are asked to discover the defect
+  from the captured ruff diagnostic and the DIFF, not from the
+  commit message.
+* Determinism: the test scenario expects exactly one diff with
+  exactly one Python F401 defect. The witness in
+  `extended_e2e_support/reviewer_substantive_disagreement.rs`
+  asserts the Reviewer pair produced a substantive critique
+  that mentions `greet.py` and that
+  `lint-runner-python` re-spawned and ultimately landed an
+  AllPassed aggregation.
 
 ## After the file is written
 
-1. `git add <the single file you edited>`
+1. `git add py-pkg/src/sample_py/greet.py`
 2. `git commit -m "<a non-suggestive message per the constraints above>"`
 3. Call `task_complete` with a brief summary that DOES NOT name
    the defect.
@@ -467,185 +482,326 @@ for the defect; do NOT modify any other file.
 """
 
 
-# ── Lint-runner Executor (captures check.sh output) ─────
+# ── Lint-runner Executor — Python (P3-3 / iter55 split) ──
 [[tasks]]
-task_id            = "lint-runner"
-name               = "Capture scripts/check.sh output for the Reviewer panel"
+task_id            = "lint-runner-python"
+name               = "Capture python -m ruff check output for the Python Reviewer panel"
 session_agent_type = "Executor"
 predecessors       = ["lint-defect"]
-# Multi-round task: Round 1 = run scripts/check.sh + capture + commit
-# (~5 turns). Round 2+ = read critique + edit defective file + re-run
-# capture + commit (~15 turns). Reviewer-panel rejection drives the
-# Round-2 path; budget covers both rounds + a Round-3 safety net.
-#
-# iter54-N raised 30 → 60. Each crash retry boots a FRESH executor VM
-# whose LLM has zero context from the prior session: it must read
-# `out/lint/check-output.txt`, locate the defective file (one of three
-# language trees), reason about the strict-lint rule, edit, re-run
-# capture, commit. From cold-start that is realistically 7–13
-# substantive turns plus exploration tax; 30 reproducibly tripped
-# `dispatch loop exceeded max_turns` on every iter54 retry, leaving
-# the orchestrator with no admissible RetrySubTask after the kernel
-# `max_crash_retries=3` ceiling, the LLM emitting a non-terminal
-# `StructuredOutput { kind: "diagnostic_flag" }` then going idle, and
-# the kernel quiescent (no `PendingActivation` row → post-exit-respawn
-# hook short-circuits). 60 gives the cold-start path a real budget
-# without changing the Round-1 + Round-2 happy-path expectation.
-# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+# Iter55 per-language split (supersedes the iter54-N cold-start
+# bump on the monolithic `lint-runner` task — that task is gone,
+# replaced by this per-language child). Scope: ONE language
+# (Python). Budget: 60 turns covers Round 1 (~5 turns:
+# `mkdir -p out/lint`, `cd py-pkg && python -m ruff check . &&
+# python -m ruff format --check .` wrapped to capture
+# stdout+stderr+exit, `git add`, `git commit`, `task_complete`)
+# AND Round 2 (~15 turns: read critique, edit
+# `py-pkg/src/sample_py/greet.py`, re-run capture, commit) with
+# 8× headroom over the per-language introduce slice. The
+# iter54-N cold-start observation still applies: each crash
+# retry boots a FRESH executor VM with zero prior context — but
+# at per-language scope the cold-start work is now ONE language
+# tree, not three, so 60 turns is comfortable rather than
+# marginal. The kernel-side progressive bump on retry
+# (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`, Fix 2)
+# elasticates this further on review-rejection paths: retry #1 →
+# 90, retry #2 → 120. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
-path_allowlist     = ["out/lint/", "rust-crate/", "ts-pkg/", "py-pkg/"]
+path_allowlist     = ["out/lint/", "py-pkg/"]
 description = """
-You are the RAXIS lint-runner executor. The diff from
+You are the RAXIS lint-runner-python executor. The diff from
 `lint-defect` is already committed on the working branch; your
-job is to surface its strict-lint verdict to the downstream
-Reviewer panel.
+job is to surface the strict-Python-lint verdict (`ruff check`
++ `ruff format --check`) to the downstream Reviewer panel.
 
 The Reviewer VM image (`raxis-reviewer-core`) is structurally
 forbidden from executing scripts: it ships ONLY `raxis-planner`
 and `ripgrep` per `INV-PLANNER-HARNESS-02` (no shell, no
 language runtimes, no `git`, no network utilities). The
-Reviewers therefore cannot run `scripts/check.sh` themselves —
-they read its captured output from a committed artifact you
+Reviewers therefore cannot run `python -m ruff check` themselves
+— they read its captured output from a committed artifact you
 produce here.
 
 ## Round 1 — capture
 
 1. Create the capture directory: `mkdir -p out/lint`.
-2. Run `scripts/check.sh` and capture stdout + stderr + the
-   exit code in a single file:
+2. Run the Python lint stack inside `py-pkg/` and capture
+   stdout + stderr + the exit code in a single file at the
+   fixed path `out/lint/check-python.txt`:
    ```bash
    {
-     bash scripts/check.sh 2>&1
+     ( cd py-pkg && python -m ruff check . && python -m ruff format --check . ) 2>&1
      echo "raxis_check_sh_exit_code=$?"
-   } > out/lint/check-output.txt
+   } > out/lint/check-python.txt
    ```
    The trailing `raxis_check_sh_exit_code=<n>` line is the
-   wire signal the Reviewers key on; do NOT omit it. Use
-   `bash scripts/check.sh` (not `./scripts/check.sh`) so the
-   script's `set -euo pipefail` does not abort the wrapping
-   shell when `check.sh` exits non-zero (which it WILL — the
-   `lint-defect` task by construction introduced one real lint
-   defect).
-3. `git add out/lint/check-output.txt`
-4. `git commit -m "chore: capture check.sh output for reviewer panel"`
+   wire signal the Reviewers key on; do NOT omit it. The
+   wrapping `{ … ; echo … } > file` form (NOT `set -e`-killing
+   pipefail) means the script captures both a passing AND a
+   failing exit code honestly — `lint-defect` is pinned to
+   Python (`py-pkg/src/sample_py/greet.py` ruff F401 unused-
+   import) so on Round 1 the captured exit code WILL be
+   non-zero.
+3. `git add out/lint/check-python.txt`
+4. `git commit -m "chore: capture python ruff output for reviewer panel"`
 5. Call `task_complete` with a one-line summary that includes
    the captured exit code.
 
 ## Round 2+ — substantive critique fix-up
 
 If your prior round was rejected by the Reviewer panel, the
-critique appended to your prompt names a specific defective
-file (one of `rust-crate/src/greeting.rs`,
-`ts-pkg/src/greet.ts`, `py-pkg/src/sample_py/greet.py`). Your
-`path_allowlist` includes the three language source trees
-precisely so you can land the fix on this round:
+critique appended to your prompt names the defective Python
+file (`py-pkg/src/sample_py/greet.py`). Your `path_allowlist`
+includes `py-pkg/` precisely so you can land the fix here:
 
-1. Edit the defective file to remove the lint diagnostic the
-   critique names (e.g. drop a `useless_conversion`, restore
-   `const`-over-`let`, remove an unused import).
-2. Re-run the capture step above. `out/lint/check-output.txt`
+1. Edit `py-pkg/src/sample_py/greet.py` to remove the lint
+   diagnostic the critique names (e.g. drop the unused
+   `import os` introduced upstream).
+2. Re-run the capture step above. `out/lint/check-python.txt`
    should now end with `raxis_check_sh_exit_code=0`.
-3. `git add` the fixed file AND `out/lint/check-output.txt`.
+3. `git add` the fixed file AND `out/lint/check-python.txt`.
 4. `git commit -m "fix: <one-line lint repair> + refresh
-   check-output capture"` (your commit message MAY name the
-   defect on the fix round; the lint-defect's "no suggestive
-   commit message" constraint applies only to its own commit).
+   python check-output capture"`.
 5. `task_complete`.
 
 ## Constraints
 
 * The capture MUST live at the exact path
-  `out/lint/check-output.txt`. The Reviewer prompts hard-code
-  that path; any other location is a witness failure.
-* Do NOT modify `scripts/check.sh` itself, or any file outside
-  the four allowed roots. Writes to `scripts/`, `fixtures/`,
-  `.gitignore`, `README.md`, etc. trip
-  `FailPathPolicyViolation` at `task_complete`.
+  `out/lint/check-python.txt`. The Python Reviewer prompts
+  hard-code that path; any other location is a witness failure.
+* Do NOT touch `rust-crate/`, `ts-pkg/`, `scripts/`,
+  `fixtures/`, or any file outside `out/lint/` + `py-pkg/`.
+  Writes outside the allowlist trip `FailPathPolicyViolation`
+  at `task_complete`.
 * Do NOT swallow the failing exit code on Round 1. The whole
-  point of the round is to surface the lint failure honestly
-  — wrapping with `|| true` or stripping the exit-code tail
+  point of the round is to surface the lint failure honestly —
+  wrapping with `|| true` or stripping the exit-code tail
   defeats the Reviewer's substantive check.
 """
 
 
 
-# ── Lint-defect substantive Reviewers (P3-7) ────────────
+# ── Lint-runner Executor — Rust (P3-3 / iter55 split) ────
+[[tasks]]
+task_id            = "lint-runner-rust"
+name               = "Capture cargo clippy + fmt output for the Rust Reviewer"
+session_agent_type = "Executor"
+predecessors       = ["lint-defect"]
+# Iter55 per-language split. Scope: ONE language (Rust). Budget:
+# 60 turns — same sizing rationale as `lint-runner-python` (see
+# its comment block). With `lint-defect` pinned to Python the
+# Rust capture is expected clean on Round 1; the budget headroom
+# is for the off-nominal case where the planner explores or the
+# capture wrapper itself misbehaves. Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 60
+path_allowlist     = ["out/lint/", "rust-crate/"]
+description = """
+You are the RAXIS lint-runner-rust executor. Your job is to
+surface the strict-Rust-lint verdict (`cargo fmt --all --
+--check` + `cargo clippy --all-targets -- -D warnings`) to the
+downstream Reviewer.
+
+The Reviewer VM image (`raxis-reviewer-core`) is structurally
+forbidden from executing scripts: it ships ONLY `raxis-planner`
+and `ripgrep` per `INV-PLANNER-HARNESS-02`. The Reviewer
+therefore cannot run `cargo clippy` themselves — they read its
+captured output from a committed artifact you produce here.
+
+## Round 1 — capture
+
+1. Create the capture directory: `mkdir -p out/lint`.
+2. Run the Rust lint stack and capture stdout + stderr + the
+   exit code in a single file at the fixed path
+   `out/lint/check-rust.txt`:
+   ```bash
+   {
+     cargo fmt --all -- --check 2>&1
+     cargo clippy --all-targets -- -D warnings 2>&1
+     echo "raxis_check_sh_exit_code=$?"
+   } > out/lint/check-rust.txt
+   ```
+3. `git add out/lint/check-rust.txt`
+4. `git commit -m "chore: capture cargo clippy output for reviewer"`
+5. Call `task_complete` with a one-line summary that includes
+   the captured exit code.
+
+## Round 2+ — substantive critique fix-up
+
+If your prior round was rejected, the critique names a file
+inside `rust-crate/` carrying the diagnostic. Edit it, re-run
+the capture, commit, `task_complete`. Your `path_allowlist`
+admits `rust-crate/` for this purpose.
+
+## Constraints
+
+* The capture MUST live at `out/lint/check-rust.txt`.
+* Do NOT touch `py-pkg/`, `ts-pkg/`, `scripts/`, `fixtures/`.
+  Writes outside the allowlist trip `FailPathPolicyViolation`.
+* Do NOT swallow the failing exit code on Round 1.
+"""
+
+
+
+# ── Lint-runner Executor — JS / TS (P3-3 / iter55 split) ─
+[[tasks]]
+task_id            = "lint-runner-js"
+name               = "Capture eslint + prettier + tsc output for the JS / TS Reviewer"
+session_agent_type = "Executor"
+predecessors       = ["lint-defect"]
+# Iter55 per-language split. Scope: ONE language (TypeScript /
+# JavaScript). Budget: 60 turns — same sizing rationale as
+# `lint-runner-python` (see its comment block). With
+# `lint-defect` pinned to Python the JS capture is expected
+# clean on Round 1; budget headroom is for off-nominal cases.
+# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 60
+path_allowlist     = ["out/lint/", "ts-pkg/"]
+description = """
+You are the RAXIS lint-runner-js executor. Your job is to
+surface the strict-JS-lint verdict (`npx --no-install eslint
+--max-warnings 0` + `npx --no-install prettier --check` +
+`npx --no-install tsc --noEmit`) to the downstream Reviewer.
+
+The Reviewer VM image (`raxis-reviewer-core`) is structurally
+forbidden from executing scripts: it ships ONLY `raxis-planner`
+and `ripgrep` per `INV-PLANNER-HARNESS-02`. The Reviewer
+therefore cannot run `eslint` themselves — they read its
+captured output from a committed artifact you produce here.
+
+## Round 1 — capture
+
+1. Create the capture directory: `mkdir -p out/lint`.
+2. Run the JS/TS lint stack inside `ts-pkg/` and capture
+   stdout + stderr + the exit code in a single file at the
+   fixed path `out/lint/check-js.txt`:
+   ```bash
+   {
+     ( cd ts-pkg && \
+       npx --no-install eslint --max-warnings 0 . && \
+       npx --no-install prettier --check . && \
+       npx --no-install tsc --noEmit ) 2>&1
+     echo "raxis_check_sh_exit_code=$?"
+   } > out/lint/check-js.txt
+   ```
+3. `git add out/lint/check-js.txt`
+4. `git commit -m "chore: capture eslint/tsc output for reviewer"`
+5. Call `task_complete` with a one-line summary that includes
+   the captured exit code.
+
+## Round 2+ — substantive critique fix-up
+
+If your prior round was rejected, the critique names a file
+inside `ts-pkg/` carrying the diagnostic. Edit it, re-run the
+capture, commit, `task_complete`. Your `path_allowlist` admits
+`ts-pkg/` for this purpose.
+
+## Constraints
+
+* The capture MUST live at `out/lint/check-js.txt`.
+* Do NOT touch `py-pkg/`, `rust-crate/`, `scripts/`,
+  `fixtures/`. Writes outside the allowlist trip
+  `FailPathPolicyViolation`.
+* Do NOT swallow the failing exit code on Round 1.
+"""
+
+
+
+# ── Lint-defect Reviewers (P3-7 / iter55 Option C fan-in) ─
+#
+# Reviewer fan-in: Option C — `lint-runner-python` carries the
+# dual-Reviewer pair (`review-lint-defect-A`/`-B`) that drives
+# the substantive-disagreement scenario asserted by
+# `ReviewerSubstantiveDisagreementWitness`; `lint-runner-rust`
+# and `lint-runner-js` each carry a single rubber-stamp
+# Reviewer that gates the upstream Executor's pipeline on the
+# captured-clean exit code. The `lint-defect` prompt is pinned
+# to Python so the per-language disagreement deterministically
+# fires on the dual pair (see plan_realistic.rs::TASK_LINT_RUNNER_PYTHON
+# docstring for the structural rationale).
 [[tasks]]
 task_id            = "review-lint-defect-A"
-name               = "Reviewer A — substantive review of lint-defect diff"
+name               = "Reviewer A — substantive review of lint-defect diff (Python pair)"
 session_agent_type = "Reviewer"
-predecessors       = ["lint-runner"]
+predecessors       = ["lint-runner-python"]
 # Reviewer is mechanical: read_file the captured artifact, observe the
 # raxis_check_sh_exit_code sentinel line, decide. The Reviewer VM image
 # (`raxis-reviewer-core`) ships ONLY raxis-planner + ripgrep per
 # `INV-PLANNER-HARNESS-02`, so there's no shell, no language runtime,
-# no tool that could legitimately need many turns. A Reviewer that
-# hasn't decided in 10 turns is stuck on its own confusion, not on the
-# task. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 10
+# no tool that could legitimately need many turns. Iter55 bumped the
+# reviewer ceiling 10 → 30 (per the user-confirmed budget audit) for
+# headroom over the round-1 read + decide path, with the kernel-side
+# progressive max_turns bump on retry
+# (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`) elasticating
+# further on round-2 if needed. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 30
 description = """
 You are the FIRST Reviewer in a panel reviewing the rich-
-multilang-001 lint-defect pipeline. The upstream `lint-defect`
-Executor introduced exactly one real lint defect in one of:
-  * `rust-crate/src/greeting.rs`  (clippy: `cargo clippy -- -D warnings`)
-  * `ts-pkg/src/greet.ts`         (eslint: `npx eslint --max-warnings 0`)
-  * `py-pkg/src/sample_py/greet.py` (ruff: `python -m ruff check`)
-A single `scripts/check.sh` runs all three.
+multilang-001 Python lint-defect pipeline. The upstream
+`lint-defect` Executor introduced exactly one real Python lint
+defect in `py-pkg/src/sample_py/greet.py` (per the iter55
+per-language-split pin: the lint-defect prompt offers only the
+Python `F401 unused-import` option — `import os` appended at
+the top of the file but never referenced).
 
-The `lint-runner` Executor has ALREADY committed
-`out/lint/check-output.txt` containing the captured stdout +
-stderr of `scripts/check.sh`, terminated by a sentinel line
-`raxis_check_sh_exit_code=<n>` carrying the script's exit code.
+The `lint-runner-python` Executor has ALREADY committed
+`out/lint/check-python.txt` containing the captured stdout +
+stderr of `python -m ruff check` + `ruff format --check`,
+terminated by a sentinel line `raxis_check_sh_exit_code=<n>`
+carrying the exit code.
 
 Your job is mechanical: `read_file` the captured artifact,
 observe the exit code, and rule on the diff. If the captured
 `raxis_check_sh_exit_code` is non-zero, submit `SubmitReview`
 with `approved = false` and a critique whose text NAMES the
-file that produced the failing lint diagnostic (one of the
-three listed above — the captured output names it verbatim).
-If the captured exit code is zero, submit `SubmitReview` with
-`approved = true`.
+file that produced the failing lint diagnostic
+(`py-pkg/src/sample_py/greet.py` — the captured output names it
+verbatim, often shortened to `greet.py`). If the captured exit
+code is zero, submit `SubmitReview` with `approved = true`.
 
-You MUST NOT attempt to execute `scripts/check.sh` yourself —
+You MUST NOT attempt to execute `python -m ruff` yourself —
 your VM image (`raxis-reviewer-core`) ships ONLY
 `raxis-planner` and `ripgrep` per `INV-PLANNER-HARNESS-02`;
 there is no shell, no `cargo`, no `npx`, no `python`. Use
-`read_file` for `out/lint/check-output.txt` and any diff hunk
+`read_file` for `out/lint/check-python.txt` and any diff hunk
 you want to confirm, and `grep_search` to locate the failing
 file's mention inside the captured output.
 
 As Reviewer A you take a STRICT stance on lint failures: any
 non-zero exit code in the captured artifact is a hard reject
-naming the specific failing file. Do NOT invent defects, do
-NOT reject for vibes, do NOT cite a file that did not appear
-in the captured output. The witness verifies the critique
-mentions one of the three filenames verbatim.
+naming the specific failing file (`greet.py` in this scenario).
+Do NOT invent defects, do NOT reject for vibes, do NOT cite a
+file that did not appear in the captured output. The witness
+verifies the critique mentions one of the lint-defect target
+basenames (`greet.py`) verbatim.
 """
 
 [[tasks]]
 task_id            = "review-lint-defect-B"
-name               = "Reviewer B — substantive review of lint-defect diff"
+name               = "Reviewer B — substantive review of lint-defect diff (Python pair)"
 session_agent_type = "Reviewer"
-predecessors       = ["lint-runner"]
+predecessors       = ["lint-runner-python"]
 # Same shape + budget as Reviewer A — mechanical read_file + decide.
+# Iter55: 10 → 30 reviewer-ceiling bump (see Reviewer A comment).
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 10
+max_turns          = 30
 description = """
 You are the SECOND Reviewer in a panel reviewing the rich-
-multilang-001 lint-defect pipeline. The `lint-runner` Executor
-has committed `out/lint/check-output.txt` (stdout + stderr +
+multilang-001 Python lint-defect pipeline. The
+`lint-runner-python` Executor has committed
+`out/lint/check-python.txt` (stdout + stderr +
 `raxis_check_sh_exit_code=<n>` sentinel) capturing the strict
-output of `scripts/check.sh`.
+output of `python -m ruff check` + `ruff format --check`.
 
 Your job is mechanical: `read_file` the captured artifact,
 observe the exit code, and rule on the diff. If
 `raxis_check_sh_exit_code` is non-zero, submit `SubmitReview`
 with `approved = false` and a critique whose text NAMES the
-specific failing file (one of `rust-crate/src/greeting.rs`,
-`ts-pkg/src/greet.ts`, `py-pkg/src/sample_py/greet.py`). If the
-exit code is zero, approve.
+specific failing file (`py-pkg/src/sample_py/greet.py` —
+shortened to `greet.py` is fine). If the exit code is zero,
+approve.
 
-You MUST NOT attempt to execute `scripts/check.sh` yourself —
+You MUST NOT attempt to execute `python -m ruff` yourself —
 your VM image (`raxis-reviewer-core`) has no shell, no
 language runtimes, and no `git`. Use `read_file` for the
 captured artifact and `grep_search` / `read_file` for the diff
@@ -653,16 +809,73 @@ itself.
 
 Reviewer B is the SLIGHTLY-LENIENT counterweight to Reviewer A:
 cosmetic-only diagnostics (e.g. a stray trailing whitespace
-that does NOT trip the strict-warnings gate at `cargo clippy
--- -D warnings`, or a `prettier` whitespace nit on a file
-that does NOT also trigger an eslint diagnostic) are NOT by
-themselves a reject. The substantive line is "did the captured
-exit_code surface a real linter ERROR against a target file".
-If yes, reject and name the file; if no, approve. The
-aggregator marks the upstream Executor pipeline `AllPassed`
-only when BOTH Reviewers approve, which on the substantive
-path requires `lint-runner` to land a corrected diff in
-response to the Round-1 rejection.
+that does NOT trip ruff's strict gate, or a `ruff format`
+nit on a file that does NOT also trigger a `ruff check`
+diagnostic) are NOT by themselves a reject. The substantive
+line is "did the captured exit_code surface a real linter
+ERROR against a target file". If yes, reject and name the
+file; if no, approve. The aggregator marks the upstream
+Executor pipeline `AllPassed` only when BOTH Reviewers
+approve, which on the substantive path requires
+`lint-runner-python` to land a corrected diff in response to
+the Round-1 rejection.
+"""
+
+[[tasks]]
+task_id            = "review-lint-defect-rust"
+name               = "Reviewer — Rust lint-runner (single, rubber-stamp on clean)"
+session_agent_type = "Reviewer"
+predecessors       = ["lint-runner-rust"]
+# Single-Reviewer fan-in for the Rust child (Option C). Same
+# mechanical read_file + decide shape as the dual pair on
+# lint-runner-python. With lint-defect pinned to Python the Rust
+# capture is expected clean and this Reviewer is rubber-stamp;
+# the budget headroom (30) is for the off-nominal case where
+# the executor's capture wrapper itself misbehaves. Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 30
+description = """
+You are the sole Reviewer for the `lint-runner-rust` Executor.
+The captured artifact at `out/lint/check-rust.txt` carries the
+stdout + stderr of `cargo fmt --check` + `cargo clippy --all-targets
+-- -D warnings`, terminated by `raxis_check_sh_exit_code=<n>`.
+
+`read_file out/lint/check-rust.txt`; if the trailing exit code
+is zero, submit `SubmitReview { approved = true }`. If it is
+non-zero, submit `SubmitReview { approved = false }` with a
+critique naming the file inside `rust-crate/` that the captured
+output points at.
+
+You MUST NOT attempt to execute `cargo` yourself — your VM
+image ships only `raxis-planner` + `ripgrep` per
+`INV-PLANNER-HARNESS-02`.
+"""
+
+[[tasks]]
+task_id            = "review-lint-defect-js"
+name               = "Reviewer — JS / TS lint-runner (single, rubber-stamp on clean)"
+session_agent_type = "Reviewer"
+predecessors       = ["lint-runner-js"]
+# Single-Reviewer fan-in for the JS / TS child (Option C). Same
+# mechanical read_file + decide shape. Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 30
+description = """
+You are the sole Reviewer for the `lint-runner-js` Executor.
+The captured artifact at `out/lint/check-js.txt` carries the
+stdout + stderr of `npx eslint --max-warnings 0` + `prettier
+--check` + `tsc --noEmit`, terminated by
+`raxis_check_sh_exit_code=<n>`.
+
+`read_file out/lint/check-js.txt`; if the trailing exit code is
+zero, submit `SubmitReview { approved = true }`. If it is
+non-zero, submit `SubmitReview { approved = false }` with a
+critique naming the file inside `ts-pkg/` that the captured
+output points at.
+
+You MUST NOT attempt to execute `npx` / `tsc` yourself — your
+VM image ships only `raxis-planner` + `ripgrep` per
+`INV-PLANNER-HARNESS-02`.
 """
 
 
@@ -673,9 +886,12 @@ task_id            = "allowlist-positive-codegen"
 name               = "Generate a build-meta file into target/codegen/"
 session_agent_type = "Executor"
 # Trivial single-file generation task; write build_meta.txt under the
-# allowlisted path, commit. ~5 turns natural; 15 covers retry headroom.
-# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 15
+# allowlisted path, commit. ~5 turns natural; iter55 budget audit
+# bumps the ceiling 15 → 25 for retry headroom (the `-f` flag on
+# `git add` against the `target/` gitignore entry is a common
+# misremember that costs one cycle to recover). Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 25
 path_allowlist     = ["target/codegen/"]
 description = """
 # Positive path-allowlist Executor prompt — extended e2e realistic scenario
@@ -1258,11 +1474,16 @@ task_id            = "credential-substitution-canary"
 name               = "Authenticate via operator-staged FAKE .env creds; proxy substitutes real creds upstream"
 session_agent_type = "Executor"
 predecessors       = ["service-round-trip"]
-# Single-service auth round-trip: read $DATABASE_URL, authenticate
-# against postgres via the substituting proxy, write one canonical
-# output, commit. ~10 turns natural; 25 covers retry headroom on a
-# bad first-pass auth attempt. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 25
+# Multi-step task: parse .env for DATABASE_USER/PASSWORD/NAME, parse
+# host:port from $DATABASE_URL, open a psycopg2 connection through
+# the substituting proxy, SELECT, format pipe-delimited output,
+# write to out/services/postgres-fake-creds.txt, git add, commit.
+# ~10 turns natural; iter55 budget audit bumps the ceiling 25 → 40
+# for headroom on first-pass auth retry + the URL-parsing
+# variant where `urlparse` returns None for the port and the
+# planner has to default to 5432. Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 40
 path_allowlist     = ["out/services/postgres-fake-creds.txt"]
 description = """
 # Credential-substitution canary — Executor prompt

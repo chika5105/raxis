@@ -1213,15 +1213,15 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                  initiative `Failed`. \
                                  Examples that look tempting but are wrong: \
                                  the realistic plan's `lint-defect → \
-                                 lint-runner → review-lint-defect-A/B` \
+                                 lint-runner-python → review-lint-defect-A/B` \
                                  chain — when `lint-defect` reports \
                                  `state=complete` and \
                                  `aggregate=NoSuccessors`, the next ready \
-                                 task is `lint-runner` (its sole \
+                                 task is `lint-runner-python` (its sole \
                                  predecessor is now Completed → \
                                  `preds_ready=true`), NOT \
                                  `review-lint-defect-A` (its IMMEDIATE \
-                                 predecessor `lint-runner` is still \
+                                 predecessor `lint-runner-python` is still \
                                  Admitted → `preds_ready=false`). \
                                  \n\
                                  This rule subsumes reviewer activation: \

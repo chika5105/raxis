@@ -8420,6 +8420,51 @@ loop ceiling) and the KSB capabilities envelope (`SessionCapabilityView::planner
 per `INV-KSB-MAX-TURNS-VISIBILITY-01`) so the agent and the kernel
 share one view of the budget.
 
+> **Note (iter54 + iter55).** Per-task `max_turns` is the spec
+> author's responsibility to size for the **worst-case**
+> activation, including review-rejection retries that must
+> REPAIR (not just introduce) the work. Under-sizing a task's
+> `max_turns` deterministically exhausts the crash-retry budget
+> on review rejection: every retry hits the same `dispatch loop
+> exceeded max_turns: N` wall (exit code 4) with no progressive
+> bump (per the v1 ceiling — see
+> `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` for the
+> kernel-side fix), the kernel logs
+> `TaskFailedOnWorkerPrematureExit` → `RetrySubTask` increments
+> `crash_retry_count`, and a fresh VM spawns into the same wall
+> until `max_crash_retries` is hit and the task permanently
+> fails.
+>
+> Iter54 surfaced this mode on the monolithic `lint-runner` task
+> in `kernel/tests/extended_e2e_support/plan_realistic.rs`
+> (mirrored at `live-e2e/examples/plan_primary.toml`): a single
+> Executor session was asked to introduce-then-on-retry-repair
+> lint defects across Rust + TypeScript + Python in a single
+> 30-turn budget. The introduce path fit; the repair path
+> deterministically did not. The iter54 one-shot fix bumped the
+> monolithic ceiling `30 → 90` (3× headroom). Iter55 SUPERSEDES
+> that bump with a structural split: the monolithic
+> `lint-runner` is gone, replaced by three per-language children
+> (`lint-runner-python`, `lint-runner-rust`, `lint-runner-js`)
+> each scoped to ONE language tree and sized at `max_turns = 60`
+> — 8× per-language headroom on introduce, 2-3× on repair,
+> further elasticated on retry by the Fix 2 progressive bump
+> (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
+> `base + (attempt-1) * step`, default `step = base/2`; retry #1
+> on a 60-turn task yields 90, retry #2 yields 120). The dual-
+> Reviewer disagreement pair is pinned to `lint-runner-python`
+> (the upstream `lint-defect` prompt is correspondingly pinned
+> to the Python F401 unused-import target — per-language
+> children only see their own language's lint, so for the
+> disagreement aggregation to fire deterministically the defect
+> must live in the language whose child carries the pair); the
+> Rust and JS children carry single rubber-stamp Reviewers each.
+> Iter55 also bumped sibling tight budgets in the same plan as a
+> defensive sweep: `lint-defect` 25 → 35,
+> `allowlist-positive-codegen` 15 → 25,
+> `credential-substitution-canary` 25 → 40, every Reviewer task
+> 10 → 30.
+
 **Witness tests:**
 * `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_precedence_01_per_task_wins_over_policy`
 * `kernel/src/session_spawn_orchestrator.rs::tests::inv_planner_max_turns_precedence_01_policy_wins_over_compiled`

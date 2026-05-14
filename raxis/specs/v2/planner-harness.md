@@ -1381,6 +1381,48 @@ materializer-Executor (~150 turns) tasks in one initiative. See
 `guides/recipes/env/11-planner-env-vars.md` for the operator
 recipe.
 
+**Sizing per-task `max_turns` for retry repair (iter54 → iter55).**
+The plan author MUST size each per-task `max_turns` for the
+**worst-case** activation, not the original. The most common
+under-sizing trap is a review-rejection retry path that must
+REPAIR the work (read critique + edit defective file + re-run
+capture + commit) on top of having already introduced it; an
+`max_turns` calibrated for the introduce-only path will
+deterministically exhaust `max_crash_retries` on every Reviewer
+rejection because `RetrySubTask` (kernel) does not progressively
+bump the per-task ceiling on its own — every fresh VM hits the
+same `dispatch loop exceeded max_turns: N` wall (exit code 4)
+with zero forward progress.
+
+The iter54 case study (`lint-runner` task in `plan_realistic.rs`,
+mirrored at `live-e2e/examples/plan_primary.toml`) tracked two
+mitigations:
+
+* **Iter54 one-shot bump** — `30 → 90` on the monolithic
+  `lint-runner` (3× headroom over the introduce path; superseded
+  by the iter55 split below).
+* **Iter55 structural split** — the monolithic task is gone; the
+  realistic plan now ships per-language children
+  (`lint-runner-python`, `lint-runner-rust`, `lint-runner-js`),
+  each scoped to ONE language tree and sized at `max_turns = 60`
+  (8× per-language introduce headroom, 2-3× repair). The
+  upstream `lint-defect` is pinned to the Python target so the
+  dual-Reviewer disagreement pair on `lint-runner-python` fires
+  deterministically (per-language children only see their own
+  language's lint; the substantive-disagreement aggregation
+  requires the defect to live in the language whose child
+  carries the pair). The Rust + JS children get single rubber-
+  stamp Reviewers.
+* **Kernel-side defense in depth** —
+  `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` (Fix 2)
+  progressively bumps the per-task ceiling on retry attempts
+  via `base + (attempt-1) * step` (default `step = base/2`), so
+  a 60-turn task elasticates to 90 on retry #1 and 120 on retry
+  #2 even without a fresh per-task bump.
+
+See `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` rationale-section note
+for the full iter54 + iter55 sizing narrative.
+
 ---
 
 ## §6 — Tool Exclusions
