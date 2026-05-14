@@ -69,7 +69,7 @@
 | Kernel store — V1 | INV-STORE-01..03 | 3 |
 | Policy epochs — V1 | INV-POLICY-01 | 1 |
 | Scheduler — V1 | INV-SCHED-01, INV-SCHED-02, INV-SCHED-03 | 3 |
-| Orchestrator respawn ceiling — V2 | INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01 | 1 |
+| Orchestrator respawn ceiling — V2 | INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01, INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01 | 2 |
 | Auto-escalation — V2.5b | INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01 | 1 |
 | VCS path enforcement — V1 | INV-TASK-PATH-01, INV-TASK-PATH-02 | 2 |
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
@@ -1576,6 +1576,150 @@ Invariant body covers:
     `EscalationRequest { class: LogicalDeadlock }` (the kernel-side
     approve handler additionally rejects rows whose `initiator !=
     'Kernel'`).
+
+---
+
+### INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01 — Post-exit hook respawns the orchestrator on any non-terminal initiative with no in-flight work
+
+**Statement.** The orchestrator-session post-exit hook in
+`kernel/src/session_spawn_orchestrator.rs::after_session_revoked`
+MUST return `PostExitAction::OrchestratorRespawn` whenever
+ALL of the following hold for the exiting session's initiative
+(`session.initiative_id`):
+
+* `initiatives.state = 'Executing'` (non-terminal — terminal
+  states `Completed` / `Failed` / `Aborted` and pre-execution
+  states `Draft` / `ApprovedPlan` / `Blocked` MUST NOT trigger
+  the respawn; `Blocked` is operator-owned, the others are
+  by-construction inert);
+* there is NO row in `subtask_activations` with
+  `initiative_id = session.initiative_id` whose
+  `activation_state = 'Active'` (no in-flight worker);
+* there is NO row in `subtask_activations` with the same
+  `initiative_id` whose `activation_state = 'PendingActivation'`
+  (Mode A's narrow predicate is already covered separately;
+  this clause activates ONLY when Mode A would have
+  short-circuited).
+
+When all three hold the kernel MUST log a single structured
+trigger line keyed on the new event name
+`orchestrator_stranded_initiative_respawn_trigger` carrying the
+exiting `session_id`, the `initiative_id`, and the cite
+`INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01`, then proceed through
+`respawn_orchestrator_for_initiative` exactly the same way
+Mode A does — including the
+`orch_respawn_ceiling::increment_no_progress_count_in_tx` call
+that is the storm guard.
+
+**Justification.** Mode A's
+`pending_exists && !active_exists` predicate covers the common
+mid-DAG case where an Executor / Reviewer just completed and
+left a `PendingActivation` row for the orchestrator to chase.
+It does NOT cover the **stranded-initiative** case: an
+`Executing` initiative with NO `PendingActivation` row and
+NO `Active` worker, where the only path forward is an
+orchestrator-side terminal decision (`ReportFailure` for a
+`Failed` task that has exhausted
+`max_crash_retries`, `IntegrationMerge` for a DAG whose
+executors all `Completed`, `AbortInitiative` for a catastrophic
+preflight failure). In v2, the orchestrator is the ONLY agent
+that can move an `Executing` initiative toward terminality;
+without a respawn the kernel has no way to re-enter that
+decision surface and the harness sees an indefinite hang.
+
+Iter54-N reproduced the wedge end-to-end on the
+`realistic_session_lifecycle` test:
+
+1. The realistic-scenario plan's `lint-runner` Round-2 path
+   (Reviewer-rejection → fresh executor must read the captured
+   output, locate the defective file across three language
+   trees, edit, re-run `scripts/check.sh`, commit) exhausted the
+   per-task `max_turns=30` budget on every cold-start retry.
+   The kernel paired each `TaskFailedOnWorkerPrematureExit` with
+   `worker_post_exit_respawn_trigger`, the orchestrator
+   correctly emitted `RetrySubTask` (per
+   `INV-PLANNER-ORCH-RETRY-PRIORITY-OVER-ACTIVATE-01`), and the
+   kernel admitted three retries (per
+   `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` shape with
+   `crash_retry_count` advancing 1 → 2 → 3 against
+   `max_crash_retries=3`).
+2. After the fourth `Failed` activation (no admissible retry
+   left — `crash_retry_count` would exceed the ceiling), the
+   orchestrator's LLM emitted a non-terminal
+   `StructuredOutput { kind: "diagnostic_flag", payload_bytes:
+   377, actor: "orchestrator" }` then went idle. The planner
+   guest exited with `dispatch loop terminated with Idle (no
+   terminal tool fired)`, exit code 5.
+3. The kernel observed `planner_session_revoked_on_exit`. With
+   only Mode A in force the post-exit hook short-circuited:
+   `pending_exists = false` (no fresh activation row was ever
+   created — the orchestrator never emitted ActivateSubTask /
+   RetrySubTask), `active_exists = false` (lint-runner is now
+   `Failed`, not `Active`). No respawn fired, no
+   `orch_respawn_ceiling` increment fired. The kernel went
+   silent for the rest of the test wall-clock; the harness
+   could not observe a terminal initiative state.
+
+The fix is the **structural** counterpart to
+`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`: the ceiling
+guarantees the kernel cannot respawn forever without progress,
+but it can only fire if `respawn_orchestrator_for_initiative`
+is actually called. Mode A+ is the missing call site that
+ensures the ceiling fires on the stranded-initiative path. With
+Mode A+ in force, the wedge resolves in at most three
+additional respawns: each respawn that re-emits
+`diagnostic_flag` (or any other non-terminal) advances the
+`orchestrator_no_progress_respawn_count` counter (no FSM
+transition resets it because no FSM transition occurs); the
+third increment trips
+`orch_respawn_ceiling::CeilingOutcome::Exceeded`,
+`initiatives.state = 'Failed'` lands in the same transaction,
+and `OrchestratorRespawnCeilingExceeded` is committed to the
+audit chain — the same operator-facing failure surface the
+realistic-scenario harness's
+`scan_audit_for_orchestrator_respawn_ceiling_exceeded`
+fast-fail (per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`
+audit-poll extension) panics on within seconds.
+
+**Scenario.** Iter54-N reproduction (`/tmp/raxis-e2e-realistic-
+iter54.log` 2026-05-14, kernel stderr at
+`<data_dir>/kernel.stderr.log`): primary-initiative
+`019e25c8-89ef-7c73-9d1d-1c112a1df7ca` reaches the
+stranded state (`initiatives.state = 'Executing'`,
+`tasks.lint-runner = 'Failed'`, all other tasks `Completed`,
+zero rows in `subtask_activations` with
+`activation_state IN ('Active', 'PendingActivation')` for this
+initiative). Without Mode A+ the kernel emits zero further
+events for ~27 minutes until the test wrapper is SIGTERMed.
+With Mode A+ the kernel emits an
+`orchestrator_stranded_initiative_respawn_trigger` log line on
+the first session-revoke, the orchestrator respawns, the LLM
+re-emits a non-terminal intent (counter += 1), session revokes,
+counter += 1 (still no FSM progress), respawn 3 trips the
+ceiling, `OrchestratorRespawnCeilingExceeded` lands in audit,
+the harness's audit-poll fast-fail panics with the upstream
+hypothesis, and the operator sees the failure within ~90s
+instead of after the full deadline ceiling.
+
+**Witness.** Hand-verified against the iter54-N kernel.stderr
+forensic capture cited above; mechanical regression coverage
+follows in iter55+ via a focused unit test that builds a
+`subtask_activations` snapshot matching the stranded shape
+(no `Active`, no `PendingActivation`, parent initiative
+`Executing`) and asserts `after_session_revoked` returns
+`Some(PostExitAction::OrchestratorRespawn)`. The integration-
+level witness is the realistic-scenario test itself: with this
+invariant in force the test transitions from "indefinite hang"
+to "loud `OrchestratorRespawnCeilingExceeded` failure within
+the audit-poll fast-fail window" on any future regression of
+the upstream `lint-runner` Round-2 budget exhaustion (or any
+other stranded-initiative cause).
+
+**Canonical home.**
+`kernel/src/session_spawn_orchestrator.rs::after_session_revoked`
+(Mode A+ branch carrying the
+`INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01` cite in its inline
+comment + the structured trigger log line).
 
 ---
 

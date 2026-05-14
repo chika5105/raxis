@@ -477,8 +477,22 @@ predecessors       = ["lint-defect"]
 # (~5 turns). Round 2+ = read critique + edit defective file + re-run
 # capture + commit (~15 turns). Reviewer-panel rejection drives the
 # Round-2 path; budget covers both rounds + a Round-3 safety net.
+#
+# iter54-N raised 30 → 60. Each crash retry boots a FRESH executor VM
+# whose LLM has zero context from the prior session: it must read
+# `out/lint/check-output.txt`, locate the defective file (one of three
+# language trees), reason about the strict-lint rule, edit, re-run
+# capture, commit. From cold-start that is realistically 7–13
+# substantive turns plus exploration tax; 30 reproducibly tripped
+# `dispatch loop exceeded max_turns` on every iter54 retry, leaving
+# the orchestrator with no admissible RetrySubTask after the kernel
+# `max_crash_retries=3` ceiling, the LLM emitting a non-terminal
+# `StructuredOutput { kind: "diagnostic_flag" }` then going idle, and
+# the kernel quiescent (no `PendingActivation` row → post-exit-respawn
+# hook short-circuits). 60 gives the cold-start path a real budget
+# without changing the Round-1 + Round-2 happy-path expectation.
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 30
+max_turns          = 60
 path_allowlist     = ["out/lint/", "rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 You are the RAXIS lint-runner executor. The diff from

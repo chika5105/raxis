@@ -1480,6 +1480,76 @@ pub fn spawn_planner_dispatcher(
                     if pending_exists && !active_exists {
                         return Some(PostExitAction::OrchestratorRespawn { initiative_id });
                     }
+                    // ── Mode A+: stranded-initiative respawn.
+                    //
+                    // INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01.
+                    //
+                    // Iter54-N reproduced this wedge on the realistic
+                    // scenario's `lint-runner` Round-2 path. After
+                    // `max_crash_retries=3` retries all exhausted (each
+                    // burned the executor's `max_turns` ceiling), the
+                    // orchestrator had no admissible RetrySubTask /
+                    // ActivateSubTask left and emitted a non-terminal
+                    // `StructuredOutput { kind: "diagnostic_flag" }`,
+                    // then went idle (planner-boot-error: "dispatch
+                    // loop terminated with Idle"). With Mode A's narrow
+                    // `pending_exists && !active_exists` predicate, the
+                    // post-exit hook short-circuits — there is no
+                    // PendingActivation row because the kernel rejected
+                    // every further RetrySubTask at the ceiling and the
+                    // orchestrator never produced a fresh activation.
+                    // The kernel went silent for the rest of the test
+                    // wall-clock, the harness could not observe a
+                    // terminal initiative state, and SIGTERM was the
+                    // only way out.
+                    //
+                    // Mode A+: when the initiative is still in a
+                    // non-terminal state (Executing / PendingApproval /
+                    // AwaitingApproval / Approved) AND there is neither
+                    // Active worker nor PendingActivation, the
+                    // orchestrator is the ONLY agent that can move the
+                    // initiative toward terminality (ReportFailure on a
+                    // Failed task, IntegrationMerge once the DAG is
+                    // satisfied, or AbortInitiative). Respawn it. The
+                    // `orch_respawn_ceiling::increment_no_progress_count_in_tx`
+                    // counter (max 3) inside `respawn_orchestrator_for_initiative`
+                    // is the storm guard — if the LLM keeps emitting
+                    // non-terminal intents (no FSM transition resets
+                    // the counter), the third respawn auto-fails the
+                    // initiative with `orchestrator_respawn_ceiling_exceeded`
+                    // and the harness observes Failed instead of hanging.
+                    // `Executing` is the only initiative state where the
+                    // orchestrator owns terminality. `Draft` / `ApprovedPlan`
+                    // wait on operator approval, `Blocked` waits on operator
+                    // unblock, and the three terminal states (`Completed` /
+                    // `Failed` / `Aborted`) are by definition done — we
+                    // must not respawn into a terminal initiative
+                    // (`InitiativeState` enum in `crates/types/src/fsm.rs`).
+                    let initiative_executing: bool = conn
+                        .query_row(
+                            &format!(
+                                "SELECT 1 FROM {init} \
+                                   WHERE initiative_id = ?1 \
+                                     AND state = 'Executing' \
+                                   LIMIT 1",
+                                init = Table::Initiatives.as_str(),
+                            ),
+                            rusqlite::params![&initiative_id],
+                            |_| Ok(true),
+                        )
+                        .unwrap_or(false);
+                    if initiative_executing && !pending_exists && !active_exists {
+                        eprintln!(
+                            "{{\"level\":\"info\",\
+                             \"event\":\"orchestrator_stranded_initiative_respawn_trigger\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"session_id\":\"{session_id}\",\
+                             \"invariant\":\"INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01\"}}",
+                            session_id   = session_for_post_exit,
+                            initiative_id = initiative_id,
+                        );
+                        return Some(PostExitAction::OrchestratorRespawn { initiative_id });
+                    }
                     return None;
                 }
 
