@@ -152,6 +152,26 @@ where
         emit_stream_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&e));
         return Err(e);
     }
+    // V3 perf-telemetry — bookend the per-stream lifetime with one
+    // `raxis.dashboard.sse.connection.active` gauge sample at attach
+    // and one at detach. The detach path runs from a `Drop` guard so
+    // an early-return (auth failure, NotFound) decrements correctly.
+    let sse_guard = state.observability.as_ref().map(|hub| {
+        let new_active = state
+            .sse_active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        raxis_observability::record_dashboard_sse_active(
+            hub,
+            "/api/sessions/:id/stream",
+            new_active,
+        );
+        SseActiveGuard {
+            counter: Arc::clone(&state.sse_active),
+            hub:     Arc::clone(hub),
+        }
+    });
+    let _ = sse_guard.as_ref();
     // Spec contract (`dashboard-hardening.md §1.6`):
     //
     // > Unknown session: `404 Not Found` JSON envelope (NOT a hung
@@ -173,6 +193,7 @@ where
     // through the same path).
     if let Err(err) = state.data.get_session(&id) {
         emit_stream_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&err));
+        // sse_guard drops here → gauge decrements correctly.
         return Err(err);
     }
     // Audit the SSE attach BEFORE we hand the long-lived
@@ -190,7 +211,11 @@ where
     // shutdown gets a single sentinel frame and a clean close
     // instead of being parked against a draining hyper.
     if state.shutdown.is_triggered() {
-        let shutdown_only = stream::once(async {
+        let guard_for_stream = sse_guard;
+        let shutdown_only = stream::once(async move {
+            // Hold the guard inside the future so the gauge stays
+            // incremented until the (single-frame) stream completes.
+            let _hold = guard_for_stream;
             Ok::<_, Infallible>(
                 Event::default()
                     .event("kernel-shutdown")
@@ -219,7 +244,8 @@ where
     // the route layer).
     let sub_result = state.data.stream_subscribe(&id);
     let shutdown = Arc::clone(&state.shutdown);
-    let sse_stream = build_sse_stream(tail, sub_result, shutdown);
+    let event_hub = state.observability.clone();
+    let sse_stream = build_sse_stream(tail, sub_result, shutdown, sse_guard, event_hub);
     Ok(Sse::new(sse_stream)
         .keep_alive(
             axum::response::sse::KeepAlive::new()
@@ -227,6 +253,30 @@ where
                 .text("keep-alive"),
         )
         .into_response())
+}
+
+/// V3 perf-telemetry — RAII handle that decrements the per-route
+/// SSE-active counter and re-emits the gauge sample when dropped.
+/// One instance lives inside every active SSE stream (in the
+/// `unfold` state); the drop runs on stream termination (client
+/// disconnect, publisher close, kernel shutdown).
+struct SseActiveGuard {
+    counter: Arc<std::sync::atomic::AtomicI64>,
+    hub:     Arc<raxis_observability::ObservabilityHub>,
+}
+
+impl Drop for SseActiveGuard {
+    fn drop(&mut self) {
+        let remaining = self
+            .counter
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+            - 1;
+        raxis_observability::record_dashboard_sse_active(
+            &self.hub,
+            "/api/sessions/:id/stream",
+            remaining.max(0),
+        );
+    }
 }
 
 fn emit_stream_audit<D>(
@@ -263,10 +313,20 @@ pub(crate) fn parse_last_event_id(headers: &HeaderMap) -> Option<u64> {
 /// subscription. Lagged frames produce a `lagged` event;
 /// publisher-drop produces `closed` then completes; kernel
 /// shutdown produces `kernel-shutdown` then completes.
+///
+/// `_active_guard` is dropped when the returned stream
+/// completes (client disconnect, publisher close, kernel
+/// shutdown); the drop decrements `record_dashboard_sse_active`.
+/// `event_hub` (Some when observability is wired) drives a
+/// per-frame `record_dashboard_sse_event` emission on the live
+/// path — replay-tail frames are NOT counted (they are not
+/// "live" by the spec's definition).
 fn build_sse_stream(
     tail: Vec<StreamEvent>,
     sub_result: Result<crate::stream::StreamSubscription, ApiError>,
     shutdown: Arc<ShutdownSignal>,
+    active_guard: Option<SseActiveGuard>,
+    event_hub: Option<Arc<raxis_observability::ObservabilityHub>>,
 ) -> impl Stream<Item = Result<Event, Infallible>> + Send + 'static {
     let tail_iter = tail.into_iter().map(|e| {
         // `Event::default()` (no `.event(...)` call) emits a
@@ -286,8 +346,8 @@ fn build_sse_stream(
     let live_stream: futures_util::stream::BoxStream<'static, Result<Event, Infallible>> =
         match sub_result {
             Ok(sub) => Box::pin(stream::unfold(
-                (sub, false, shutdown),
-                |(mut sub, closed, shutdown)| async move {
+                (sub, false, shutdown, active_guard, event_hub),
+                |(mut sub, closed, shutdown, active_guard, event_hub)| async move {
                     if closed {
                         return None;
                     }
@@ -305,15 +365,33 @@ fn build_sse_stream(
                             let evt = Event::default()
                                 .event("kernel-shutdown")
                                 .data("server-shutting-down");
-                            Some((Ok(evt), (sub, true, shutdown)))
+                            Some((Ok(evt), (sub, true, shutdown, active_guard, event_hub)))
                         }
                         msg = sub.recv() => match msg {
                             Ok(Some(e)) => {
+                                // V3 perf-telemetry — one
+                                // `raxis.dashboard.sse.event.total`
+                                // counter bump + lag histogram
+                                // observation per live frame. The
+                                // lag is `now - e.at_ms`; clamps
+                                // to 0 on a clock-skew underflow.
+                                if let Some(hub) = event_hub.as_ref() {
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as i64)
+                                        .unwrap_or(0);
+                                    let lag = (now_ms - e.at_ms as i64).max(0);
+                                    raxis_observability::record_dashboard_sse_event(
+                                        hub,
+                                        "/api/sessions/:id/stream",
+                                        lag,
+                                    );
+                                }
                                 let data = envelope_json(&e);
                                 let evt = Event::default()
                                     .data(data)
                                     .id(e.at_ms.to_string());
-                                Some((Ok(evt), (sub, false, shutdown)))
+                                Some((Ok(evt), (sub, false, shutdown, active_guard, event_hub)))
                             }
                             Ok(None) => {
                                 // Publisher dropped — emit one
@@ -322,13 +400,13 @@ fn build_sse_stream(
                                 let evt = Event::default()
                                     .event("closed")
                                     .data("publisher-dropped");
-                                Some((Ok(evt), (sub, true, shutdown)))
+                                Some((Ok(evt), (sub, true, shutdown, active_guard, event_hub)))
                             }
                             Err(n) => {
                                 let evt = Event::default()
                                     .event("lagged")
                                     .data(n.to_string());
-                                Some((Ok(evt), (sub, false, shutdown)))
+                                Some((Ok(evt), (sub, false, shutdown, active_guard, event_hub)))
                             }
                         }
                     }

@@ -105,6 +105,26 @@ pub struct AppStateInner<D: DashboardData> {
     /// arrive AFTER the notify see the "closed" path through
     /// `is_shutdown_triggered`.
     pub shutdown: Arc<ShutdownSignal>,
+    /// V3 perf-telemetry — optional handle to the kernel's
+    /// `ObservabilityHub`. When present, the middleware in
+    /// [`build_router`] records one
+    /// `raxis.dashboard.http.request.duration` observation per
+    /// request, and the SSE handler in
+    /// `routes::sessions::stream` updates the
+    /// `raxis.dashboard.sse.connection.active` gauge plus the
+    /// `raxis.dashboard.sse.event.total` /
+    /// `raxis.dashboard.sse.lag.duration` family. `None` keeps
+    /// the dashboard hub-agnostic for tests and for embedded
+    /// deployments that boot the dashboard without observability.
+    pub observability: Option<Arc<raxis_observability::ObservabilityHub>>,
+    /// V3 perf-telemetry — per-route in-flight SSE counter. The
+    /// SSE handler increments on attach, decrements on detach, and
+    /// emits one `raxis.dashboard.sse.connection.active` gauge
+    /// sample on every transition. Held in `AppStateInner` so
+    /// every request shares the same monotonic counter; otherwise
+    /// each handler would see its own per-connection view and
+    /// the gauge would never reflect aggregate state.
+    pub sse_active: Arc<std::sync::atomic::AtomicI64>,
 }
 
 /// One-shot, fan-out-safe shutdown signal handed to long-poll
@@ -178,6 +198,19 @@ impl<D: DashboardData> DashboardServer<D> {
         config: DashboardConfig,
         data: Arc<D>,
     ) -> Result<Self, BindError> {
+        Self::bind_with_observability(config, data, None).await
+    }
+
+    /// V3 perf-telemetry — bind variant that attaches an optional
+    /// `ObservabilityHub` to the dashboard's [`AppStateInner`].
+    /// Kernel boot wires the hub through this entry point; the
+    /// short-form [`Self::bind`] preserves the pre-V3 signature for
+    /// tests and embedded harnesses that never instantiate a hub.
+    pub async fn bind_with_observability(
+        config: DashboardConfig,
+        data: Arc<D>,
+        observability: Option<Arc<raxis_observability::ObservabilityHub>>,
+    ) -> Result<Self, BindError> {
         let auth = build_auth_state(&config)
             .map_err(|e| BindError::Auth(e.to_string()))?;
         let shutdown = ShutdownSignal::new();
@@ -186,6 +219,8 @@ impl<D: DashboardData> DashboardServer<D> {
             auth,
             config: config.clone(),
             shutdown: Arc::clone(&shutdown),
+            observability,
+            sse_active: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         });
         let router = build_router(Arc::clone(&state));
         let addr_str = format!("{}:{}", config.bind_address, config.bind_port);
@@ -455,7 +490,50 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
                     .and(NotForContentType::const_new("text/event-stream")),
             ),
         )
+        // V3 perf-telemetry — per-request duration histogram. The
+        // middleware is appended last so the `route` label reflects
+        // the routed path (after axum's matcher), the wall-clock
+        // includes every inner layer, and an SSE long-poll path
+        // still produces one observation when the stream tears
+        // down (the duration is the full stream lifetime — that is
+        // the intent of the histogram for SSE).
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            observability_middleware::<D>,
+        ))
         .with_state(state)
+}
+
+/// V3 perf-telemetry — record one
+/// `raxis.dashboard.http.request.duration` observation per
+/// request. The `route` label uses
+/// [`axum::extract::MatchedPath`] when present so dashboards
+/// pivot on stable path templates (`/api/initiatives/:id`)
+/// rather than fully-resolved paths.
+async fn observability_middleware<D: DashboardData>(
+    axum::extract::State(state): axum::extract::State<AppState<D>>,
+    matched: Option<axum::extract::MatchedPath>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let started = std::time::Instant::now();
+    let method  = request.method().as_str().to_owned();
+    let route   = matched
+        .as_ref()
+        .map(|m| m.as_str().to_owned())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let response = next.run(request).await;
+    if let Some(hub) = state.observability.as_ref() {
+        let status: i64 = response.status().as_u16() as i64;
+        raxis_observability::record_dashboard_http_request(
+            hub,
+            &route,
+            &method,
+            status,
+            started.elapsed().as_millis() as i64,
+        );
+    }
+    response
 }
 
 /// Server bind / startup errors.

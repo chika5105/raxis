@@ -54,3 +54,73 @@ pub use types::{
     AttrMap, AttrValue, DataPoint, EventName, MetricData, MetricName, MetricType,
     SpanData, SpanEvent, SpanKind, SpanName, SpanStatus, Unit,
 };
+
+// ---------------------------------------------------------------------------
+// Cross-crate emit helpers (V3 Part 2 expansion)
+//
+// Dashboard middleware / SSE handlers live in `crates/dashboard/` and cannot
+// import `raxis-kernel`. The canonical convenience helpers continue to live
+// in `kernel/src/observability.rs`; the three dashboard-facing ones are
+// duplicated here so non-kernel crates can call them without a circular
+// dep. The kernel-side helpers in `kernel/src/observability.rs` re-export
+// these three so every emit site lands in one canonical shape.
+// ---------------------------------------------------------------------------
+
+/// `raxis.dashboard.http.request.duration` — every dashboard HTTP
+/// request, success or failure. Closed allow-list labels match
+/// `redact::ALLOW_LIST` (`route`, `http_method`, `http_status`).
+pub fn record_dashboard_http_request(
+    hub:         &ObservabilityHub,
+    route:       &str,
+    http_method: &str,
+    http_status: i64,
+    duration_ms: i64,
+) {
+    if !hub.enabled() { return; }
+    let mut labels = redact::attrs([
+        ("route",       route),
+        ("http_method", http_method),
+    ]);
+    labels.insert(
+        "http_status".to_owned(),
+        AttrValue::I64(http_status),
+    );
+    hub.record_histogram(
+        MetricName::DashboardHttpRequestDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
+
+/// `raxis.dashboard.sse.connection.active` gauge — sampled on
+/// connect and disconnect.
+pub fn record_dashboard_sse_active(
+    hub:   &ObservabilityHub,
+    route: &str,
+    count: i64,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([("route", route)]);
+    hub.record_gauge(
+        MetricName::DashboardSseConnectionActive,
+        labels,
+        count.max(0) as f64,
+    );
+}
+
+/// `raxis.dashboard.sse.event.total` plus
+/// `raxis.dashboard.sse.lag.duration`.
+pub fn record_dashboard_sse_event(
+    hub:    &ObservabilityHub,
+    route:  &str,
+    lag_ms: i64,
+) {
+    if !hub.enabled() { return; }
+    let labels = redact::attrs([("route", route)]);
+    hub.record_counter(MetricName::DashboardSseEventTotal, labels.clone(), 1.0);
+    hub.record_histogram(
+        MetricName::DashboardSseLagDuration,
+        labels,
+        lag_ms.max(0) as f64,
+    );
+}

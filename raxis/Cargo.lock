@@ -3469,6 +3469,7 @@ dependencies = [
  "parking_lot",
  "raxis-audit-tools",
  "raxis-crypto",
+ "raxis-observability",
  "raxis-policy",
  "raxis-store",
  "raxis-types",

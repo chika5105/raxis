@@ -224,6 +224,30 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
 
     let latency_ms = elapsed_ms_clamped(started);
 
+    // V3 §3 perf-telemetry — record one `raxis.gateway.fetch.{total,duration}`
+    // observation per kernel-mediated call. `provider` is the request host
+    // (the only stable identifier visible at this layer; model / token usage
+    // / gateway-cache state live one process boundary further into the
+    // gateway subprocess and are not observable here). `status_code` is the
+    // upstream HTTP status on success, 0 on every gateway-side failure.
+    let provider_label = extract_host_port(&url_for_stall_detection)
+        .map(|(host, _)| host)
+        .unwrap_or_else(|| "unknown".to_owned());
+    let fetch_status_i64: i64 = match &result {
+        Ok(fr) => fr.status_code.map(|c| c as i64).unwrap_or(0),
+        Err(_) => 0,
+    };
+    crate::observability::record_gateway_fetch(
+        &ctx.observability,
+        &provider_label,
+        None,
+        fetch_status_i64,
+        latency_ms as i64,
+        false,
+        None,
+        None,
+    );
+
     match result {
         Ok(fr) => PlannerFetchResponse {
             request_id,

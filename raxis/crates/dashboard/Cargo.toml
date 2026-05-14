@@ -15,6 +15,12 @@ raxis-store         = { workspace = true }
 raxis-policy        = { workspace = true }
 raxis-crypto        = { workspace = true }
 raxis-audit-tools   = { workspace = true }
+# V3 perf-telemetry — optional `ObservabilityHub` plumbed through
+# `AppStateInner` so the middleware in `server.rs` can record
+# per-request histograms and the SSE handler in `routes::sessions`
+# can update the connection / event gauges. Optional means: tests
+# that never wire a hub still work; the metric path is a noop.
+raxis-observability = { workspace = true }
 
 # HTTP stack. Pinned to the workspace's existing axum 0.7 family
 # (the aegis-server uses the same major). tower-http provides

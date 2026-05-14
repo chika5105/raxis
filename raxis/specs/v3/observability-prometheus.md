@@ -267,6 +267,110 @@ override `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]`
 ms — substrate IPC round-trips span sub-millisecond ksb-update
 probes through multi-second `planner_fetch_request` tool calls.
 
+## 3.14 Emit contracts (V3 Part 2)
+
+### 3.14.1 Periodic flush
+
+The kernel's [`ObservabilityHub`] buffers `record_*` data into an
+in-process ring; the buffer is drained by a periodic
+`spawn_periodic_flush` task installed by `observability_boot::spawn_periodic_flush`
+during kernel boot. The flush cadence is operator-configurable:
+
+| Setting | Default | Range | Spec |
+|---|---|---|---|
+| `[observability.metrics] export_interval` | `15s` | `1s..=300s` | `otel-observability.md §6.1` |
+
+The task `select!`s the interval timer against the kernel shutdown
+notifier so a tear-down completes promptly. A flush failure is
+silent at the hub layer; the next-tier `raxis-otel-pusher` records
+its own retry / drop counters via `raxis.observability.dropped.total`.
+See `otel-observability.md §5.3` for the full silent-failure mode.
+
+### 3.14.2 Heartbeat tick
+
+The kernel runtime's `heartbeat` task (defined in
+`kernel/src/runtime/heartbeat.rs`) emits one
+`record_kernel_uptime` + one `record_sessions_active` sample every
+`HEARTBEAT_INTERVAL = 5s`. Both samples are gauges so a missed tick
+does not accumulate — the next tick overwrites the series cleanly.
+
+The heartbeat does NOT carry the histogram families; those are
+emitted from their respective hot paths (intent admission, gateway
+fetch, audit append, dashboard request, …). The 5s cadence is
+chosen so Prometheus's 5s scrape interval picks up every
+heartbeat-driven gauge sample at least once per scrape window —
+INV-OBS-HEARTBEAT-PROM-CADENCE-01.
+
+### 3.14.3 Audit-chain bridge (V3 Part 2 expansion)
+
+The kernel's `NotifyingAuditSink` (`kernel/src/notifications/sink.rs`)
+forwards every successful `AuditEvent` emission to a closed table
+of matching metric helpers. The mapping is exhaustive over the
+variants the dashboards reference; everything else is a noop. The
+bridge is intentionally one-way (audit-log is the source of truth;
+metric is the dashboard fast path), and per `INV-OTEL-02` a
+redactor rejection drops the metric silently without affecting the
+audit-chain row.
+
+Variants bridged (in addition to the V3 §3 originals):
+
+| Audit variant | Bridged helper(s) |
+|---|---|
+| `SessionCreated`, `SessionVmSpawned`, `SessionVmExited` | `record_session_lifecycle_transition`, `record_session_duration` |
+| `InitiativeCreated`, `InitiativeStateChanged` (terminal), `InitiativeAborted` | `record_initiative_duration` |
+| `TaskAdmitted` | `record_initiative_task_in_flight` |
+| `NotificationDelivered`, `NotificationDeliveryFailed` | `record_notification_delivery` |
+| `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed` | `record_credproxy_connection`, `record_credproxy_policy_block` |
+| `DatabaseQueryExecuted`, `DatabaseQueryCompleted`, `HttpProxyRequestExecuted`, `SmtpMessageRelayed`, `SmtpMessageRejected` | `record_credproxy_statement`, `record_credproxy_bytes`, `record_credproxy_policy_block` |
+| `ReviewAggregationCompleted`, `ExecutorRespawnFromReviewRejection` | `record_reviewer_review`, `record_reviewer_disagreement`, `record_review_revision_round` |
+| `IntegrationMergeCompleted`, `MergeFastForwardFailed` | `record_git_merge`, `record_git_commit` |
+
+Session / initiative duration helpers correlate paired events by id
+through a small in-sink state cache; the cache is cleared on the
+terminal event so a long-running kernel does not accumulate state
+proportional to total-session count.
+
+Audit-chain lag (`raxis.audit.chain.lag`) is structurally zero in
+this codebase — the audit writer fsyncs synchronously on every
+append, so the in-memory tip equals the flushed seq at every
+successful return. The bridge re-emits the zero-gauge on every
+successful append so the dashboard series stays warm; an
+asynchronous-flush regression would surface as the first non-zero
+sample.
+
+Audit fsync failures (`raxis.audit.fsync.failure.total`) bump from
+the same seam: when `inner.emit` returns
+`AuditWriterError::Io(_)`, the `NotifyingAuditSink` classifies the
+reason (`"io"` for `Io`, `"other"` for the remaining variants) and
+emits the counter before propagating the error.
+
+### 3.14.4 Hot-path destinations (V3 Part 2 wiring)
+
+Beyond the audit-chain bridge, the kernel's high-volume hot paths
+carry direct `record_*` calls:
+
+| Helper | Site |
+|---|---|
+| `record_gateway_fetch` | `kernel/src/handlers/planner_fetch.rs` — post-gateway dispatch |
+| `record_egress_check` | `kernel/src/handlers/tproxy_admit.rs` — every admit / deny decision |
+| `record_git_worktree_provision` | `kernel/src/handlers/intent.rs::handle_activate_subtask` — wrapping the blocking provision call |
+| `record_dashboard_http_request` | `crates/dashboard/src/server.rs` middleware (axum) |
+| `record_dashboard_sse_active`, `record_dashboard_sse_event` | `crates/dashboard/src/routes/sessions.rs::stream` — RAII guard + per-frame counter |
+
+`record_gateway_fetch`'s `model` / `tokens_in` / `tokens_out` /
+`cached` fields are `None` / `false` at this site — the gateway
+runs in a separate subprocess and the kernel can only observe the
+HTTP-shape (host, status, latency) of the kernel-mediated call.
+The full provider-specific cardinality lives on the gateway-side
+metric surface (out of scope for the kernel `ObservabilityHub`).
+
+The three dashboard helpers live in
+`crates/observability/src/lib.rs` (not `kernel/src/observability.rs`)
+so the dashboard binary can call them without a circular dep on
+the kernel crate; `kernel/src/observability.rs` re-exports the
+three so any kernel-side caller can still use
+`crate::observability::record_dashboard_*` unchanged.
+
 ## 4. Grafana dashboards
 
 Eleven dashboards live under

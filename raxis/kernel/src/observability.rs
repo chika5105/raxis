@@ -525,63 +525,19 @@ pub fn record_gateway_upstream(
     );
 }
 
-/// `raxis.dashboard.http.request.duration` — every dashboard HTTP
-/// request, success or failure.
-pub fn record_dashboard_http_request(
-    hub:         &ObservabilityHub,
-    route:       &str,
-    http_method: &str,
-    http_status: i64,
-    duration_ms: i64,
-) {
-    if !hub.enabled() { return; }
-    let mut labels = redact::attrs([
-        ("route",       route),
-        ("http_method", http_method),
-    ]);
-    labels.insert(
-        "http_status".to_owned(),
-        raxis_observability::AttrValue::I64(http_status),
-    );
-    hub.record_histogram(
-        MetricName::DashboardHttpRequestDuration,
-        labels,
-        duration_ms.max(0) as f64,
-    );
-}
-
-/// `raxis.dashboard.sse.connection.active` gauge — sampled on connect
-/// and disconnect.
-pub fn record_dashboard_sse_active(
-    hub:   &ObservabilityHub,
-    route: &str,
-    count: i64,
-) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([("route", route)]);
-    hub.record_gauge(
-        MetricName::DashboardSseConnectionActive,
-        labels,
-        count.max(0) as f64,
-    );
-}
-
-/// `raxis.dashboard.sse.event.total` plus
-/// `raxis.dashboard.sse.lag.duration`.
-pub fn record_dashboard_sse_event(
-    hub:    &ObservabilityHub,
-    route:  &str,
-    lag_ms: i64,
-) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([("route", route)]);
-    hub.record_counter(MetricName::DashboardSseEventTotal, labels.clone(), 1.0);
-    hub.record_histogram(
-        MetricName::DashboardSseLagDuration,
-        labels,
-        lag_ms.max(0) as f64,
-    );
-}
+// V3 Part 2 — the three dashboard helpers live in `crates/observability`
+// so non-kernel crates (the dashboard binary) can call them without a
+// circular dep. Re-exported here for any kernel-side call site that
+// already imports `crate::observability::record_dashboard_*`. The
+// kernel binary itself never calls these (the only emit sites live
+// in `crates/dashboard`), so the unused-imports lint fires here
+// even though the re-export is part of the public surface.
+#[allow(unused_imports)]
+pub use raxis_observability::{
+    record_dashboard_http_request,
+    record_dashboard_sse_active,
+    record_dashboard_sse_event,
+};
 
 /// `raxis.reviewer.review.duration` plus `raxis.reviewer.outcome.total`.
 pub fn record_reviewer_review(

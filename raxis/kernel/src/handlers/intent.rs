@@ -4358,6 +4358,7 @@ async fn handle_activate_sub_task(
         let session_for_provision    = lookup.new_session_id.clone();
         let target_ref_for_provision = target_ref.clone();
         let data_dir_for_provision   = data_dir.clone();
+        let provision_started = std::time::Instant::now();
         let provisioned: Result<(raxis_isolation::WorkspaceMount, String, String), String> =
             tokio::task::spawn_blocking(move || {
                 let anchor = crate::worktree_provisioning::provision_orchestrator_worktree(
@@ -4385,8 +4386,27 @@ async fn handle_activate_sub_task(
                      \"task_id\":\"{}\",\"kind\":\"{}\",\"error\":\"{}\"}}",
                     task_id_owned, dispatch_kind, e,
                 );
+                crate::observability::record_git_worktree_provision(
+                    &ctx.observability,
+                    dispatch_kind,
+                    "join_failed",
+                    provision_started.elapsed().as_millis() as i64,
+                );
                 (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted)
             })?;
+        // V3 §3 perf-telemetry — wall-clock + outcome for the
+        // `provision_{orchestrator,executor,reviewer}` triple as a single
+        // observation. `role` mirrors the `dispatch_kind` lexicon
+        // (`executor` | `reviewer`); `outcome` is `ok` on success,
+        // `provision_failed` on a typed ProvisionError surfaced by the
+        // blocking task body.
+        let provision_outcome = if provisioned.is_ok() { "ok" } else { "provision_failed" };
+        crate::observability::record_git_worktree_provision(
+            &ctx.observability,
+            dispatch_kind,
+            provision_outcome,
+            provision_started.elapsed().as_millis() as i64,
+        );
         let (mount, base_sha, base_tracking_ref) = provisioned.map_err(|e| {
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionFailed\",\

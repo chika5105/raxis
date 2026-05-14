@@ -198,7 +198,7 @@ pub async fn handle(
     registry: &Arc<TunnelRegistry>,
 ) -> TproxyAdmissionResponse {
     let request_id = req.request_id;
-    let _started   = Instant::now();
+    let started    = Instant::now();
 
     // ── Step 1: resolve session token → SessionRow ────────────────
     let session = match resolve_session(&req.session_token, ctx).await {
@@ -216,6 +216,12 @@ pub async fn handle(
                 "",
                 &req,
                 reasons::SESSION_TOKEN_MISMATCH,
+            );
+            crate::observability::record_egress_check(
+                &ctx.observability,
+                "deny",
+                started.elapsed().as_millis() as i64,
+                Some(reasons::SESSION_TOKEN_MISMATCH),
             );
             return deny(request_id, reasons::SESSION_TOKEN_MISMATCH, None);
         }
@@ -264,8 +270,20 @@ pub async fn handle(
             reasons::HOST_NOT_IN_ALLOWLIST,
         );
         if !audit_ok {
+            crate::observability::record_egress_check(
+                &ctx.observability,
+                "deny",
+                started.elapsed().as_millis() as i64,
+                Some(reasons::AUDIT_EMIT_FAILED),
+            );
             return deny(request_id, reasons::AUDIT_EMIT_FAILED, None);
         }
+        crate::observability::record_egress_check(
+            &ctx.observability,
+            "deny",
+            started.elapsed().as_millis() as i64,
+            Some(reasons::HOST_NOT_IN_ALLOWLIST),
+        );
         return deny(
             request_id,
             reasons::HOST_NOT_IN_ALLOWLIST,
@@ -295,6 +313,12 @@ pub async fn handle(
             &req,
             reasons::PROTOCOL_NOT_PERMITTED,
         );
+        crate::observability::record_egress_check(
+            &ctx.observability,
+            "deny",
+            started.elapsed().as_millis() as i64,
+            Some(reasons::PROTOCOL_NOT_PERMITTED),
+        );
         return deny(request_id, reasons::PROTOCOL_NOT_PERMITTED, None);
     }
 
@@ -318,9 +342,21 @@ pub async fn handle(
         // we just registered (so the guest cannot consume it on a
         // subsequent dial) and respond Deny.
         let _ = registry.consume(tunnel_id, &tunnel_token);
+        crate::observability::record_egress_check(
+            &ctx.observability,
+            "deny",
+            started.elapsed().as_millis() as i64,
+            Some(reasons::AUDIT_EMIT_FAILED),
+        );
         return deny(request_id, reasons::AUDIT_EMIT_FAILED, None);
     }
 
+    crate::observability::record_egress_check(
+        &ctx.observability,
+        "admit",
+        started.elapsed().as_millis() as i64,
+        None,
+    );
     TproxyAdmissionResponse::Admit {
         request_id,
         tunnel_id,

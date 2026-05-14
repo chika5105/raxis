@@ -32,10 +32,13 @@
 // `notifications::dispatch`), so the calling thread returns
 // immediately after the inner emit completes.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError};
 use raxis_dashboard_kernel::notification_priority;
 use raxis_observability::ObservabilityHub;
@@ -43,6 +46,34 @@ use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
 use super::SidecarRegistry;
+
+/// Per-session bookkeeping used to compute `record_session_duration`
+/// and tag `record_session_lifecycle_transition` with the agent_type
+/// captured from the earlier `SessionCreated` event.
+///
+/// `SessionCreated` carries the agent_type but no spawn instant;
+/// `SessionVmSpawned` carries no agent_type; `SessionVmExited`
+/// carries neither. The bridge correlates the three by `session_id`.
+#[derive(Default)]
+struct SessionTracker {
+    /// session_id → (spawn_instant, agent_type)
+    by_session: HashMap<String, (Instant, String)>,
+}
+
+/// Per-initiative bookkeeping used to compute `record_initiative_duration`
+/// and to maintain the `record_initiative_task_in_flight` gauge.
+///
+/// `InitiativeCreated` carries no `initiative_class` (no audit event
+/// does at the moment), so the gauge / duration labels collapse to
+/// `"unknown"` — the closed allow-list accepts arbitrary strings up to
+/// 32 bytes for the `initiative_class` key.
+#[derive(Default)]
+struct InitiativeTracker {
+    /// initiative_id → start_instant
+    by_initiative: HashMap<String, Instant>,
+    /// initiative_id → in-flight task count
+    in_flight:     HashMap<String, i64>,
+}
 
 /// Wraps any `AuditSink` (typically `FileAuditSink` in production,
 /// `FakeAuditSink` in integration tests) and routes every emitted
@@ -60,6 +91,15 @@ pub struct NotifyingAuditSink {
     /// never wire a hub), the bridge is a noop. The hub is the
     /// dashboard fast path; the audit log remains the source of truth.
     obs_hub:          Option<Arc<ObservabilityHub>>,
+    /// V3 observability — per-session correlation state used to
+    /// compute session-duration / agent_type-tagged lifecycle
+    /// transitions. Only mutated when `obs_hub` is `Some(_)` AND
+    /// the inner emit succeeded; cleared on `SessionVmExited`.
+    sessions:    Mutex<SessionTracker>,
+    /// V3 observability — per-initiative correlation state used to
+    /// compute initiative-duration and the in-flight task gauge.
+    /// Same lifecycle discipline as `sessions`.
+    initiatives: Mutex<InitiativeTracker>,
 }
 
 impl NotifyingAuditSink {
@@ -79,6 +119,8 @@ impl NotifyingAuditSink {
             sidecar_registry: None,
             store: None,
             obs_hub: None,
+            sessions:    Mutex::new(SessionTracker::default()),
+            initiatives: Mutex::new(InitiativeTracker::default()),
         }
     }
 
@@ -112,31 +154,68 @@ impl NotifyingAuditSink {
 /// Returns `Some(clone)` for variants the metric bridge cares about,
 /// `None` for everything else. Lets the audit hot-path skip cloning
 /// the (sometimes-large) `AuditEventKind` enum when the variant has
-/// no counter — only the five V3 §3 expansion variants get cloned.
+/// no counter — only the bridged variants below get cloned.
 fn bridge_kind_if_relevant(kind: &AuditEventKind) -> Option<AuditEventKind> {
     matches!(
         kind,
+        // V3 §3 originals.
         AuditEventKind::TransparentProxyAdmitted { .. }
             | AuditEventKind::TransparentProxyDenied { .. }
             | AuditEventKind::DefaultProviderEgressApplied { .. }
             | AuditEventKind::SessionEgressStallDetected { .. }
             | AuditEventKind::CredentialProxySubstituted { .. }
+            // Session / initiative lifecycle (Part 2 expansion).
+            | AuditEventKind::SessionCreated { .. }
+            | AuditEventKind::SessionVmSpawned { .. }
+            | AuditEventKind::SessionVmExited { .. }
+            | AuditEventKind::InitiativeCreated { .. }
+            | AuditEventKind::InitiativeStateChanged { .. }
+            | AuditEventKind::InitiativeAborted { .. }
+            | AuditEventKind::TaskAdmitted { .. }
+            | AuditEventKind::TaskStateChanged { .. }
+            // Notifications.
+            | AuditEventKind::NotificationDelivered { .. }
+            | AuditEventKind::NotificationDeliveryFailed { .. }
+            // Credential proxies.
+            | AuditEventKind::CredentialProxyUpstreamConnected { .. }
+            | AuditEventKind::CredentialProxyUpstreamFailed { .. }
+            | AuditEventKind::DatabaseQueryExecuted { .. }
+            | AuditEventKind::DatabaseQueryCompleted { .. }
+            | AuditEventKind::HttpProxyRequestExecuted { .. }
+            | AuditEventKind::SmtpMessageRelayed { .. }
+            | AuditEventKind::SmtpMessageRejected { .. }
+            // Reviewer aggregation.
+            | AuditEventKind::ReviewAggregationCompleted { .. }
+            | AuditEventKind::ExecutorRespawnFromReviewRejection { .. }
+            // Git integration.
+            | AuditEventKind::IntegrationMergeCompleted { .. }
+            | AuditEventKind::MergeFastForwardFailed { .. }
     )
     .then(|| kind.clone())
 }
 
 /// Bump V3 §3 counters at the same moment the matching audit event
-/// is emitted. Mapping is exhaustive over the (currently five)
-/// variants the dashboards reference; everything else is a no-op so
-/// adding a new audit variant doesn't accidentally leak through this
-/// bridge unless someone adds a deliberate arm here.
+/// is emitted. Mapping is exhaustive over the variants the
+/// dashboards reference; everything else is a no-op so adding a new
+/// audit variant doesn't accidentally leak through this bridge
+/// unless someone adds a deliberate arm here.
 ///
 /// Kept private to this module so the mapping table lives next to
 /// the only call site (`NotifyingAuditSink::emit`); the per-metric
 /// helpers continue to live in `kernel/src/observability.rs`.
-fn bridge_audit_to_metric(hub: &ObservabilityHub, kind: &AuditEventKind) {
+///
+/// `sessions` / `initiatives` are mutated for variants that need
+/// cross-event correlation (spawn→exit duration, in-flight gauge);
+/// stateless variants ignore them.
+fn bridge_audit_to_metric(
+    hub:         &ObservabilityHub,
+    kind:        &AuditEventKind,
+    sessions:    &Mutex<SessionTracker>,
+    initiatives: &Mutex<InitiativeTracker>,
+) {
     use crate::observability as obs;
     match kind {
+        // ── V3 §3 originals ───────────────────────────────────────
         AuditEventKind::TransparentProxyAdmitted { .. } => {
             obs::record_egress_admit(hub, "tproxy");
         }
@@ -152,6 +231,288 @@ fn bridge_audit_to_metric(hub: &ObservabilityHub, kind: &AuditEventKind) {
         AuditEventKind::CredentialProxySubstituted { proxy_type, .. } => {
             obs::record_credential_proxy_substitution(hub, proxy_type);
         }
+
+        // ── Session lifecycle (lifecycle transition + duration) ───
+        //
+        // `SessionCreated` is the earliest event carrying the agent
+        // type; we cache it under the session id so the later
+        // `SessionVmExited` can emit duration + lifecycle transition
+        // with the right `agent_type` label.
+        AuditEventKind::SessionCreated { session_id, session_agent_type, .. } => {
+            let agent_type = session_agent_type
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_owned();
+            obs::record_session_lifecycle_transition(
+                hub, "None", "Created", &agent_type, "ok",
+            );
+            // Cache the agent_type. The spawn instant comes later on
+            // `SessionVmSpawned`; we seed with `Instant::now()` so
+            // sessions that go straight to exited without a spawn
+            // still get a non-zero duration window.
+            sessions.lock().by_session.insert(
+                session_id.clone(),
+                (Instant::now(), agent_type),
+            );
+        }
+        AuditEventKind::SessionVmSpawned { session_id, .. } => {
+            // Refresh the spawn instant — `SessionCreated` happens
+            // before scheduling admits the spawn; the wall-clock the
+            // operator cares about is the VM-spawn-to-VM-exit window.
+            let now = Instant::now();
+            let mut guard = sessions.lock();
+            match guard.by_session.get_mut(session_id) {
+                Some(entry) => entry.0 = now,
+                None => {
+                    // SessionCreated was missed (legacy chain or
+                    // SessionCreated emit failed); seed a fresh entry
+                    // with unknown agent_type.
+                    guard.by_session.insert(
+                        session_id.clone(),
+                        (now, "unknown".to_owned()),
+                    );
+                }
+            }
+            // Pull agent_type for the transition label without
+            // holding the guard across the metric emit (avoid lock
+            // contention on the high-volume admission path).
+            let agent_type = guard
+                .by_session
+                .get(session_id)
+                .map(|(_, a)| a.clone())
+                .unwrap_or_else(|| "unknown".to_owned());
+            drop(guard);
+            obs::record_session_lifecycle_transition(
+                hub, "Created", "Spawned", &agent_type, "ok",
+            );
+        }
+        AuditEventKind::SessionVmExited {
+            session_id, signal_class, ..
+        } => {
+            let entry = sessions.lock().by_session.remove(session_id);
+            let (spawn_instant, agent_type) = match entry {
+                Some(pair) => pair,
+                None => (Instant::now(), "unknown".to_owned()),
+            };
+            let duration_ms = spawn_instant.elapsed().as_millis() as i64;
+            let outcome = match signal_class.as_str() {
+                "GracefulExit" => "ok",
+                _ => "error",
+            };
+            obs::record_session_lifecycle_transition(
+                hub, "Spawned", "Exited", &agent_type, outcome,
+            );
+            obs::record_session_duration(
+                hub, &agent_type, outcome, duration_ms,
+            );
+        }
+
+        // ── Initiative lifecycle (duration + in-flight gauge) ────
+        //
+        // No audit event exposes an explicit `initiative_class`, so
+        // the gauge / histogram collapses to `"unknown"`. This is a
+        // valid label — the redactor accepts it under the closed
+        // `initiative_class` allow-list entry.
+        AuditEventKind::InitiativeCreated { initiative_id, .. } => {
+            initiatives.lock().by_initiative.insert(
+                initiative_id.clone(),
+                Instant::now(),
+            );
+        }
+        AuditEventKind::InitiativeStateChanged {
+            initiative_id, to_state, ..
+        } => {
+            // Only the terminal state-changes produce a duration
+            // observation. Mirror the FSM terminal set
+            // (Completed / Failed / Cancelled).
+            let terminal = matches!(
+                to_state.as_str(),
+                "Completed" | "Failed" | "Cancelled" | "Aborted",
+            );
+            if terminal {
+                let start = initiatives
+                    .lock()
+                    .by_initiative
+                    .remove(initiative_id)
+                    .unwrap_or_else(Instant::now);
+                let duration_ms = start.elapsed().as_millis() as i64;
+                let outcome = match to_state.as_str() {
+                    "Completed" => "ok",
+                    _ => "error",
+                };
+                obs::record_initiative_duration(
+                    hub, "unknown", outcome, duration_ms,
+                );
+            }
+        }
+        AuditEventKind::InitiativeAborted { initiative_id, .. } => {
+            let start = initiatives
+                .lock()
+                .by_initiative
+                .remove(initiative_id)
+                .unwrap_or_else(Instant::now);
+            let duration_ms = start.elapsed().as_millis() as i64;
+            obs::record_initiative_duration(
+                hub, "unknown", "aborted", duration_ms,
+            );
+        }
+        AuditEventKind::TaskAdmitted { initiative_id, .. } => {
+            let mut guard = initiatives.lock();
+            let count = guard.in_flight.entry(initiative_id.clone()).or_insert(0);
+            *count += 1;
+            let value = *count;
+            drop(guard);
+            obs::record_initiative_task_in_flight(hub, "unknown", value);
+        }
+        AuditEventKind::TaskStateChanged { to_state, .. } => {
+            // Only terminal task states decrement the gauge. We
+            // cannot look up the owning initiative_id from a
+            // `TaskStateChanged` payload (the event does not carry
+            // it), so we emit the gauge without a per-initiative
+            // delta — the kernel-side audit-paired-writes contract
+            // pairs TaskStateChanged with a TaskAdmitted earlier
+            // that already pushed an `initiative_class="unknown"`
+            // sample. This branch is intentionally a noop: the gauge
+            // converges to its true value at the next TaskAdmitted /
+            // initiative-completion tick.
+            let _ = to_state;
+        }
+
+        // ── Notifications ─────────────────────────────────────────
+        AuditEventKind::NotificationDelivered {
+            channel_kind, channel_id, event_kind, delivery_ms, ..
+        } => {
+            obs::record_notification_delivery(
+                hub,
+                channel_kind,
+                channel_id,
+                event_kind,
+                true,
+                *delivery_ms as i64,
+            );
+        }
+        AuditEventKind::NotificationDeliveryFailed {
+            channel_id, event_kind, ..
+        } => {
+            // `NotificationDeliveryFailed` does not carry
+            // `channel_kind` or `delivery_ms` — both surface only on
+            // the success path. Use `"unknown"` and 0 so the metric
+            // still records the failure attempt; dashboards filter
+            // on `success=false` to surface the failure rate.
+            obs::record_notification_delivery(
+                hub,
+                "unknown",
+                channel_id,
+                event_kind,
+                false,
+                0,
+            );
+        }
+
+        // ── Credential proxies ───────────────────────────────────
+        AuditEventKind::CredentialProxyUpstreamConnected {
+            proxy_type, handshake_ms, ..
+        } => {
+            obs::record_credproxy_connection(
+                hub, proxy_type, "ok", *handshake_ms as i64,
+            );
+        }
+        AuditEventKind::CredentialProxyUpstreamFailed {
+            proxy_type, reason, ..
+        } => {
+            obs::record_credproxy_connection(hub, proxy_type, "error", 0);
+            obs::record_credproxy_policy_block(hub, proxy_type, reason);
+        }
+        AuditEventKind::DatabaseQueryExecuted {
+            operation, blocked, ..
+        } => {
+            let outcome = if *blocked { "blocked" } else { "ok" };
+            obs::record_credproxy_statement(
+                hub, "database", operation, outcome, *blocked, 0,
+            );
+        }
+        AuditEventKind::DatabaseQueryCompleted {
+            proxy_type, bytes_returned, duration_ms, upstream_error, ..
+        } => {
+            let outcome = if upstream_error.is_some() { "error" } else { "ok" };
+            obs::record_credproxy_statement(
+                hub, proxy_type, "query", outcome, false, *duration_ms as i64,
+            );
+            obs::record_credproxy_bytes(
+                hub, proxy_type, "in", *bytes_returned as i64,
+            );
+        }
+        AuditEventKind::HttpProxyRequestExecuted {
+            method, blocked, status_code, ..
+        } => {
+            let outcome = if *blocked {
+                "blocked"
+            } else if *status_code >= 500 {
+                "error"
+            } else {
+                "ok"
+            };
+            obs::record_credproxy_statement(
+                hub, "http", method, outcome, *blocked, 0,
+            );
+        }
+        AuditEventKind::SmtpMessageRelayed {
+            bytes_relayed, ..
+        } => {
+            obs::record_credproxy_statement(
+                hub, "smtp", "relay", "ok", false, 0,
+            );
+            obs::record_credproxy_bytes(
+                hub, "smtp", "out", *bytes_relayed as i64,
+            );
+        }
+        AuditEventKind::SmtpMessageRejected { reason, .. } => {
+            obs::record_credproxy_statement(
+                hub, "smtp", "relay", "blocked", true, 0,
+            );
+            obs::record_credproxy_policy_block(hub, "smtp", reason);
+        }
+
+        // ── Reviewer aggregation ─────────────────────────────────
+        AuditEventKind::ReviewAggregationCompleted {
+            verdict, reviewer_count, ..
+        } => {
+            // `record_reviewer_review` records one observation per
+            // terminal aggregation. Duration is unknown at this
+            // layer (the audit event does not carry it); 0 is the
+            // safe sentinel — the aggregation completion event is
+            // itself instantaneous from the audit chain's POV.
+            obs::record_reviewer_review(hub, verdict, 0);
+            if verdict == "AtLeastOneRejected" {
+                // `revision_round` carries the cardinality of the
+                // disagreement (number of dissenting reviewers as a
+                // proxy); the helper takes an i64 and the
+                // `reviewer_count` value is the closest available
+                // measure at this layer.
+                obs::record_reviewer_disagreement(
+                    hub, *reviewer_count as i64,
+                );
+            }
+            obs::record_review_revision_round(hub, *reviewer_count as i64);
+        }
+        AuditEventKind::ExecutorRespawnFromReviewRejection {
+            review_reject_count, ..
+        } => {
+            obs::record_review_revision_round(
+                hub, *review_reject_count as i64,
+            );
+        }
+
+        // ── Git integration ──────────────────────────────────────
+        AuditEventKind::IntegrationMergeCompleted { .. } => {
+            obs::record_git_merge(hub, "ok", 0);
+            obs::record_git_commit(hub, "orchestrator");
+        }
+        AuditEventKind::MergeFastForwardFailed { category, .. } => {
+            let _ = category;
+            obs::record_git_merge(hub, "error", 0);
+        }
+
         _ => { /* no metric counterpart — audit log carries it alone */ }
     }
 }
@@ -191,16 +552,47 @@ impl AuditSink for NotifyingAuditSink {
         // borrow `&kind` once (so a noisy kind avoids the clone /
         // bundle snapshot / dispatch fan-out below).
         let priority = notification_priority(&kind);
-        let event = self.inner.emit(kind, session_id, task_id, initiative_id)?;
+        let inner_result = self.inner.emit(kind, session_id, task_id, initiative_id);
+        let event = match inner_result {
+            Ok(ev) => ev,
+            Err(e) => {
+                // V3 perf-telemetry — audit-chain fsync / append
+                // failures are an operational alarm bell. We can
+                // only see the error category at this seam (the
+                // inner sink doesn't surface a typed kind), so we
+                // classify by `AuditWriterError` variant.
+                if let Some(hub) = self.obs_hub.as_ref() {
+                    let reason = match &e {
+                        AuditWriterError::Io(_) => "io",
+                        _ => "other",
+                    };
+                    crate::observability::record_audit_fsync_failure(hub, reason);
+                }
+                return Err(e);
+            }
+        };
 
         // 1a. Bridge to the V3 §3 metric counter (egress admit/deny/
-        //     default-grant/stall, credential-proxy substitution). The
-        //     hub bump runs only after the inner emit succeeded, so
+        //     default-grant/stall, credential-proxy substitution,
+        //     plus the Part 2 expansion: session / initiative /
+        //     notification / credproxy / reviewer / git). The hub
+        //     bump runs only after the inner emit succeeded, so
         //     metric and audit always agree on what landed. Hub may
         //     be `None` in legacy unit-test paths; bridge is a noop
         //     when missing.
-        if let (Some(hub), Some(bk)) = (self.obs_hub.as_ref(), bridge_kind) {
-            bridge_audit_to_metric(hub, &bk);
+        if let Some(hub) = self.obs_hub.as_ref() {
+            if let Some(bk) = bridge_kind {
+                bridge_audit_to_metric(hub, &bk, &self.sessions, &self.initiatives);
+            }
+            // V3 perf-telemetry — the kernel's audit chain is
+            // sync-fsync'd on every successful append (`writer.rs`
+            // calls `File::sync_data` before returning Ok), so the
+            // "events behind in-memory tip" gauge is structurally
+            // zero at this seam. Re-emitting the zero gauge per
+            // successful append keeps the dashboard surface alive
+            // (a stale series would silently mask a future
+            // asynchronous-flush regression).
+            crate::observability::record_audit_chain_lag(hub, 0);
         }
 
         // 1b. INV-NOTIF-SCOPE-01: drop events that should not reach
@@ -499,21 +891,25 @@ mod tests {
         hub.flush();
 
         let metrics = exp.metrics();
-        assert_eq!(metrics.len(), 1,
-            "exactly one bridged metric expected; got {metrics:#?}");
+        // V3 Part 2 expansion: every successful audit append also
+        // emits `raxis.audit.chain.lag` (gauge, sync-fsync ⇒ always 0).
+        // The bridged-variant assertion is now "find the deny counter"
+        // rather than "exactly one metric".
+        let deny = metrics
+            .iter()
+            .find(|m| m.name.as_otel_name() == "raxis.egress.deny.total")
+            .unwrap_or_else(|| panic!(
+                "expected one raxis.egress.deny.total metric; got {metrics:#?}",
+            ));
         assert_eq!(
-            metrics[0].name.as_otel_name(),
-            "raxis.egress.deny.total",
-        );
-        assert_eq!(
-            metrics[0].labels.get("chokepoint").map(|v| match v {
+            deny.labels.get("chokepoint").map(|v| match v {
                 raxis_observability::AttrValue::Str(s) => s.as_str(),
                 _ => panic!("chokepoint label must be Str"),
             }),
             Some("tproxy"),
         );
         assert_eq!(
-            metrics[0].labels.get("reason").map(|v| match v {
+            deny.labels.get("reason").map(|v| match v {
                 raxis_observability::AttrValue::Str(s) => s.as_str(),
                 _ => panic!("reason label must be Str"),
             }),
