@@ -565,6 +565,46 @@ fn realistic_session_lifecycle() {
         ),
         &tp_workdir,
     );
+    // ── Observability witness — periodic flush drained the queue ──
+    // Catches the iter48 regression at the live-e2e level: an
+    // enabled observability hub without a periodic flush task
+    // fails closed silently — the in-memory queue fills,
+    // `DropReason::QueueFull` increments for every subsequent
+    // record, and the JSONL ring file stays 0 bytes for the full
+    // kernel lifetime. The unit-test witness in
+    // `kernel/src/observability_boot.rs::tests::\
+    // periodic_flush_drains_queue_to_ring_file_within_one_interval`
+    // pins the spawn-site mechanics; this Tier-3 line pins the
+    // end-to-end "kernel produced metric frames over a full
+    // realism scenario" contract. Asserted BEFORE the SIGTERM
+    // graceful-shutdown so a kernel-side `flush()` on shutdown
+    // can't mask a missing periodic-flush task.
+    let metrics_jsonl =
+        kernel.data_dir().join("observability/metrics/000001.jsonl");
+    let metrics_size = std::fs::metadata(&metrics_jsonl)
+        .unwrap_or_else(|e| {
+            panic!(
+                "observability metrics ring file {} not found: {e}; \
+                 kernel produced no metric frames over the full \
+                 realism scenario run â periodic flush task is \
+                 missing or wedged (see \
+                 `kernel/src/observability_boot.rs::spawn_periodic_flush`)",
+                metrics_jsonl.display(),
+            )
+        })
+        .len();
+    assert!(
+        metrics_size > 0,
+        "kernel produced 0 bytes of observability metrics over the \
+         full scenario run; periodic flush task is missing or \
+         wedged. File: {}",
+        metrics_jsonl.display(),
+    );
+    eprintln!(
+        "[realism-e2e] observability metrics ring witness: \
+         {} = {metrics_size} bytes (>0 â periodic flush task drained the queue)",
+        metrics_jsonl.display(),
+    );
     // ── Graceful shutdown ────────────────────────────────────
     let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
     assert!(

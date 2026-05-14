@@ -99,6 +99,18 @@ This is the single rule that makes the rest of the spec coherent. Every design d
 │     `max_queue_depth`      │
 │   - drops on overflow      │
 │     (counter incremented)  │
+│            ▲               │
+│            │               │
+│  spawn_periodic_flush task │
+│  (one tokio task / kernel) │
+│   - cadence =              │
+│     `[observability.metrics] │
+│       .export_interval`    │
+│   - calls hub.flush() →    │
+│     drains queue → exporter│
+│   - WITHOUT THIS LOOP THE  │
+│     QUEUE FILLS AND THE    │
+│     RING FILE STAYS 0 BYTES│
 │            │               │
 │            ▼               │
 │  RingFileWriter            │
@@ -160,6 +172,7 @@ These are derived from §2.3 and are non-negotiable:
 |---|---|---|
 | **Type system** (SpanData, MetricData, attribute schema) | `crates/observability/src/types.rs` | Pure data; no I/O; no time. |
 | **Hub** (in-memory queue + ring file writer) | `crates/observability/src/hub.rs` | Owned by the kernel; one instance per process; `Arc<ObservabilityHub>` on `HandlerContext`. |
+| **Hub queue-drain task** | `kernel/src/observability_boot.rs::spawn_periodic_flush` | One tokio task per kernel run, spawned by `build_obs_hub` immediately after the hub is constructed. Calls `hub.flush()` every `[observability.metrics].export_interval`. Without this task the in-memory queue fills to `max_queue_depth` and silently drops every subsequent record (`DropReason::QueueFull`); the ring file stays 0 bytes for the entire kernel lifetime. The witness test `kernel/src/observability_boot.rs::tests::periodic_flush_drains_queue_to_ring_file_within_one_interval` pins this contract; the live-e2e Tier-3 assertion in `kernel/tests/extended_e2e_realistic_scenario.rs` re-asserts it over a full realism scenario. |
 | **Trait** (`ObservabilityExporter`) | `crates/observability/src/exporter.rs` | The kernel-side exporter abstraction (default impl: `RingFileExporter`). Alternative impls (`InMemoryExporter` for tests, future `TonicExporter` for embedded mode) plug in here. |
 | **Redactor** (closed allow-list) | `crates/observability/src/redact.rs` | Applied unconditionally to every span and metric attribute before write. |
 | **Sidecar protocol** (JSONL frame format, cursor file) | `crates/observability/src/protocol.rs` | Shared by kernel writer and pusher reader. |
@@ -303,7 +316,25 @@ max_events_per_span = 16                 # range [0, 64]
 
 [observability.metrics]
 enabled            = true
-export_interval    = "15s"               # how often the pusher exports metric batches; range [1s, 300s]
+# How often the kernel-side `spawn_periodic_flush` task drains the
+# `ObservabilityHub`'s in-memory queue into the ring file exporter.
+# This is the kernel-side queue-drain cadence, NOT the pusher-side
+# OTLP batch cadence — see `[observability.pusher].otlp_flush_interval`
+# for the latter. The two are independent: the kernel writes JSONL
+# frames to disk every `export_interval`; the pusher reads those
+# frames and ships them to OTLP every `otlp_flush_interval`.
+#
+# An enabled hub without this periodic-flush task fails closed
+# silently — the queue fills to `[observability.ring].max_queue_depth`,
+# every subsequent `record_*` call increments
+# `DropReason::QueueFull`, and the JSONL ring file stays 0 bytes for
+# the full kernel lifetime. The contract is enforced by the boot-side
+# `kernel/src/observability_boot.rs::spawn_periodic_flush` and
+# witness-tested by `kernel/src/observability_boot.rs::tests::\
+# periodic_flush_drains_queue_to_ring_file_within_one_interval` plus
+# the live-e2e Tier-3 assertion in
+# `kernel/tests/extended_e2e_realistic_scenario.rs`.
+export_interval    = "15s"               # range [1s, 300s]
 histogram_buckets  = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]   # ms
 
 [observability.resource]
@@ -383,6 +414,24 @@ x-tenant-id   = "platform"
 | `pusher.headers` keys match `^[a-zA-Z0-9_-]+$` and are not in the reserved set `{user-agent, content-type, content-length, te, host, transfer-encoding}`. | `FAIL_OBS_HEADER_KEY` |
 
 The validator runs at policy load and at every `advance_epoch` call; an invalid `[observability]` section refuses the rotation (`FAIL_POLICY_VALIDATION`).
+
+### §5.3 Silent-failure mode (the queue-drain contract)
+
+An enabled `[observability]` section without a kernel-side periodic queue-drain task fails closed silently. The structural truth (`v3/otel-observability.md §3.1`):
+
+> An enabled `ObservabilityHub` MUST have its in-memory queue drained periodically. With no drain, the queue fills to `[observability.ring].max_queue_depth`, every subsequent `record_*` call increments `DropReason::QueueFull`, the JSONL ring file under `<data_dir>/observability/{spans,metrics}/` stays 0 bytes for the full kernel lifetime, the out-of-process `raxis-otel-pusher` tails empty files, and Prometheus / Grafana scrape nothing.
+
+The drain runs on the kernel's main multi-threaded tokio runtime as a single task spawned by `kernel/src/observability_boot.rs::spawn_periodic_flush` immediately after the hub is constructed. Its cadence is `[observability.metrics].export_interval`. The task is suppressed when:
+
+  * `enabled = false` (the hub holds a `NoopExporter`; nothing to drain).
+  * `interval.is_zero()` (a defence-in-depth guard against a hand-constructed `HubConfig`; production policy validation forbids zero via `FAIL_OBS_METRICS_INTERVAL`).
+
+The contract is enforced by:
+
+  * **Unit witness**: `kernel/src/observability_boot.rs::tests::periodic_flush_drains_queue_to_ring_file_within_one_interval` — drives a record through `record_intent_admission` after `spawn_periodic_flush`, asserts the ring file is 0 bytes before one interval has elapsed, sleeps `2 × interval + 50 ms`, asserts the ring file is non-zero.
+  * **Live-e2e Tier-3 assertion**: `kernel/tests/extended_e2e_realistic_scenario.rs` reads `<data_dir>/observability/metrics/000001.jsonl` after the full realism scenario completes (BEFORE graceful shutdown so a kernel-side `flush()` on shutdown can't mask a missing periodic-flush task) and panics if the file is 0 bytes.
+
+This is `[observability.metrics].export_interval`'s load-bearing semantics; ignore it in code and the entire dashboard surface goes silent.
 
 ---
 
