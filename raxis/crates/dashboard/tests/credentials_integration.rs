@@ -185,9 +185,18 @@ async fn list_initiative_credentials_returns_metadata_only_no_plaintext_field() 
     handle.shutdown().await.expect("shutdown");
 }
 
+/// `worker/audit-noise-sweep-r2` retired the
+/// `OperatorListedCredentials` emission: the listing is a
+/// read-only browse of metadata-only rows, and the security-
+/// relevant moment is the per-credential `OperatorRevealedCredential`
+/// event that the reveal endpoint still emits. The test flipped
+/// from "every list emits a paired audit row" to "the read-only
+/// list leaves the audit ledger untouched"; the reveal-side
+/// tests below pin the security-event coverage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn listing_emits_operator_listed_credentials_audit_with_count() {
-    let (handle, base, token, data, fp) =
+#[allow(deprecated)] // pattern-matches the deprecated variant on purpose
+async fn listing_does_not_emit_operator_listed_credentials_audit() {
+    let (handle, base, token, data, _fp) =
         serve_with_role(DashboardRole::Read).await;
     data.push_initiative_credential("init-1", fixture("a", "x"))
         .push_initiative_credential("init-1", fixture("b", "y"));
@@ -202,21 +211,14 @@ async fn listing_emits_operator_listed_credentials_audit_with_count() {
     assert_eq!(res.status(), 200);
 
     let audits = data.recorded_operator_audits();
-    let row = audits
+    let any_listing = audits
         .iter()
-        .find(|e| matches!(e, AuditEventKind::OperatorListedCredentials { .. }))
-        .expect("paired audit emission");
-    if let AuditEventKind::OperatorListedCredentials {
-        operator_fingerprint, initiative_id, count, outcome,
-    } = row
-    {
-        assert_eq!(*operator_fingerprint, fp);
-        assert_eq!(*initiative_id, "init-1");
-        assert_eq!(*count, 2, "audit row carries the surfaced row count");
-        assert_eq!(outcome, "Accepted");
-    } else {
-        unreachable!()
-    }
+        .any(|e| matches!(e, AuditEventKind::OperatorListedCredentials { .. }));
+    assert!(
+        !any_listing,
+        "Expected no OperatorListedCredentials row after a read-only \
+         list (signal-vs-noise round-2 tightening). Saw: {audits:?}",
+    );
     handle.shutdown().await.expect("shutdown");
 }
 
@@ -237,7 +239,17 @@ async fn list_initiative_credentials_unknown_initiative_returns_404() {
     handle.shutdown().await.expect("shutdown");
 }
 
+/// `worker/audit-noise-sweep-r2` retired the
+/// `OperatorListedSystemCredentials` emission. The role gate
+/// (admin-only) is still enforced — a `read` caller cannot
+/// even discover the provider names — but the rejection no
+/// longer appends a chain row. The denied-attempt forensic
+/// trail moved off the audit chain and onto the dashboard
+/// access-log surface; the chain reserves its rows for state
+/// mutations and security events (signal-vs-noise policy in
+/// `specs/v2/dashboard-operator-action-audit-coverage.md`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(deprecated)] // pattern-matches the deprecated variant on purpose
 async fn list_system_credentials_rejects_read_role() {
     let (handle, base, token, data, _fp) =
         serve_with_role(DashboardRole::Read).await;
@@ -252,17 +264,15 @@ async fn list_system_credentials_rejects_read_role() {
         .expect("send");
     assert_eq!(res.status(), 403, "system listing is admin-only");
 
-    // Even on rejection, the audit chain MUST record the
-    // attempt so a forensic walker sees the denied access.
     let audits = data.recorded_operator_audits();
-    let denied = audits.iter().any(|e| {
-        matches!(
-            e,
-            AuditEventKind::OperatorListedSystemCredentials { outcome, .. }
-                if outcome == "RejectedPermission"
-        )
+    let any_listing = audits.iter().any(|e| {
+        matches!(e, AuditEventKind::OperatorListedSystemCredentials { .. })
     });
-    assert!(denied, "listing-denied audit row not found: {audits:?}");
+    assert!(
+        !any_listing,
+        "Expected no OperatorListedSystemCredentials row after a \
+         read-only list (signal-vs-noise round-2 tightening). Saw: {audits:?}",
+    );
     handle.shutdown().await.expect("shutdown");
 }
 

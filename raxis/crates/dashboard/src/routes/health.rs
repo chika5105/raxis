@@ -7,12 +7,16 @@
 //! metadata (active session counts, doctor-style checks). All
 //! other operators get a sanitized `{ status: "ok" }` shape.
 //!
-//! The subsystem-health surface gates on `read` like every
-//! other privileged-read view, and emits an
-//! `OperatorHealthQueried` audit event per
-//! `INV-AUDIT-OPERATOR-ACTION-01`. Verdicts come from the
-//! kernel's own bookkeeping — the dashboard never invents a
-//! status (`INV-DASHBOARD-VALIDATE-01`).
+//! Audit discipline: every health surface here is a read-only
+//! browse. The `OperatorHealthQueried` emission was retired in
+//! `worker/audit-noise-sweep-r2` per the signal-vs-noise policy
+//! in `specs/v2/dashboard-operator-action-audit-coverage.md` —
+//! per-poll health pings are dashboard heartbeat telemetry, not
+//! forensic events, and observability infrastructure (Prom /
+//! OTel) records them at a fraction of the chain's per-row
+//! cost. Verdicts still come from the kernel's own bookkeeping
+//! — the dashboard never invents a status (`INV-DASHBOARD-
+//! VALIDATE-01`).
 //!
 //! V2.5 `self-healing-supervisor.md §5.2`: the kernel-lifecycle
 //! handler reads the supervisor's atomic sentinel file
@@ -28,11 +32,10 @@ use std::path::PathBuf;
 
 use axum::extract::State;
 use axum::Json;
-use raxis_audit_tools::AuditEventKind;
 use serde::Serialize;
 
 use crate::auth::DashboardRole;
-use crate::data::{operator_outcome, HealthSnapshot, SubsystemHealthResponse};
+use crate::data::{HealthSnapshot, SubsystemHealthResponse};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -66,10 +69,12 @@ where
 }
 
 /// `GET /api/health/subsystems` — per-subsystem cards for the
-/// dashboard Health tab. Honours `INV-AUDIT-OPERATOR-ACTION-01`
-/// (audit emit on success and on each rejection path) and
+/// dashboard Health tab. Pure read-only browse; honours
 /// `INV-DASHBOARD-VALIDATE-01` (validate auth + permission
-/// before any privileged read).
+/// before any privileged read). No `Operator*` audit fires —
+/// the read does not affect kernel state and per-poll rows
+/// drown out forensic signal (see signal-vs-noise policy in
+/// `specs/v2/dashboard-operator-action-audit-coverage.md`).
 pub async fn subsystems<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -78,42 +83,10 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        let err = ApiError::Forbidden { required: "read".into() };
-        emit_health_audit(
-            &*state.data,
-            &op,
-            operator_outcome::outcome_from_api_error(&err),
-        );
-        return Err(err);
+        return Err(ApiError::Forbidden { required: "read".into() });
     }
-    let snapshot = match state.data.subsystem_health() {
-        Ok(s) => s,
-        Err(err) => {
-            emit_health_audit(
-                &*state.data,
-                &op,
-                operator_outcome::outcome_from_api_error(&err),
-            );
-            return Err(err);
-        }
-    };
-    state
-        .data
-        .emit_operator_audit(AuditEventKind::OperatorHealthQueried {
-            operator_fingerprint: op.fingerprint.clone(),
-            outcome:              operator_outcome::ACCEPTED.into(),
-        })?;
+    let snapshot = state.data.subsystem_health()?;
     Ok(Json(snapshot))
-}
-
-fn emit_health_audit<D>(data: &D, op: &AuthorizedOperator, outcome: &'static str)
-where
-    D: crate::data::DashboardData + ?Sized,
-{
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorHealthQueried {
-        operator_fingerprint: op.fingerprint.clone(),
-        outcome:              outcome.into(),
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -245,9 +218,10 @@ fn default_status_healthy() -> String { "Healthy".to_owned() }
 ///
 /// Polled by the `KernelLifecycleBanner` React component every
 /// 5 seconds (`self-healing-supervisor.md §5.4`). Gated on the
-/// `read` role like every other privileged-read view, emits one
-/// `OperatorHealthQueried` audit row per request per
-/// `INV-AUDIT-OPERATOR-ACTION-01`.
+/// `read` role like every other privileged-read view. No
+/// `Operator*` audit fires — the read is a kernel-lifecycle
+/// banner poll, not a forensic action (signal-vs-noise policy
+/// in `specs/v2/dashboard-operator-action-audit-coverage.md`).
 pub async fn kernel_lifecycle<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -256,21 +230,9 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        let err = ApiError::Forbidden { required: "read".into() };
-        emit_health_audit(
-            &*state.data,
-            &op,
-            operator_outcome::outcome_from_api_error(&err),
-        );
-        return Err(err);
+        return Err(ApiError::Forbidden { required: "read".into() });
     }
     let response = read_kernel_lifecycle_response(state.config.data_dir.as_deref());
-    state
-        .data
-        .emit_operator_audit(AuditEventKind::OperatorHealthQueried {
-            operator_fingerprint: op.fingerprint.clone(),
-            outcome:              operator_outcome::ACCEPTED.into(),
-        })?;
     Ok(Json(response))
 }
 

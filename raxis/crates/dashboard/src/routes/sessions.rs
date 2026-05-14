@@ -3,13 +3,15 @@
 //! Audit discipline: the list and detail endpoints are pure
 //! read-only browsers. The `OperatorViewedSessionList` /
 //! `OperatorViewedSession` emissions were retired in
-//! `worker/audit-tightening` per the signal-vs-noise policy in
-//! `specs/v2/dashboard-operator-action-audit-coverage.md`. The
-//! SSE attach (`OperatorOpenedSessionStream`) IS still audited:
-//! it's a one-shot per-attach event that hands the operator a
-//! long-lived window into session-private capture data, so the
-//! attach moment is forensically interesting and not a periodic
-//! "view" emission.
+//! `worker/audit-tightening`, and the SSE attach
+//! (`OperatorOpenedSessionStream`) emission was retired in
+//! `worker/audit-noise-sweep-r2`. The session is already
+//! running; the operator's read-only attach to its capture
+//! stream does not affect kernel state and the per-attach
+//! audit row only ever proved "someone looked", which the
+//! audit chain itself records via the events the stream
+//! mirrors. See signal-vs-noise policy in
+//! `specs/v2/dashboard-operator-action-audit-coverage.md`.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -20,11 +22,10 @@ use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use futures_util::stream::{self, Stream, StreamExt};
-use raxis_audit_tools::AuditEventKind;
 use serde::Deserialize;
 
 use crate::auth::DashboardRole;
-use crate::data::{operator_outcome, SessionView};
+use crate::data::SessionView;
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator, ShutdownSignal};
 use crate::stream::StreamEvent;
@@ -148,10 +149,7 @@ pub async fn stream<D>(
 where
     D: crate::data::DashboardData,
 {
-    if let Err(e) = require_read(&op) {
-        emit_stream_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&e));
-        return Err(e);
-    }
+    require_read(&op)?;
     // V3 perf-telemetry — bookend the per-stream lifetime with one
     // `raxis.dashboard.sse.connection.active` gauge sample at attach
     // and one at detach. The detach path runs from a `Drop` guard so
@@ -191,21 +189,13 @@ where
     // failure surface for the SSE handler matches the rest of the
     // session API surface (`/api/sessions/:id` returns 404 / 500
     // through the same path).
-    if let Err(err) = state.data.get_session(&id) {
-        emit_stream_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&err));
-        // sse_guard drops here → gauge decrements correctly.
-        return Err(err);
-    }
-    // Audit the SSE attach BEFORE we hand the long-lived
-    // connection to the operator. Per
-    // `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01` the
-    // attach itself is the audited event; the keepalive frames
-    // that follow are NOT audited (they would flood the chain).
-    state.data.emit_operator_audit(AuditEventKind::OperatorOpenedSessionStream {
-        operator_fingerprint: op.fingerprint.clone(),
-        session_id: id.clone(),
-        outcome: operator_outcome::ACCEPTED.into(),
-    })?;
+    state.data.get_session(&id)?;
+    // SSE attach is a read-only window into the session's
+    // existing capture stream — no kernel state changes here
+    // and the audit row only ever recorded "someone looked".
+    // Retired in `worker/audit-noise-sweep-r2` per the
+    // signal-vs-noise policy in
+    // `specs/v2/dashboard-operator-action-audit-coverage.md`.
     // Fast-path the kernel-shutdown case: a freshly-attached
     // subscriber that hits a kernel that already triggered
     // shutdown gets a single sentinel frame and a clean close
@@ -277,19 +267,6 @@ impl Drop for SseActiveGuard {
             remaining.max(0),
         );
     }
-}
-
-fn emit_stream_audit<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    session_id: &str,
-    outcome: &'static str,
-) where D: crate::data::DashboardData + ?Sized {
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorOpenedSessionStream {
-        operator_fingerprint: op.fingerprint.clone(),
-        session_id: session_id.to_owned(),
-        outcome: outcome.into(),
-    });
 }
 
 /// Parse the SSE `Last-Event-ID` request header into a `u64`

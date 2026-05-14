@@ -2449,7 +2449,6 @@ pub mod recent_activity_filter {
         "OperatorDeniedRespawnEscalation",
         "OperatorRevealedCredential",
         "OperatorRevealedSystemCredential",
-        "OperatorAuditChainReverified",
         "PolicyUpdatedViaDashboard",
         "PolicyEpochAdvanced",
         "DryRunAdmitted",
@@ -2516,10 +2515,15 @@ pub mod recent_activity_filter {
 
         #[test]
         fn allow_list_excludes_operator_pageview_class_events() {
-            // Health-tick, notification-mark, worktree-access and
-            // similar per-click events that remain in the audit
-            // chain for forensic walks but are not what the
-            // Overview surfaces.
+            // Per-click read-only events that the dashboard used
+            // to mirror onto the chain. `worker/audit-noise-sweep-r2`
+            // stops emitting these entirely; the Overview filter
+            // remains a defensive backstop against any stray
+            // already-persisted row (or replay harness) that
+            // surfaces one. The two notification-mutation events
+            // continue to emit (state mutations) but stay out of
+            // the curated Overview to keep its "what changed?"
+            // feel focused on initiative-affecting work.
             assert!(!is_important("OperatorHealthQueried"));
             assert!(!is_important("OperatorNotificationMarkedRead"));
             assert!(!is_important("OperatorNotificationsMarkedAllRead"));
@@ -2529,6 +2533,13 @@ pub mod recent_activity_filter {
             assert!(!is_important("OperatorListedCredentials"));
             assert!(!is_important("OperatorListedSystemCredentials"));
             assert!(!is_important("OperatorOpenedSessionStream"));
+            // `OperatorAuditChainReverified` was previously in the
+            // allow-list back when the dashboard emitted it on
+            // every reverify click; round-2 of the audit-tightening
+            // sweep retired the emit site, so it stays out of the
+            // curated feed too. The variant remains on the enum as
+            // `#[deprecated]` so old chains still decode.
+            assert!(!is_important("OperatorAuditChainReverified"));
         }
     }
 }

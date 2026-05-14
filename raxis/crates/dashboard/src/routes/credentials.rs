@@ -12,12 +12,23 @@
 //!     `read`-role caller can't even discover the system credential
 //!     names.
 //!
-//! Every request emits a paired `Operator*` audit event BEFORE the
-//! response is returned (`INV-AUDIT-OPERATOR-ACTION-01` /
-//! `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`). Failure paths
-//! audit too with the rejection class on `outcome`.
+//! Audit discipline:
 //!
-//! The reveal endpoints are rate-limited via the data layer's
+//!   * The reveal endpoints emit a paired `OperatorRevealedCredential`
+//!     / `OperatorRevealedSystemCredential` audit row BEFORE the
+//!     plaintext leaves the kernel — a secret disclosure is the
+//!     security event a forensic walker MUST be able to reconstruct
+//!     (`INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01`).
+//!   * The listing endpoints return metadata only, mutate no
+//!     kernel state, and were emitting `OperatorListedCredentials`
+//!     / `OperatorListedSystemCredentials` on every poll. The
+//!     reveal event records the security-relevant moment;
+//!     auditing the listing too was redundant pageview noise and
+//!     was retired in `worker/audit-noise-sweep-r2`. See
+//!     signal-vs-noise policy in
+//!     `specs/v2/dashboard-operator-action-audit-coverage.md`.
+//!
+//! The reveal endpoints remain rate-limited via the data layer's
 //! `enforce_reveal_rate_limit` (default 5 reveals per 60s per
 //! operator). A 429 also audits — the dashboard cares about
 //! operators that hammer the endpoint.
@@ -41,7 +52,8 @@ use crate::server::{AppState, AuthorizedOperator};
 ///
 /// Returns metadata only — `INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01`
 /// pins the wire shape so a future refactor can't accidentally add a
-/// `bytes` field.
+/// `bytes` field. Read-only browse; no `Operator*` audit fires (the
+/// reveal endpoint records the security-relevant moment).
 pub async fn list_initiative<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -54,56 +66,10 @@ where
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        emit_initiative_listed(
-            &*state.data,
-            &op,
-            &initiative_id,
-            0,
-            operator_outcome::REJECTED_PERMISSION,
-        );
         return Err(ApiError::Forbidden { required: "read".into() });
     }
-    let result = state.data.list_initiative_credentials(&initiative_id);
-    let credentials = match result {
-        Ok(c) => c,
-        Err(err) => {
-            emit_initiative_listed(
-                &*state.data,
-                &op,
-                &initiative_id,
-                0,
-                operator_outcome::outcome_from_api_error(&err),
-            );
-            return Err(err);
-        }
-    };
-    let count = credentials.len() as u32;
-    state
-        .data
-        .emit_operator_audit(AuditEventKind::OperatorListedCredentials {
-            operator_fingerprint: op.fingerprint.clone(),
-            initiative_id:        initiative_id.clone(),
-            count,
-            outcome:              operator_outcome::ACCEPTED.into(),
-        })?;
+    let credentials = state.data.list_initiative_credentials(&initiative_id)?;
     Ok(Json(CredentialListResponse { credentials }))
-}
-
-fn emit_initiative_listed<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    initiative_id: &str,
-    count: u32,
-    outcome: &'static str,
-) where
-    D: crate::data::DashboardData + ?Sized,
-{
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorListedCredentials {
-        operator_fingerprint: op.fingerprint.clone(),
-        initiative_id:        initiative_id.to_owned(),
-        count,
-        outcome:              outcome.into(),
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +184,9 @@ fn emit_initiative_revealed<D>(
 ///
 /// Admin-only — even discovering the names of provider credentials
 /// requires the admin role. `read` callers cannot enumerate which
-/// providers the kernel is configured against.
+/// providers the kernel is configured against. Read-only browse;
+/// no `Operator*` audit fires (the reveal endpoint records the
+/// security-relevant moment).
 pub async fn list_system<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -227,51 +195,10 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Admin) {
-        emit_system_listed(
-            &*state.data,
-            &op,
-            0,
-            operator_outcome::REJECTED_PERMISSION,
-        );
         return Err(ApiError::Forbidden { required: "admin".into() });
     }
-    let result = state.data.list_system_credentials();
-    let credentials = match result {
-        Ok(c) => c,
-        Err(err) => {
-            emit_system_listed(
-                &*state.data,
-                &op,
-                0,
-                operator_outcome::outcome_from_api_error(&err),
-            );
-            return Err(err);
-        }
-    };
-    let count = credentials.len() as u32;
-    state
-        .data
-        .emit_operator_audit(AuditEventKind::OperatorListedSystemCredentials {
-            operator_fingerprint: op.fingerprint.clone(),
-            count,
-            outcome: operator_outcome::ACCEPTED.into(),
-        })?;
+    let credentials = state.data.list_system_credentials()?;
     Ok(Json(CredentialListResponse { credentials }))
-}
-
-fn emit_system_listed<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    count: u32,
-    outcome: &'static str,
-) where
-    D: crate::data::DashboardData + ?Sized,
-{
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorListedSystemCredentials {
-        operator_fingerprint: op.fingerprint.clone(),
-        count,
-        outcome: outcome.into(),
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +538,13 @@ mod tests {
     }
 
     /// `read`-role can't even list system credentials.
+    ///
+    /// `worker/audit-noise-sweep-r2` retired the
+    /// `OperatorListedSystemCredentials` emission; the test
+    /// flipped from "rejection emits an audit row" to "the
+    /// read-only browse leaves the audit ledger untouched"
+    /// (signal-vs-noise policy in
+    /// `specs/v2/dashboard-operator-action-audit-coverage.md`).
     #[tokio::test]
     async fn list_system_forbidden_for_read_role() {
         let d = InMemoryDashboardData::new();
@@ -626,13 +560,10 @@ mod tests {
             other => panic!("expected Forbidden, got {other:?}"),
         }
         let audits = d.recorded_operator_audits();
-        assert_eq!(audits.len(), 1);
-        match &audits[0] {
-            AuditEventKind::OperatorListedSystemCredentials { outcome, .. } => {
-                assert_eq!(outcome, "RejectedPermission");
-            }
-            other => panic!("unexpected audit kind: {other:?}"),
-        }
+        assert!(
+            audits.is_empty(),
+            "listing is a read-only browse; expected no audit rows, got: {audits:?}",
+        );
     }
 
     fn _app_state(

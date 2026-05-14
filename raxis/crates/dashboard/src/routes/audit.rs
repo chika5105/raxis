@@ -11,21 +11,23 @@
 //!
 //! Audit discipline: paging the chain is itself a read-only
 //! browse, so the `OperatorViewedAuditChain` emission was retired
-//! in `worker/audit-tightening` per the signal-vs-noise policy
-//! in `specs/v2/dashboard-operator-action-audit-coverage.md`.
-//! The chain re-verify path (`?reverify=true`) DOES still audit
-//! via `OperatorAuditChainReverified` because it pins a kernel
-//! worker on a full chain walk — that's a state-affecting load.
+//! in `worker/audit-tightening`. The chain re-verify path
+//! (`?reverify=true`) was emitting `OperatorAuditChainReverified`
+//! per request; `worker/audit-noise-sweep-r2` retired that too
+//! because verifying the audit chain does not mutate kernel
+//! state and emitting an audit row about verifying the audit
+//! chain is recursive noise. The data-layer rate-limit
+//! (≤ 1 reverify per ~30 s per operator) plus the cache-hit
+//! short-circuit are enough to keep the walker from being
+//! abused; signal-vs-noise policy in
+//! `specs/v2/dashboard-operator-action-audit-coverage.md`.
 
 use axum::extract::{Query, State};
 use axum::Json;
-use raxis_audit_tools::AuditEventKind;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
-use crate::data::{
-    operator_outcome, recent_activity_filter, AuditEntryView, ChainStatusView,
-};
+use crate::data::{recent_activity_filter, AuditEntryView, ChainStatusView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -155,12 +157,14 @@ pub struct ChainStatusResponse {
 /// `INV-AUDIT-DASHBOARD-01`. The verdict comes from the kernel's
 /// own `verify_chain_from` walker (no FE re-implementation).
 ///
-/// Audit discipline: implicit (cache-hit) reads are NOT audited
-/// — they would flood the chain with one row per page mount.
-/// The explicit `?reverify=true` path IS audited via
-/// `OperatorAuditChainReverified` per `INV-AUDIT-OPERATOR-ACTION-01`,
-/// since it deliberately pins a kernel worker thread on a full
-/// chain walk.
+/// Audit discipline: every branch here is a read of an existing
+/// kernel verdict (cache hit) or a re-walk of the already-persisted
+/// chain. Neither mutates kernel state, and the data-layer
+/// rate-limit on `?reverify=true` keeps a chatty UI from pinning
+/// a worker thread. No `Operator*` audit fires — emitting a row
+/// about verifying the audit chain is recursive noise (signal-
+/// vs-noise policy in
+/// `specs/v2/dashboard-operator-action-audit-coverage.md`).
 pub async fn chain_status<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -169,61 +173,9 @@ pub async fn chain_status<D>(
 where
     D: crate::data::DashboardData,
 {
-    if let Err(e) = require_read(&op) {
-        if q.reverify {
-            emit_reverify_audit(
-                &*state.data,
-                &op,
-                "unknown",
-                0,
-                operator_outcome::outcome_from_api_error(&e),
-            );
-        }
-        return Err(e);
-    }
-    let (fresh, status) = match state.data.audit_chain_status(q.reverify) {
-        Ok(v) => v,
-        Err(err) => {
-            if q.reverify {
-                emit_reverify_audit(
-                    &*state.data,
-                    &op,
-                    "unknown",
-                    0,
-                    operator_outcome::outcome_from_api_error(&err),
-                );
-            }
-            return Err(err);
-        }
-    };
-    if q.reverify {
-        state
-            .data
-            .emit_operator_audit(AuditEventKind::OperatorAuditChainReverified {
-                operator_fingerprint: op.fingerprint.clone(),
-                verdict:              status.status.clone(),
-                last_verified_seq:    status.last_verified_seq,
-                outcome:              operator_outcome::ACCEPTED.into(),
-            })?;
-    }
+    require_read(&op)?;
+    let (fresh, status) = state.data.audit_chain_status(q.reverify)?;
     Ok(Json(ChainStatusResponse { fresh, status }))
-}
-
-fn emit_reverify_audit<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    verdict: &str,
-    last_verified_seq: u64,
-    outcome: &'static str,
-) where
-    D: crate::data::DashboardData + ?Sized,
-{
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorAuditChainReverified {
-        operator_fingerprint: op.fingerprint.clone(),
-        verdict:              verdict.to_owned(),
-        last_verified_seq,
-        outcome:              outcome.into(),
-    });
 }
 
 fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
