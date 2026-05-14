@@ -191,6 +191,21 @@ pub enum PlannerErrorCode {
     /// diagnostic with the underlying cause.
     #[serde(rename = "FAIL_WORKTREE_PROVISION")]
     FailWorktreeProvision,
+
+    /// **V2 `agent-disagreement.md §3.6`** — the orchestrator
+    /// submitted `IntegrationMerge` while at least one Executor
+    /// task in the initiative still carries a cross-Reviewer
+    /// terminal verdict of `AtLeastOneRejected`. The orchestrator
+    /// NNSP rule 3a directs `retry_subtask` for that executor
+    /// BEFORE `integration_merge` is allowed; the kernel-side
+    /// fail-closed gate here REFUSES to silently ship defective
+    /// code despite the reviewer's objection (paradigm-`R-6`
+    /// Fail-Closed Default). Retryable: the orchestrator must
+    /// either retry the rejected executor (`retry_subtask`) or
+    /// escalate per `agent-disagreement.md §3` before re-issuing
+    /// `integration_merge`.
+    #[serde(rename = "FAIL_REVIEW_OUTSTANDING")]
+    FailReviewOutstanding,
 }
 
 impl PlannerErrorCode {
@@ -233,6 +248,7 @@ impl fmt::Display for PlannerErrorCode {
             Self::FailStructuredOutputRateLimited => "FAIL_STRUCTURED_OUTPUT_RATE_LIMITED",
             Self::FailGitApplyPending => "FAIL_GIT_APPLY_PENDING",
             Self::FailWorktreeProvision => "FAIL_WORKTREE_PROVISION",
+            Self::FailReviewOutstanding => "FAIL_REVIEW_OUTSTANDING",
         };
         f.write_str(s)
     }

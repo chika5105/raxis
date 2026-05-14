@@ -946,6 +946,122 @@ fn run_phase_a(
         }
     }
 
+    // ── Step 3d: IntegrationMerge fail-closed gate on outstanding review ──
+    //
+    // The orchestrator's NNSP rule 3a (`crates/planner-core/src/
+    // driver.rs::render_system_prompt_for_role`) directs
+    // `retry_subtask` for every Executor row reading
+    // `aggregate=AtLeastOneRejected` BEFORE `integration_merge`
+    // is allowed (`agent-disagreement.md §3.6`). The kernel-side
+    // backstop here REFUSES to silently ship defective code
+    // despite the reviewer's objection (paradigm-`R-6` Fail-Closed
+    // Default), so a regressed NNSP / blind-asking LLM cannot turn
+    // an outstanding `AtLeastOneRejected` cross-Reviewer verdict
+    // into a fast-forward of `target_ref`.
+    //
+    // Iter49 reproduced the failure mode: both Reviewers rejected
+    // the lint-defect → lint-runner pipeline, the kernel-side
+    // aggregator emitted `ReviewAggregationCompleted{verdict=
+    // AtLeastOneRejected}` and bumped `review_reject_count = 1` on
+    // `lint-runner`'s latest activation, but the orchestrator
+    // session that submitted the next decision-cycle's terminal
+    // tool was a fresh respawn whose KSB carried `aggregate=
+    // AtLeastOneRejected retry_admissible=true` for `lint-runner`
+    // — and the LLM still chose `integration_merge` over
+    // `retry_subtask{lint-runner}`, silently shipping the
+    // defective lint-runner commit that the Reviewer panel had
+    // unanimously rejected. The
+    // `ReviewerSubstantiveDisagreementWitness` failed with
+    // `saw_executor_respawn=false saw_aggregation_pass=false`.
+    //
+    // The check iterates every Executor task in the initiative
+    // (per the plan registry's `session_agent_type == Executor`
+    // filter — Reviewer / Orchestrator rows never carry a
+    // meaningful aggregate verdict and `compute_aggregate_review_
+    // outcome_with_conn` skips them) and rejects the merge with
+    // `FailReviewOutstanding` on the first executor whose latest
+    // verdict-fold is `AtLeastOneRejected`. The structured
+    // `eprintln` carries the offending executor task id so the
+    // operator can read it from the kernel log without joining
+    // SQLite. Aggregate verdicts of `AllPassed`, `Pending`, and
+    // `NoSuccessors` all pass the gate — `Pending` is the
+    // partial-vote race window (sibling Reviewer still owes a
+    // verdict; aggregator hasn't fired) and the orchestrator's
+    // own NNSP rule 4 already gates the merge on every reviewer
+    // being `complete`, so a `Pending` verdict at this point
+    // implies the orchestrator went rogue against rule 4 and the
+    // failure should surface as a `FailMissingWitness` /
+    // `FailPolicyViolation` from a downstream gate, not here.
+    if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
+        let initiative_id = task.initiative_id.clone();
+        let blocker: Option<(String, String)> = {
+            use crate::initiatives::review_aggregation
+                ::compute_aggregate_review_outcome_with_conn;
+            use crate::initiatives::plan_registry::TaskKey;
+            let conn = store.lock_sync();
+            // Pull every task in the initiative once so the per-row
+            // aggregate-verdict fold below borrows the registry +
+            // connection without issuing N+1 SELECTs.
+            let task_ids: Vec<String> = match conn.prepare(&format!(
+                "SELECT task_id FROM {TASKS} WHERE initiative_id = ?1 \
+                 ORDER BY admitted_at ASC, task_id ASC"
+            )) {
+                Ok(mut stmt) => {
+                    match stmt.query_map(
+                        rusqlite::params![initiative_id.as_str()],
+                        |r| r.get::<_, String>(0),
+                    ) {
+                        Ok(it) => it.filter_map(Result::ok).collect(),
+                        Err(_) => Vec::new(),
+                    }
+                }
+                Err(_) => Vec::new(),
+            };
+            let mut found: Option<(String, String)> = None;
+            for tid in task_ids {
+                let key = TaskKey::new(initiative_id.as_str(), tid.as_str());
+                let is_executor = ctx.plan_registry.get(&key)
+                    .map(|f| f.session_agent_type
+                        == raxis_types::SessionAgentType::Executor)
+                    .unwrap_or(false);
+                if !is_executor { continue; }
+                match compute_aggregate_review_outcome_with_conn(
+                    &tid, &conn, None,
+                ) {
+                    Ok(outcome) => {
+                        let v = outcome.verdict.wire_str();
+                        if v == "AtLeastOneRejected" {
+                            found = Some((tid, v.to_owned()));
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // Database read failure — fail-closed: a
+                        // missing aggregate read is treated as
+                        // "verdict unknown" and we refuse the merge
+                        // with a synthetic `unknown` verdict so the
+                        // operator can see the kernel-side log line.
+                        found = Some((tid, "unknown".to_owned()));
+                        break;
+                    }
+                }
+            }
+            found
+        };
+        if let Some((blocker_task, verdict_str)) = blocker {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"IntegrationMergeBlockedByOutstandingReview\",\
+                 \"task_id\":\"{}\",\"initiative_id\":\"{initiative_id}\",\
+                 \"blocker_executor_task_id\":\"{blocker_task}\",\
+                 \"blocker_aggregate_verdict\":\"{verdict_str}\",\
+                 \"diagnostic\":\"executor task {blocker_task} has aggregate verdict {verdict_str}; orchestrator must retry_subtask before integration_merge per agent-disagreement.md §3.6 (paradigm-R-6 Fail-Closed Default)\"}}",
+                req.task_id.as_str(),
+            );
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailReviewOutstanding, task_state);
+        }
+    }
+
     // ── Step 4: Validate worktree_root against policy ─────────────────────
     let worktree_root = session.worktree_root.as_deref().unwrap_or("");
     if !policy.worktree_root_allowed(worktree_root) {
