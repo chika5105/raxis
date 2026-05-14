@@ -2740,21 +2740,23 @@ fired.
 
 ---
 
-### INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01 — Kernel admits `RetrySubTask` from `Completed` IFF `review_reject_count > 0`
+### INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01 — Kernel admits `RetrySubTask` from `Completed` / `PendingActivation` IFF `review_reject_count > 0`
 
 **Statement.**
 `handle_retry_sub_task` (in `kernel/src/handlers/intent.rs`) MUST
 admit a `RetrySubTask` intent against an executor sub-task whose
-MOST-RECENT `subtask_activations` row has `activation_state =
-'Completed'` IF AND ONLY IF the same row has `review_reject_count
-> 0`. The two retry-eligibility classes are:
+MOST-RECENT `subtask_activations` row is in one of the three
+retry-eligibility classes below; everything else MUST reject with
+`FAIL_INVALID_REQUEST`.
 
 | Class | Prior activation state | `review_reject_count` | Anchor audit event | Decision rationale |
 |---|---|---|---|---|
 | Crash-retry | `Failed` | (any) | none — the preceding `TaskStateChanged { state: Failed }` is the anchor | Classic `ReportFailure` → retry per `v2-deep-spec.md §Step 12` |
 | Reviewer-rejection retry (Option A) | `Completed` | `> 0` | `ExecutorRespawnFromReviewRejection` (this invariant's anchor) | Executor task-FSM stays `Completed` (forward-only) per `kernel-store.md §2.5.1`; the counter is the canonical "this round was rejected" witness |
+| Reviewer-rejection retry — iter48 extension | `PendingActivation` | `> 0` | `ExecutorRespawnFromReviewRejection` (same event reused; `prior_activation_id` payload disambiguates the Completed vs PendingActivation branch) | A prior `RetrySubTask` admit landed and inserted a fresh `PendingActivation` row, but the orchestrator session that submitted the prior retry exited cleanly BEFORE issuing the follow-up `ActivateSubTask`. The post-exit hook respawned a fresh orchestrator decision-cycle session; that session reads the cumulative-trajectory witness (`review_reject_count > 0`, still `aggregate=AtLeastOneRejected`) and re-issues `RetrySubTask`. The iter48 NNSP fix steers the LLM toward `ActivateSubTask` instead, but the kernel admit predicate is the structural backstop for any LLM blind-ask, harness bug, or future NNSP regression. |
 | (rejected) | `Completed` | `0` | n/a — the handler rejects with `FAIL_INVALID_REQUEST` | Clean completion; admitting would let the orchestrator force a re-run of a successful task (paradigm-`R-6` Fail-Closed Default violation) |
-| (rejected) | `Active` / `PendingActivation` | (any) | n/a — `FAIL_INVALID_REQUEST` | Live or queued round; nothing to retry yet |
+| (rejected) | `PendingActivation` | `0` | n/a — `FAIL_INVALID_REQUEST` | Brand-new round-1 admission; no Reviewer has voted yet, the orchestrator MUST issue `ActivateSubTask` (not `RetrySubTask`); admitting would race the pending spawn against the retry handler's revoke + insert |
+| (rejected) | `Active` | (any, including `> 0`) | n/a — `FAIL_INVALID_REQUEST` | Executor VM is still running; admitting would race the executor's eventual `CompleteTask` cascade against this handler's revoke + insert. The orchestrator MUST wait for activation termination before retrying. |
 
 The retry inserts a NEW `PendingActivation` row carrying both
 counters forward from the prior row verbatim. The prior row's
@@ -2817,6 +2819,55 @@ The fix lands all three halves in one PR:
   the `Completed + review_reject_count > 0` branch (this
   invariant).
 
+**iter48 reproduction trace + extension.** The iter42 fix above
+admitted the FIRST retry-from-rejection but left a follow-up loop
+class uncovered. Iter48's `realistic_session_lifecycle` live-e2e
+on `lint-defect` reproduced it:
+
+1. Round-1 `Completed` activation `cba693a4-...` got two reviewer
+   rejections (`AtLeastOneRejected`); the kernel bumped
+   `review_reject_count = 1`.
+2. Orchestrator session `88a256b1-...` submitted `RetrySubTask`;
+   the kernel admitted via the iter42 `Completed +
+   review_reject_count > 0` branch and inserted a round-2
+   `PendingActivation` row `bcfdd7ce-...` carrying
+   `review_reject_count = 1` forward.
+3. Orchestrator session `88a256b1-...` exited cleanly BEFORE
+   issuing the follow-up `ActivateSubTask` (decision-cycle
+   sessions exit after each terminal tool call per V2.5b).
+4. The post-exit hook respawned a fresh orchestrator
+   `84d011c5-...`. The new session read the cumulative-trajectory
+   witness (`review_reject_count = 1`, still
+   `aggregate=AtLeastOneRejected`) and re-issued `RetrySubTask`
+   against the `bcfdd7ce-...` PendingActivation row.
+5. The kernel rejected with
+   `RetrySubTaskRejectedNotRetryable`,
+   `prior_state=PendingActivation`, `review_reject_count=1`.
+6. The orchestrator exited; the post-exit hook respawned again;
+   the same loop repeated. After three no-progress rounds the
+   `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` ceiling fired and
+   the kernel marked the initiative `Failed`.
+
+Iter48 first attempted to fix the loop via the orchestrator NNSP
+(commit `4d19026`: gate `retry_subtask` on
+`capabilities.tasks[*].retry_admissible`, route the LLM to
+`activate_subtask` when the retry is inadmissible). That fix is
+correct AND necessary — the LLM should not blind-ask retry — but
+is not load-bearing on its own: a future NNSP regression, KSB
+projection bug, harness bug, or LLM hallucination could
+re-introduce the loop class with a different cause. The kernel
+admit predicate is the structural backstop.
+
+This invariant therefore extends the admit-set with a third
+class: `prior_state == 'PendingActivation'` AND
+`review_reject_count > 0`. The same `> 0` witness gates both the
+`Completed` and `PendingActivation` branches — a brand-new
+round-1 PendingActivation row (no Reviewer ever voted) stays
+non-retryable. `Active` is intentionally excluded regardless of
+counter (admitting a retry against a still-running executor
+would race the eventual `CompleteTask` cascade against the
+retry handler's revoke + insert).
+
 **Rejected alternative — Option B (`Completed → Failed`
 backward transition).** The earlier proposal to transition the
 activation row from `Completed` back to `Failed` on
@@ -2852,6 +2903,34 @@ admission contract) + `kernel-store.md §2.5.1`
   — negative case: `Completed + review_reject_count = 0`
   rejects with `FAIL_INVALID_REQUEST` (regression guard against
   accidentally unlocking retry from clean Completed states).
+- `kernel/src/handlers/intent.rs::tests::retry_from_pending_activation_with_review_rejection_admits_and_emits_audit`
+  — iter48 positive case: `PendingActivation +
+  review_reject_count = 1` admits the retry, inserts a fresh
+  `PendingActivation` row (so the per-task activation count is 2:
+  one round-1 prior + one round-2 fresh), keeps the prior row
+  immutable, emits `ExecutorRespawnFromReviewRejection` with the
+  iter48 prior + new activation ids in the payload, does NOT
+  emit `SessionRevoked` (no prior session was bound on the
+  PendingActivation branch).
+- `kernel/src/handlers/intent.rs::tests::retry_from_pending_activation_without_review_rejection_is_rejected`
+  — iter48 negative case: `PendingActivation +
+  review_reject_count = 0` (a brand-new round-1 admission, no
+  Reviewer ever voted) rejects with `FAIL_INVALID_REQUEST`
+  (regression guard against accidentally widening retry to
+  in-flight rounds).
+- `crates/types/src/intent_admit.rs::tests::admits_when_pending_activation_with_review_rejection`
+  + `rejects_when_pending_activation_without_review_rejection`
+  + `rejects_active_even_with_review_rejection` — pure
+  predicate unit tests covering the iter48 extension and the
+  `Active`-stays-non-retryable carve-out.
+- `kernel/tests/ksb_capabilities_parity.rs::predicate_and_ksb_view_agree_across_admission_matrix`
+  — extended with the `pending-activation-with-rejection-iter48`
+  parity row (admissible) and the
+  `active-with-rejection-still-not-retryable` parity row
+  (inadmissible). A drift between the kernel admit predicate and
+  the KSB `retry_admissible` projection on either row would fail
+  this parity witness before any live-e2e dryrun has to wait
+  for the harness deadline.
 - `kernel/src/handlers/intent.rs::tests::increment_review_reject_count_bumps_most_recent_terminated_row`
   — counter-no-op fix: bump succeeds against a Completed
   activation with populated `terminated_at` (iter41 silent-bug

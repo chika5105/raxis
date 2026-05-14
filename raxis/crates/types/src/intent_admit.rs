@@ -60,8 +60,23 @@ pub enum RetryInadmissibleReason {
     /// never been activated; `RetrySubTask` is meaningless.
     /// Wire counterpart: `eprintln "RetrySubTaskRejectedUnknownTask"`.
     NoPriorActivation,
-    /// The most-recent activation's `activation_state` is neither
-    /// `Failed` nor `Completed-with-review_reject_count > 0`.
+    /// The most-recent activation's `activation_state` is not in
+    /// any retry-eligible class. The closed set of admissible
+    /// classes (per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
+    /// + iter48 `PendingActivation` extension) is:
+    ///   * `Failed` — classic crash / `ReportFailure`.
+    ///   * `Completed` AND `review_reject_count > 0` — Reviewer-
+    ///     rejection retry per Option A.
+    ///   * `PendingActivation` AND `review_reject_count > 0` —
+    ///     Reviewer-rejection retry whose prior `RetrySubTask`
+    ///     admit landed but never reached `ActivateSubTask` (the
+    ///     orchestrator session that issued the prior retry exited
+    ///     between the two intents; a fresh orchestrator now reads
+    ///     the cumulative trajectory `review_reject_count > 0` and
+    ///     re-issues `RetrySubTask`).
+    /// Anything else lands here (`Active`, `Completed` with
+    /// `review_reject_count = 0`, `PendingActivation` with
+    /// `review_reject_count = 0`, etc).
     /// Wire counterpart: `eprintln "RetrySubTaskRejectedNotRetryable"`.
     NotRetryable {
         /// The actual prior state (verbatim, lowercase per the
@@ -103,7 +118,9 @@ impl RetryInadmissibleReason {
                 "no prior activation".to_owned(),
             RetryInadmissibleReason::NotRetryable { prior_state, review_reject_count } =>
                 format!(
-                    "prior state {prior_state}; need Failed or Completed-with-review-rejection \
+                    "prior state {prior_state}; need Failed or \
+                     Completed-with-review-rejection or \
+                     PendingActivation-with-review-rejection \
                      (review_reject_count={review_reject_count})"
                 ),
             RetryInadmissibleReason::CrashCeiling { crash_retry_count, max_crash_retries } =>
@@ -164,6 +181,7 @@ pub struct RetryAdmitInputs<'a> {
 ///   1. No prior activation ⇒
 ///      [`RetryInadmissibleReason::NoPriorActivation`].
 ///   2. Prior state ≠ `"Failed"` AND not `(Completed +
+///      review_reject_count > 0)` AND not `(PendingActivation +
 ///      review_reject_count > 0)` ⇒
 ///      [`RetryInadmissibleReason::NotRetryable`] —
 ///      `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.
@@ -172,6 +190,64 @@ pub struct RetryAdmitInputs<'a> {
 ///   4. `review_reject_count >= max_review_rejections` ⇒
 ///      [`RetryInadmissibleReason::ReviewCeiling`].
 ///   5. Otherwise: [`AdmitOutcome::Admissible`].
+///
+/// ## iter48 `PendingActivation` extension
+///
+/// The original Option-A formulation (`Completed +
+/// review_reject_count > 0`) admitted the FIRST retry-from-rejection
+/// but rejected every subsequent retry whose prior round was itself
+/// a `RetrySubTask` admit (the new activation row this handler
+/// inserts is `PendingActivation`, NOT `Completed`). The iter48
+/// live-e2e reproduced the failure mode:
+///
+///   1. Round-1 `Completed` activation gets two reviewer rejections
+///      (`AtLeastOneRejected`); kernel bumps `review_reject_count = 1`.
+///   2. Orchestrator submits `RetrySubTask`; kernel admits via the
+///      `Completed + review_reject_count > 0` branch and inserts a
+///      round-2 `PendingActivation` row carrying `review_reject_count
+///      = 1` forward.
+///   3. The orchestrator session that submitted the prior retry exits
+///      cleanly (decision-cycle session — see `v2-deep-spec.md §Step 12
+///      V2.5b`) BEFORE issuing the follow-up `ActivateSubTask`.
+///   4. The post-exit hook respawns a fresh orchestrator. The new
+///      orchestrator reads the KSB capabilities envelope, sees a
+///      cumulative trajectory `review_reject_count = 1` with a still-
+///      live `AtLeastOneRejected` aggregate verdict, and re-issues
+///      `RetrySubTask` (the iter48 NNSP fix steers it to
+///      `ActivateSubTask` — but the kernel admit predicate is the
+///      structural backstop for any LLM blind-ask, harness bug, or
+///      future NNSP regression).
+///   5. Pre-iter48: kernel observes `prior_state = 'PendingActivation'`,
+///      rejects with `RetrySubTaskRejectedNotRetryable`, the
+///      orchestrator exits, the no-progress respawn ceiling
+///      (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fires after three
+///      rounds, and the initiative deadlocks to `Failed`.
+///   6. Post-iter48: the predicate admits the retry — the same
+///      cumulative-rejection witness (`review_reject_count > 0`) is
+///      load-bearing in both the `Completed` and `PendingActivation`
+///      cases. The handler revokes any prior session (a no-op on the
+///      `PendingActivation` path because no session is bound),
+///      inserts a NEW `PendingActivation` row carrying counters
+///      forward verbatim, and resets `tasks.state = Admitted` so the
+///      follow-up `ActivateSubTask` is dispatch-legal.
+///
+/// Why the `> 0` gate is still load-bearing on the
+/// `PendingActivation` branch: a brand-new `PendingActivation` row
+/// (round-1 admission via `ActivateSubTask`-but-no-spawn-yet) has
+/// `review_reject_count = 0` because no Reviewer has ever voted on
+/// it. Admitting `PendingActivation + review_reject_count = 0` would
+/// let the orchestrator force a redo of an in-flight round before
+/// any verdict has been recorded, violating paradigm-`R-6`
+/// (Fail-Closed Default). The counter remains the canonical
+/// "a Reviewer has rejected this trajectory" witness.
+///
+/// `Active` is intentionally left OUT of the allow-list: an `Active`
+/// row means the executor VM is still running and producing output;
+/// admitting a retry would race the executor's eventual
+/// `CompleteTask` against the orchestrator's revoke + re-insert.
+/// The orchestrator MUST wait for the activation to terminate
+/// (cascade to `Completed` or `Failed`) before retrying — the
+/// rejection here is structural, not a budget gate.
 ///
 /// The IPC handler enforces additional gates (envelope replay
 /// protection, session revocation, FSM transactionality) that are
@@ -182,9 +258,10 @@ pub fn admit_retry_subtask_check(inputs: &RetryAdmitInputs<'_>) -> AdmitOutcome 
         Some(s) => s,
         None    => return AdmitOutcome::Inadmissible(RetryInadmissibleReason::NoPriorActivation),
     };
-    let allow_from_completed_review_rejection =
-        prior_state == "Completed" && inputs.review_reject_count > 0;
-    if prior_state != "Failed" && !allow_from_completed_review_rejection {
+    let allow_from_review_rejection =
+        (prior_state == "Completed" || prior_state == "PendingActivation")
+            && inputs.review_reject_count > 0;
+    if prior_state != "Failed" && !allow_from_review_rejection {
         return AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable {
             prior_state:         prior_state.to_owned(),
             review_reject_count: inputs.review_reject_count,
@@ -249,6 +326,72 @@ mod tests {
             AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable { prior_state, review_reject_count }) => {
                 assert_eq!(prior_state, "Completed");
                 assert_eq!(review_reject_count, 0);
+            }
+            other => panic!("expected NotRetryable, got {other:?}"),
+        }
+    }
+
+    /// `iter48` regression — `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
+    /// extension. A `PendingActivation` row carrying
+    /// `review_reject_count > 0` represents a prior `RetrySubTask`
+    /// admit whose follow-up `ActivateSubTask` never landed (the
+    /// orchestrator session that issued the prior retry exited
+    /// before issuing the spawn intent). A fresh orchestrator
+    /// reading the cumulative-trajectory witness MUST be able to
+    /// re-issue `RetrySubTask`; the kernel admit predicate is the
+    /// structural backstop that closes the post-iter48 deadlock.
+    #[test]
+    fn admits_when_pending_activation_with_review_rejection() {
+        let inputs = RetryAdmitInputs {
+            prior_activation_state: Some("PendingActivation"),
+            review_reject_count:    1,
+            ..base()
+        };
+        assert_eq!(admit_retry_subtask_check(&inputs), AdmitOutcome::Admissible);
+    }
+
+    /// Negative regression guard — a brand-new `PendingActivation`
+    /// row (round-1 admission, no Reviewer ever voted) MUST NOT be
+    /// retry-eligible. The `review_reject_count > 0` gate is the
+    /// canonical "a Reviewer has rejected this trajectory" witness;
+    /// without it, `RetrySubTask` against an in-flight round would
+    /// race the eventual `ActivateSubTask` + executor lifecycle.
+    #[test]
+    fn rejects_when_pending_activation_without_review_rejection() {
+        let inputs = RetryAdmitInputs {
+            prior_activation_state: Some("PendingActivation"),
+            review_reject_count:    0,
+            ..base()
+        };
+        match admit_retry_subtask_check(&inputs) {
+            AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable {
+                prior_state, review_reject_count,
+            }) => {
+                assert_eq!(prior_state, "PendingActivation");
+                assert_eq!(review_reject_count, 0);
+            }
+            other => panic!("expected NotRetryable, got {other:?}"),
+        }
+    }
+
+    /// `Active` (executor VM still running) is structurally
+    /// non-retryable regardless of `review_reject_count` — admitting
+    /// would race the executor's eventual `CompleteTask` against the
+    /// orchestrator's revoke. The orchestrator MUST wait for the
+    /// activation to terminate before retrying.
+    #[test]
+    fn rejects_active_even_with_review_rejection() {
+        let inputs = RetryAdmitInputs {
+            prior_activation_state: Some("Active"),
+            review_reject_count:    1,
+            ..base()
+        };
+        match admit_retry_subtask_check(&inputs) {
+            AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable {
+                prior_state, review_reject_count,
+            }) => {
+                assert_eq!(prior_state, "Active");
+                assert_eq!(review_reject_count, 1);
             }
             other => panic!("expected NotRetryable, got {other:?}"),
         }

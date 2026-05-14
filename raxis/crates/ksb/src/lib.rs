@@ -401,13 +401,19 @@ pub struct TaskCapabilityView {
     /// admissible="false"}` was tracking).
     pub retry_admissible:           bool,
     /// Human-readable reason when `retry_admissible == false`. Empty
-    /// (`None`) when the retry would be admissible. Stable lexemes:
-    /// `"prior state {state}; need Failed or Completed-with-rejection"`,
+    /// (`None`) when the retry would be admissible. Stable lexemes
+    /// (substring-matched by the orchestrator NNSP):
+    /// `"prior state {state}; need Failed or Completed-with-review-rejection or PendingActivation-with-review-rejection"`,
     /// `"crash_retry_count {n} >= max_crash_retries {m}"`,
     /// `"review_reject_count {n} >= max_review_rejections {m}"`,
-    /// `"no prior activation"`. The strings are lexeme-stable across
-    /// kernel revisions because the planner-core driver is allowed
-    /// to substring-match against them in the system prompt.
+    /// `"no prior activation"`. The leading lexemes (`prior state`,
+    /// `crash_retry_count`, `review_reject_count`, `no prior
+    /// activation`) are byte-stable across kernel revisions; the
+    /// trailing constraint enumeration (`Failed or Completed-…`)
+    /// grows additively as new admit branches land (e.g. the iter48
+    /// `PendingActivation-with-review-rejection` branch). The
+    /// planner-core driver is allowed to substring-match against
+    /// the leading lexemes in the system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_inadmissible_reason: Option<String>,
 }

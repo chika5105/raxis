@@ -94,10 +94,45 @@ fn parity_matrix() -> Vec<ParityCase> {
             expected_admissible:    false,
         },
         ParityCase {
-            label:                  "pending-activation-not-retryable",
+            label:                  "pending-activation-without-rejection-not-retryable",
             prior_activation_state: Some("PendingActivation"),
             crash_retry_count:      0,
             review_reject_count:    0,
+            max_crash_retries:      3,
+            max_review_rejections:  2,
+            expected_admissible:    false,
+        },
+        // iter48 extension — `INV-RETRY-FROM-COMPLETED-REVIEW-
+        // REJECTED-01`. When the prior `RetrySubTask` admit landed
+        // but the orchestrator session exited before issuing the
+        // follow-up `ActivateSubTask`, the cumulative-trajectory
+        // witness `review_reject_count > 0` MUST be load-bearing
+        // for both the kernel admit predicate AND the KSB
+        // `retry_admissible` projection. A drift here would let
+        // the LLM gate retry on a stale `retry_admissible=true`
+        // (or, conversely, miss a legitimate retry path because
+        // the KSB said `false` while the kernel was about to say
+        // `true`).
+        ParityCase {
+            label:                  "pending-activation-with-rejection-iter48",
+            prior_activation_state: Some("PendingActivation"),
+            crash_retry_count:      0,
+            review_reject_count:    1,
+            max_crash_retries:      3,
+            max_review_rejections:  2,
+            expected_admissible:    true,
+        },
+        // `Active` is structurally non-retryable regardless of
+        // `review_reject_count` — admitting would race the
+        // executor's eventual `CompleteTask` against the
+        // orchestrator's revoke + insert. Pin this against a
+        // future regression that conflates the iter48 extension
+        // with `Active`.
+        ParityCase {
+            label:                  "active-with-rejection-still-not-retryable",
+            prior_activation_state: Some("Active"),
+            crash_retry_count:      0,
+            review_reject_count:    1,
             max_crash_retries:      3,
             max_review_rejections:  2,
             expected_admissible:    false,
