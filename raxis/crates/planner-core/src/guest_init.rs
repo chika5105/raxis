@@ -465,14 +465,6 @@ pub fn init_pid1_filesystem() {
 // Path A3 egress chokepoint setup
 // ---------------------------------------------------------------------------
 
-/// Env var that activates the A3 universal-airgap egress
-/// chokepoint inside the guest. Set by
-/// `kernel::session_spawn_orchestrator` when the
-/// `runtime-airgap-a3` cargo feature is compiled in AND the
-/// kernel process sees `RAXIS_AIRGAP_A3=1` in its own env. Absent
-/// ⇒ default-off path (NIC + cred-proxy loopback only).
-pub const A3_ACTIVE_ENV: &str = "RAXIS_AIRGAP_A3";
-
 /// Env var consumed by [`init_pid1_a3_egress`] to size the
 /// iptables REDIRECT chain that catches outbound TCP from agent
 /// processes. Default `3129` matches
@@ -483,20 +475,16 @@ pub const A3_TPROXY_PORT_ENV: &str = "RAXIS_AIRGAP_A3_TPROXY_PORT";
 /// outbound TCP to. Mirrors `raxis_tproxy::linux::bind_default_listener`.
 pub const A3_DEFAULT_TPROXY_PORT: u16 = 3129;
 
-/// `true` iff the calling process should treat itself as running
-/// under Path A3. Both the planner-executor entrypoint and the
-/// test harness use this to decide whether to spawn the in-guest
-/// tproxy + DNS stub.
-#[must_use]
-pub fn airgap_a3_active() -> bool {
-    matches!(
-        std::env::var(A3_ACTIVE_ENV).ok().as_deref(),
-        Some("1") | Some("true") | Some("True") | Some("TRUE")
-    )
-}
-
-/// Install the in-guest egress chokepoint when [`airgap_a3_active`]
-/// is true and the calling process is PID 1 on Linux.
+/// Install the in-guest egress chokepoint when the calling process
+/// is PID 1 on Linux.
+///
+/// After the Tier1Tproxy deletion (TODO
+/// `tier1-deletion-fold-into-cleanup-sweep`) every executor /
+/// orchestrator VM boots at `EgressTier::Mediated`, so the
+/// chokepoint is installed unconditionally on Linux PID 1 — the
+/// previous `RAXIS_AIRGAP_A3=1` env-var gate was removed in the
+/// same sweep. (Non-Linux platforms and non-PID-1 callers remain
+/// no-ops.)
 ///
 /// Steps:
 ///   1. Disable IPv6 entirely (sysfs writes to
@@ -526,9 +514,6 @@ pub fn init_pid1_a3_egress() {
     #[cfg(target_os = "linux")]
     {
         if std::process::id() != 1 {
-            return;
-        }
-        if !airgap_a3_active() {
             return;
         }
         let tproxy_port = std::env::var(A3_TPROXY_PORT_ENV)
@@ -723,32 +708,19 @@ mod tests_a3 {
 
     #[test]
     fn a3_env_vars_pinned() {
-        // Pin the env-var names so a rename in the kernel side
-        // (session_spawn_orchestrator) breaks both halves of the
-        // contract at compile time, not at runtime.
-        assert_eq!(A3_ACTIVE_ENV,        "RAXIS_AIRGAP_A3");
+        // Pin the surviving env-var names. The `RAXIS_AIRGAP_A3=1`
+        // ACTIVE-toggle env var (`A3_ACTIVE_ENV`) and the
+        // `airgap_a3_active()` helper were removed in the
+        // Tier1Tproxy deletion sweep — Mediated is unconditional
+        // for executor / orchestrator VMs, so the toggle no longer
+        // has a purpose. The per-port discovery env vars
+        // (`RAXIS_AIRGAP_A3_TPROXY_PORT`, plus the
+        // `RAXIS_AIRGAP_A3_{HOST_CID,ADMISSION_PORT,TUNNEL_PORT}`
+        // constants in `planner-executor::main`) survive because
+        // the kernel still needs to communicate per-session vsock
+        // port assignments to the guest.
         assert_eq!(A3_TPROXY_PORT_ENV,   "RAXIS_AIRGAP_A3_TPROXY_PORT");
         assert_eq!(A3_DEFAULT_TPROXY_PORT, 3129);
-    }
-
-    #[test]
-    fn a3_active_recognises_canonical_values() {
-        // The kernel stamps "1"; tests / operators may set
-        // "true" / "True" / "TRUE" — accept all four shapes.
-        let prev = std::env::var(A3_ACTIVE_ENV).ok();
-        for v in ["1", "true", "True", "TRUE"] {
-            std::env::set_var(A3_ACTIVE_ENV, v);
-            assert!(airgap_a3_active(), "should be active when set to {v:?}");
-        }
-        for v in ["0", "false", "no", ""] {
-            std::env::set_var(A3_ACTIVE_ENV, v);
-            assert!(!airgap_a3_active(), "should NOT be active when set to {v:?}");
-        }
-        std::env::remove_var(A3_ACTIVE_ENV);
-        assert!(!airgap_a3_active());
-        if let Some(v) = prev {
-            std::env::set_var(A3_ACTIVE_ENV, v);
-        }
     }
 }
 

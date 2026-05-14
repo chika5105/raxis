@@ -37,17 +37,14 @@
 //!    path itself does NOT live in this handler — only the
 //!    admission-and-register decision does.
 //!
-//! # Why this handler is feature-gated
+//! # Why this handler is always compiled in
 //!
-//! `runtime-airgap-a3` is the kernel-side compile-time switch. Without
-//! it the module is compiled out entirely so the default-off build is
-//! bit-identical to the V2 baseline. Production opt-in is **double**:
-//! the feature MUST be compiled in AND the kernel process MUST be
-//! launched with `RAXIS_AIRGAP_A3=1`. See
-//! `session_spawn_orchestrator::airgap_a3_active` for the runtime
-//! gate.
-
-#![cfg(feature = "runtime-airgap-a3")]
+//! After the Tier1Tproxy deletion (TODO
+//! `tier1-deletion-fold-into-cleanup-sweep`) Mediated is the only
+//! non-`None` egress tier shipped in V2, so every kernel build
+//! needs this handler wired into the IPC dispatcher. The previous
+//! `runtime-airgap-a3` cargo feature and `RAXIS_AIRGAP_A3` env-var
+//! double-gate were removed in the same sweep.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

@@ -33,8 +33,6 @@
 //! lands; until then 60s is the V2 default mirroring the gateway
 //! cache TTL in `specs/v2/v2-deep-spec.md §egress`.
 
-#![cfg(feature = "runtime-airgap-a3")]
-
 use std::net::IpAddr;
 use std::sync::Arc;
 

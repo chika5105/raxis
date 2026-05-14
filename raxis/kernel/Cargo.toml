@@ -58,25 +58,15 @@ embedded-gateway = []
 # this Cargo.toml change.
 runtime-deadlock-detection = ["parking_lot/deadlock_detection"]
 
-# `specs/v2/airgap-architecture.md` — Path A3 universal-airgap
-# build feature. Compiling with the feature enables the
+# `specs/v2/airgap-architecture.md` — Path A3 universal-airgap is
+# the only egress path shipped in V2 after the Tier1Tproxy
+# deletion (TODO `tier1-deletion-fold-into-cleanup-sweep`). The
 # kernel-side admission listener (`handlers::tproxy_admit`), the
 # DNS resolver (`handlers::dns_resolve`), and the per-session
-# vsock admission / tunnel listeners. The opt-in is **double-gated**:
-# the feature compiles the code paths in, and the runtime env var
-# `RAXIS_AIRGAP_A3=1` switches them on per session-spawn (see
-# `session_spawn_orchestrator::airgap_a3_active`). Both gates must
-# pass for an Executor / Orchestrator to boot with
-# `EgressTier::Mediated`; default-off path is bit-identical to the
-# legacy V2 baseline at the wire / audit / spawn levels.
-#
-# Production release builds that have completed their per-policy
-# `[[tproxy_allowlist]]` authoring SHOULD enable the feature so
-# operators can flip A3 on with an env-var change rather than a
-# rebuild; default `cargo build` / `cargo test` keep the feature
-# off so iter42 + the existing live-e2e harness exercise the
-# legacy code path unchanged.
-runtime-airgap-a3 = []
+# vsock admission / tunnel listeners are therefore compiled in
+# unconditionally; the previous `runtime-airgap-a3` cargo feature
+# and `RAXIS_AIRGAP_A3=1` env-var double-gate were removed in the
+# same sweep.
 
 default = ["runtime-deadlock-detection"]
 

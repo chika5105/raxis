@@ -17,11 +17,9 @@ pub mod planner_fetch;
 pub mod witness;
 
 // Path A3 universal-airgap admission + DNS resolution handlers.
-// Compiled in only when the `runtime-airgap-a3` feature is enabled
-// (specs/v2/airgap-architecture.md §6). Default-off builds drop
-// these modules entirely so the legacy NIC-based egress path is
-// bit-identical to the V2 baseline.
-#[cfg(feature = "runtime-airgap-a3")]
+// Compiled in unconditionally after the Tier1Tproxy deletion
+// (specs/v2/airgap-architecture.md): Mediated is the only
+// non-`None` egress tier shipped in V2, so the kernel always
+// needs these handlers wired into the IPC dispatcher.
 pub mod dns_resolve;
-#[cfg(feature = "runtime-airgap-a3")]
 pub mod tproxy_admit;

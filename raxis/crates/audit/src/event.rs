@@ -2336,15 +2336,17 @@ pub enum AuditEventKind {
 
     // --- Path A3 universal-airgap admission + DNS audit events.
     //
-    // Canonical home: `v2/airgap-architecture.md §8`. These three
-    // variants are emitted ONLY when the kernel is built with the
-    // `runtime-airgap-a3` feature AND `RAXIS_AIRGAP_A3=1` was set
-    // in the launching env (so default-off audit chains stay
-    // bit-identical). They are wire-disjoint from the legacy
-    // `TransparentProxy{Admitted,Denied}` pair so an audit reader
-    // can distinguish A3 admissions from the legacy chokepoint
-    // even when both code paths are present in the same kernel
-    // binary.
+    // Canonical home: `v2/airgap-architecture.md §8`. After the
+    // Tier1Tproxy deletion (TODO
+    // `tier1-deletion-fold-into-cleanup-sweep`) the kernel emits
+    // these variants unconditionally — Mediated is the only
+    // non-`None` egress tier shipped in V2, so the previous
+    // `runtime-airgap-a3` cargo feature + `RAXIS_AIRGAP_A3=1`
+    // env-var double-gate were removed and these variants are
+    // always reachable. They remain wire-disjoint from the legacy
+    // `TransparentProxy{Admitted,Denied}` pair so audit readers
+    // pivoting on the pre-deletion taxonomy can still distinguish
+    // the two chokepoints in mixed-vintage chains.
     //
     // `INV-AUDIT-TPROXY-ADMIT-01`: every TproxyAdmissionRequest the
     // kernel processes emits exactly one paired event (Granted or

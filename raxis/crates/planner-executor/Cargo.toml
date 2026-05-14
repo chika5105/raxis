@@ -22,17 +22,17 @@ tokio              = { workspace = true }
 # AND stamps `RAXIS_VSOCK_LOOPBACK_PLAN` into `vm_spec.env`. The matching
 # in-guest TCP→AF_VSOCK fan-out lives in `raxis_tproxy::loopback_forwarder`.
 #
-# Default-off path: `raxis-tproxy` is consumed as a library here so
-# the credential-proxy vsock-loopback fan-out runs inside the
-# executor binary without a separate process. Path A3
-# (`RAXIS_AIRGAP_A3=1` + `runtime-airgap-a3` cargo feature on the
-# kernel side) additionally drives the in-guest tproxy accept loop
+# `raxis-tproxy` is consumed as a library here so the credential-
+# proxy vsock-loopback fan-out runs inside the executor binary
+# without a separate process. After the Tier1Tproxy deletion
+# (TODO `tier1-deletion-fold-into-cleanup-sweep`) every executor /
+# orchestrator VM boots at `EgressTier::Mediated`, so the binary
+# also unconditionally drives the in-guest tproxy accept loop
 # (`raxis_tproxy::linux::accept_loop_a3`) and the DNS stub
-# (`raxis_tproxy::dns_stub::run_dns_stub`) from this binary —
+# (`raxis_tproxy::dns_stub::run_dns_stub`).
 # `images/executor-starter/Containerfile` still ships only one
 # binary on the canonical executor rootfs, the egress chokepoint
 # is statically linked into it.
 #
-# See `specs/v2/airgap-architecture.md §6` for the feature-gate
-# rationale.
+# See `specs/v2/airgap-architecture.md`.
 raxis-tproxy      = { workspace = true }

@@ -18,7 +18,7 @@
 //! scaffold.
 
 use raxis_planner_core::{
-    airgap_a3_active, hydrate_from_proc_cmdline, init_pid1_a3_egress, init_pid1_filesystem,
+    hydrate_from_proc_cmdline, init_pid1_a3_egress, init_pid1_filesystem,
     mount_workspace_shares, park_on_signal, render_boot_log, run_role_session, shutdown_or_exit,
     BootContext, DriverError, DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role,
     WorkspaceMountOutcome,
@@ -49,17 +49,14 @@ fn main() -> ! {
     let mount_outcome = mount_workspace_shares();
     log_workspace_mount_outcome(&mount_outcome);
 
-    // Step 3b: Path A3 — when the kernel stamped
-    // `RAXIS_AIRGAP_A3=1` into the env (i.e. the
-    // `runtime-airgap-a3` cargo feature was compiled into the
-    // kernel binary AND the operator set the env on the kernel
-    // process), install the in-guest egress chokepoint:
-    //   * disable IPv6 (sysfs writes)
-    //   * point `/etc/resolv.conf` at the in-guest DNS stub
-    //   * install iptables REDIRECT chains for outbound TCP
-    //     and UDP/53
-    // No-op when the env var is unset — the default-off path is
-    // bit-identical to the V2 baseline.
+    // Step 3b: Path A3 — install the in-guest egress chokepoint
+    // (disable IPv6 via sysfs, point `/etc/resolv.conf` at the
+    // in-guest DNS stub, install iptables REDIRECT chains for
+    // outbound TCP and UDP/53). After the Tier1Tproxy deletion
+    // every executor / orchestrator VM boots at
+    // `EgressTier::Mediated`, so the chokepoint is installed
+    // unconditionally on Linux PID 1 — the previous
+    // `RAXIS_AIRGAP_A3=1` env-var gate was removed.
     init_pid1_a3_egress();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -79,15 +76,13 @@ async fn async_main() -> u8 {
     if let Err(code) = activate_vsock_loopback_forwarder().await {
         return code;
     }
-    // Path A3 — spawn the in-guest tproxy + DNS stub iff
-    // `RAXIS_AIRGAP_A3=1` was stamped into the env. The kernel
-    // only stamps this when its `runtime-airgap-a3` cargo
-    // feature is on AND it sees `RAXIS_AIRGAP_A3=1` in its own
-    // env (double-gated; see `session_spawn_orchestrator`).
-    if airgap_a3_active() {
-        if let Err(code) = activate_airgap_a3_chokepoint().await {
-            return code;
-        }
+    // Path A3 — spawn the in-guest tproxy + DNS stub. After the
+    // Tier1Tproxy deletion the kernel always stamps the executor
+    // VM at `EgressTier::Mediated`, so the chokepoint is
+    // unconditionally active; the previous `RAXIS_AIRGAP_A3=1`
+    // env-var gate was removed in the same sweep.
+    if let Err(code) = activate_airgap_a3_chokepoint().await {
+        return code;
     }
     match run().await {
         Ok(())  => 0,
