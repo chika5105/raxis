@@ -81,7 +81,7 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 | 9 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 | 10 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
@@ -4948,6 +4948,69 @@ whose plan bundle was purged; the panel renders "Plan archived
 or purged" inline (410), not a generic 5xx toast.
 
 **Canonical home.** `v2/dashboard-hardening.md §plan-view`.
+
+---
+
+### INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01 — Session detail surfaces every catalogued row, including terminated ones
+
+**Statement.** `GET /api/sessions/:id` MUST return a `SessionView`
+for any `session_id` that exists in the kernel's `sessions`
+catalog, regardless of the row's current state (active, revoked,
+or expired). Concretely:
+
+  1. The dashboard-kernel resolves the row through
+     `raxis_store::views::sessions::by_id`, NOT through
+     `active_list`. `by_id` ignores the active-window filter
+     (`revoked = 0 AND expires_at > now`) and the 200-row cap
+     `active_list` applies.
+  2. The wire `state` field carries the terminal classification
+     — one of `Active` / `Revoked` / `Expired`. `Revoked`
+     takes precedence over `Expired` (a row that is BOTH
+     revoked AND past `expires_at` reports `Revoked` because
+     the deliberate kernel/operator action is the salient
+     terminal cause; the passive timeout is incidental).
+  3. The `failure` field stays `None` for V2.5; V3 walks the
+     audit chain for the matching `SessionRevoked` /
+     `SessionVmFailedFinal` row and surfaces a structured
+     reason. The wire shape is stable across versions.
+  4. `404 FAIL_DASHBOARD_NOT_FOUND` is reserved for session ids
+     the catalog has never seen — typos, stale tokens, sessions
+     from a different kernel run.
+
+**Justification.** The Sessions list page (`/sessions`) renders
+every active session as a clickable row. An operator clicks one,
+the page navigates to `/sessions/<id>`, and the detail handler
+runs against the kernel store. With the V2.5 `active_list`-backed
+implementation, any session whose `expires_at` had elapsed
+between the list fetch and the click — or that had been revoked
+in the same window — silently 404'd. Operators reported this as
+"the session was right there a second ago, why is it gone now?"
+and were forced to grep the audit chain by hand to see what
+happened to a session they'd just been looking at.
+
+The fix is structural: detail is a *forensic* read surface, not
+a dispatch surface. Once a session existed in the catalog it must
+remain navigable for the rest of the kernel run. The list page
+is allowed to show only active rows (that's its semantic — "which
+sessions are live"), but the detail surface must answer "what
+happened to this id" for any `id` in the catalog.
+
+**Canonical home.** `v2/dashboard-hardening.md §session-detail`
+(referenced; the full body lives in this invariants block).
+
+**Witness.**
+  * `crates/store/src/views/sessions.rs::tests::by_id_finds_active_session`
+  * `crates/store/src/views/sessions.rs::tests::by_id_finds_revoked_session`
+  * `crates/store/src/views/sessions.rs::tests::by_id_finds_expired_session`
+  * `crates/store/src/views/sessions.rs::tests::by_id_returns_none_for_unknown`
+  * `crates/dashboard-kernel/src/lib.rs::tests::session_row_state_active_when_not_revoked_and_in_window`
+  * `crates/dashboard-kernel/src/lib.rs::tests::session_row_state_revoked_takes_precedence_over_expiry`
+  * `crates/dashboard-kernel/src/lib.rs::tests::session_row_state_expired_when_past_window_and_not_revoked`
+  * Frontend: `dashboard-fe/src/pages/SessionDetail.tsx`'s
+    `<SessionNotFound>` affordance is the operator-facing
+    fallback for the legacy 404 path; once this invariant is
+    satisfied that affordance only fires for genuinely-unknown
+    session ids.
 
 ---
 

@@ -127,6 +127,57 @@ pub fn active_list(conn: &RoConn, limit: usize) -> Result<Vec<SessionRow>, Sessi
     Ok(rows)
 }
 
+/// Look up ONE session by `session_id`, regardless of its current
+/// state (active / revoked / expired). Returns `Ok(None)` only when
+/// no row exists for the id.
+///
+/// The dashboard's detail view (`GET /api/sessions/:id`) needs this:
+/// an operator who clicked a session row in the list page MUST see
+/// the detail page render, even if the session has since terminated
+/// (V2.5 originally pinned this surface to [`active_list`], so any
+/// session that crossed `expires_at` between the list fetch and the
+/// detail click surfaced as a misleading `FAIL_DASHBOARD_NOT_FOUND`
+/// for a row the operator literally just saw —
+/// `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`).
+///
+/// The forensic-detail contract: terminated sessions surface as
+/// read-only (the FE renders `state="Revoked"` or `state="Expired"`
+/// via `failure: None` for V2.5; V3 walks the audit chain for the
+/// matching `SessionRevoked` / `SessionVmFailedFinal` row).
+pub fn by_id(
+    conn:       &RoConn,
+    session_id: &str,
+) -> Result<Option<SessionRow>, SessionViewError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT session_id, role_id, lineage_id, worktree_root, \
+                sequence_number, created_at, expires_at, revoked, revoked_at \
+         FROM {} \
+         WHERE session_id = ?1 \
+         LIMIT 1",
+        Table::Sessions.as_str(),
+    ))?;
+    let row = stmt
+        .query_row(rusqlite::params![session_id], |r| {
+            Ok(SessionRow {
+                session_id:      r.get(0)?,
+                role_id:         r.get(1)?,
+                lineage_id:      r.get(2)?,
+                worktree_root:   r.get(3)?,
+                sequence_number: r.get::<_, i64>(4)?.max(0) as u64,
+                created_at:      r.get::<_, i64>(5)?.max(0) as u64,
+                expires_at:      r.get::<_, i64>(6)?.max(0) as u64,
+                revoked:         r.get::<_, i64>(7)? != 0,
+                revoked_at:      r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
+            })
+        })
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other                                => Err(other),
+        })?;
+    Ok(row)
+}
+
 fn unix_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -273,6 +324,64 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, "s-active");
         assert!(!rows[0].revoked);
+    }
+
+    // `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`: the dashboard
+    // detail surface needs to find ANY session, including ones
+    // that have already terminated (revoked / expired). The
+    // previous lookup path used [`active_list`], which silently
+    // returned 404 for sessions an operator had just seen in the
+    // list (because `expires_at` had since elapsed). [`by_id`]
+    // ignores the active-window filter so terminated rows render
+    // in a read-only forensic detail view.
+    #[test]
+    fn by_id_finds_active_session() {
+        let tmp = fresh_store_with_seed_sessions();
+        let conn = open_ro(tmp.path()).unwrap();
+        let row = by_id(&conn, "s-active").unwrap();
+        assert!(row.is_some());
+        let r = row.unwrap();
+        assert_eq!(r.session_id, "s-active");
+        assert!(!r.revoked);
+    }
+
+    #[test]
+    fn by_id_finds_revoked_session() {
+        let tmp = fresh_store_with_seed_sessions();
+        let conn = open_ro(tmp.path()).unwrap();
+        let row = by_id(&conn, "s-revoked").unwrap();
+        assert!(row.is_some(),
+            "INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01: revoked \
+             session must be visible to the detail handler");
+        let r = row.unwrap();
+        assert_eq!(r.session_id, "s-revoked");
+        assert!(r.revoked);
+        assert_eq!(r.revoked_at, Some(150));
+    }
+
+    #[test]
+    fn by_id_finds_expired_session() {
+        let tmp = fresh_store_with_seed_sessions();
+        let conn = open_ro(tmp.path()).unwrap();
+        let row = by_id(&conn, "s-expired").unwrap();
+        assert!(row.is_some(),
+            "INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01: expired \
+             session must be visible to the detail handler");
+        let r = row.unwrap();
+        assert_eq!(r.session_id, "s-expired");
+        assert!(!r.revoked);
+        // expires_at = 200 in the seed; that's clearly in the past
+        // (long before any reasonable `now`) — the row is still
+        // returned because `by_id` does NOT apply the active-window
+        // filter.
+        assert_eq!(r.expires_at, 200);
+    }
+
+    #[test]
+    fn by_id_returns_none_for_unknown() {
+        let tmp = fresh_store_with_seed_sessions();
+        let conn = open_ro(tmp.path()).unwrap();
+        assert!(by_id(&conn, "no-such-session").unwrap().is_none());
     }
 
     // ── Worktree-GC helper tests (V2.5 §11.4) ─────────────────────

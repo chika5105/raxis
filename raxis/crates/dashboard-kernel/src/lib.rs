@@ -951,61 +951,81 @@ impl DashboardData for KernelDashboardData {
                 Some(set) => set.contains(&s.session_id),
                 None => true,
             })
-            .map(|s| SessionView {
-                session_id: s.session_id,
-                role: s.role_id,
-                initiative_id: None,
-                task_id: None,
-                state: if s.revoked { "Revoked".into() } else { "Active".into() },
-                provider: None,
-                model: None,
-                input_tokens: 0,
-                output_tokens: 0,
-                created_at: s.created_at,
-                updated_at: s.created_at,
-                // INV-DASHBOARD-FAILURE-VISIBILITY-01: V2.5 ships
-                // the wire shape; a Revoked session here lacks an
-                // explicit reason string in the store-side view,
-                // so the kernel emits `None` and the FE renders
-                // "No reason supplied — kernel bug" so the gap is
-                // visible. V3 widens this to walk the audit chain
-                // for the matching `SessionRevoked` /
-                // `SessionVmFailedFinal` row.
-                failure: None,
+            .map(|s| {
+                let state = session_row_state(&s);
+                SessionView {
+                    session_id: s.session_id,
+                    role: s.role_id,
+                    initiative_id: None,
+                    task_id: None,
+                    state,
+                    provider: None,
+                    model: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    created_at: s.created_at,
+                    updated_at: s.revoked_at.unwrap_or(s.created_at),
+                    // INV-DASHBOARD-FAILURE-VISIBILITY-01: V2.5
+                    // ships the wire shape; a Revoked session
+                    // here lacks an explicit reason string in
+                    // the store-side view, so the kernel emits
+                    // `None` and the FE renders "No reason
+                    // supplied — kernel bug" so the gap is
+                    // visible. V3 widens this to walk the audit
+                    // chain for the matching `SessionRevoked` /
+                    // `SessionVmFailedFinal` row.
+                    failure: None,
+                }
             })
             .collect())
     }
 
     fn get_session(&self, session_id: &str) -> Result<SessionView, ApiError> {
-        // The store's session catalog is keyed by token; we walk
-        // the active list as an O(N) lookup (N ≤ 200). For V2.5 this
-        // is the most truthful surface — the kernel does not expose a
-        // by_id session view yet because every other consumer either
-        // filters by FK (tasks.session_id) or scans the active list.
+        // `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`: the detail
+        // surface MUST return a row for any session that exists in
+        // the catalog, including ones that have already terminated
+        // (revoked or expired). The previous implementation walked
+        // `active_list` and silently 404'd terminated sessions —
+        // that produced a `FAIL_DASHBOARD_NOT_FOUND` for rows the
+        // operator literally just clicked in the list page (any
+        // session whose `expires_at` had elapsed between the list
+        // fetch and the click).
+        //
+        // `by_id` ignores the active-window filter and the 200-row
+        // cap so the response shape matches the contract: a session
+        // that ever existed is forever-renderable in a read-only
+        // forensic detail view. The state column carries the
+        // terminal classification (`Revoked`, `Expired`, `Active`)
+        // so the FE can render the appropriate badge.
         let conn = self.open_ro()?;
-        let rows = raxis_store::views::sessions::active_list(&conn, 200)
-            .map_err(|e| ApiError::Internal { log_only: format!("sessions::active_list: {e}") })?;
-        rows.into_iter()
-            .find(|s| s.session_id == session_id)
-            .map(|s| SessionView {
-                session_id: s.session_id,
-                role: s.role_id,
-                initiative_id: None,
-                task_id: None,
-                state: if s.revoked { "Revoked".into() } else { "Active".into() },
-                provider: None,
-                model: None,
-                input_tokens: 0,
-                output_tokens: 0,
-                created_at: s.created_at,
-                updated_at: s.created_at,
-                // INV-DASHBOARD-FAILURE-VISIBILITY-01: see
-                // `list_sessions` for the V2.5 best-effort
-                // rationale. V3 promotes this to a real audit
-                // chain walk.
-                failure: None,
-            })
-            .ok_or(ApiError::NotFound { kind: "session".into() })
+        let s = raxis_store::views::sessions::by_id(&conn, session_id)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("sessions::by_id: {e}"),
+            })?
+            .ok_or(ApiError::NotFound { kind: "session".into() })?;
+        let state = session_row_state(&s);
+        Ok(SessionView {
+            session_id: s.session_id,
+            role: s.role_id,
+            initiative_id: None,
+            task_id: None,
+            state,
+            provider: None,
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: s.created_at,
+            // V2.5 stores only `created_at` + `revoked_at` on the
+            // sessions row; surface `revoked_at` (when present) as
+            // the updated timestamp so the FE's "updated N min ago"
+            // line reflects the most-recent state change.
+            updated_at: s.revoked_at.unwrap_or(s.created_at),
+            // INV-DASHBOARD-FAILURE-VISIBILITY-01: see
+            // `list_sessions` for the V2.5 best-effort
+            // rationale. V3 promotes this to a real audit
+            // chain walk.
+            failure: None,
+        })
     }
 
     fn list_escalations(&self) -> Result<Vec<EscalationView>, ApiError> {
@@ -2625,6 +2645,34 @@ fn resolve_within_root(
     Ok(joined)
 }
 
+/// Classify a `SessionRow` into the wire-state string the
+/// dashboard surfaces — one of `Active`, `Revoked`, or `Expired`.
+///
+/// `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`: the detail view
+/// MUST surface terminated rows (the operator clicked one in the
+/// list — refusing to render its detail is a contract violation,
+/// even when the row has just terminated). `Revoked` takes
+/// precedence over `Expired` because a revocation is a deliberate
+/// operator / kernel action; an expiry is the passive lapse of
+/// `expires_at`. A row that is BOTH revoked and past `expires_at`
+/// is reported as `Revoked` so the operator sees the deliberate
+/// terminal cause.
+fn session_row_state(s: &raxis_store::views::sessions::SessionRow) -> String {
+    if s.revoked {
+        "Revoked".into()
+    } else {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if s.expires_at <= now {
+            "Expired".into()
+        } else {
+            "Active".into()
+        }
+    }
+}
+
 /// Common task-row → TaskView projection. Pulls structured
 /// outputs from the V2 §3.2 table; reviewer verdicts are not
 /// surfaced yet (the store does not own that read view today).
@@ -2876,5 +2924,50 @@ mod tests {
         assert_eq!(severity_from_class("PolicyViolation"), "High");
         assert_eq!(severity_from_class("CapabilityUpgrade"), "Normal");
         assert_eq!(severity_from_class("Other"), "Low");
+    }
+
+    // `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`: the wire-state
+    // discriminator the dashboard surfaces for a terminated row
+    // MUST distinguish revoked / expired / active so the operator
+    // sees the right badge in a read-only forensic detail view.
+    // The dashboard FE state-color map (in
+    // `dashboard-fe/src/lib/state-color.ts`) is the matching
+    // consumer side — adding a new variant here means adding a
+    // tone mapping there in the same commit.
+    fn mk_row(revoked: bool, expires_at: u64) -> raxis_store::views::sessions::SessionRow {
+        raxis_store::views::sessions::SessionRow {
+            session_id:      "sess".into(),
+            role_id:         "Executor".into(),
+            lineage_id:      "lin".into(),
+            worktree_root:   None,
+            sequence_number: 0,
+            created_at:      100,
+            expires_at,
+            revoked,
+            revoked_at:      if revoked { Some(150) } else { None },
+        }
+    }
+
+    #[test]
+    fn session_row_state_active_when_not_revoked_and_in_window() {
+        let row = mk_row(false, u64::MAX);
+        assert_eq!(session_row_state(&row), "Active");
+    }
+
+    #[test]
+    fn session_row_state_revoked_takes_precedence_over_expiry() {
+        // A row that is BOTH revoked AND past `expires_at` reports
+        // `Revoked` — the deliberate kernel/operator action wins
+        // over the passive timeout.
+        let row = mk_row(true, 200);
+        assert_eq!(session_row_state(&row), "Revoked");
+    }
+
+    #[test]
+    fn session_row_state_expired_when_past_window_and_not_revoked() {
+        // Far-in-the-past `expires_at` ⇒ Expired regardless of
+        // wall clock at test time.
+        let row = mk_row(false, 200);
+        assert_eq!(session_row_state(&row), "Expired");
     }
 }
