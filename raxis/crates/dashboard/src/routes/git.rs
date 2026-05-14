@@ -47,6 +47,16 @@ use crate::server::{AppState, AuthorizedOperator};
 const MAX_NAME_LEN: usize = 128;
 
 /// `GET /api/git/worktrees`.
+///
+/// Audit discipline: this listing endpoint is a pure read-only
+/// browse. The `OperatorViewedWorktreeList` emission was
+/// retired in `worker/audit-tightening` per the signal-vs-noise
+/// policy in `specs/v2/dashboard-operator-action-audit-coverage.md`.
+/// The per-worktree detail / log / tree / file paths below
+/// continue to audit via `OperatorWorktreeAccessed` /
+/// `OperatorDiffViewed` / `OperatorFileContentFetched` because
+/// they surface operator-blessed source material whose access
+/// the security review specifically needs to reconstruct.
 pub async fn list<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -54,37 +64,9 @@ pub async fn list<D>(
 where
     D: crate::data::DashboardData,
 {
-    if let Err(e) = require_read(&op) {
-        emit_worktree_list_audit(&*state.data, &op, 0, operator_outcome::outcome_from_api_error(&e));
-        return Err(e);
-    }
-    let rows = match state.data.list_worktrees() {
-        Ok(r) => r,
-        Err(err) => {
-            emit_worktree_list_audit(&*state.data, &op, 0, operator_outcome::outcome_from_api_error(&err));
-            return Err(err);
-        }
-    };
-    let count = rows.len() as u32;
-    state.data.emit_operator_audit(AuditEventKind::OperatorViewedWorktreeList {
-        operator_fingerprint: op.fingerprint.clone(),
-        count,
-        outcome: operator_outcome::ACCEPTED.into(),
-    })?;
+    require_read(&op)?;
+    let rows = state.data.list_worktrees()?;
     Ok(Json(rows))
-}
-
-fn emit_worktree_list_audit<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    count: u32,
-    outcome: &'static str,
-) where D: crate::data::DashboardData + ?Sized {
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedWorktreeList {
-        operator_fingerprint: op.fingerprint.clone(),
-        count,
-        outcome: outcome.into(),
-    });
 }
 
 /// `GET /api/git/worktrees/:name`.

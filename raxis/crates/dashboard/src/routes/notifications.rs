@@ -38,13 +38,13 @@ fn default_limit() -> u32 {
 
 /// `GET /api/notifications`.
 ///
-/// `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`: emits
-/// `OperatorViewedNotifications`. The list endpoint is polled
-/// by the dashboard sidebar; the data layer debounces emissions
-/// to one per operator+endpoint per 5-minute window so the
-/// chain doesn't bloat. The unread-count companion endpoint is
-/// excluded from audit emission entirely (badge-counter polling
-/// every 5s).
+/// Audit discipline: pure read-only browse. The
+/// `OperatorViewedNotifications` emission was retired in
+/// `worker/audit-tightening` per the signal-vs-noise policy in
+/// `specs/v2/dashboard-operator-action-audit-coverage.md`. The
+/// state-mutating mark-read and mark-all-read endpoints below
+/// continue to emit `OperatorNotificationMarkedRead` /
+/// `OperatorNotificationsMarkedAllRead`.
 pub async fn list<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -54,43 +54,14 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        emit_list_audit(&*state.data, &op, 0, q.unread_only, operator_outcome::REJECTED_PERMISSION);
         return Err(ApiError::Forbidden { required: "read".into() });
     }
-    let rows = match state.data.list_notifications(
+    let rows = state.data.list_notifications(
         q.limit.min(200),
         q.unread_only,
         q.initiative_id.as_deref(),
-    ) {
-        Ok(r) => r,
-        Err(err) => {
-            emit_list_audit(&*state.data, &op, 0, q.unread_only, operator_outcome::outcome_from_api_error(&err));
-            return Err(err);
-        }
-    };
-    let count = rows.len() as u32;
-    state.data.emit_operator_audit(AuditEventKind::OperatorViewedNotifications {
-        operator_fingerprint: op.fingerprint.clone(),
-        count,
-        unread_only: q.unread_only,
-        outcome: operator_outcome::ACCEPTED.into(),
-    })?;
+    )?;
     Ok(Json(rows))
-}
-
-fn emit_list_audit<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    count: u32,
-    unread_only: bool,
-    outcome: &'static str,
-) where D: crate::data::DashboardData + ?Sized {
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedNotifications {
-        operator_fingerprint: op.fingerprint.clone(),
-        count,
-        unread_only,
-        outcome: outcome.into(),
-    });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,15 @@
 //! Session endpoints: list, detail, and SSE stream (§4.3 P4).
+//!
+//! Audit discipline: the list and detail endpoints are pure
+//! read-only browsers. The `OperatorViewedSessionList` /
+//! `OperatorViewedSession` emissions were retired in
+//! `worker/audit-tightening` per the signal-vs-noise policy in
+//! `specs/v2/dashboard-operator-action-audit-coverage.md`. The
+//! SSE attach (`OperatorOpenedSessionStream`) IS still audited:
+//! it's a one-shot per-attach event that hands the operator a
+//! long-lived window into session-private capture data, so the
+//! attach moment is forensically interesting and not a periodic
+//! "view" emission.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -41,40 +52,11 @@ pub async fn list<D>(
 where
     D: crate::data::DashboardData,
 {
-    if let Err(e) = require_read(&op) {
-        emit_list_audit(&*state.data, &op, 0, q.initiative_id.as_deref(), operator_outcome::outcome_from_api_error(&e));
-        return Err(e);
-    }
-    let rows = match state.data.list_sessions(q.limit.clamp(1, 200), q.initiative_id.as_deref()) {
-        Ok(r) => r,
-        Err(err) => {
-            emit_list_audit(&*state.data, &op, 0, q.initiative_id.as_deref(), operator_outcome::outcome_from_api_error(&err));
-            return Err(err);
-        }
-    };
-    let count = rows.len() as u32;
-    state.data.emit_operator_audit(AuditEventKind::OperatorViewedSessionList {
-        operator_fingerprint: op.fingerprint.clone(),
-        count,
-        initiative_id_filter: q.initiative_id.clone(),
-        outcome: operator_outcome::ACCEPTED.into(),
-    })?;
+    require_read(&op)?;
+    let rows = state
+        .data
+        .list_sessions(q.limit.clamp(1, 200), q.initiative_id.as_deref())?;
     Ok(Json(rows))
-}
-
-fn emit_list_audit<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    count: u32,
-    initiative_id_filter: Option<&str>,
-    outcome: &'static str,
-) where D: crate::data::DashboardData + ?Sized {
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedSessionList {
-        operator_fingerprint: op.fingerprint.clone(),
-        count,
-        initiative_id_filter: initiative_id_filter.map(str::to_owned),
-        outcome: outcome.into(),
-    });
 }
 
 /// `GET /api/sessions/:id`.
@@ -86,36 +68,9 @@ pub async fn detail<D>(
 where
     D: crate::data::DashboardData,
 {
-    if let Err(e) = require_read(&op) {
-        emit_detail_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&e));
-        return Err(e);
-    }
-    let view = match state.data.get_session(&id) {
-        Ok(v) => v,
-        Err(err) => {
-            emit_detail_audit(&*state.data, &op, &id, operator_outcome::outcome_from_api_error(&err));
-            return Err(err);
-        }
-    };
-    state.data.emit_operator_audit(AuditEventKind::OperatorViewedSession {
-        operator_fingerprint: op.fingerprint.clone(),
-        session_id: id.clone(),
-        outcome: operator_outcome::ACCEPTED.into(),
-    })?;
+    require_read(&op)?;
+    let view = state.data.get_session(&id)?;
     Ok(Json(view))
-}
-
-fn emit_detail_audit<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    session_id: &str,
-    outcome: &'static str,
-) where D: crate::data::DashboardData + ?Sized {
-    let _ = data.emit_operator_audit(AuditEventKind::OperatorViewedSession {
-        operator_fingerprint: op.fingerprint.clone(),
-        session_id: session_id.to_owned(),
-        outcome: outcome.into(),
-    });
 }
 
 /// Query string for `GET /api/sessions/:id/stream`.
