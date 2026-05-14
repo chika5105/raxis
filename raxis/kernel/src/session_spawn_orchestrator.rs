@@ -3212,9 +3212,11 @@ pub enum ExecutorAgentKind {
 ///      `SessionSpawnService` can rehydrate per-session credential
 ///      proxies (`credential-proxy.md §3`).
 ///   3. Builds a `SpawnRequest` shaped per `extensibility-traits.md
-///      §3.5` — Executor egress on `Tier1Tproxy` (full admission
-///      enforcement) and Reviewer egress on `Tier0NoEgress` (the
-///      Pure-Static Reviewer mandate, `INV-PLANNER-HARNESS-02`).
+///      §3.5` — Executor egress on `Mediated` (Path A3
+///      universal-airgap, the only non-`None` tier shipped in V2
+///      after the Tier1Tproxy deletion) and Reviewer egress on
+///      `Tier0NoEgress` (the Pure-Static Reviewer mandate,
+///      `INV-PLANNER-HARNESS-02`).
 ///   4. Delegates to `service.spawn_session(req).await` and
 ///      surfaces the resulting `SpawnHandle`.
 ///
@@ -3240,8 +3242,10 @@ pub enum ExecutorAgentKind {
 /// cannot make HTTP calls, gateway calls, or credential-proxy
 /// calls because its only authorised output is `SubmitReview`
 /// against an in-memory `evaluation_sha`. Executor VMs run with
-/// `Tier1Tproxy` so the per-session admission listener arbitrates
-/// every egress request against the active `EgressAllowlist`.
+/// `EgressTier::Mediated` so the kernel-side admission listener
+/// arbitrates every egress request over the per-VM vsock device
+/// against the active `EgressAllowlist`. (Path A3 universal-airgap;
+/// see `specs/v2/airgap-architecture.md`.)
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_executor_for_task(
     spawn_ctx:        &ExecutorSpawnContext,
@@ -3415,11 +3419,20 @@ pub async fn spawn_executor_for_task(
     }
 
     // ── Step 3: build the spawn spec. ────────────────────────────
+    //
+    // Executor egress is unconditionally `EgressTier::Mediated` after
+    // the Tier1Tproxy deletion (TODO
+    // `tier1-deletion-fold-into-cleanup-sweep`). The previous
+    // `runtime-airgap-a3` cargo feature + `RAXIS_AIRGAP_A3` env-var
+    // double-gate were removed in the same sweep — Mediated is now
+    // the only sanctioned non-`None` tier in V2 (see
+    // `specs/v2/airgap-architecture.md`,
+    // `INV-NETISO-A3-UNIVERSAL-NO-NIC-01`).
     let (vcpu_count, mem_mib, egress_tier, entrypoint_argv) = match agent_kind {
         ExecutorAgentKind::Executor => (
             spawn_ctx.executor_vcpu_count,
             spawn_ctx.executor_mem_mib,
-            EgressTier::Tier1Tproxy,
+            EgressTier::Mediated,
             vec![
                 "/usr/local/bin/raxis-executor".to_owned(),
                 "--task-id".to_owned(),

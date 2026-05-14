@@ -18,11 +18,15 @@
 //!   - `VZVirtioFileSystemDeviceConfiguration` +
 //!     `VZSingleDirectoryShare` + `VZSharedDirectory` for each
 //!     VirtioFS share
-//!   - `VZVirtioNetworkDeviceConfiguration` +
-//!     `VZNATNetworkDeviceAttachment` for the (optional) network
-//!     device
 //!   - `VZVirtioSocketDeviceConfiguration` (always present so the
 //!     planner port is reachable from the host)
+//!
+//!   The substrate attaches **no** virtio-net device for any
+//!   surviving `EgressTier` after the Tier1Tproxy deletion — the
+//!   `VZVirtualMachineConfiguration.networkDevices` array is left
+//!   empty under `EgressTier::{None, Mediated, Tier2CredProxy}`.
+//!   See `airgap-architecture.md §5` and
+//!   `INV-NETISO-A3-UNIVERSAL-NO-NIC-01`.
 //!   The build path then validates the assembled configuration via
 //!   `validateWithError:`.
 //!
@@ -304,11 +308,11 @@ mod macos {
     use objc2_foundation::{NSArray, NSError, NSString, NSURL};
     use objc2_virtualization::{
         VZDiskImageCachingMode, VZDiskImageStorageDeviceAttachment, VZDiskImageSynchronizationMode,
-        VZDirectoryShare, VZLinuxBootLoader, VZNATNetworkDeviceAttachment,
-        VZNetworkDeviceConfiguration, VZSharedDirectory, VZSingleDirectoryShare,
+        VZDirectoryShare, VZLinuxBootLoader,
+        VZSharedDirectory, VZSingleDirectoryShare,
         VZSocketDevice, VZSocketDeviceConfiguration, VZStorageDeviceConfiguration,
         VZVirtioBlockDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
-        VZVirtioNetworkDeviceConfiguration, VZVirtioSocketConnection, VZVirtioSocketDevice,
+        VZVirtioSocketConnection, VZVirtioSocketDevice,
         VZVirtioSocketDeviceConfiguration, VZVirtualMachine, VZVirtualMachineConfiguration,
         VZVirtualMachineState,
     };
@@ -800,35 +804,17 @@ mod macos {
             }
 
             // ---- Network device ----------------------------------
-            let mut net_objs: Vec<Retained<VZNetworkDeviceConfiguration>> = Vec::new();
-            if let Some(net) = &self.cfg.network {
-                match net.mode {
-                    crate::config::AvfNetworkMode::Nat => {
-                        let attachment = unsafe { VZNATNetworkDeviceAttachment::new() };
-                        let dev = unsafe { VZVirtioNetworkDeviceConfiguration::new() };
-                        // SAFETY: VZNATNetworkDeviceAttachment <:
-                        // VZNetworkDeviceAttachment.
-                        let attach_upcast = unsafe {
-                            Retained::cast_unchecked::<
-                                objc2_virtualization::VZNetworkDeviceAttachment,
-                            >(attachment)
-                        };
-                        unsafe {
-                            dev.setAttachment(Some(&attach_upcast));
-                        }
-                        // SAFETY: VZVirtioNetworkDeviceConfiguration <:
-                        // VZNetworkDeviceConfiguration.
-                        let dev_upcast: Retained<VZNetworkDeviceConfiguration> = unsafe {
-                            Retained::cast_unchecked::<VZNetworkDeviceConfiguration>(dev)
-                        };
-                        net_objs.push(dev_upcast);
-                    }
-                }
-            }
-            let net_array = NSArray::from_retained_slice(&net_objs);
-            unsafe {
-                conf.setNetworkDevices(&net_array);
-            }
+            //
+            // After the Tier1Tproxy deletion the AVF substrate
+            // attaches **no** virtio-net device for any surviving
+            // `EgressTier` variant (`None`, `Mediated`,
+            // `Tier2CredProxy`). The structural absence of
+            // `AvfConfig.network` enforces this at compile time;
+            // `VZVirtualMachineConfiguration.networkDevices` is left
+            // at its default empty `NSArray` so the boot path is
+            // bit-identical to the legacy `network = None` arm. See
+            // `airgap-architecture.md §5` and
+            // `INV-NETISO-A3-UNIVERSAL-NO-NIC-01`.
 
             // ---- VSock device ------------------------------------
             // Always wire a single VSock device — the kernel's

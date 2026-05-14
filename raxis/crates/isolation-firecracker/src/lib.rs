@@ -57,8 +57,7 @@ use raxis_isolation::{
 };
 
 use crate::api::{
-    Action, ActionType, BootSource, Drive, FirecrackerApi, MachineConfig, NetworkInterface,
-    VsockConfig,
+    Action, ActionType, BootSource, Drive, FirecrackerApi, MachineConfig, VsockConfig,
 };
 use crate::vmm::{FirecrackerVmm, SpawnArgs};
 use crate::vsock::HostVsockChannel;
@@ -442,27 +441,23 @@ fn drive_boot(
         })?;
     }
 
-    // Optional network — only the legacy `EgressTier::Tier1Tproxy` path
-    // attaches a tap device (per `vm-network-isolation.md §3`).
-    // `EgressTier::None` (Reviewer) and `EgressTier::Mediated` (Path A3
-    // universal-airgap, per `airgap-architecture.md §5`) both produce
-    // a NIC-less VM — A3 routes outbound TCP and DNS over the per-VM
-    // vsock device to the kernel admission handler, so attaching a
-    // virtio-net interface would be a redundant covert channel. The
-    // `#[allow(deprecated)]` is needed because `Tier1Tproxy` is
-    // marked deprecated in favour of `Mediated`; the variant is
-    // still selected on the default-off path so legacy operators get
-    // bit-identical behaviour until they opt in via
-    // `RAXIS_AIRGAP_A3=1`.
-    #[allow(deprecated)]
-    let attach_nic = matches!(spec.egress_tier, raxis_isolation::EgressTier::Tier1Tproxy);
-    if attach_nic {
-        api.put_network_interface(&NetworkInterface {
-            iface_id:      "eth0".to_owned(),
-            host_dev_name: "raxis-tap".to_owned(),
-            guest_mac:     None,
-        })?;
-    }
+    // No virtio-net device. After the Tier1Tproxy deletion every
+    // surviving `EgressTier` variant boots a NIC-less guest under
+    // Firecracker:
+    //
+    // * `EgressTier::None` — Reviewer / Orchestrator, `INV-NETISO-01`.
+    // * `EgressTier::Mediated` — Path A3 universal-airgap, the
+    //   canonical Executor egress (`airgap-architecture.md §5`,
+    //   `INV-NETISO-A3-UNIVERSAL-NO-NIC-01`). All outbound TCP and
+    //   DNS flow over the per-VM vsock device to the kernel
+    //   admission handler; a virtio-net interface here would be a
+    //   redundant covert channel.
+    // * `EgressTier::Tier2CredProxy` — V3+ placeholder; the kernel
+    //   rejects this tier upstream and the substrate fail-closes by
+    //   attaching no NIC.
+    //
+    // The `PUT /network-interfaces/eth0` REST call has therefore
+    // been removed entirely — no `attach_nic` branch survives.
 
     api.put_vsock(&VsockConfig {
         vsock_id:  "raxis".to_owned(),
@@ -1175,74 +1170,13 @@ mod tests {
         );
     }
 
-    #[test]
-    #[allow(deprecated)]
-    fn drive_boot_emits_network_interface_when_egress_tier_is_tier1() {
-        use std::io::{Read, Write};
-        use std::os::unix::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let api_sock = dir.path().join("api.sock");
-        let vsock_uds = dir.path().join("vsock.sock");
-        let listener = UnixListener::bind(&api_sock).unwrap();
-
-        let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let captured_thread = std::sync::Arc::clone(&captured);
-
-        let server = std::thread::spawn(move || {
-            for _ in 0..6 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buf = Vec::with_capacity(4096);
-                let mut tmp = [0u8; 1024];
-                loop {
-                    let n = stream.read(&mut tmp).unwrap();
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&tmp[..n]);
-                    if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = std::str::from_utf8(&buf[..end]).unwrap();
-                        let cl: usize = headers
-                            .lines()
-                            .find_map(|l| {
-                                l.strip_prefix("Content-Length:")
-                                    .or_else(|| l.strip_prefix("content-length:"))
-                                    .map(|s| s.trim().parse::<usize>().unwrap_or(0))
-                            })
-                            .unwrap_or(0);
-                        if buf.len() >= end + 4 + cl {
-                            break;
-                        }
-                    }
-                }
-                let text = String::from_utf8_lossy(&buf).into_owned();
-                let request_line = text
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .to_owned();
-                captured_thread.lock().unwrap().push(request_line);
-                stream
-                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                    .unwrap();
-                stream.flush().unwrap();
-            }
-        });
-
-        let api = FirecrackerApi::new(&api_sock).with_timeout(Duration::from_secs(2));
-        let img = fixture_image_with_path(PathBuf::from("/tmp/vmlinux.bin"));
-        let mut spec = fixture_spec("session-fixture-net");
-        spec.egress_tier = EgressTier::Tier1Tproxy;
-        drive_boot(&api, &img, &[], &spec, &vsock_uds).unwrap();
-
-        server.join().unwrap();
-        let cap = captured.lock().unwrap();
-        assert_eq!(cap.len(), 6);
-        assert!(cap[3].starts_with("PUT /network-interfaces/eth0"));
-        assert!(cap[4].starts_with("PUT /vsock"));
-        assert!(cap[5].starts_with("PUT /actions"));
-    }
+    // The companion `drive_boot_emits_network_interface_when_egress_tier_is_tier1`
+    // test was removed in the Tier1Tproxy deletion sweep — no
+    // surviving `EgressTier` variant emits a
+    // `PUT /network-interfaces/eth0` frame, and the structural
+    // absence is pinned by
+    // `drive_boot_omits_network_interface_under_egress_tier_mediated`
+    // above.
 
     #[test]
     fn drive_boot_rejects_inline_image_bytes() {

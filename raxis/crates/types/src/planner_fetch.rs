@@ -65,7 +65,7 @@ pub enum PlannerFetchKind {
 /// a planner running in an air-gapped substrate (`EgressTier::None`,
 /// e.g. the canonical Orchestrator and Reviewer VMs) can reach an
 /// upstream provider. Substrates with in-VM tproxy
-/// (`EgressTier::Tier1Tproxy`) MAY still use the direct path but
+/// (`EgressTier::Mediated`) MAY still use the direct path but
 /// SHOULD use this path uniformly so audit, breaker, and credential
 /// invariants live entirely on the kernel side.
 #[derive(Debug, Clone, Serialize, Deserialize)]

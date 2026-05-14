@@ -143,15 +143,20 @@ fn avf_runtime_drives_full_device_array_lifecycle_against_real_avf() {
         fixture_mount(host_share_dir.clone(), "/workspace", MountMode::ReadWrite),
         fixture_mount(host_share_dir, "/raxis", MountMode::ReadOnly),
     ];
-    let spec = fixture_spec("avf-integ-token", EgressTier::Tier1Tproxy, kernel_path);
+    // Executor egress is `EgressTier::Mediated` post-Tier1Tproxy
+    // deletion — the substrate emits no virtio-net device for any
+    // surviving tier, so this test covers the canonical Mediated
+    // Executor boot path on the real AVF integration surface.
+    let spec = fixture_spec("avf-integ-token", EgressTier::Mediated, kernel_path);
 
     let cfg = translate(&image, &mounts, &spec).expect("translate succeeds for real fixture");
 
-    // Sanity: translator wired all four device shapes the substrate
-    // needs.
+    // Sanity: translator wired the device shapes the substrate
+    // actually instantiates (rootfs + virtiofs + vsock). There is
+    // no virtio-net field to assert on after the Tier1Tproxy
+    // deletion — the absence is structural.
     assert_eq!(cfg.block_devices.len(), 1, "rootfs drive present");
     assert_eq!(cfg.fs_shares.len(), 2, "two virtiofs shares");
-    assert!(cfg.network.is_some(), "Tier1Tproxy ⇒ NAT network attached");
 
     let mut runtime = AvfRuntime::new(cfg);
 
@@ -220,41 +225,35 @@ fn avf_runtime_connect_vsock_without_started_vm_returns_typed_error() {
     }
 }
 
-/// Translator should produce the canonical NAT shape when the
-/// session is `Tier1Tproxy` and an empty network when `None`. This
-/// pins the substrate's network-device behaviour at the integration
-/// boundary (config translator + runtime build path), not just at
-/// the per-unit level.
+/// After the Tier1Tproxy deletion the AVF substrate provisions no
+/// virtio-net device for any surviving `EgressTier` variant. This
+/// integration-level test confirms `translate` accepts each
+/// variant and the resulting `AvfRuntime` constructs successfully
+/// — the structural absence of an `AvfConfig.network` field
+/// enforces the no-NIC contract at compile time, so the previous
+/// parametric assertions over the field collapsed away. See
+/// `INV-NETISO-A3-UNIVERSAL-NO-NIC-01`.
 #[test]
-fn avf_runtime_network_translation_round_trips_through_runtime() {
+fn avf_runtime_translation_round_trips_for_every_egress_tier() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel_path = tmp.path().join("vmlinux.bin");
     make_kernel_placeholder(&kernel_path);
     let rootfs_path = tmp.path().join("rootfs.img");
     make_raw_disk(&rootfs_path);
 
-    let cfg_off = translate(
-        &fixture_image_at(rootfs_path.clone()),
-        &[],
-        &fixture_spec("net-off", EgressTier::None, kernel_path.clone()),
-    )
-    .unwrap();
-    assert!(cfg_off.network.is_none());
-
-    let cfg_nat = translate(
-        &fixture_image_at(rootfs_path),
-        &[],
-        &fixture_spec("net-nat", EgressTier::Tier1Tproxy, kernel_path),
-    )
-    .unwrap();
-    let net = cfg_nat.network.clone().unwrap();
-    assert!(matches!(
-        net.mode,
-        raxis_isolation_apple_vz::config::AvfNetworkMode::Nat,
-    ));
-
-    let runtime_off = AvfRuntime::new(cfg_off);
-    let runtime_nat = AvfRuntime::new(cfg_nat);
-    assert!(runtime_off.config().network.is_none());
-    assert!(runtime_nat.config().network.is_some());
+    for (label, tier) in [
+        ("net-none", EgressTier::None),
+        ("net-mediated", EgressTier::Mediated),
+    ] {
+        let cfg = translate(
+            &fixture_image_at(rootfs_path.clone()),
+            &[],
+            &fixture_spec(label, tier, kernel_path.clone()),
+        )
+        .unwrap_or_else(|e| panic!("translate must succeed for {tier:?}: {e:?}"));
+        // Sanity: rootfs + vsock plumbing is present even with
+        // no virtio-net device.
+        assert_eq!(cfg.block_devices.len(), 1);
+        let _runtime = AvfRuntime::new(cfg);
+    }
 }

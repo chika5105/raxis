@@ -182,7 +182,7 @@ pub use transport::{
 /// tests in `raxis-kernel::session_spawn_orchestrator`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
-    /// Spawned with `EgressTier::Tier1Tproxy`, full task-id +
+    /// Spawned with `EgressTier::Mediated`, full task-id +
     /// initiative-id pair, executor tool-registry features.
     Executor,
     /// Spawned with `EgressTier::None`, full task-id + initiative-id

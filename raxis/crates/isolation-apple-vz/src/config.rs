@@ -146,21 +146,15 @@ pub struct AvfVirtioFsShare {
     pub guest_path:  String,
 }
 
-/// Translated network device.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AvfNetworkDevice {
-    /// We use NAT mode for `Tier1Tproxy`. The kernel layers tproxy
-    /// rules on top of the host's NAT bridge.
-    pub mode:        AvfNetworkMode,
-}
-
-/// Network attachment mode. V2 ships only NAT for `Tier1Tproxy`;
-/// `None` returns no network device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AvfNetworkMode {
-    /// `VZNATNetworkDeviceAttachment` — NAT-via-host bridging.
-    Nat,
-}
+// `AvfNetworkDevice` and `AvfNetworkMode` were removed in the
+// Tier1Tproxy deletion sweep. Under the surviving `EgressTier`
+// variants (`None`, `Mediated`, `Tier2CredProxy`) no virtio-net
+// device is attached by the AVF substrate, so the translated
+// `AvfConfig.network` field is now permanently `None`. The
+// `VZNATNetworkDeviceAttachment` cargo feature on
+// `objc2-virtualization` was dropped at the same time — keeping
+// the linker surface tight to the devices the substrate actually
+// instantiates.
 
 /// Translated VSock configuration.
 ///
@@ -189,8 +183,6 @@ pub struct AvfConfig {
     pub block_devices: Vec<AvfBlockDevice>,
     /// VirtioFS shares.
     pub fs_shares:     Vec<AvfVirtioFsShare>,
-    /// Optional network device.
-    pub network:       Option<AvfNetworkDevice>,
     /// VSock configuration.
     pub vsock:         AvfVsock,
     /// Optional host file path for guest serial console capture.
@@ -573,32 +565,24 @@ pub fn translate(
     }
 
     // ---- 5. Network ----------------------------------------------------
-    let network = match spec.egress_tier {
-        EgressTier::None => None,
-        // Legacy default-off path. Path A3 supersedes this with
-        // `EgressTier::Mediated` (no NIC, vsock admission); the
-        // variant is preserved so a kernel built without
-        // `runtime-airgap-a3` and launched without
-        // `RAXIS_AIRGAP_A3=1` boots a NAT-attached executor
-        // bit-identically to the V2 baseline.
-        #[allow(deprecated)]
-        EgressTier::Tier1Tproxy => Some(AvfNetworkDevice {
-            mode: AvfNetworkMode::Nat,
-        }),
-        // Path A3 — `airgap-architecture.md §5`. No NIC; all
-        // egress flows over the per-VM vsock device to the
-        // kernel admission handler. INV-NETISO-A3-UNIVERSAL-
-        // NO-NIC-01 is structurally enforced here: the AVF
-        // configuration handed to `VZVirtualMachineConfiguration`
-        // omits `networkDevices` entirely.
-        EgressTier::Mediated => None,
-        EgressTier::Tier2CredProxy => {
-            // V3+ placeholder per `extensibility-traits.md §3.4` — V2
-            // never reaches here (kernel rejects the tier upstream),
-            // but the substrate honours fail-closed: no network.
-            None
-        }
-    };
+    //
+    // After the Tier1Tproxy deletion, no surviving `EgressTier`
+    // attaches a virtio-net device under the AVF substrate. The
+    // translate step accepts each variant for exhaustiveness and
+    // emits no network device:
+    //
+    // * `EgressTier::None` — Reviewer / Orchestrator (no NIC,
+    //   `INV-NETISO-01`).
+    // * `EgressTier::Mediated` — Path A3 universal-airgap, the
+    //   canonical Executor egress (no NIC,
+    //   `INV-NETISO-A3-UNIVERSAL-NO-NIC-01`; all egress flows over
+    //   the per-VM vsock device to the kernel admission handler).
+    // * `EgressTier::Tier2CredProxy` — V3+ placeholder; the kernel
+    //   rejects this tier upstream, but the substrate honours
+    //   fail-closed: no network.
+    match spec.egress_tier {
+        EgressTier::None | EgressTier::Mediated | EgressTier::Tier2CredProxy => {}
+    }
 
     // ---- 6. VSock ------------------------------------------------------
     // We default to CID 3 (per Firecracker convention) and planner
@@ -616,7 +600,6 @@ pub fn translate(
         boot_loader,
         block_devices,
         fs_shares,
-        network,
         vsock,
         console_log: spec.guest_console_log.clone(),
     })
@@ -676,50 +659,29 @@ mod tests {
 
     // ---- INV-NETISO-A3-UNIVERSAL-NO-NIC-01 witness --------------------
     //
-    // The substrate MUST refuse to provision a NIC for any role that
-    // boots under `EgressTier::Mediated` (Path A3) or
-    // `EgressTier::None` (legacy reviewer / orchestrator + every role
-    // when A3 is active). These tests pin that contract: a single bug
-    // that re-adds `Some(AvfNetworkDevice { … })` to the Mediated arm
-    // surfaces here at compile-and-test time, before it can ship.
+    // After the Tier1Tproxy deletion the "no NIC for any egress tier"
+    // contract is **structural**: `AvfConfig` carries no network field
+    // and `translate()` has no code path that constructs one. The
+    // legacy parametric witnesses (one per `EgressTier` variant) have
+    // been collapsed into the smoke test below — a single call to
+    // `translate()` per surviving variant confirms the function
+    // accepts the tier without surfacing a `ConfigError` and the
+    // structural absence of `AvfConfig.network` is enforced by the
+    // compiler.
 
     #[test]
-    fn translate_provisions_no_nic_under_egress_tier_mediated() {
-        let mut spec = fixture_spec();
-        spec.egress_tier = EgressTier::Mediated;
-        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
-        assert!(
-            cfg.network.is_none(),
-            "INV-NETISO-A3-UNIVERSAL-NO-NIC-01: \
-             EgressTier::Mediated MUST produce no virtio-net device \
-             (got: {:?})",
-            cfg.network,
-        );
-    }
-
-    #[test]
-    fn translate_provisions_no_nic_under_egress_tier_none() {
-        let mut spec = fixture_spec();
-        spec.egress_tier = EgressTier::None;
-        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
-        assert!(
-            cfg.network.is_none(),
-            "INV-NETISO-01: EgressTier::None MUST produce no \
-             virtio-net device (got: {:?})",
-            cfg.network,
-        );
-    }
-
-    #[test]
-    fn translate_provisions_no_nic_under_egress_tier_cred_proxy() {
-        let mut spec = fixture_spec();
-        spec.egress_tier = EgressTier::Tier2CredProxy;
-        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
-        assert!(
-            cfg.network.is_none(),
-            "Tier2CredProxy MUST produce no virtio-net device \
-             (cred proxies tunnel over vsock loopback)",
-        );
+    fn translate_accepts_every_egress_tier_without_attaching_a_nic() {
+        for tier in [
+            EgressTier::None,
+            EgressTier::Mediated,
+            EgressTier::Tier2CredProxy,
+        ] {
+            let mut spec = fixture_spec();
+            spec.egress_tier = tier;
+            translate(&fixture_image(), &[], &spec).unwrap_or_else(|e| {
+                panic!("translate must succeed for {tier:?}: {e:?}")
+            });
+        }
     }
 
     // -------------------------------------------------------------------
@@ -760,7 +722,6 @@ mod tests {
         // Initrd channel empty for the EROFS path.
         assert!(cfg.boot_loader.initrd_url.is_none());
         assert!(cfg.fs_shares.is_empty());
-        assert!(cfg.network.is_none());
         assert_eq!(cfg.vsock.guest_cid, 7);
         assert_eq!(cfg.vsock.planner_port, AVF_PLANNER_PORT);
     }
@@ -1054,37 +1015,14 @@ mod tests {
     }
 
     // ---- Network -------------------------------------------------------
-
-    #[test]
-    fn translate_omits_network_when_egress_tier_is_none() {
-        let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
-        assert!(cfg.network.is_none());
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn translate_attaches_nat_device_for_tier1_tproxy() {
-        // Legacy Tier1Tproxy default-off path — pinned because the
-        // V2 baseline iter42 + the existing live-e2e harness depend on
-        // virtio-net + NAT being attached when the kernel selects
-        // this tier. Path A3 supersedes this with `EgressTier::Mediated`
-        // (no NIC); the bit-identical default-off path keeps this
-        // arm verbatim.
-        let mut spec = fixture_spec();
-        spec.egress_tier = EgressTier::Tier1Tproxy;
-        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
-        assert_eq!(cfg.network, Some(AvfNetworkDevice { mode: AvfNetworkMode::Nat }));
-    }
-
-    #[test]
-    fn translate_skips_network_for_tier2_cred_proxy_until_v3() {
-        let mut spec = fixture_spec();
-        spec.egress_tier = EgressTier::Tier2CredProxy;
-        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
-        // Tier-2 ships in V3; the substrate fails closed (no
-        // network) until then.
-        assert!(cfg.network.is_none());
-    }
+    //
+    // After the Tier1Tproxy deletion, the AVF substrate provisions
+    // no virtio-net device for any surviving `EgressTier`. The
+    // structural absence of `AvfConfig.network` enforces this at
+    // compile time; the parametric tier-by-tier witnesses that this
+    // section previously held collapsed into
+    // `translate_accepts_every_egress_tier_without_attaching_a_nic`
+    // above.
 
     // ---- Resource envelope guards --------------------------------------
 

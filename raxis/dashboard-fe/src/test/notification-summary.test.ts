@@ -168,13 +168,18 @@ describe("summarizeNotificationPayload", () => {
       admission_loopback: "127.0.0.1:53891",
       backend_id: "apple-vz-14.x",
       credential_proxies: 2,
-      egress_tier: "Tier1Tproxy",
+      // `Mediated` is the only non-`None` egress tier shipped in V2
+      // after the Tier1Tproxy deletion. The FE summariser is
+      // String-typed and passes the value through verbatim, so
+      // pre-deletion chains with `"Tier1Tproxy"` still render
+      // correctly — the assertion below pins the post-deletion shape.
+      egress_tier: "Mediated",
       initiative_id: "019e1f05-0146-77a3-b455-2dd3e8fdf4b9",
       session_id: "3258b2d3-629d-4706-81cf-ac424df163b1",
       task_id: "materialize-records",
     });
     expect(summary).toBe(
-      "Session 3258b2d3 VM spawned for materialize-records (backend=apple-vz-14.x, egress=Tier1Tproxy, 2 cred proxies)",
+      "Session 3258b2d3 VM spawned for materialize-records (backend=apple-vz-14.x, egress=Mediated, 2 cred proxies)",
     );
   });
 
@@ -182,12 +187,12 @@ describe("summarizeNotificationPayload", () => {
     const summary = summarizeNotificationPayload("SessionVmSpawned", {
       backend_id: "apple-vz-14.x",
       credential_proxies: 1,
-      egress_tier: "Tier1Tproxy",
+      egress_tier: "Mediated",
       session_id: "3258b2d3-629d-4706-81cf-ac424df163b1",
       task_id: "materialize-records",
     });
     expect(summary).toBe(
-      "Session 3258b2d3 VM spawned for materialize-records (backend=apple-vz-14.x, egress=Tier1Tproxy, 1 cred proxy)",
+      "Session 3258b2d3 VM spawned for materialize-records (backend=apple-vz-14.x, egress=Mediated, 1 cred proxy)",
     );
   });
 

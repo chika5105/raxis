@@ -915,7 +915,7 @@ mod tests {
         VmSpec {
             vcpu_count:        vcpu,
             mem_mib:           mem,
-            egress_tier:       EgressTier::Tier1Tproxy,
+            egress_tier:       EgressTier::Mediated,
             cgroup_quota:      None,
             boot_args:         Vec::new(),
             entrypoint_argv:   Vec::new(),

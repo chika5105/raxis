@@ -95,12 +95,18 @@ objc2-virtualization     = { version = "0.3", features = [
     "VZDirectoryShare",
     "VZSingleDirectoryShare",
     "VZSharedDirectory",
-    # Network (Tier1Tproxy NAT)
-    "VZNetworkDeviceConfiguration",
-    "VZVirtioNetworkDeviceConfiguration",
-    "VZNetworkDeviceAttachment",
-    "VZNATNetworkDeviceAttachment",
-    "VZMACAddress",
+    # Network — none. After the Tier1Tproxy deletion the AVF
+    # substrate provisions no virtio-net device for any surviving
+    # `EgressTier` (`None`, `Mediated`, `Tier2CredProxy`); see
+    # `crates/isolation-apple-vz/src/runtime.rs` and
+    # `specs/v2/airgap-architecture.md §5` /
+    # `INV-NETISO-A3-UNIVERSAL-NO-NIC-01`. The previous NIC-related
+    # features (`VZNetworkDeviceConfiguration`,
+    # `VZVirtioNetworkDeviceConfiguration`,
+    # `VZNetworkDeviceAttachment`, `VZNATNetworkDeviceAttachment`,
+    # `VZMACAddress`) were removed in this sweep — the linker
+    # surface stays tight to the devices the substrate actually
+    # instantiates.
     # VSock (control plane)
     "VZSocketDeviceConfiguration",
     "VZVirtioSocketDeviceConfiguration",

@@ -700,7 +700,7 @@ pub struct WorkspaceMount {
 pub struct VmSpec {
     pub vcpu_count:        u32,
     pub mem_mib:           u32,
-    pub egress_tier:       EgressTier,     // None | Tier1Tproxy | Tier2CredProxy
+    pub egress_tier:       EgressTier,     // None | Mediated | Tier2CredProxy
     pub cgroup_quota:      Option<CgroupQuota>,
     pub boot_args:         Vec<String>,
     pub entrypoint_argv:   Vec<String>,

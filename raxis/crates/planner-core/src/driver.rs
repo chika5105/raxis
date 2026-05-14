@@ -490,10 +490,11 @@ where
     //
     // VM substrates (`Vsock` dial / `VsockListen`) run the planner
     // in an `EgressTier::None` (Orchestrator, Reviewer) or
-    // `Tier1Tproxy` (Executor) guest. The kernel-mediated path is
-    // the ONLY way out for `EgressTier::None` and a strict
-    // architectural improvement for `Tier1Tproxy` (the audit chain
-    // gains a single anchor on the kernel side per
+    // `Mediated` (Executor; the only non-`None` egress tier shipped
+    // in V2 after the Tier1Tproxy deletion). The kernel-mediated
+    // path is the ONLY way out for `EgressTier::None` and the only
+    // sanctioned path for `Mediated` (the audit chain gains a single
+    // anchor on the kernel side per
     // `provider-failure-handling.md §2.1`).
     let http_fetch: Arc<dyn crate::http_fetch::HttpFetch> = match &transport_cfg {
         crate::transport::KernelTransportConfig::Uds { .. } => {
@@ -1761,7 +1762,8 @@ mod tests {
     /// with `RetrySubTaskRejectedNotRetryable`, and the per-
     /// initiative no-progress respawn ceiling
     /// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fires; iter48
-    /// reproduced this on Tier1Tproxy supervisor-free with the
+    /// reproduced this (then on the legacy Tier1Tproxy egress, since
+    /// removed) supervisor-free with the
     /// `lint-defect` task and surfaced
     /// `OrchestratorRespawnCeilingExceeded` as the chain-side
     /// terminal event.

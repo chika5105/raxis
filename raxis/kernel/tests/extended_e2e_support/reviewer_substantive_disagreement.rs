@@ -345,7 +345,7 @@ mod tests {
             task_id:            Some(task_id.to_owned()),
             initiative_id:      "init-realistic".to_owned(),
             backend_id:         "test-backend".to_owned(),
-            egress_tier:        "Tier1Tproxy".to_owned(),
+            egress_tier:        "Mediated".to_owned(),
             admission_loopback: "127.0.0.1:0".to_owned(),
             credential_proxies: 0,
         }, Some(task_id))

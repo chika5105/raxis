@@ -449,7 +449,18 @@ pub enum AuditEventKind {
         backend_id: String,
         /// `EgressTier` that the substrate enforces for this VM,
         /// stringified PascalCase. Operator dashboards key on this
-        /// to surface "Tier1Tproxy" vs "Tier2CredProxy" sessions.
+        /// to surface `"None"` (Reviewer / Orchestrator),
+        /// `"Mediated"` (Executor; the only egress tier shipped in
+        /// V2 after the Tier1Tproxy deletion), and
+        /// `"Tier2CredProxy"` sessions.
+        ///
+        /// **Back-compat.** Pre-deletion audit chains contain
+        /// `"Tier1Tproxy"` here. Because the field is a free-form
+        /// `String` and not the `EgressTier` enum, those chains
+        /// replay byte-identically through `raxis-audit-tools
+        /// verify-chain` — no enum-deserialization happens at the
+        /// audit layer, so no synthetic variant or `#[serde(alias)]`
+        /// is required to retain compatibility.
         egress_tier: String,
         /// `host:port` of the per-session egress-admission listener
         /// the in-guest tproxy phones home to. Loopback in dev,

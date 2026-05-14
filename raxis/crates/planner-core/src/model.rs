@@ -472,7 +472,7 @@ pub trait ModelClient: Send + Sync {
 /// [`crate::http_fetch::HttpFetch`] so the same client works in
 /// every substrate:
 ///
-/// * Subprocess / `Tier1Tproxy` substrates pass
+/// * Subprocess / `Mediated` substrates pass
 ///   [`crate::http_fetch::DirectHttpFetch`] (`reqwest` direct
 ///   egress + transparent tproxy interception in the VM).
 /// * `EgressTier::None` substrates (Orchestrator, Reviewer) pass

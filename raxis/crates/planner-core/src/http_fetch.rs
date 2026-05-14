@@ -28,7 +28,7 @@
 //!
 //! 1. [`DirectHttpFetch`] — wraps `reqwest::Client`. Used by the
 //!    subprocess substrate, by host-side dev work, and by the
-//!    `Tier1Tproxy` substrate path where the in-VM tproxy
+//!    `Mediated` substrate path where the in-VM tproxy
 //!    transparently routes to the kernel gateway. Equivalent to
 //!    today's behaviour, just hoisted behind the trait.
 //!

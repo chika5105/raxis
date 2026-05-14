@@ -715,7 +715,7 @@ warnings, no audit-stream backpressure noise.
   - `Initiative 019e1f0d created (plan 6380a6c2), signed by f8dda844`
   - `Plan approved for 019e1f0d (9 tasks)`
   - `Plan approved for 019e1f0d (1 task)`  ← pluralisation
-  - `Session 9bdf2e2f VM spawned for sibling-materialize-records (backend=apple-vz-14.x, egress=Tier1Tproxy, 2 cred proxies)`
+  - `Session 9bdf2e2f VM spawned for sibling-materialize-records (backend=apple-vz-14.x, egress=Mediated, 2 cred proxies)`
   - `Gateway spawned (attempt 1, token 0c08e52c…)`
 
   Follow-up commit `67a35cb`

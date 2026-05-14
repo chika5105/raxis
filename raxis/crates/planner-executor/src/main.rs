@@ -9,7 +9,7 @@
 //!   * compile-time tool-registry features
 //!     (`raxis-planner-core/executor`).
 //!   * egress tier the kernel pre-stamps on the VM
-//!     (`Tier1Tproxy` per `raxis-kernel::session_spawn_orchestrator`).
+//!     (`Mediated` per `raxis-kernel::session_spawn_orchestrator`).
 //!
 //! V2.4 lifecycle: the driver delegates to
 //! [`raxis_planner_core::run_role_session`] which runs the full

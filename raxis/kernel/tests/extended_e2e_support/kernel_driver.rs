@@ -2205,8 +2205,10 @@ pub fn poll_for_dual_lifecycle_completion(
             // `IntegrationMergeCompleted` that will never arrive (the
             // same indefinite-wait class the spawn-failure scanner
             // above covers per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`).
-            // iter48 reproduced this on Tier1Tproxy supervisor-free
-            // when the orchestrator NNSP blind-asked `retry_subtask`
+            // iter48 reproduced this (then on the legacy Tier1Tproxy
+            // egress, since removed in favour of Mediated)
+            // supervisor-free when the orchestrator NNSP blind-asked
+            // `retry_subtask`
             // against a `lint-defect` task whose
             // `capabilities.tasks[*].retry_admissible=false reason="prior
             // state PendingActivation; …"` — the kernel correctly

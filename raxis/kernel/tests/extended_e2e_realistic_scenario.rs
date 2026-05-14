@@ -845,7 +845,7 @@ fn synthetic_vm_spawn(seq: u64, task_id: &str) -> AuditEvent {
         task_id:            Some(task_id.to_owned()),
         initiative_id:      "init-primary".to_owned(),
         backend_id:         "test-backend".to_owned(),
-        egress_tier:        "Tier1Tproxy".to_owned(),
+        egress_tier:        "Mediated".to_owned(),
         admission_loopback: "127.0.0.1:0".to_owned(),
         credential_proxies: 0,
     };

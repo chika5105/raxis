@@ -137,12 +137,11 @@ impl FirecrackerApi {
         Ok(())
     }
 
-    /// `PUT /network-interfaces/{iface_id}`.
-    pub fn put_network_interface(&self, body: &NetworkInterface) -> Result<(), ApiError> {
-        let path = format!("/network-interfaces/{}", body.iface_id);
-        self.request("PUT", &path, Some(body))?;
-        Ok(())
-    }
+    // `PUT /network-interfaces/{iface_id}` was removed in the
+    // Tier1Tproxy deletion sweep — no surviving `EgressTier`
+    // variant attaches a virtio-net interface to a Firecracker
+    // guest (see `crates/isolation-firecracker/src/lib.rs::drive_boot`
+    // and `specs/v2/airgap-architecture.md §5`).
 
     /// `PUT /vsock`.
     pub fn put_vsock(&self, body: &VsockConfig) -> Result<(), ApiError> {
@@ -418,18 +417,8 @@ pub struct MachineConfig {
     pub smt: bool,
 }
 
-/// `/network-interfaces/{iface_id}` payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NetworkInterface {
-    /// Stable interface id (path-encoded into the URL).
-    pub iface_id:    String,
-    /// Host-side tap device the VMM attaches to (e.g.
-    /// `"raxis-tap-3"`).
-    pub host_dev_name: String,
-    /// Optional guest MAC override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guest_mac:   Option<String>,
-}
+// `/network-interfaces/{iface_id}` payload removed alongside
+// `put_network_interface` in the Tier1Tproxy deletion sweep.
 
 /// `/vsock` payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
