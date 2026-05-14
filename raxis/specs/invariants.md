@@ -83,7 +83,7 @@
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 | 10 |
-| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 | 3 |
+| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
@@ -93,7 +93,7 @@
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
 | Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
-| **Total** | | **117** |
+| **Total** | | **119** |
 
 ---
 
@@ -5930,6 +5930,246 @@ documentation).
 [`tests::common::dashboard::locate_dashboard_dist`]: ../kernel/tests/common/dashboard.rs
 [`tests::common::dashboard::classify_bundle_state`]: ../kernel/tests/common/dashboard.rs
 [`tests::common::dashboard::run_npm_bounded`]: ../kernel/tests/common/dashboard.rs
+
+---
+
+### INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01 — Live-e2e harness MUST guarantee a forwarding OTel pusher (or hard-fail), never silently degrade
+
+**Statement.** Before the realism-e2e harness submits any plan,
+it MUST guarantee that an OTel pusher process is actively
+forwarding the kernel's metric ring to the OTLP collector at
+`http://127.0.0.1:4318`, AND that Prometheus shows
+`up{job=~"raxis.*"} = 1` for at least one raxis target. The
+harness either spawns and supervises this pusher itself
+(default) or asserts an external pusher is reachable (opt-out
+via `RAXIS_E2E_SKIP_OTEL_PUSHER=1`). Silent degradation — the
+run continuing while Grafana panels stay empty — is forbidden.
+
+The harness's single source of truth for this contract is
+[`extended_e2e_support::otel_pusher::ensure_otel_pusher_or_panic`];
+that function MUST:
+
+1. Resolve the pusher binary in this priority:
+   a) `RAXIS_OTEL_PUSHER_BINARY` env var if set + present.
+   b) Convention paths
+      `<workspace>/target/{release,debug}/raxis-otel-pusher`
+      and `$RAXIS_INSTALL_DIR/bin/raxis-otel-pusher`.
+   c) If still missing AND `RAXIS_E2E_SKIP_OTEL_PUSHER` is unset,
+      run `cargo build --release -p raxis-otel-pusher` with a
+      bounded timeout
+      ([`DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS`], default 180 s,
+      tunable via `RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS` and
+      clamped to `[60s, 600s]`).
+2. Spawn the pusher as a supervised child of the test process
+   pointing at the kernel's `<data_dir>` and the kernel-signed
+   `policy.toml`; capture its stderr to
+   `<data_dir>/otel-pusher.stderr.log`; verify the child is
+   alive after [`POST_SPAWN_LIVENESS_DELAY`] (3 s).
+3. Smoke-probe Prometheus
+   (`http://127.0.0.1:9090/api/v1/query?query=up`) for up to
+   [`SMOKE_PROBE_BUDGET`] (30 s) at [`SMOKE_PROBE_INTERVAL`]
+   (1 s) cadence; assert at least one `raxis*` job appears as
+   `up=1`. The probe loop short-circuits on supervised-child
+   death so a pusher that crashes mid-startup surfaces
+   immediately instead of waiting out the full budget.
+4. Return an [`OtelPusherSupervisor`] RAII guard whose `Drop`
+   SIGTERM-then-SIGKILL's the child (500 ms grace window).
+5. Emit exactly ONE operator-facing success log line of the
+   form `[realism-e2e] observability: pusher spawned (pid=N,
+   bin=…, log=…), smoke-probed, live metrics flowing to Grafana
+   …`. The opt-out branch emits the parallel external-pusher
+   form. Neither branch emits the contradictory pair this
+   invariant exists to prevent (`INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01`).
+
+Every panic body produced by the pipeline carries the literal
+[`OTEL_PUSHER_VIOLATION_TOKEN`] (`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01
+VIOLATED`) so a CI log scraper can pin the failure mode
+without parsing the whole remediation block. The remediation
+block names every escape hatch: pre-build the pusher, point
+`RAXIS_OTEL_PUSHER_BINARY` at an existing binary, opt out via
+`RAXIS_E2E_SKIP_OTEL_PUSHER=1`, or tune the build deadline.
+
+**Opt-out (operator-supervised pusher).** Set
+`RAXIS_E2E_SKIP_OTEL_PUSHER=1` to skip the auto-locate /
+auto-build / spawn path. The harness logs an explicit opt-out
+line and STILL runs the Prometheus smoke-probe — if no
+external pusher is actually forwarding, the harness hard-fails
+with the alternate remediation message
+("Set `RAXIS_E2E_SKIP_OTEL_PUSHER=0` (or unset it) to let the
+harness manage the pusher, OR ensure your external pusher is
+running and pointing at `http://127.0.0.1:4318`"). Mirrors the
+`RAXIS_LIVE_E2E_NO_AUTO_DOCKER` discipline for the docker
+backing stack.
+
+**Bounded-wait composition.** The auto-build subprocess is
+bounded by [`otel_pusher_build_timeout`], which clamps any
+out-of-range / unparseable / non-positive override to the
+default — satisfying `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`
+even on a misconfigured CI lane. The smoke-probe loop is
+bounded by [`SMOKE_PROBE_BUDGET`].
+
+**Justification.** The kernel emits per-frame metrics into an
+in-process JSONL ring (`<data_dir>/observability/{spans,metrics}/`)
+per `INV-OTEL-03`. Without the out-of-process pusher
+forwarding those frames to OTLP, Prometheus has no data to
+scrape and every Grafana panel stays empty for the duration
+of the run. Iter53 reproduced the silent-degradation shape
+exactly: the realism-e2e harness emitted both
+`raxis-otel-pusher binary not located … Grafana panels will
+stay empty` AND `kernel pushing OTLP to … live metrics flowing
+to Grafana` in the same boot, the latter contradicting the
+former — and the run continued for ~30 minutes without any
+operator-visible signal that the dashboards were dark. The
+parallel iter52 case for the dashboard FE bundle
+(`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`) demonstrated
+the same hard-fail policy works: the operator either pre-builds
+the artifact, sets the explicit opt-out, or accepts the
+auto-build cost — but never silently runs without the
+artifact.
+
+**Scenario.** Operator runs `cargo test -p raxis-kernel
+--test extended_e2e_realistic_scenario --features
+runtime-deadlock-detection` after `git worktree add` on a
+fresh clone where `target/release/raxis-otel-pusher` has
+never been built. With this invariant in force the harness
+auto-builds the pusher (≤180 s on a healthy host), spawns it,
+smoke-probes Prometheus, emits the single success log line,
+and proceeds — the live test sees Grafana panels populating
+within ~5 s of the kernel emitting its first metric. Without
+the invariant the run would proceed silently with empty
+dashboards (the iter53 root-cause shape) until the operator
+manually notices the Grafana darkness ~30 minutes in.
+
+**Witness.**
+[`extended_e2e_support::otel_pusher::tests::inv_live_e2e_otel_pusher_present_01_classifier_opt_out_wins_over_locate`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(opt-out beats every locate-success arm),
+[`…::inv_live_e2e_otel_pusher_present_01_classifier_envvar_beats_convention`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(env-var override beats convention paths),
+[`…::inv_live_e2e_otel_pusher_present_01_classifier_convention_path_used`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(convention path arm dispatches when present),
+[`…::inv_live_e2e_otel_pusher_present_01_default_path_auto_builds_when_missing`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(default path is `NeedsAutoBuild` — pins iter53 fix),
+[`…::inv_live_e2e_otel_pusher_present_01_classifier_never_returns_hard_fail_directly`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(`HardFailMissingBinary` is reserved for the post-failed-build
+dispatcher, not the classifier itself),
+[`…::inv_live_e2e_otel_pusher_present_01_convention_path_precedence_release_first`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(release-before-debug precedence; pinned so a future maintainer
+cannot silently flip onto a stale debug build).
+Operator-surface stability is pinned by
+[`…::inv_live_e2e_otel_pusher_present_01_opt_out_env_var_name_pinned`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(env var spellings),
+[`…::inv_live_e2e_otel_pusher_present_01_violation_token_shape`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(panic-message scraper token + `cargo build --release -p
+raxis-otel-pusher` remediation phrase),
+[`…::inv_live_e2e_otel_pusher_present_01_default_build_timeout_generous_but_bounded`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(default sits in `[60s, 600s]` window), and
+[`…::inv_live_e2e_otel_pusher_present_01_build_timeout_override_clamp_safely`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(env-override path: missing / `0` / unparseable / out-of-range
+all clamp to default). Supervision discipline is pinned by
+[`…::inv_live_e2e_otel_pusher_present_01_supervisor_kills_child_on_drop`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(spawns `sleep 9999` under the supervisor, drops the guard,
+asserts the child dies within 5 s — the "no leaked processes"
+contract). Smoke-probe shape is pinned by
+[`…::inv_live_e2e_otel_pusher_present_01_smoke_probe_blocks_on_no_metrics`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(empty `up` series, only-non-raxis jobs, raxis-job-up=0 all
+classify as `NoRaxisUpYet`; only raxis-job-up=1 short-circuits
+the loop). Opt-out smoke-probe path is pinned by
+[`…::inv_live_e2e_otel_pusher_present_01_opt_out_still_smoke_probes`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+(opt-out branch dispatches into `SmokeProbeMode::ExternalPusher`
+with the alternate remediation phrasing).
+
+**Canonical home.**
+`kernel/tests/extended_e2e_support/otel_pusher.rs::ensure_otel_pusher_or_panic`
+(the mechanical enforcement site — every panic body carries
+the `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01 VIOLATED` token);
+`kernel/tests/extended_e2e_support/otel_pusher.rs::classify_otel_pusher_state`
+(the pure-data classifier the witness tests pin exhaustively);
+`kernel/tests/extended_e2e_support/otel_pusher.rs::OtelPusherSupervisor`
+(the RAII guard that satisfies the no-leaked-processes half
+of the invariant);
+`live-e2e/README.md §OTel pusher auto-spawn contract`
+(operator-facing recipe + opt-out + bounded-wait env var
+documentation);
+`specs/v3/observability-prometheus.md §4.2`
+(cross-link to this invariant from the Prometheus side of the
+contract).
+
+[`extended_e2e_support::otel_pusher::ensure_otel_pusher_or_panic`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`OtelPusherSupervisor`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`OTEL_PUSHER_VIOLATION_TOKEN`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`POST_SPAWN_LIVENESS_DELAY`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`SMOKE_PROBE_BUDGET`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`SMOKE_PROBE_INTERVAL`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`otel_pusher_build_timeout`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+
+---
+
+### INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 — Harness MUST NOT emit contradictory observability log lines in the same run
+
+**Statement.** Within a single realism-e2e run the harness MUST
+NOT emit BOTH a line containing `Grafana panels will stay
+empty` AND a line containing `live metrics flowing to Grafana`.
+Either the pusher is actively forwarding (success log fires
+once) or the pusher is not (the harness hard-fails per
+`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`); there is no
+intermediate state where both can coexist. The contradictory
+pair would cause an operator scanning the log to trust the
+"live metrics flowing" claim and stop debugging the dark
+dashboard, so the absence of the contradictory pair is itself
+a contract.
+
+**Justification.** The iter53 root-cause sequence emitted both
+lines back-to-back:
+
+```text
+[realism-e2e] observability: raxis-otel-pusher binary not located …
+  kernel will emit to its in-process JSONL ring but Grafana panels will stay empty for this run
+[realism-e2e] observability: kernel pushing OTLP to http://127.0.0.1:4318 —
+  live metrics flowing to Grafana http://127.0.0.1:3000/d/raxis-00-overview
+```
+
+The second line was static, fired unconditionally after a
+best-effort spawn that returned `None`. Operators scanning
+the log saw "live metrics flowing" and assumed the dashboards
+were live — the dark Grafana was attributed to a misconfigured
+panel rather than to a missing pusher. The fix
+(`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`) makes the missing-
+pusher path hard-fail, but the no-contradiction invariant
+exists as a defence-in-depth witness so a future maintainer
+who adds a new code path cannot reintroduce the contradictory
+pair via a different code path (e.g. a "best-effort fallback
+to a stub pusher that doesn't actually forward").
+
+**Scenario.** Future maintainer adds a `RAXIS_E2E_OTEL_PUSHER_DRY_RUN=1`
+env var that spawns the pusher with `--dry-run` (no OTLP
+exports). They emit a "Grafana panels will stay empty" warning
+in that branch but forget to suppress the pre-existing "live
+metrics flowing" line. Without this invariant the
+contradictory pair re-emerges silently. With it the witness
+asserts neither shape coexists with the other — adding a new
+"stay empty" surface is a deliberate spec-edit-required
+choice rather than an accidental regression.
+
+**Witness.**
+[`extended_e2e_support::otel_pusher::tests::inv_live_e2e_observability_log_no_contradiction_01_pusher_absent_emits_only_failure_path`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+asserts (a) the constructed success log line shape contains
+`live metrics flowing to Grafana` and DOES NOT contain `stay
+empty`; (b) the constructed hard-fail panic body carries the
+`OTEL_PUSHER_VIOLATION_TOKEN` and DOES NOT contain `live
+metrics flowing`. Together these pin the contract at both
+the success-log and the failure-panic surfaces.
+
+**Canonical home.**
+`kernel/tests/extended_e2e_support/otel_pusher.rs::ensure_otel_pusher_or_panic`
+(the mechanical enforcement site — both the success log and
+the hard-fail panic bodies are constructed inline; a
+maintainer adding a new code path with a "stay empty" warning
+would have to also drop the "live metrics flowing" success
+line, which the witness prevents). Pairs with
+`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01` whose enforcement
+mechanism makes the contradictory pair structurally
+impossible in the default path.
 
 ---
 

@@ -458,6 +458,52 @@ host = compose service name not `localhost`; admin password is
 `raxis-e2e` not `admin`; Grafana 11.x silently skips YAML
 without `apiVersion: 1`; etc.).
 
+### 4.2 Pusher-active-at-kernel-spawn contract
+
+The realism-e2e harness MUST guarantee that a `raxis-otel-pusher`
+process is actively forwarding the kernel's metric ring to
+`http://127.0.0.1:4318` BEFORE the first plan is submitted, AND
+that Prometheus reports `up{job=~"raxis.*"} = 1` for at least
+one raxis target. Pinned by
+`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`
+(`specs/invariants.md §11.10`).
+
+The harness either spawns and supervises the pusher itself
+(default — auto-locate then auto-build via `cargo build
+--release -p raxis-otel-pusher` if missing, with a 180 s
+bounded build deadline tunable via
+`RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS` and clamped to
+`[60s, 600s]`) or asserts an external pusher is forwarding
+(opt-out via `RAXIS_E2E_SKIP_OTEL_PUSHER=1`). Both branches
+run a 30 s smoke probe against the Prometheus `query=up` HTTP
+API; failure to observe a `raxis*` target within the budget
+hard-fails the test with
+`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01 VIOLATED` plus a
+remediation block that names every escape hatch (pre-build,
+override, opt-out, tune the deadline).
+
+The supervised-spawn path uses the [`OtelPusherSupervisor`]
+RAII guard that SIGTERM-then-SIGKILL's the child on drop, so
+no leaked pusher processes survive a panicking test.
+
+The companion no-contradiction invariant
+`INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01` forbids
+the harness from emitting both `Grafana panels will stay
+empty` AND `live metrics flowing to Grafana` in the same run
+— operators historically trusted the latter when both fired,
+attributing dark Grafana panels to a misconfigured panel
+rather than to a missing pusher. With the contract in force,
+either the pusher is forwarding (success log fires once) or
+the harness hard-fails (no success log emitted at all).
+
+The operator-facing recipe + opt-out + bounded-wait env-var
+table lives in `live-e2e/README.md §OTel pusher auto-spawn
+contract`. The witness coverage (13 tests) lives in
+[`extended_e2e_support::otel_pusher::tests`].
+
+[`OtelPusherSupervisor`]: ../../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`extended_e2e_support::otel_pusher::tests`]: ../../kernel/tests/extended_e2e_support/otel_pusher.rs
+
 ## 5. Perf harness
 
 The `cargo xtask perf` runner in

@@ -87,11 +87,12 @@ use extended_e2e_support::{
         require_canonical_images, require_disk_hygiene,
         require_gateway_binary, require_gcp_adc, require_tcp_reachable,
         seed_realistic_main_repository, spawn_kernel_normal,
-        spawn_otel_pusher_or_warn, walk_chain_or_panic, write_credentials,
+        walk_chain_or_panic, write_credentials,
         write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
         LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
         SHUTDOWN_DEADLINE,
     },
+    otel_pusher::{ensure_otel_pusher_or_panic, PusherSpawnContext},
     multi_initiative::{
         sibling_plan_toml, MultiInitiativeIsolationWitness,
         SIBLING_LANE_ID, TASK_SIBLING_MATERIALIZE,
@@ -328,18 +329,28 @@ fn realistic_session_lifecycle() {
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[realism-e2e] kernel daemon up, accepting operator IPC");
 
-    // ── Spawn `raxis-otel-pusher` (V3 §12) — kernel emits JSONL
-    //    frames into `<data_dir>/observability/`; the pusher reads
-    //    them and ships to the OTel collector at 127.0.0.1:4318.
-    //    Best-effort: skipped (with a loud Tier-3 line) when the
-    //    pusher binary isn't pre-built. Held in an RAII guard so
-    //    a panic mid-test SIGKILLs the child.
-    let _otel_pusher_guard = OtelPusherGuard::spawn(kernel.data_dir());
-    eprintln!(
-        "[realism-e2e] observability: kernel pushing OTLP to \
-         http://127.0.0.1:4318 — live metrics flowing to Grafana \
-         http://127.0.0.1:3000/d/raxis-00-overview"
-    );
+    // ── Auto-locate-or-build + supervise + smoke-probe the
+    //    `raxis-otel-pusher` sidecar (V3 §12 / V3 §4.2). Hard-fails
+    //    with `OTEL_PUSHER_VIOLATION_TOKEN` per
+    //    `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01` when the pusher
+    //    cannot be located/built/spawned, OR when Prometheus does
+    //    not show `up{job=~"raxis.*"}=1` within the smoke-probe
+    //    budget. The returned supervisor is RAII; a panic mid-test
+    //    SIGTERM-then-SIGKILLs the child.
+    //
+    //    `_otel_pusher_supervisor` is `Option`-shaped because the
+    //    `RAXIS_E2E_SKIP_OTEL_PUSHER=1` opt-out path returns
+    //    `None` (an external pusher is supervising the child;
+    //    the harness only runs the smoke probe). Either branch
+    //    has already emitted exactly ONE operator-facing
+    //    "live metrics flowing" / "external pusher confirmed"
+    //    success line — no contradictory pair, per
+    //    `INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01`.
+    let _otel_pusher_supervisor = ensure_otel_pusher_or_panic(PusherSpawnContext {
+        data_dir: kernel.data_dir(),
+        workspace_root: &workspace_root,
+        install_dir: Some(&install_dir),
+    });
 
     // ── (visual-debug) — open the operator dashboard with an
     //    autologin URL so the QA worker can attach a browser to
@@ -951,42 +962,8 @@ fn seed_minimal_tasks_db(
 // kernel-faithful and race-free.
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// `raxis-otel-pusher` lifetime guard.
-//
-// Holds the spawned pusher's `Child` handle and SIGKILLs it on
-// drop. Without this RAII guard a panic mid-test (OR a normal
-// completion) would leak the pusher process, which would then
-// fight the next run for the same `<data_dir>/observability/`
-// cursor file. Drop is best-effort — every error path logs and
-// continues.
-// ---------------------------------------------------------------------------
-
-struct OtelPusherGuard {
-    child: Option<std::process::Child>,
-}
-
-impl OtelPusherGuard {
-    fn spawn(data_dir: &Path) -> Self {
-        Self { child: spawn_otel_pusher_or_warn(data_dir) }
-    }
-}
-
-impl Drop for OtelPusherGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let pid = child.id();
-            // SIGKILL — racing the test teardown deadline against
-            // a graceful SIGTERM isn't worth it: the pusher's only
-            // state is a cursor file the next run reconciles, and
-            // the kernel's JSONL ring is the source of truth.
-            if let Err(e) = child.kill() {
-                eprintln!(
-                    "[realism-e2e] observability: failed to kill \
-                     raxis-otel-pusher pid={pid}: {e}",
-                );
-            }
-            let _ = child.wait();
-        }
-    }
-}
+// `OtelPusherGuard` (the legacy best-effort RAII guard) was
+// removed in the iter53(harness) sweep. Pusher supervision
+// (SIGTERM-then-SIGKILL on drop, no leaked processes) is now
+// owned by [`extended_e2e_support::otel_pusher::OtelPusherSupervisor`]
+// per `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`.

@@ -1139,8 +1139,9 @@ fn observability_policy_block() -> String {
     // The kernel writes JSONL frames into `<data_dir>/observability/`
     // (see `kernel/src/observability_boot.rs::build_obs_hub`); the
     // out-of-process `raxis-otel-pusher` (spawned later via
-    // `spawn_otel_pusher_or_warn`) reads those frames and ships
-    // them to the OTel collector at 127.0.0.1:4318.
+    // `extended_e2e_support::otel_pusher::ensure_otel_pusher_or_panic`)
+    // reads those frames and ships them to the OTel collector at
+    // 127.0.0.1:4318.
     "\n# ── [observability] (realism-e2e — V3 OTel push) ──\n\
      [observability]\n\
      enabled = true\n\
@@ -1172,122 +1173,13 @@ fn observability_policy_block() -> String {
         .to_owned()
 }
 
-/// Spawn `raxis-otel-pusher --config <policy.toml> --data-dir
-/// <data_dir>` in the background so kernel-emitted JSONL frames are
-/// shipped to the OTel collector at 127.0.0.1:4318.
-///
-/// Best-effort: when `RAXIS_OTEL_PUSHER_BINARY` is unset OR the
-/// binary cannot be located via `cargo build -p raxis-otel-pusher`
-/// the function logs a Tier-3-style line to stderr and returns
-/// `None`. The realistic-scenario test does NOT panic on absence —
-/// the kernel still emits to its in-process JSONL ring (per
-/// `INV-OTEL-03`) so the run continues; only the dashboards stay
-/// empty until the operator brings the pusher up themselves.
-///
-/// Stderr is captured to `<data_dir>/otel-pusher.stderr.log` so
-/// post-mortem inspection is possible without re-running.
-pub fn spawn_otel_pusher_or_warn(data_dir: &Path) -> Option<std::process::Child> {
-    let policy_path = data_dir.join("policy").join("policy.toml");
-    if !policy_path.exists() {
-        eprintln!(
-            "[realism-e2e] observability: policy.toml missing at {}; \
-             skipping raxis-otel-pusher spawn",
-            policy_path.display(),
-        );
-        return None;
-    }
-    let pusher_bin = match locate_raxis_otel_pusher_binary() {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "[realism-e2e] observability: raxis-otel-pusher binary not located \
-                 (set RAXIS_OTEL_PUSHER_BINARY or run `cargo build -p raxis-otel-pusher`); \
-                 kernel will emit to its in-process JSONL ring but Grafana panels will \
-                 stay empty for this run"
-            );
-            return None;
-        }
-    };
-    let log_path = data_dir.join("otel-pusher.stderr.log");
-    let log_file = match std::fs::File::create(&log_path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "[realism-e2e] observability: cannot create {}: {e}; \
-                 skipping pusher spawn",
-                log_path.display(),
-            );
-            return None;
-        }
-    };
-    let stderr_handle = match log_file.try_clone() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!(
-                "[realism-e2e] observability: cannot dup pusher log handle: {e}; \
-                 skipping pusher spawn"
-            );
-            return None;
-        }
-    };
-    match Command::new(&pusher_bin)
-        .arg("--config").arg(&policy_path)
-        .arg("--data-dir").arg(data_dir)
-        // Disable the pusher's `/healthz` HTTP server — collisions on
-        // 9501 from a prior aborted run would prevent spawn.
-        .arg("--health-port").arg("0")
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(stderr_handle))
-        .spawn()
-    {
-        Ok(child) => {
-            eprintln!(
-                "[realism-e2e] observability: raxis-otel-pusher spawned pid={} bin={} \
-                 log={}",
-                child.id(),
-                pusher_bin.display(),
-                log_path.display(),
-            );
-            Some(child)
-        }
-        Err(e) => {
-            eprintln!(
-                "[realism-e2e] observability: failed to spawn raxis-otel-pusher \
-                 (bin={}): {e}",
-                pusher_bin.display(),
-            );
-            None
-        }
-    }
-}
-
-/// Locate the `raxis-otel-pusher` binary. Resolution order:
-/// 1. `RAXIS_OTEL_PUSHER_BINARY` env var (operator override).
-/// 2. `<workspace>/target/{debug,release}/raxis-otel-pusher`.
-/// 3. The first match alongside the kernel binary
-///    (`require_gateway_binary`'s parent).
-fn locate_raxis_otel_pusher_binary() -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var("RAXIS_OTEL_PUSHER_BINARY") {
-        let p = PathBuf::from(raw);
-        if p.is_absolute() && p.exists() {
-            return Some(p);
-        }
-    }
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    for profile in ["debug", "release"] {
-        let candidate = workspace
-            .join("target")
-            .join(profile)
-            .join("raxis-otel-pusher");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
+// `spawn_otel_pusher_or_warn` + `locate_raxis_otel_pusher_binary`
+// (legacy best-effort implementations that silently degraded the
+// run when the pusher binary was missing) were removed in the
+// iter53(harness) sweep. The hard-fail / auto-build / supervised-
+// spawn / smoke-probe surface that supersedes them lives in
+// [`super::otel_pusher::ensure_otel_pusher_or_panic`] per
+// `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`.
 
 pub fn write_credentials(data_dir: &Path) {
     let cred_dir = data_dir.join("credentials");

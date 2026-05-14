@@ -21,6 +21,7 @@ pub mod health_probe;
 pub mod injection;
 pub mod kernel_driver;
 pub mod multi_initiative;
+pub mod otel_pusher;
 pub mod path_allowlist;
 pub mod plan;
 pub mod plan_realistic;

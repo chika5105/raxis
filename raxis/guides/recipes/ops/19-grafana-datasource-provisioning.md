@@ -281,3 +281,53 @@ the container (mount-path drift between the compose file and the
 YAML claim is the only failure mode the witness can't fully
 explain — the witness asserts the runtime contract, not the
 container-internal filesystem state).
+
+---
+
+## 6. Pusher binary contract (`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`)
+
+Provisioning the Grafana datasource is necessary but not
+sufficient — Grafana panels stay empty unless the
+`raxis-otel-pusher` sidecar is actively forwarding the kernel's
+in-process JSONL ring to the OTel collector at
+`http://127.0.0.1:4318`. The kernel itself never imports OTLP
+transport libraries (`INV-OTEL-03`); without the pusher
+process forwarding, Prometheus has no `raxis*` series to scrape.
+
+The realism-e2e harness owns this contract:
+
+* **Default path** — auto-locates the pusher binary at
+  `target/release/raxis-otel-pusher`, then `target/debug/`,
+  then `$RAXIS_INSTALL_DIR/bin/`. If still missing, runs
+  `cargo build --release -p raxis-otel-pusher` from the
+  workspace root with a 180 s bounded timeout (override via
+  `RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS`, clamped to
+  `[60s, 600s]`). Spawns the binary with the kernel's signed
+  `policy.toml` + `<data_dir>`, captures stderr, smoke-probes
+  Prometheus for `up{job=~"raxis.*"}=1` within 30 s, and
+  emits exactly one `pusher spawned … live metrics flowing`
+  log line. SIGTERM-then-SIGKILL on test drop.
+* **Operator override** — `export
+  RAXIS_OTEL_PUSHER_BINARY=/path/to/raxis-otel-pusher` to point
+  at a pre-built binary (skips the auto-build).
+* **Opt-out** — `export RAXIS_E2E_SKIP_OTEL_PUSHER=1` for an
+  externally-supervised pusher (systemd / launchd /
+  Terraform). The harness still runs the Prometheus smoke
+  probe — if no external pusher is actually forwarding, the
+  test hard-fails with the alternate remediation message.
+* **Hard-fail token** — every panic body produced by the
+  pipeline carries the literal string
+  `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01 VIOLATED` so a CI log
+  scraper can pin the failure mode. There is no
+  silent-degradation path; either the dashboards are live or
+  the test panics with a remediation block naming every
+  escape hatch.
+
+Operator-facing recipe: `live-e2e/README.md §OTel pusher
+auto-spawn contract`. Spec: `specs/v3/observability-prometheus.md
+§4.2`. Witness coverage:
+[`extended_e2e_support::otel_pusher::tests`](../../../kernel/tests/extended_e2e_support/otel_pusher.rs)
+— 13 tests pinning the classifier, env-var spellings, panic
+token, timeout bounds, supervisor SIGKILL-on-drop, smoke-probe
+classifier, opt-out smoke-probe path, and the no-contradiction
+log invariant.

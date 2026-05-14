@@ -286,6 +286,147 @@ clamping, and `node_modules` probe edge cases.
 
 ---
 
+## OTel pusher auto-spawn contract (`INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`)
+
+Every realistic-scenario / full-lifecycle live-e2e run depends
+on the kernel's metrics being forwarded from its in-process
+JSONL ring (`<data_dir>/observability/{spans,metrics}/`) to the
+OTLP collector at `http://127.0.0.1:4318` so Prometheus can
+scrape them and Grafana can render them. The forwarding job is
+owned by the `raxis-otel-pusher` sidecar binary
+(`pusher/`); without it, the kernel buffers metrics
+locally and every Grafana panel stays empty for the duration
+of the run — `INV-OTEL-03` keeps the kernel itself out of the
+OTLP transport business so the pusher MUST exist.
+
+**Auto-locate-or-build + auto-spawn + smoke-probe (default).**
+When `RAXIS_E2E_SKIP_OTEL_PUSHER` is **unset**, the harness
+([`extended_e2e_support::otel_pusher::ensure_otel_pusher_or_panic`])
+guarantees a forwarding pusher is alive before the first plan
+is submitted:
+
+1. Resolve the binary in this priority:
+   1. `RAXIS_OTEL_PUSHER_BINARY` env var (operator override).
+   2. `<workspace>/target/release/raxis-otel-pusher`, then
+      `<workspace>/target/debug/raxis-otel-pusher`.
+   3. `$RAXIS_INSTALL_DIR/bin/raxis-otel-pusher`.
+2. If still missing, run `cargo build --release -p
+   raxis-otel-pusher` from the workspace root, bounded by
+   `RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS` (default 180 s,
+   clamped to `[60s, 600s]`). The auto-build runs as part of
+   the harness's own setup phase BEFORE the kernel daemon
+   spawns, so it does NOT compete with an already-running
+   kernel for RAM (mirrors how `npm ci` runs before the kernel
+   binds the dashboard port). On a fresh worktree the cold-cache
+   cost is ~16 s; on a warm cache it is a no-op (binary already
+   on disk).
+3. Spawn the pusher with `--config <data_dir>/policy/policy.toml
+   --data-dir <data_dir> --health-port 0`; capture stderr to
+   `<data_dir>/otel-pusher.stderr.log`; verify the child PID is
+   alive after a 3 s startup window.
+4. Smoke-probe Prometheus (`http://127.0.0.1:9090/api/v1/query?
+   query=up`) for up to 30 s at 1 s cadence; assert at least
+   one `raxis*` job appears with `up=1`. The probe loop
+   short-circuits on supervised-child death so a crashed
+   pusher surfaces immediately.
+5. Emit exactly ONE operator-facing log line:
+   `[realism-e2e] observability: pusher spawned (pid=N, bin=…,
+   log=…), smoke-probed, live metrics flowing to Grafana
+   http://127.0.0.1:3000/d/raxis-00-overview`.
+6. Hold the supervised child in an `OtelPusherSupervisor` RAII
+   guard whose `Drop` SIGTERM-then-SIGKILL's the child
+   (500 ms grace window). No leaked processes on success
+   or failure.
+
+**Hard-fail policy.** Any failure in steps 2-4 panics the test
+with a panic body containing the literal token `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01
+VIOLATED`. Failure modes that hard-fail:
+
+| Failure                                  | Surface                                                                                                                |
+|------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| `RAXIS_OTEL_PUSHER_BINARY` set but missing | Convention paths are still tried; if all miss → auto-build.                                                            |
+| `cargo` not on PATH (no Rust toolchain)  | Spawn-failed panic with hint to install Rust + cargo OR set `RAXIS_OTEL_PUSHER_BINARY`.                                |
+| `cargo build` non-zero exit              | Real build failure; surfaced npm-style with cargo's full output above the panic.                                       |
+| `cargo build` exceeded 180 s             | Timeout panic with hint to raise `RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS` (clamped to `[60s, 600s]`).                |
+| Pusher binary spawn failed (ENOENT etc.) | Spawn-failed panic naming the binary path.                                                                             |
+| Pusher exited within 3 s of spawn        | Tail of `<data_dir>/otel-pusher.stderr.log` embedded in the panic body so the operator sees the OTLP / policy reason.  |
+| Prometheus smoke probe timed out (30 s)  | "no `raxis*` job" / "raxis target up=0" remediation block including curl one-liners against Prometheus + the collector zPages. |
+
+This is the iter53 lesson: the previous behaviour silently
+emitted a warning when the pusher binary was absent, then
+contradicted itself in the very next log line by claiming
+"live metrics flowing to Grafana" — operators trusted the
+second line, attributed dark Grafana panels to a misconfigured
+panel rather than to a missing pusher, and the run continued
+for ~30 minutes without any operator-visible signal that the
+dashboards were dark. Hard-fail forces the failure to surface
+immediately so the operator either pre-builds the pusher,
+sets the explicit opt-out, or accepts the auto-build cost.
+
+**Opt-out (operator-supervised pusher).** Set
+`RAXIS_E2E_SKIP_OTEL_PUSHER=1` for the narrow case where you
+are running your own long-lived pusher (systemd / launchd /
+Terraform-provisioned) attached to the same `<data_dir>`
+ring. The harness skips the auto-locate / auto-build / spawn
+path and emits an explicit opt-out log line:
+
+```text
+[realism-e2e] observability: pusher skipped by RAXIS_E2E_SKIP_OTEL_PUSHER=1;
+  assuming external pusher is forwarding to http://127.0.0.1:4318
+```
+
+The Prometheus smoke probe still runs — if no external pusher
+is actually forwarding, the harness hard-fails with the
+alternate remediation message:
+
+```text
+INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01 VIOLATED: Prometheus smoke probe failed after 30s …
+
+Remediation:
+  * Set RAXIS_E2E_SKIP_OTEL_PUSHER=0 (or unset it) to let the harness manage the pusher, OR
+  * Ensure your external pusher is running and pointing at http://127.0.0.1:4318
+  * Verify Prometheus has a `raxis*` job scraping the OTel collector
+```
+
+Mirrors the `RAXIS_LIVE_E2E_NO_AUTO_DOCKER` discipline for
+the docker backing stack — operator-explicit "I'll handle it"
++ a smoke probe that catches the broken-promise case.
+
+**Bounded-wait composition.** The auto-build subprocess
+satisfies `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` via
+[`harness_timeout::run_command_output_timeout`]. The smoke
+probe is bounded by `SMOKE_PROBE_BUDGET` (30 s). Non-positive
+/ unparseable / out-of-range build-timeout overrides clamp to
+the default rather than disabling the bound.
+
+**No-contradiction guarantee
+(`INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01`).** No
+code path in the harness emits both `Grafana panels will stay
+empty` AND `live metrics flowing to Grafana` in the same run.
+Either the pusher is actively forwarding (success log fires
+once, with the "flowing" phrase) or the pusher is not (the
+harness hard-fails per `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`,
+with the violation token and zero "flowing" claims). A future
+maintainer who adds a third intermediate state (e.g.
+`--dry-run` mode) MUST also drop one of the two conflicting
+phrases — the witness asserts both surfaces.
+
+**Witness coverage:**
+[`extended_e2e_support::otel_pusher::tests::inv_live_e2e_otel_pusher_present_01_*`](../kernel/tests/extended_e2e_support/otel_pusher.rs)
+— 13 tests covering classifier exhaustion (5 arms +
+"never returns hard-fail directly" guard), env-var spelling,
+panic-token shape, default + override timeout bounds, supervisor
+SIGKILL-on-drop, smoke-probe classifier (empty / non-raxis /
+raxis-down / raxis-up shapes), opt-out smoke-probe path,
+convention-path precedence, plus the
+`inv_live_e2e_observability_log_no_contradiction_01_pusher_absent_emits_only_failure_path`
+witness for the no-contradiction half of the contract.
+
+[`extended_e2e_support::otel_pusher::ensure_otel_pusher_or_panic`]: ../kernel/tests/extended_e2e_support/otel_pusher.rs
+[`harness_timeout::run_command_output_timeout`]: ../kernel/tests/extended_e2e_support/harness_timeout.rs
+
+---
+
 ## Harness preflight: host disk hygiene + auto-bring-up + bounded waits
 
 The realistic-scenario kernel test
