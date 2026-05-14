@@ -608,6 +608,56 @@ pub enum AuditEventKind {
         final_reason: String,
     },
 
+    /// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — emitted
+    /// at session-spawn time when the kernel's
+    /// `resolve_planner_max_turns_for` resolver scaled the
+    /// per-attempt planner-turn budget above the per-task / per-policy
+    /// base because the activating task's `crash_retry_count` is
+    /// `>= 1` (i.e. `attempt > 1`). Pairs 1:1 with the
+    /// `SessionVmSpawned` event for the same `session_id` and is
+    /// suppressed on `attempt = 1` (when `effective == base` and the
+    /// progressive scaling is a no-op).
+    ///
+    /// **Why this exists.** The `PlannerMaxTurnsResolved` stderr-log
+    /// line is the operator-visible witness for every spawn; the
+    /// audit-chain event is the **forensic** witness that survives
+    /// stderr rotation and feeds the dashboard's
+    /// "why-did-this-budget-change" timeline. Operators investigating
+    /// a deadlocked / failed initiative can `jq '.event_kind ==
+    /// "PlannerMaxTurnsProgressivelyScaled"'` across the chain and
+    /// see the exact (`base`, `step`, `attempt`, `effective`,
+    /// `hard_ceiling`) trajectory for each task.
+    ///
+    /// Routes at `Medium` notification priority — steady-state
+    /// observability; not a page.
+    PlannerMaxTurnsProgressivelyScaled {
+        /// Task id whose spawn triggered the scaling decision.
+        task_id:       String,
+        /// 1-based attempt index
+        /// (`subtask_activations.crash_retry_count + 1`).
+        /// Always `>= 2` when this event is emitted; `attempt = 1`
+        /// is the no-scaling case and does not emit.
+        attempt:       u32,
+        /// Per-task / per-policy / compiled base ceiling
+        /// (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`).
+        base:          u32,
+        /// Per-task / per-policy / derived scaling step.
+        step:          u32,
+        /// `min(base + (attempt - 1) * step, hard_ceiling)`.
+        effective:     u32,
+        /// Runtime hard ceiling clamp (`240` by default, overridable
+        /// via `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING`).
+        hard_ceiling:  u32,
+        /// Stable label naming the base resolution arm verbatim:
+        /// `"task"`, `"policy"`, or `"compiled-default"`. Mirrors the
+        /// `source` field on the companion `PlannerMaxTurnsResolved`
+        /// stderr line.
+        source:        String,
+        /// Stable label naming the step resolution arm verbatim:
+        /// `"task"`, `"policy"`, or `"derived-default"`.
+        step_source:   String,
+    },
+
     /// V2 `elastic-vm-scaling.md §4` — admitted scaling decision.
     /// Emitted by the dynamic-scaling engine after a scale-up
     /// (`direction = "Up"`, requires `policy.[elastic].enabled =
@@ -3916,6 +3966,9 @@ impl AuditEventKind {
             Self::SessionVmExited { .. } => "SessionVmExited",
             Self::SessionVmRespawnAttempted { .. } => "SessionVmRespawnAttempted",
             Self::SessionVmFailedFinal { .. } => "SessionVmFailedFinal",
+            Self::PlannerMaxTurnsProgressivelyScaled { .. } => {
+                "PlannerMaxTurnsProgressivelyScaled"
+            }
             Self::SessionVmScaleEvent { .. } => "SessionVmScaleEvent",
             Self::SessionVmScaleDeferred { .. } => "SessionVmScaleDeferred",
             Self::VmImageResolved { .. } => "VmImageResolved",

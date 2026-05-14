@@ -26,6 +26,7 @@ needs the gateway is structurally invalid.
 | `respawn_backoff_ms` | `u64` | no | 1000 | Initial back-off between respawn attempts. Doubles each consecutive crash up to a hard cap of 60 seconds. |
 | `max_consecutive_respawns` | `u32` | no | 5 | After this many consecutive respawns within the back-off window, the kernel quarantines the gateway slot. No further respawns until kernel restart. |
 | `planner_max_turns_default` | `u32` (optional) | no | unset (compiled fallback `100`) | V2.7 — org-wide default for `RAXIS_PLANNER_MAX_TURNS`. Per-task `[[tasks]] max_turns` always wins if set. See `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` and `guides/recipes/env/11-planner-env-vars.md` "Resolving `RAXIS_PLANNER_MAX_TURNS`". |
+| `planner_max_turns_step_default` | `u32` (optional) | no | unset (derived `max(round_up_to_5(base/2), 10)`) | V3 — org-wide default for the progressive-scaling step (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`). Per-task `[[tasks]].max_turns_step` always wins if set. `0` is rejected by the resolver (a zero step degenerates progressive scaling to a constant budget). See `guides/recipes/env/11-planner-env-vars.md` "Progressive scaling on crash retry". |
 
 ---
 
@@ -38,6 +39,7 @@ spawn_timeout_secs         = 5
 respawn_backoff_ms         = 1000
 max_consecutive_respawns   = 5
 # planner_max_turns_default = 50    # optional V2.7 — org-wide cap; per-task overrides still win
+# planner_max_turns_step_default = 25  # optional V3 — org-wide progressive-scaling step
 ```
 
 Defaults are usually fine. Tighten only if you have specific

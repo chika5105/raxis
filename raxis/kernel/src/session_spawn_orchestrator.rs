@@ -653,14 +653,17 @@ async fn spawn_orchestrator_for_initiative(
     // a transient SQLite lock contention does not block initiative
     // activation; the absence of the live KSB is logged in the
     // env-stamp branch below so an operator can correlate.
-    // V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — resolve the per-session
-    // planner turn ceiling here so the SAME value reaches both the
-    // KSB capabilities projection (this spawn-blocking task) and the
-    // `RAXIS_PLANNER_MAX_TURNS` env stamp emitted just below by
-    // `populate_planner_max_turns_env`. The orchestrator passes
-    // `task_fields = None` (per-initiative role, no per-task override).
-    let (planner_max_turns_resolved, _) =
-        resolve_planner_max_turns_for(None, policy.gateway());
+    // V2.7 / V3 `INV-KSB-MAX-TURNS-VISIBILITY-01` +
+    // `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — resolve the
+    // per-session planner turn ceiling here so the SAME value reaches
+    // both the KSB capabilities projection (this spawn-blocking task)
+    // and the `RAXIS_PLANNER_MAX_TURNS` env stamp emitted just below
+    // by `populate_planner_max_turns_env`. The orchestrator is
+    // per-initiative (no per-task crash counter), so `attempt = 1` is
+    // the only legal value here — progressive scaling never fires for
+    // orchestrator spawns.
+    let planner_max_turns_resolved =
+        resolve_planner_max_turns_for(None, policy.gateway(), 1);
     let ksb_fut = {
         let store_for_ksb     = Arc::clone(store);
         let registry_for_ksb  = Arc::clone(plan_registry);
@@ -683,7 +686,8 @@ async fn spawn_orchestrator_for_initiative(
                     // path is provisioning against and is stamped
                     // verbatim into `capabilities.session.session_id`.
                     session_id:                    &session_owned,
-                    planner_max_turns:             planner_max_turns_resolved,
+                    planner_max_turns:             planner_max_turns_resolved.effective,
+                    max_turns_scaling:             planner_max_turns_resolved.into(),
                 },
             )
         })
@@ -860,10 +864,24 @@ async fn spawn_orchestrator_for_initiative(
     // structurally impossible — explicit stamp closes that gap.
     populate_planner_max_turns_env(
         &mut env,
-        None,
-        policy.gateway(),
+        planner_max_turns_resolved,
         "<orchestrator>",
         session_id,
+        initiative_id,
+    );
+    // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — emit the
+    // progressive-scaling audit event when scaling fired (`attempt >
+    // 1`). Orchestrator spawns always pass `attempt = 1`, so the
+    // helper short-circuits and never emits for the orchestrator; the
+    // call is kept here for parity with the executor path and so a
+    // future change that introduces per-initiative orchestrator
+    // crash retries inherits the witness contract without a missing
+    // emit site.
+    maybe_emit_planner_max_turns_scaled_audit(
+        &service,
+        planner_max_turns_resolved,
+        session_id,
+        None,
         initiative_id,
     );
 
@@ -2583,18 +2601,17 @@ fn populate_token_cap_env_or_insert(
     }
 }
 
-/// V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — resolve the effective
-/// `max_turns` for a planner session against the precedence chain and
-/// return both the resolved integer AND a stable `source` label that
-/// names the resolution arm verbatim (`"task"` / `"policy"` /
-/// `"compiled-default"`).
+/// V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — resolve the per-session
+/// **base** `max_turns` for a planner session against the precedence
+/// chain and return both the resolved integer AND a stable `source`
+/// label that names the resolution arm verbatim (`"task"` / `"policy"`
+/// / `"compiled-default"`).
 ///
-/// Used by both the env-stamp helpers below ([`populate_planner_max_turns_env`]
-/// / [`populate_planner_max_turns_env_or_insert`]) and by KSB assembly
-/// (`crate::initiatives::ksb_assembly::assemble_ksb_snapshot`), so the
-/// planner-VM env stamp and the KSB-projected `planner_max_turns` field
-/// are guaranteed to carry the SAME value (single source of truth for
-/// the resolution).
+/// This is the **base** value before progressive scaling. The full
+/// resolver [`resolve_planner_max_turns_for`] consumes this together
+/// with `attempt` + `step` + `hard_ceiling` to produce the effective
+/// per-attempt budget per
+/// `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`.
 ///
 /// The `task_fields` argument is `None` for orchestrator spawns (the
 /// orchestrator is per-initiative, not per-task — the per-task
@@ -2602,7 +2619,7 @@ fn populate_token_cap_env_or_insert(
 /// spawns it carries the registry-projected
 /// [`crate::initiatives::PlanRegistry::get`] result for the activating
 /// task.
-pub(crate) fn resolve_planner_max_turns_for(
+pub(crate) fn resolve_planner_max_turns_base_for(
     task_fields: Option<&crate::initiatives::TaskPlanFields>,
     gateway:     Option<&raxis_policy::GatewaySection>,
 ) -> (u32, &'static str) {
@@ -2619,9 +2636,173 @@ pub(crate) fn resolve_planner_max_turns_for(
     }
 }
 
-/// V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — stamp the resolved
-/// `RAXIS_PLANNER_MAX_TURNS` into the spawned VM's env table AND emit
-/// the audit-friendly `PlannerMaxTurnsResolved` structured log line.
+/// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — kernel-side
+/// default hard ceiling clamp on the progressively-scaled per-attempt
+/// budget. The resolver clamps `base + (attempt - 1) * step` against
+/// this value so an operator-misconfigured plan cannot inflate the
+/// budget unboundedly across many crash-retries.
+///
+/// Overridable at runtime via the
+/// [`RAXIS_PLANNER_MAX_TURNS_HARD_CEILING_ENV`] env var so operators
+/// have an escape hatch without a kernel rebuild.
+pub const DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING: u32 = 240;
+
+/// V3 — env-var name for the operator-facing override of
+/// [`DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING`]. When set to a valid
+/// `u32` at kernel boot, the resolver clamps against that value
+/// instead of the compiled default.
+pub const RAXIS_PLANNER_MAX_TURNS_HARD_CEILING_ENV: &str =
+    "RAXIS_PLANNER_MAX_TURNS_HARD_CEILING";
+
+/// V3 — read the progressive-scaling hard ceiling from the runtime
+/// env, falling back to the compiled default. Best-effort: a missing
+/// or unparseable value silently degrades to the compiled default
+/// (operator typos don't fail-close the spawn path).
+pub(crate) fn resolve_planner_max_turns_hard_ceiling() -> u32 {
+    std::env::var(RAXIS_PLANNER_MAX_TURNS_HARD_CEILING_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING)
+}
+
+/// V3 — resolve the per-task progressive scaling **step**.
+///
+/// **Precedence** (mirrors the base `max_turns` chain):
+///
+/// 1. `task_fields.max_turns_step = Some(s)` ⇒ `(s, "task")`.
+/// 2. `task_fields.max_turns_step = None` + policy
+///    `planner_max_turns_step_default = Some(d)` ⇒ `(d, "policy")`.
+/// 3. Both `None` ⇒ derived default
+///    `max(round_up_to_5(base / 2), 10)` with source
+///    `"derived-default"`.
+///
+/// `base` is the resolved per-task / per-policy / compiled
+/// `max_turns` (see [`resolve_planner_max_turns_base_for`]).
+pub(crate) fn resolve_planner_max_turns_step_for(
+    task_fields: Option<&crate::initiatives::TaskPlanFields>,
+    gateway:     Option<&raxis_policy::GatewaySection>,
+    base:        u32,
+) -> (u32, &'static str) {
+    if let Some(s) = task_fields.and_then(|tf| tf.max_turns_step) {
+        return (s, "task");
+    }
+    if let Some(d) = gateway.and_then(|g| g.planner_max_turns_step_default) {
+        return (d, "policy");
+    }
+    (derive_default_max_turns_step(base), "derived-default")
+}
+
+/// Derive the cold-start retry-tax step when neither the per-task
+/// field nor the per-policy default are set. Formula:
+///
+///   `max(round_up_to_5(base / 2), 10)`
+///
+/// The `round_up_to_5` step keeps the witness-table values readable
+/// (multiples of 5 are the natural granularity an operator would pick
+/// by hand); the `max(_, 10)` floor keeps the step useful for very
+/// small base budgets (e.g. a 5-turn Reviewer base still gets a
+/// 10-turn step on retry, not a single-turn nudge).
+fn derive_default_max_turns_step(base: u32) -> u32 {
+    let half = base / 2;
+    let rounded = half.div_ceil(5).saturating_mul(5);
+    rounded.max(10)
+}
+
+/// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — fully-resolved
+/// per-attempt planner-turn budget. Bundles the effective value
+/// together with the inputs that produced it (`base`, `step`,
+/// `attempt`, `hard_ceiling`, `source`) so both the env stamp and the
+/// KSB capabilities projection can surface the same numbers to the
+/// agent / operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedPlannerMaxTurns {
+    /// Effective per-session budget for THIS attempt
+    /// (`min(base + (attempt - 1) * step, hard_ceiling)`).
+    pub effective:    u32,
+    /// Resolved base (per-task → per-policy → compiled default).
+    pub base:         u32,
+    /// Resolved step (per-task → per-policy → derived default).
+    pub step:         u32,
+    /// 1-based attempt index (`crash_retry_count + 1`).
+    pub attempt:      u32,
+    /// Runtime hard ceiling clamp (default 240, env-overridable).
+    pub hard_ceiling: u32,
+    /// Stable label naming the **base** resolution arm verbatim
+    /// (`"task"` / `"policy"` / `"compiled-default"`). Used by the
+    /// `PlannerMaxTurnsResolved` structured-log line for operator
+    /// grep parity with `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+    pub base_source:  &'static str,
+    /// Stable label naming the **step** resolution arm verbatim
+    /// (`"task"` / `"policy"` / `"derived-default"`).
+    pub step_source:  &'static str,
+}
+
+/// V3 — project a kernel-resolved `ResolvedPlannerMaxTurns` onto the
+/// wire-stable [`raxis_ksb::MaxTurnsScalingView`] that the KSB
+/// capabilities envelope carries. The conversion is lossy by design:
+/// the `source` / `step_source` labels are debug-only (they live on
+/// the structured log line + the audit event) and do not reach the
+/// LLM via the KSB.
+impl From<ResolvedPlannerMaxTurns> for raxis_ksb::MaxTurnsScalingView {
+    fn from(r: ResolvedPlannerMaxTurns) -> Self {
+        raxis_ksb::MaxTurnsScalingView {
+            max_turns_attempt:       r.attempt,
+            max_turns_base:          r.base,
+            max_turns_step:          r.step,
+            max_turns_hard_ceiling:  r.hard_ceiling,
+        }
+    }
+}
+
+/// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — resolve the
+/// effective `max_turns` for a planner session **at attempt `attempt`**.
+///
+/// `attempt` is **1-based**: the first attempt (no prior crash) is
+/// `attempt = 1` and returns `base`; the Nth attempt returns
+/// `min(base + (N - 1) * step, hard_ceiling)`. Callers compute
+/// `attempt = crash_retry_count + 1` against the most-recent
+/// `subtask_activations` row for the task being spawned. Orchestrator
+/// spawns pass `attempt = 1` (the orchestrator is per-initiative —
+/// the per-task crash counter never applies).
+///
+/// Used by both the env-stamp helpers below
+/// ([`populate_planner_max_turns_env`] /
+/// [`populate_planner_max_turns_env_or_insert`]) and by KSB assembly
+/// (`crate::initiatives::ksb_assembly::assemble_ksb_snapshot`), so the
+/// planner-VM env stamp and the KSB-projected `planner_max_turns` field
+/// are guaranteed to carry the SAME effective value (single source of
+/// truth for the resolution).
+pub(crate) fn resolve_planner_max_turns_for(
+    task_fields: Option<&crate::initiatives::TaskPlanFields>,
+    gateway:     Option<&raxis_policy::GatewaySection>,
+    attempt:     u32,
+) -> ResolvedPlannerMaxTurns {
+    let (base, base_source) =
+        resolve_planner_max_turns_base_for(task_fields, gateway);
+    let (step, step_source) =
+        resolve_planner_max_turns_step_for(task_fields, gateway, base);
+    let hard_ceiling = resolve_planner_max_turns_hard_ceiling();
+    let attempt_idx = attempt.max(1);
+    let scaled = base
+        .saturating_add(step.saturating_mul(attempt_idx.saturating_sub(1)));
+    let effective = scaled.min(hard_ceiling);
+    ResolvedPlannerMaxTurns {
+        effective,
+        base,
+        step,
+        attempt: attempt_idx,
+        hard_ceiling,
+        base_source,
+        step_source,
+    }
+}
+
+/// V2.7 / V3 — stamp the resolved `RAXIS_PLANNER_MAX_TURNS` into the
+/// spawned VM's env table AND emit the audit-friendly
+/// `PlannerMaxTurnsResolved` structured log line, extended with the
+/// `attempt` / `base` / `step` / `effective` / `hard_ceiling` fields
+/// per `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`.
 ///
 /// `task_fields` is `None` for orchestrator spawns; the resolver
 /// short-circuits the per-task arm in that case.
@@ -2636,23 +2817,17 @@ pub(crate) fn resolve_planner_max_turns_for(
 /// value cannot mask the kernel-resolved one.
 fn populate_planner_max_turns_env(
     env:             &mut BTreeMap<String, String>,
-    task_fields:     Option<&crate::initiatives::TaskPlanFields>,
-    gateway:         Option<&raxis_policy::GatewaySection>,
+    resolved:        ResolvedPlannerMaxTurns,
     task_id_for_log: &str,
     session_id:      &str,
     initiative_id:   &str,
 ) {
-    let (resolved, source) = resolve_planner_max_turns_for(task_fields, gateway);
     env.insert(
         raxis_types::planner_env::PLANNER_MAX_TURNS_ENV.to_owned(),
-        resolved.to_string(),
+        resolved.effective.to_string(),
     );
-    eprintln!(
-        "{{\"level\":\"info\",\"event\":\"PlannerMaxTurnsResolved\",\
-         \"task_id\":{:?},\"session_id\":{:?},\"initiative_id\":{:?},\
-         \"source\":{:?},\"resolved\":{},\
-         \"invariant\":\"INV-PLANNER-MAX-TURNS-PRECEDENCE-01\"}}",
-        task_id_for_log, session_id, initiative_id, source, resolved,
+    log_planner_max_turns_resolved(
+        resolved, task_id_for_log, session_id, initiative_id,
     );
 }
 
@@ -2664,24 +2839,139 @@ fn populate_planner_max_turns_env(
 /// matching the semantics of the token-cap `_or_insert` helpers.
 fn populate_planner_max_turns_env_or_insert(
     env:             &mut BTreeMap<String, String>,
-    task_fields:     Option<&crate::initiatives::TaskPlanFields>,
-    gateway:         Option<&raxis_policy::GatewaySection>,
+    resolved:        ResolvedPlannerMaxTurns,
     task_id_for_log: &str,
     session_id:      &str,
     initiative_id:   &str,
 ) {
-    let (resolved, source) = resolve_planner_max_turns_for(task_fields, gateway);
     let key = raxis_types::planner_env::PLANNER_MAX_TURNS_ENV.to_owned();
     if let std::collections::btree_map::Entry::Vacant(slot) = env.entry(key) {
-        slot.insert(resolved.to_string());
-        eprintln!(
-            "{{\"level\":\"info\",\"event\":\"PlannerMaxTurnsResolved\",\
-             \"task_id\":{:?},\"session_id\":{:?},\"initiative_id\":{:?},\
-             \"source\":{:?},\"resolved\":{},\
-             \"invariant\":\"INV-PLANNER-MAX-TURNS-PRECEDENCE-01\"}}",
-            task_id_for_log, session_id, initiative_id, source, resolved,
+        slot.insert(resolved.effective.to_string());
+        log_planner_max_turns_resolved(
+            resolved, task_id_for_log, session_id, initiative_id,
         );
     }
+}
+
+/// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — read the
+/// `crash_retry_count` for the most-recent activation row of
+/// `task_id`. Used by the executor / reviewer spawn paths to derive
+/// the `attempt` argument for [`resolve_planner_max_turns_for`]
+/// (`attempt = crash_retry_count + 1`, 1-indexed).
+///
+/// Best-effort: returns `0` when no activation row exists (first
+/// spawn of the task, or store-read error) so the resolver falls
+/// through to `attempt = 1` (no progressive scaling). A read failure
+/// here is non-fatal — the worst case is a budget regression, not a
+/// security regression, and the kernel still spawns the VM with the
+/// base ceiling.
+pub(crate) fn read_crash_retry_count_for_task(
+    conn:    &rusqlite::Connection,
+    task_id: &str,
+) -> u32 {
+    use rusqlite::OptionalExtension;
+    let sql = "SELECT crash_retry_count FROM subtask_activations \
+               WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1";
+    match conn.query_row(sql, rusqlite::params![task_id], |r| r.get::<_, i64>(0))
+        .optional()
+    {
+        Ok(Some(n)) => u32::try_from(n).unwrap_or(0),
+        Ok(None)    => 0,
+        Err(e)      => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"crash_retry_count_read_failed\",\
+                 \"task_id\":\"{task_id}\",\"error\":\"{e}\"}}",
+            );
+            0
+        }
+    }
+}
+
+/// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — emit the
+/// `PlannerMaxTurnsProgressivelyScaled` audit event when scaling
+/// fired (`attempt > 1`). No-op when `attempt = 1` (the first attempt
+/// has `effective == base` and the event would be noise). Audit-emit
+/// failures are logged but never abort the spawn flow — same
+/// best-effort discipline as the existing
+/// `SessionVmFailedFinal` / `SessionVmRespawnAttempted` emits.
+fn maybe_emit_planner_max_turns_scaled_audit(
+    service:       &Arc<SessionSpawnService>,
+    resolved:      ResolvedPlannerMaxTurns,
+    session_id:    &str,
+    task_id:       Option<&str>,
+    initiative_id: &str,
+) {
+    if resolved.attempt <= 1 {
+        return;
+    }
+    let Some(task_id) = task_id else {
+        // Defensive: the orchestrator path always passes
+        // `attempt = 1`, so reaching this branch with `attempt > 1`
+        // and `task_id = None` would indicate a regression in the
+        // caller (orchestrator sessions have no per-task crash
+        // counter). Log and skip rather than panic.
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"planner_max_turns_scaled_audit_skipped_no_task_id\",\
+             \"session_id\":\"{session_id}\",\"initiative_id\":\"{initiative_id}\",\
+             \"attempt\":{}}}",
+            resolved.attempt,
+        );
+        return;
+    };
+    if let Err(e) = service.audit().emit(
+        AuditEventKind::PlannerMaxTurnsProgressivelyScaled {
+            task_id:      task_id.to_owned(),
+            attempt:      resolved.attempt,
+            base:         resolved.base,
+            step:         resolved.step,
+            effective:    resolved.effective,
+            hard_ceiling: resolved.hard_ceiling,
+            source:       resolved.base_source.to_owned(),
+            step_source:  resolved.step_source.to_owned(),
+        },
+        Some(session_id),
+        Some(task_id),
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"planner_max_turns_scaled_audit_emit_failed\",\
+             \"session_id\":\"{session_id}\",\"task_id\":\"{task_id}\",\
+             \"initiative_id\":\"{initiative_id}\",\"error\":\"{e}\"}}",
+        );
+    }
+}
+
+/// V3 — emit the `PlannerMaxTurnsResolved` structured-log line, now
+/// carrying the progressive-scaling fields per
+/// `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`. Operator-grep
+/// stays compatible with the V2.7 `event = "PlannerMaxTurnsResolved"`
+/// + `source = …` lexemes; the new `attempt` / `base` / `step` /
+/// `effective` / `hard_ceiling` fields are additive.
+fn log_planner_max_turns_resolved(
+    resolved:        ResolvedPlannerMaxTurns,
+    task_id_for_log: &str,
+    session_id:      &str,
+    initiative_id:   &str,
+) {
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"PlannerMaxTurnsResolved\",\
+         \"task_id\":{:?},\"session_id\":{:?},\"initiative_id\":{:?},\
+         \"source\":{:?},\"step_source\":{:?},\"resolved\":{},\
+         \"attempt\":{},\"base\":{},\"step\":{},\"effective\":{},\
+         \"hard_ceiling\":{},\
+         \"invariant\":\"INV-PLANNER-MAX-TURNS-PRECEDENCE-01,INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01\"}}",
+        task_id_for_log,
+        session_id,
+        initiative_id,
+        resolved.base_source,
+        resolved.step_source,
+        resolved.effective,
+        resolved.attempt,
+        resolved.base,
+        resolved.step,
+        resolved.effective,
+        resolved.hard_ceiling,
+    );
 }
 
 /// V2 `v2_extended_gaps.md §3.1` — stamp the `[budget.sleep_caps]`
@@ -3752,27 +4042,53 @@ pub async fn spawn_executor_for_task(
     populate_token_cap_env_or_insert(&mut env, policy.token_caps());
     populate_sleep_cap_env_or_insert(&mut env, policy.sleep_caps());
 
-    // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` +
-    // `INV-KSB-MAX-TURNS-VISIBILITY-01` — resolve the per-task hard
-    // turn ceiling here so the SAME value reaches both the
-    // `RAXIS_PLANNER_MAX_TURNS` env stamp (this `_or_insert` call)
-    // and the KSB capabilities projection
+    // V2.7 / V3 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` +
+    // `INV-KSB-MAX-TURNS-VISIBILITY-01` +
+    // `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — resolve the
+    // per-task hard turn ceiling here so the SAME value reaches both
+    // the `RAXIS_PLANNER_MAX_TURNS` env stamp (this `_or_insert`
+    // call) and the KSB capabilities projection
     // (`KsbInputs::planner_max_turns` populated below). Single source
     // of truth: env stamp + KSB project from one resolver call.
+    //
+    // The `attempt` argument is sourced from the most-recent
+    // activation row's `crash_retry_count`. When the read fails or
+    // no row exists the helper returns `0`, falling through to
+    // `attempt = 1` (no progressive scaling — the conservative
+    // default for first-spawn behaviour). Read errors are logged
+    // but never abort the spawn flow.
     let task_fields_for_max_turns = {
         let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
         plan_registry.get(&key)
     };
-    let (planner_max_turns_resolved, _) = resolve_planner_max_turns_for(
+    let crash_retry_count_for_attempt = {
+        let store_for_read = Arc::clone(store);
+        let task_id_owned  = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store_for_read.lock_sync();
+            read_crash_retry_count_for_task(&*conn, &task_id_owned)
+        })
+        .await
+        .unwrap_or(0)
+    };
+    let attempt_for_resolver = crash_retry_count_for_attempt.saturating_add(1);
+    let planner_max_turns_resolved = resolve_planner_max_turns_for(
         task_fields_for_max_turns.as_ref(),
         policy.gateway(),
+        attempt_for_resolver,
     );
     populate_planner_max_turns_env_or_insert(
         &mut env,
-        task_fields_for_max_turns.as_ref(),
-        policy.gateway(),
+        planner_max_turns_resolved,
         task_id,
         session_id,
+        initiative_id,
+    );
+    maybe_emit_planner_max_turns_scaled_audit(
+        &service,
+        planner_max_turns_resolved,
+        session_id,
+        Some(task_id),
         initiative_id,
     );
 
@@ -3809,7 +4125,8 @@ pub async fn spawn_executor_for_task(
                     // session id (already minted at this call
                     // site) into the capabilities envelope.
                     session_id:                    &session_owned,
-                    planner_max_turns:             planner_max_turns_resolved,
+                    planner_max_turns:             planner_max_turns_resolved.effective,
+                    max_turns_scaling:             planner_max_turns_resolved.into(),
                 },
             )
         })
@@ -4642,11 +4959,29 @@ mod tests {
     /// reads only `planner_max_turns_default`.
     fn gateway_with_default(d: Option<u32>) -> raxis_policy::GatewaySection {
         raxis_policy::GatewaySection {
-            binary_path:                "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs:         5,
-            respawn_backoff_ms:         1000,
-            max_consecutive_respawns:   5,
-            planner_max_turns_default:  d,
+            binary_path:                     "/bin/raxis-gateway".to_owned(),
+            spawn_timeout_secs:              5,
+            respawn_backoff_ms:              1000,
+            max_consecutive_respawns:        5,
+            planner_max_turns_default:       d,
+            planner_max_turns_step_default:  None,
+        }
+    }
+
+    /// V3 helper: `GatewaySection` with both the per-policy
+    /// `planner_max_turns_default` AND the
+    /// `planner_max_turns_step_default` knobs varying.
+    fn gateway_with_default_and_step(
+        d:     Option<u32>,
+        step:  Option<u32>,
+    ) -> raxis_policy::GatewaySection {
+        raxis_policy::GatewaySection {
+            binary_path:                     "/bin/raxis-gateway".to_owned(),
+            spawn_timeout_secs:              5,
+            respawn_backoff_ms:              1000,
+            max_consecutive_respawns:        5,
+            planner_max_turns_default:       d,
+            planner_max_turns_step_default:  step,
         }
     }
 
@@ -4664,10 +4999,11 @@ mod tests {
     fn inv_planner_max_turns_precedence_01_per_task_wins_over_policy() {
         let task = task_with_max_turns(Some(7));
         let gw   = gateway_with_default(Some(42));
-        let (resolved, source) = resolve_planner_max_turns_for(Some(&task), Some(&gw));
-        assert_eq!(resolved, 7,
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        assert_eq!(r.effective, 7,
             "per-task `max_turns = Some(7)` MUST win over policy default 42");
-        assert_eq!(source, "task",
+        assert_eq!(r.base, 7);
+        assert_eq!(r.base_source, "task",
             "resolver MUST label the per-task arm `task` for log parity");
     }
 
@@ -4678,10 +5014,11 @@ mod tests {
     fn inv_planner_max_turns_precedence_01_policy_wins_over_compiled() {
         let task = task_with_max_turns(None);
         let gw   = gateway_with_default(Some(42));
-        let (resolved, source) = resolve_planner_max_turns_for(Some(&task), Some(&gw));
-        assert_eq!(resolved, 42,
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        assert_eq!(r.effective, 42,
             "policy default 42 MUST win when per-task is None");
-        assert_eq!(source, "policy",
+        assert_eq!(r.base, 42);
+        assert_eq!(r.base_source, "policy",
             "resolver MUST label the policy arm `policy` for log parity");
     }
 
@@ -4692,13 +5029,13 @@ mod tests {
     fn inv_planner_max_turns_precedence_01_compiled_default_when_both_absent() {
         let task = task_with_max_turns(None);
         let gw   = gateway_with_default(None);
-        let (resolved, source) = resolve_planner_max_turns_for(Some(&task), Some(&gw));
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
         assert_eq!(
-            resolved,
+            r.effective,
             crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             "both arms None ⇒ compiled fallback DEFAULT_PLANNER_MAX_TURNS",
         );
-        assert_eq!(source, "compiled-default",
+        assert_eq!(r.base_source, "compiled-default",
             "resolver MUST label the compiled-fallback arm `compiled-default`");
     }
 
@@ -4713,28 +5050,169 @@ mod tests {
     fn inv_planner_max_turns_precedence_01_orchestrator_path_ignores_task_arm() {
         // Policy wins (compiled would be 100, policy is 33).
         let gw_with_policy = gateway_with_default(Some(33));
-        let (resolved, source) = resolve_planner_max_turns_for(None, Some(&gw_with_policy));
-        assert_eq!(resolved, 33);
-        assert_eq!(source, "policy",
+        let r = resolve_planner_max_turns_for(None, Some(&gw_with_policy), 1);
+        assert_eq!(r.effective, 33);
+        assert_eq!(r.base_source, "policy",
             "orchestrator-spawn path MUST label `policy` when task_fields=None and policy is Some");
 
         // No policy ⇒ compiled fallback.
         let gw_no_policy = gateway_with_default(None);
-        let (resolved, source) = resolve_planner_max_turns_for(None, Some(&gw_no_policy));
+        let r = resolve_planner_max_turns_for(None, Some(&gw_no_policy), 1);
         assert_eq!(
-            resolved,
+            r.effective,
             crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
         );
-        assert_eq!(source, "compiled-default",
+        assert_eq!(r.base_source, "compiled-default",
             "orchestrator-spawn path MUST fall through to compiled-default when both task and policy are absent");
 
         // No gateway at all ⇒ also compiled fallback.
-        let (resolved, source) = resolve_planner_max_turns_for(None, None);
+        let r = resolve_planner_max_turns_for(None, None, 1);
         assert_eq!(
-            resolved,
+            r.effective,
             crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
         );
-        assert_eq!(source, "compiled-default");
+        assert_eq!(r.base_source, "compiled-default");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` witness tests
+    //
+    // Pin the progressive-scaling resolver against the spec table:
+    //   * `base = 30, step = 30` across 3 attempts ⇒ 30 / 60 / 90.
+    //   * `base = 100, step = 100` across 5 attempts clamps at the
+    //     compiled hard ceiling 240 (100 / 200 / 240 / 240 / 240).
+    //   * Default step inference (`base = 50` → step 25) yields
+    //     50 / 75 / 100 across 3 attempts.
+    //   * Per-task `max_turns_step = Some(0)` is rejected at the
+    //     parser; the resolver itself never sees a zero step.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn task_with_max_turns_and_step(
+        c:    Option<u32>,
+        step: Option<u32>,
+    ) -> crate::initiatives::TaskPlanFields {
+        let mut tf = crate::initiatives::TaskPlanFields::default();
+        tf.max_turns      = c;
+        tf.max_turns_step = step;
+        tf
+    }
+
+    /// V3 — `attempt = 1` MUST always return `effective = base`
+    /// (no scaling fires on the first attempt). Mirrors the
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` contract verbatim.
+    #[test]
+    fn inv_progressive_max_turns_attempt_1_equals_base() {
+        let task = task_with_max_turns_and_step(Some(30), Some(30));
+        let gw   = gateway_with_default(None);
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        assert_eq!(r.effective, 30,
+            "attempt = 1 MUST return base unchanged; got {r:?}");
+        assert_eq!(r.attempt, 1);
+        assert_eq!(r.base, 30);
+        assert_eq!(r.step, 30);
+    }
+
+    /// V3 — `base = 30, step = 30` across 3 attempts yields the
+    /// canonical witness sequence 30 / 60 / 90.
+    #[test]
+    fn inv_progressive_max_turns_base_30_step_30_three_attempts() {
+        let task = task_with_max_turns_and_step(Some(30), Some(30));
+        let gw   = gateway_with_default(None);
+        let a1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        let a2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        let a3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
+        assert_eq!(a1.effective, 30, "attempt 1 ⇒ base; got {a1:?}");
+        assert_eq!(a2.effective, 60, "attempt 2 ⇒ base + step; got {a2:?}");
+        assert_eq!(a3.effective, 90, "attempt 3 ⇒ base + 2*step; got {a3:?}");
+    }
+
+    /// V3 — `base = 100, step = 100` across 5 attempts clamps at
+    /// the compiled hard ceiling 240 (100 / 200 / 240 / 240 / 240).
+    #[test]
+    fn inv_progressive_max_turns_clamps_at_hard_ceiling() {
+        let task = task_with_max_turns_and_step(Some(100), Some(100));
+        let gw   = gateway_with_default(None);
+        let r1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        let r2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        let r3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
+        let r4 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 4);
+        let r5 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 5);
+        assert_eq!(r1.effective, 100);
+        assert_eq!(r2.effective, 200);
+        assert_eq!(r3.effective, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING,
+            "attempt 3 (base+2*step=300) MUST clamp at compiled ceiling 240");
+        assert_eq!(r4.effective, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING);
+        assert_eq!(r5.effective, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING);
+        assert_eq!(r3.hard_ceiling, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING);
+    }
+
+    /// V3 — `base = 50` with NO declared step ⇒ derived default
+    /// step `25` (half of base, rounded up to nearest 5, floor 10).
+    /// 3 attempts ⇒ 50 / 75 / 100.
+    #[test]
+    fn inv_progressive_max_turns_derived_step_default() {
+        let task = task_with_max_turns_and_step(Some(50), None);
+        let gw   = gateway_with_default(None);
+        let a1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        let a2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        let a3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
+        assert_eq!(a1.step, 25,
+            "base=50 ⇒ derived step max(round_up_to_5(25), 10) = 25");
+        assert_eq!(a1.step_source, "derived-default");
+        assert_eq!(a1.effective, 50);
+        assert_eq!(a2.effective, 75);
+        assert_eq!(a3.effective, 100);
+    }
+
+    /// V3 — derived step floor of 10 applies for very small base
+    /// budgets (e.g. base=5 gives derived step 10, not 5/2=2).
+    #[test]
+    fn inv_progressive_max_turns_derived_step_min_10() {
+        let task = task_with_max_turns_and_step(Some(5), None);
+        let gw   = gateway_with_default(None);
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        assert_eq!(r.step, 10,
+            "base=5 ⇒ derived step max(round_up_to_5(2), 10) = 10");
+        assert_eq!(r.effective, 15, "attempt 2 ⇒ 5 + 10 = 15");
+    }
+
+    /// V3 — `round_up_to_5` arithmetic: base=22 gives step
+    /// `round_up_to_5(11) = 15`.
+    #[test]
+    fn inv_progressive_max_turns_derived_step_rounds_up_to_5() {
+        assert_eq!(derive_default_max_turns_step(22), 15,
+            "round_up_to_5(22/2=11) = 15");
+        assert_eq!(derive_default_max_turns_step(50), 25);
+        assert_eq!(derive_default_max_turns_step(100), 50);
+        // base=101 → 101/2=50 (integer division), round_up_to_5(50) = 50.
+        assert_eq!(derive_default_max_turns_step(101), 50);
+        // base=103 → 103/2=51, round_up_to_5(51) = 55.
+        assert_eq!(derive_default_max_turns_step(103), 55);
+    }
+
+    /// V3 — per-policy step default takes precedence over derived
+    /// default when the per-task step is absent.
+    #[test]
+    fn inv_progressive_max_turns_policy_step_default_wins_over_derived() {
+        let task = task_with_max_turns_and_step(Some(40), None);
+        let gw   = gateway_with_default_and_step(None, Some(7));
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        assert_eq!(r.step, 7,
+            "policy `planner_max_turns_step_default = Some(7)` MUST win over derived default");
+        assert_eq!(r.step_source, "policy");
+        assert_eq!(r.effective, 47, "attempt 2 ⇒ 40 + 7 = 47");
+    }
+
+    /// V3 — per-task step takes precedence over per-policy default.
+    #[test]
+    fn inv_progressive_max_turns_per_task_step_wins_over_policy() {
+        let task = task_with_max_turns_and_step(Some(40), Some(3));
+        let gw   = gateway_with_default_and_step(None, Some(7));
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        assert_eq!(r.step, 3,
+            "per-task `max_turns_step = Some(3)` MUST win over policy default 7");
+        assert_eq!(r.step_source, "task");
+        assert_eq!(r.effective, 43);
     }
 
     /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` constant-parity guard:

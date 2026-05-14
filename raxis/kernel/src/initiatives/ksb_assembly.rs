@@ -135,11 +135,22 @@ pub struct KsbInputs<'a> {
     /// planner turn ceiling. The spawn callsites
     /// (`session_spawn_orchestrator::spawn_orchestrator_for_initiative`
     /// + `…spawn_executor_for_task`) MUST populate this with the SAME
-    /// value `resolve_planner_max_turns_for(task_fields, gateway)`
+    /// `ResolvedPlannerMaxTurns::effective` value
+    /// `resolve_planner_max_turns_for(task_fields, gateway, attempt)`
     /// returns for the env stamp — single source of truth for the
     /// resolution. Tests that do not care can pass
     /// [`crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS`].
     pub planner_max_turns: u32,
+
+    /// **V3 — `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`.**
+    /// Per-session breakdown of the progressive-scaling resolver's
+    /// decision: `attempt`, `base`, `step`, `hard_ceiling`. The spawn
+    /// callsites convert the `ResolvedPlannerMaxTurns` struct
+    /// returned by `resolve_planner_max_turns_for` into this view via
+    /// the `From<ResolvedPlannerMaxTurns>` impl. Surfaces onto the
+    /// orchestrator + executor envelopes; the assembler discards it
+    /// for the reviewer (role-scoping rule).
+    pub max_turns_scaling: raxis_ksb::MaxTurnsScalingView,
 }
 
 /// Assemble the KSB snapshot the kernel will stamp into
@@ -720,6 +731,13 @@ fn assemble_capabilities(
                 session,
                 initiative,
                 tasks,
+                // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
+                // — orchestrator carries the scaling view so its
+                // NNSP can reason about retry economics (e.g. surface
+                // "this child task is on attempt 3/3 with a 3× scaled
+                // budget; further retries hit the ceiling" before
+                // the LLM blind-issues another `retry_subtask`).
+                max_turns_scaling: inputs.max_turns_scaling,
             }))
         }
         KsbRole::Executor => {
@@ -730,6 +748,12 @@ fn assemble_capabilities(
             Ok(Capabilities::Executor(ExecutorCapabilities {
                 session,
                 task,
+                // V3 — executor sees its OWN budget breakdown so the
+                // role NNSP can self-regulate (`remaining = effective
+                // - turn_index`; the agent now knows the effective
+                // value differs from base because attempt > 1, not
+                // because of operator misconfiguration).
+                max_turns_scaling: inputs.max_turns_scaling,
             }))
         }
         KsbRole::Reviewer => {
@@ -963,6 +987,20 @@ mod tests {
         (Arc::new(store), dir)
     }
 
+    /// V3 — fixture default for the
+    /// `KsbInputs::max_turns_scaling` field. Carries the inert
+    /// "attempt 1 / step = 10 / hard_ceiling = 240" view so tests
+    /// that don't care about progressive scaling can spread
+    /// `..Default::default()` semantics inline.
+    fn default_max_turns_scaling() -> raxis_ksb::MaxTurnsScalingView {
+        raxis_ksb::MaxTurnsScalingView {
+            max_turns_attempt:       1,
+            max_turns_base:          crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+            max_turns_step:          10,
+            max_turns_hard_ceiling:  240,
+        }
+    }
+
     fn populate_registry(
         registry:      &PlanRegistry,
         initiative_id: &str,
@@ -1001,6 +1039,7 @@ mod tests {
                 credential_ports: Vec::new(),
                 session_id:       "",
                 planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
             },
         ).expect("assemble snapshot");
 
@@ -1040,6 +1079,7 @@ mod tests {
                 credential_ports: Vec::new(),
                 session_id:       "",
                 planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
             },
         ).expect("assemble orchestrator snapshot");
 
@@ -1071,6 +1111,7 @@ mod tests {
                 credential_ports: Vec::new(),
                 session_id:       "",
                 planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
             },
         ).expect("assemble snapshot");
         drop(conn);
@@ -1118,6 +1159,7 @@ mod tests {
                 credential_ports: Vec::new(),
                 session_id:       "",
                 planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
             },
         ).expect("assemble snapshot");
 
@@ -1222,6 +1264,7 @@ mod tests {
                 credential_ports: Vec::new(),
                 session_id:       "",
                 planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);
@@ -1377,6 +1420,7 @@ mod tests {
                 credential_ports: Vec::new(),
                 session_id:       "",
                 planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);
@@ -1502,6 +1546,7 @@ mod tests {
                 credential_ports: Vec::new(),
                 session_id:       "",
                 planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
             },
         ).expect("assemble orchestrator snapshot");
         drop(conn);
@@ -1586,6 +1631,7 @@ mod tests {
                     credential_ports:             Vec::new(),
                     session_id:                   "sess-mt",
                     planner_max_turns:            RESOLVED,
+                    max_turns_scaling:            default_max_turns_scaling(),
                 },
             ).expect("assemble snapshot");
             drop(conn);

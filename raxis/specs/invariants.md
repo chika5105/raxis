@@ -92,11 +92,11 @@
 | Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01, INV-OBS-OPERATOR-IPC-COVERAGE-01, INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 | 4 |
 | KSB capabilities envelope — V2.6 | INV-KSB-CAPABILITIES-PARITY-01, INV-KSB-CAPABILITIES-ROLE-SCOPED-01, INV-KSB-CAPABILITIES-TURN-COHERENT-01 | 3 |
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
-| Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
+| Planner turn budget — V2.7 / V3 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01, INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01 | 3 |
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
 | Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01, INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01 | 2 |
 | Integration-merge completion cascade — V3 (iter54) | INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01, INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01 | 2 |
-| **Total** | | **126** |
+| **Total** | | **127** |
 
 ---
 
@@ -8565,6 +8565,110 @@ spent >75% of its budget on a single coherent edit should prefer
 
 **Canonical home.** `v2/v2_extended_gaps.md §2.4` (KSB schema);
 `v2/v2-deep-spec.md §Step 12` (planner-harness ceiling resolution).
+
+---
+
+### INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01 — Per-task `max_turns` scales by `step` on each crash retry
+
+**Statement.**
+On every per-task planner-VM spawn the kernel computes the
+**effective** per-attempt `max_turns` budget as
+
+    effective = min(base + (attempt - 1) * step, hard_ceiling)
+
+where:
+
+* `base` is the resolved per-task `max_turns` (per
+  `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`: per-task →
+  `[gateway].planner_max_turns_default` → compiled default).
+* `step` is the resolved per-task `max_turns_step` (precedence:
+  per-task `[[tasks]].max_turns_step` →
+  `[gateway].planner_max_turns_step_default` → derived default
+  `max(round_up_to_5(base / 2), 10)`).
+* `attempt` is `subtask_activations.crash_retry_count + 1` for the
+  task being spawned, sourced from the most-recent activation row.
+  `attempt = 1` is the first spawn (no prior crash) — the resolver
+  is a no-op (`effective = base`) on attempt 1 by construction.
+* `hard_ceiling` is the runtime ceiling clamp — default 240,
+  overridable via the `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING` env
+  var read at kernel boot. Values `<= 0` or unparseable values
+  silently degrade to the compiled default (operator typos do not
+  fail-close the spawn).
+
+Both the spawned VM's `RAXIS_PLANNER_MAX_TURNS` env stamp AND the
+KSB capabilities envelope's `planner_max_turns` /
+`max_turns_scaling` fields MUST come from a SINGLE call to
+`session_spawn_orchestrator::resolve_planner_max_turns_for(task_fields,
+gateway, attempt)`. The KSB scaling view is shipped only on the
+orchestrator + executor envelopes; the reviewer envelope MUST omit
+it (role-scoping rule per
+`INV-KSB-CAPABILITIES-ROLE-SCOPED-01`).
+
+`[[tasks]].max_turns_step = 0` MUST fail admission at the plan
+parser (`parse_plan_tasks` in
+`kernel/src/initiatives/lifecycle.rs`) — a zero step degenerates
+the resolver back to a constant budget and masks the cold-start
+retry tax this knob exists to absorb.
+
+When `attempt > 1` the kernel MUST emit the
+`PlannerMaxTurnsProgressivelyScaled` audit event with the
+(`base`, `step`, `attempt`, `effective`, `hard_ceiling`) tuple so
+the dashboard's "why-did-this-budget-change" timeline reflects the
+spawn-site decision verbatim. The companion
+`PlannerMaxTurnsResolved` structured-log line on stderr MUST carry
+the same five numeric fields so operators grepping the kernel log
+have parity with the audit chain.
+
+**Justification.**
+Production telemetry from iter54/iter55 shows the dominant
+crash-retry failure mode is "executor ran out of turns mid-edit on
+attempt 2 with the same budget that failed on attempt 1". A
+fixed-budget retry asks the same agent to do the same work with
+the same scratch, which is not what the operator wants — a retry
+that doesn't add resources is just a re-run with a different
+random seed. Progressive scaling gives the kernel a structural
+defense-in-depth lever: when a crash retry fires the kernel knows
+the prior attempt under-budgeted itself, and the new attempt gets
+a larger turn budget without operator intervention.
+
+The hard ceiling clamp exists so a misconfigured plan that
+declares (say) `max_turns = 1000, max_turns_step = 1000` cannot
+inflate the budget unboundedly — the kernel-side clamp keeps the
+per-attempt cost bounded even when the operator's TOML is wrong.
+
+**Witness tests:**
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_progressive_max_turns_base_30_step_30_three_attempts`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_progressive_max_turns_clamps_at_hard_ceiling`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_progressive_max_turns_derived_step_default`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_progressive_max_turns_derived_step_min_10`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_progressive_max_turns_policy_step_default_wins_over_derived`
+* `kernel/src/session_spawn_orchestrator.rs::tests::inv_progressive_max_turns_per_task_step_wins_over_policy`
+* `kernel/src/initiatives/lifecycle.rs::tests::inv_planner_max_turns_progressive_on_retry_01_parser_rejects_zero_step`
+* `kernel/src/initiatives/lifecycle.rs::tests::inv_planner_max_turns_progressive_on_retry_01_parser_admits_one_step`
+* `kernel/src/initiatives/lifecycle.rs::tests::inv_planner_max_turns_progressive_on_retry_01_parser_admits_omitted_step`
+* `kernel/tests/ksb_capabilities_role_scoped.rs::inv_planner_max_turns_progressive_on_retry_01_role_scoped`
+
+**Enforcement sites:**
+* `kernel/src/session_spawn_orchestrator.rs::resolve_planner_max_turns_for` — the resolver
+* `kernel/src/session_spawn_orchestrator.rs::resolve_planner_max_turns_step_for` — step resolver + derived-default
+* `kernel/src/session_spawn_orchestrator.rs::resolve_planner_max_turns_hard_ceiling` — env override + compiled default
+* `kernel/src/session_spawn_orchestrator.rs::read_crash_retry_count_for_task` — attempt derivation
+* `kernel/src/session_spawn_orchestrator.rs::maybe_emit_planner_max_turns_scaled_audit` — audit emit guard
+* `kernel/src/session_spawn_orchestrator.rs::log_planner_max_turns_resolved` — stderr structured log
+* `kernel/src/initiatives/plan_registry.rs::TaskPlanFields::max_turns_step` — schema
+* `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks` — `Some(0)` rejection at admission
+* `crates/policy/src/bundle.rs::GatewaySection::planner_max_turns_step_default` — per-policy default
+* `crates/audit/src/event.rs::AuditEventKind::PlannerMaxTurnsProgressivelyScaled` — audit variant
+* `crates/ksb/src/lib.rs::MaxTurnsScalingView` — KSB wire shape
+* `crates/ksb/src/lib.rs::push_max_turns_scaling_line` — KSB renderer
+* `kernel/src/initiatives/ksb_assembly.rs::assemble_capabilities` — role-scoped projection
+
+**Canonical home.** `v2/v2-deep-spec.md §Step 12` (planner-harness
+progressive ceiling resolution); `v2/planner-harness.md`
+(progressive scaling section); `guides/recipes/policy/06-budget-section.md`
+(policy-side `planner_max_turns_step_default`);
+`guides/recipes/env/11-planner-env-vars.md`
+(`RAXIS_PLANNER_MAX_TURNS_HARD_CEILING` override).
 
 ---
 

@@ -505,6 +505,52 @@ bearing kernel concern with **three mutually exclusive paths**:
    plan-authors and operators carve per-task / per-org exceptions
    without bumping the global default.
 
+   **V3 — progressive scaling on crash retry
+   (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`).** The V2.7
+   precedence chain above resolves a SINGLE `max_turns` value that
+   every attempt of the task shares. Production telemetry from
+   iter54/iter55 shows the dominant crash-retry failure mode is
+   "executor ran out of turns mid-edit on attempt 2 with the same
+   budget that failed on attempt 1" — a fixed-budget retry asks the
+   same agent to do the same work with the same scratch, which is
+   not what the operator wants.
+
+   V3 adds a `step` knob that grows the per-attempt budget on every
+   crash retry, computed at spawn time by
+   `resolve_planner_max_turns_for(task_fields, gateway, attempt)`
+   as `effective = min(base + (attempt - 1) * step, hard_ceiling)`
+   where:
+
+   * `attempt` = `subtask_activations.crash_retry_count + 1` for
+     the task being spawned, sourced via
+     `read_crash_retry_count_for_task`. Orchestrator spawns pass
+     `attempt = 1` unconditionally (no per-task crash counter
+     applies to a per-initiative session), so progressive scaling
+     is a no-op for the orchestrator session itself.
+   * `base` = the V2.7-resolved per-task → per-policy → compiled
+     `max_turns`.
+   * `step` = per-task `[[tasks]].max_turns_step` → per-policy
+     `[gateway].planner_max_turns_step_default` → derived default
+     `max(round_up_to_5(base / 2), 10)`. `max_turns_step = 0` is
+     rejected at the plan parser.
+   * `hard_ceiling` = `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING` env
+     var (best-effort u32 parse) or the compiled default `240`.
+
+   The kernel emits the `PlannerMaxTurnsProgressivelyScaled` audit
+   event with the (`base`, `step`, `attempt`, `effective`,
+   `hard_ceiling`) tuple when `attempt > 1`, and the
+   `PlannerMaxTurnsResolved` stderr structured-log line carries
+   the same numeric fields on every spawn. The KSB capabilities
+   envelope projects a `max_turns_scaling` view onto the
+   orchestrator + executor envelopes (reviewer omitted per the
+   role-scoping rule) so the in-VM agent can budget its turn-spend
+   knowing the effective value differs from `base` because the
+   kernel scaled it up on retry, not because of an operator
+   misconfiguration. See `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
+   in `specs/invariants.md` for the full witness/enforcement list
+   and `planner-harness.md §5.9.1` for the operator-facing
+   summary.
+
 The storm-guard's `pending_exists && !active_exists` predicate is
 load-bearing: without `!active_exists` the hook re-fires on every
 orchestrator exit while a worker is still in flight, and the respawned

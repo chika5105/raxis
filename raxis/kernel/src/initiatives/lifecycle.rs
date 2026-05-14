@@ -1133,6 +1133,13 @@ pub fn approve_plan(
             // through to `[gateway].planner_max_turns_default` and
             // then `DEFAULT_PLANNER_MAX_TURNS` at session-spawn time.
             max_turns:                 pt.max_turns,
+            // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
+            // propagate the operator-declared progressive scaling
+            // step. `None` preserves "operator omitted" semantics so
+            // the resolver can fall through to the policy default
+            // (`[gateway].planner_max_turns_step_default`) and then
+            // the derived `max(base/2, 10)` default at spawn time.
+            max_turns_step:            pt.max_turns_step,
             // V2 `elastic-vm-scaling.md §2.2` — propagate the
             // operator-declared elastic knobs into the in-memory
             // PlanRegistry so the spawn helper can consult them
@@ -1735,6 +1742,13 @@ pub fn repopulate_plan_registry(
                     // omitted" semantics so a kernel reboot does
                     // not silently widen the budget.
                     max_turns:                 pt.max_turns,
+                    // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
+                    // — re-hydrate the operator-declared progressive
+                    // scaling step from the immutable signed plan
+                    // bytes. Same `None`-stays-`None` discipline as
+                    // `max_turns` above so the policy / derived
+                    // defaults remain in play after restart.
+                    max_turns_step:            pt.max_turns_step,
                     // V2 `elastic-vm-scaling.md §2.2` — re-hydrate
                     // the operator-declared elastic knobs from the
                     // immutable signed plan bytes. Same `None`
@@ -2132,6 +2146,18 @@ struct PlanTask {
     /// contract.
     max_turns:                 Option<u32>,
 
+    /// **V3 — `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`.**
+    /// Operator-declared progressive scaling step. The kernel
+    /// resolves the effective per-attempt budget as
+    /// `min(base + (attempt - 1) * step, hard_ceiling)`.
+    /// `None` ⇒ fall through to
+    /// `[gateway].planner_max_turns_step_default` (policy) and then
+    /// the derived default `max(round_up_to_5(base/2), 10)`.
+    /// `Some(0)` is rejected at parse time — a zero step degenerates
+    /// the resolver back to a constant budget and masks the
+    /// cold-start retry tax this knob exists to absorb.
+    max_turns_step:            Option<u32>,
+
     // ── V2 `credential-proxy.md §3` typed credential decls ─────────────
     /// Parsed `[[tasks.credentials]]` entries for this task. Empty
     /// when the operator omitted the block. The
@@ -2440,6 +2466,31 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             });
         }
 
+        // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
+        // per-task progressive scaling step. Same shape as
+        // `max_turns`: structural-only at parse, semantic resolution
+        // at spawn time. `Some(0)` is rejected here because a zero
+        // step would degrade the progressive resolver back to a
+        // constant budget — operators who want the constant-budget
+        // behaviour should pin `max_turns` higher instead.
+        let max_turns_step = parse_optional_u32_field(
+            entry, "max_turns_step", &task_id,
+        )?;
+        if let Some(0) = max_turns_step {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) `max_turns_step = 0` is \
+                     not a useful value — a zero step degenerates the \
+                     progressive resolver back to a constant budget and \
+                     masks the cold-start retry tax this knob exists to \
+                     absorb. Either omit the field (to fall through to \
+                     the policy / derived default) or declare a value \
+                     `>= 1`. See \
+                     `specs/invariants.md#INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`."
+                ),
+            });
+        }
+
         // V2 `elastic-vm-scaling.md §2.2` — per-task elastic knobs.
         // All five fields are OPTIONAL; absence carries through as
         // `None` so admission-time validation can apply the
@@ -2522,6 +2573,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             max_crash_retries,
             max_review_rejections,
             max_turns,
+            max_turns_step,
             elastic,
             min_vcpus,
             max_vcpus,
@@ -8620,6 +8672,87 @@ description = "no per-task override; defer to policy / compiled fallback"
         let tasks = parse_plan_tasks(toml).expect("omitted max_turns is admissible");
         assert_eq!(tasks[0].max_turns, None,
             "omitted `max_turns` MUST parse as `None`, NOT `Some(default)` — \
+             the resolver needs the option-shape to distinguish 'operator \
+             chose the default' from 'operator declared the value'");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` parser
+    // admission witnesses for the new `max_turns_step` field.
+    //
+    // Same shape as the `max_turns` parser guard above: `Some(0)`
+    // MUST fail admission (a zero-step retry would defeat the entire
+    // point of the progressive scaling — the budget would never grow),
+    // `Some(1)` is the minimum admissible value, and omission MUST
+    // parse as `None` so the spawn-time resolver can fall through to
+    // the policy default → derived default precedence chain.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn inv_planner_max_turns_progressive_on_retry_01_parser_rejects_zero_step() {
+        let toml = r#"
+[meta]
+version = 1
+[[tasks]]
+task_id        = "t-zero-step"
+description    = "zero-step retry MUST fail admission"
+max_turns      = 30
+max_turns_step = 0
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_turns_step"),
+            "rejection message MUST name `max_turns_step`; got: {msg}",
+        );
+        assert!(
+            msg.contains("t-zero-step"),
+            "rejection message MUST name the offending task; got: {msg}",
+        );
+        assert!(
+            msg.contains('0'),
+            "rejection message MUST mention the rejected value; got: {msg}",
+        );
+    }
+
+    /// `Some(1)` is the minimum admissible step value — the
+    /// boundary check is `< 1`, not `<= 1`. A 1-step retry is
+    /// degenerate but legal for adversarial / fuzz scenarios where
+    /// the operator deliberately wants a slow ramp.
+    #[test]
+    fn inv_planner_max_turns_progressive_on_retry_01_parser_admits_one_step() {
+        let toml = r#"
+[meta]
+version = 1
+[[tasks]]
+task_id        = "t-one-step"
+description    = "minimum admissible step"
+max_turns      = 30
+max_turns_step = 1
+"#;
+        let tasks = parse_plan_tasks(toml).expect("max_turns_step = 1 MUST be admissible");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].max_turns_step, Some(1),
+            "parser MUST propagate `Some(1)` through to the in-memory PlanTask");
+    }
+
+    /// Omitted `max_turns_step` ⇒ `None` ⇒ the spawn-time resolver
+    /// falls through to the policy default
+    /// (`[gateway].planner_max_turns_step_default`) or the
+    /// derived-default formula (`max(round_up_to_5(base/2), 10)`).
+    #[test]
+    fn inv_planner_max_turns_progressive_on_retry_01_parser_admits_omitted_step() {
+        let toml = r#"
+[meta]
+version = 1
+[[tasks]]
+task_id     = "t-step-omitted"
+description = "no per-task step override; defer to policy / derived default"
+max_turns   = 30
+"#;
+        let tasks = parse_plan_tasks(toml).expect("omitted max_turns_step is admissible");
+        assert_eq!(tasks[0].max_turns_step, None,
+            "omitted `max_turns_step` MUST parse as `None`, NOT `Some(default)` — \
              the resolver needs the option-shape to distinguish 'operator \
              chose the default' from 'operator declared the value'");
     }

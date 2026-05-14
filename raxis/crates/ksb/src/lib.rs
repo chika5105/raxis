@@ -433,6 +433,37 @@ pub struct TaskCapabilityView {
     pub retry_inadmissible_reason: Option<String>,
 }
 
+/// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — per-session
+/// view of the progressive-scaling resolver's decision. Surfaced on
+/// the orchestrator + executor envelopes (so both roles can reason
+/// about retry economics) and intentionally absent from the reviewer
+/// envelope: the reviewer's verdict MUST be on the artifact, not on
+/// the executor's budget pressure (same role-scoping rule as the
+/// existing `crash_retry_count` exclusion on `ReviewerCapabilities`).
+///
+/// Companion to `SessionCapabilityView::planner_max_turns` (which
+/// stays the **effective** value for this attempt). The fields here
+/// let the agent see *why* the effective value differs from the base
+/// — a Round-2 retry surfaces `attempt = 2, base = 30, step = 30,
+/// effective = 60, hard_ceiling = 240` so the agent knows the budget
+/// is larger because the kernel scaled it up on retry, and can
+/// budget its turn-spend accordingly.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MaxTurnsScalingView {
+    /// 1-based attempt index (`subtask_activations.crash_retry_count
+    /// + 1`). `1` on first spawn; `>= 2` on every retry.
+    pub max_turns_attempt:       u32,
+    /// Per-task / per-policy / compiled base ceiling
+    /// (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`). Constant across
+    /// attempts for the same task.
+    pub max_turns_base:          u32,
+    /// Per-task / per-policy / derived scaling step.
+    pub max_turns_step:          u32,
+    /// Runtime hard ceiling clamp (`240` by default, overridable via
+    /// `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING`).
+    pub max_turns_hard_ceiling:  u32,
+}
+
 /// Orchestrator's full envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrchestratorCapabilities {
@@ -443,6 +474,9 @@ pub struct OrchestratorCapabilities {
     /// `retry_subtask` on a reviewer (reviewers are
     /// reactivate-only).
     pub tasks:      Vec<TaskCapabilityView>,
+    /// V3 — progressive scaling view (this session's
+    /// per-attempt budget breakdown).
+    pub max_turns_scaling: MaxTurnsScalingView,
 }
 
 /// Executor's envelope. Single task — the one this executor session
@@ -452,11 +486,17 @@ pub struct OrchestratorCapabilities {
 pub struct ExecutorCapabilities {
     pub session: SessionCapabilityView,
     pub task:    TaskCapabilityView,
+    /// V3 — progressive scaling view (this session's
+    /// per-attempt budget breakdown).
+    pub max_turns_scaling: MaxTurnsScalingView,
 }
 
 /// Reviewer's envelope. Identity-only artifact view — no counters
 /// (the reviewer must verdict on the artifact, not the executor's
-/// trajectory).
+/// trajectory). The progressive-scaling view is intentionally absent
+/// per the same role-scoping rule that excludes `crash_retry_count` /
+/// `review_reject_count` — the reviewer's verdict must be on the
+/// artifact, not on the executor's budget pressure.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewerCapabilities {
     pub session:          SessionCapabilityView,
@@ -996,6 +1036,7 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
     match caps {
         Capabilities::Orchestrator(o) => {
             push_session_capability_line(buf, "orchestrator", &o.session);
+            push_max_turns_scaling_line(buf, &o.max_turns_scaling);
             buf.push_str("  initiative=");
             buf.push_str(&o.initiative.initiative_id);
             buf.push_str(" orch_no_progress_respawns=");
@@ -1016,16 +1057,44 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
         }
         Capabilities::Executor(e) => {
             push_session_capability_line(buf, "executor", &e.session);
+            push_max_turns_scaling_line(buf, &e.max_turns_scaling);
             buf.push_str("  task=\n");
             push_task_capability_row(buf, &e.task);
         }
         Capabilities::Reviewer(r) => {
             push_session_capability_line(buf, "reviewer", &r.session);
+            // V3 — reviewer is intentionally NOT given the scaling
+            // view (role-scoping rule per
+            // `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`).
             buf.push_str("  artifact_task_id=");
             buf.push_str(&r.artifact_task_id);
             buf.push('\n');
         }
     }
+}
+
+/// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — render the
+/// per-session progressive-scaling line:
+///
+/// ```text
+///   max_turns_attempt=N base=B step=S hard_ceiling=H
+/// ```
+///
+/// Emitted only on orchestrator + executor envelopes (the reviewer
+/// envelope omits this line by contract). The agent uses these fields
+/// to reason about retry economics — a Round-2 executor sees
+/// `max_turns_attempt=2`, knows the budget rose `base + step` since
+/// last attempt, and can budget its turns accordingly.
+fn push_max_turns_scaling_line(buf: &mut String, v: &MaxTurnsScalingView) {
+    buf.push_str("  max_turns_attempt=");
+    buf.push_str(&v.max_turns_attempt.to_string());
+    buf.push_str(" base=");
+    buf.push_str(&v.max_turns_base.to_string());
+    buf.push_str(" step=");
+    buf.push_str(&v.max_turns_step.to_string());
+    buf.push_str(" hard_ceiling=");
+    buf.push_str(&v.max_turns_hard_ceiling.to_string());
+    buf.push('\n');
 }
 
 /// V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — render the per-session
@@ -1539,6 +1608,12 @@ mod tests {
                 orchestrator_respawns_remaining:        3,
             },
             tasks:      Vec::new(),
+            max_turns_scaling: MaxTurnsScalingView {
+                max_turns_attempt:       1,
+                max_turns_base:          77,
+                max_turns_step:          40,
+                max_turns_hard_ceiling:  240,
+            },
         }));
         let s = render_ksb(&snap).unwrap();
         assert!(s.contains("role=orchestrator"),
@@ -1563,6 +1638,12 @@ mod tests {
                 retry_inadmissible_reason: Some(
                     "no prior activation".to_owned(),
                 ),
+            },
+            max_turns_scaling: MaxTurnsScalingView {
+                max_turns_attempt:       1,
+                max_turns_base:          25,
+                max_turns_step:          15,
+                max_turns_hard_ceiling:  240,
             },
         }));
         let s = render_ksb(&snap).unwrap();

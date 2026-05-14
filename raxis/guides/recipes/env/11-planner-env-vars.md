@@ -133,6 +133,88 @@ without an extra IPC round-trip.
 
 ---
 
+## Progressive scaling on crash retry (V3, `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`)
+
+The V2.7 precedence chain resolves a SINGLE `max_turns` value that
+every attempt of the task shares. V3 adds a `step` knob that
+**grows** the per-attempt budget on every crash retry, computed
+at spawn time as:
+
+    effective = min(base + (attempt - 1) * step, hard_ceiling)
+
+where:
+
+* `attempt` = `subtask_activations.crash_retry_count + 1` for the
+  task being spawned (1 on first spawn; 2 after the first crash
+  retry; etc.). Orchestrator spawns pass `attempt = 1`
+  unconditionally — progressive scaling is a no-op for the
+  orchestrator session.
+* `base` = the V2.7-resolved per-task → per-policy → compiled
+  `max_turns`.
+* `step` precedence (mirrors the `base` chain):
+  1. `[[tasks]].max_turns_step = N` in the plan TOML.
+  2. `[gateway].planner_max_turns_step_default = N` in `policy.toml`.
+  3. Derived default: `max(round_up_to_5(base / 2), 10)` (e.g.
+     `base = 30` ⇒ derived step `15`; `base = 100` ⇒ derived step
+     `50`; `base = 5` ⇒ derived step `10` (floor)).
+* `hard_ceiling` = the `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING` env
+  var (best-effort u32 parse) or the compiled default `240`.
+
+**Canonical witness table** (`base = 30, step = 30`):
+
+| Attempt | crash_retry_count | scaled | effective (clamped at 240) |
+|---|---|---|---|
+| 1 | 0 |  30 |  30 |
+| 2 | 1 |  60 |  60 |
+| 3 | 2 |  90 |  90 |
+| 8 | 7 | 240 | 240 |
+| 9 | 8 | 270 | 240 (clamped) |
+
+**Validation.** `[[tasks]].max_turns_step = 0` is rejected at
+admission (a zero step degenerates the resolver back to a
+constant budget and masks the cold-start retry tax this knob
+exists to absorb). Omitting the field is admissible — the
+resolver falls through to the policy default → derived default
+precedence chain.
+
+**Operator override — `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING`.**
+Set this env var on the kernel process to clamp the
+progressively-scaled budget at a value other than the compiled
+default `240`. The kernel reads it once at boot:
+
+```sh
+export RAXIS_PLANNER_MAX_TURNS_HARD_CEILING=180   # tighten
+export RAXIS_PLANNER_MAX_TURNS_HARD_CEILING=400   # loosen
+```
+
+Unparseable / non-positive values silently degrade to the
+compiled default — operator typos do not fail-close the spawn.
+The resolved ceiling is surfaced on the orchestrator + executor
+KSB envelopes as `max_turns_hard_ceiling=N` so the in-VM agent
+sees the clamp value.
+
+**Audit visibility.** When `attempt > 1` the kernel emits a
+`PlannerMaxTurnsProgressivelyScaled` audit event with the
+(`base`, `step`, `attempt`, `effective`, `hard_ceiling`) tuple —
+visible in the dashboard's audit timeline. The companion
+`PlannerMaxTurnsResolved` stderr structured-log line carries the
+same numeric fields on every spawn so operators grepping the
+kernel log have parity with the audit chain.
+
+**KSB visibility.** The orchestrator + executor capabilities
+envelopes carry a `max_turns_scaling` view rendered as
+
+```text
+  max_turns_attempt=N base=B step=S hard_ceiling=H
+```
+
+so the in-VM agent can reason about retry economics. The reviewer
+envelope omits this line per the role-scoping rule — the
+reviewer's verdict must be on the artifact, not on the
+executor's budget pressure.
+
+---
+
 ## The token cap vars (V2 §2.5)
 
 These come from `[budget.token_caps]` in `policy.toml`. The kernel

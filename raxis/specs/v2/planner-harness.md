@@ -1418,10 +1418,82 @@ mitigations:
   progressively bumps the per-task ceiling on retry attempts
   via `base + (attempt-1) * step` (default `step = base/2`), so
   a 60-turn task elasticates to 90 on retry #1 and 120 on retry
-  #2 even without a fresh per-task bump.
+  #2 even without a fresh per-task bump. See §5.9.1 below
+  for the full resolver semantics.
 
 See `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` rationale-section note
 for the full iter54 + iter55 sizing narrative.
+### 5.9.1 Progressive scaling on crash retry (V3, `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`)
+
+The base `max_turns` resolution above gives EVERY attempt of a
+task the SAME budget. Production telemetry from iter54/iter55
+showed this is structurally wrong: the dominant crash-retry
+failure mode is "executor ran out of turns mid-edit on attempt 2
+with the same budget that failed on attempt 1". A fixed-budget
+retry asks the same agent to do the same work with the same
+scratch, which is not what the operator wants — a retry that
+doesn't add resources is just a re-run with a different random
+seed.
+
+V3 introduces a **progressive scaling** layer on top of the base
+ceiling resolution. On every per-task spawn the kernel computes
+
+    effective = min(base + (attempt - 1) * step, hard_ceiling)
+
+where:
+
+* `attempt` = `subtask_activations.crash_retry_count + 1` (1-based
+  for the current spawn — attempt 1 is the first spawn, attempt 2
+  is the spawn after the first crash retry, etc.).
+* `base` = resolved per-task `max_turns` per the precedence chain
+  above. Constant across attempts for the same task.
+* `step` = resolved per-task `max_turns_step`. Precedence:
+  per-task `[[tasks]].max_turns_step = Some(N)` → per-policy
+  `[gateway].planner_max_turns_step_default = Some(d)` → derived
+  default `max(round_up_to_5(base / 2), 10)`. `max_turns_step = 0`
+  is rejected at the plan parser (a zero step degenerates the
+  resolver back to a constant budget and masks the cold-start
+  retry tax this knob exists to absorb).
+* `hard_ceiling` = runtime ceiling clamp. Default `240`,
+  overridable via the `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING` env
+  var read at kernel boot.
+
+**Canonical witness table** (`base = 30, step = 30`):
+
+| Attempt | crash_retry_count | base | step | scaled | effective (clamped at 240) |
+|---|---|---|---|---|---|
+| 1 | 0 | 30 | 30 |  30 |  30 |
+| 2 | 1 | 30 | 30 |  60 |  60 |
+| 3 | 2 | 30 | 30 |  90 |  90 |
+| 4 | 3 | 30 | 30 | 120 | 120 |
+| … | … | …  | …  | …   |  …  |
+| 8 | 7 | 30 | 30 | 240 | 240 |
+| 9 | 8 | 30 | 30 | 270 | 240 (clamped) |
+
+**Audit + log visibility.** When `attempt > 1` the kernel emits
+the `PlannerMaxTurnsProgressivelyScaled` audit event with the
+(`base`, `step`, `attempt`, `effective`, `hard_ceiling`) tuple so
+the dashboard's "why-did-this-budget-change" timeline reflects the
+spawn-site decision verbatim. The companion
+`PlannerMaxTurnsResolved` structured-log line on stderr carries
+the same numeric fields so operators grepping the kernel log have
+parity with the audit chain.
+
+**KSB visibility.** The orchestrator + executor KSB capabilities
+envelopes carry a `max_turns_scaling` view with
+(`max_turns_attempt`, `max_turns_base`, `max_turns_step`,
+`max_turns_hard_ceiling`); the reviewer envelope omits this view
+per the role-scoping rule (the reviewer must verdict on the
+artifact, not on the executor's budget pressure).
+
+The orchestrator passes `attempt = 1` for its own spawn (the
+orchestrator is per-initiative; the per-task crash counter never
+applies), so progressive scaling is a no-op for the orchestrator
+session itself.
+
+See `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` in
+`specs/invariants.md` for the full enforcement-site list,
+witnesses, and rationale.
 
 ---
 

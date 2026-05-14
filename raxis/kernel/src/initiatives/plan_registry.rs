@@ -232,6 +232,32 @@ pub struct TaskPlanFields {
     /// any `n >= 1` is admitted verbatim.
     pub max_turns:                 Option<u32>,
 
+    /// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
+    /// operator-declared per-task scaling step applied to each
+    /// crash-retry attempt. The kernel resolves the effective budget
+    /// for attempt `N` (1-indexed) as
+    /// `min(base + (N - 1) * step, hard_ceiling)` where `base` is
+    /// the per-task / per-policy / compiled `max_turns`
+    /// (see [`Self::max_turns`] and
+    /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`).
+    ///
+    /// **Resolution precedence** (mirrors `max_turns`):
+    /// 1. `Some(s)` here ⇒ `s` (policy default ignored).
+    /// 2. `None` here + `Some(d)` on
+    ///    `GatewaySection::planner_max_turns_step_default` ⇒ `d`.
+    /// 3. Neither set ⇒ derived default
+    ///    `max(round_up_to_5(base / 2), 10)` so cold-start retries
+    ///    get a useful step even for plans that never declared one.
+    ///
+    /// **Validation.** `Some(0)` is rejected at plan-parse time with
+    /// `LifecycleError::PlanInvalid` — a zero step degenerates the
+    /// progressive resolver back to a constant budget and would mask
+    /// the cold-start retry-tax this knob exists to absorb. If an
+    /// operator actually wants the constant-budget behaviour they
+    /// should pin `max_turns` to a higher value rather than zeroing
+    /// the step.
+    pub max_turns_step:            Option<u32>,
+
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
     /// Operator-declared toggle for upward VM-resource scaling on
     /// this task. `None` ⇒ inherit from
@@ -326,6 +352,7 @@ impl Default for TaskPlanFields {
             max_crash_retries:         None,
             max_review_rejections:     None,
             max_turns:                 None,
+            max_turns_step:            None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,
@@ -876,6 +903,7 @@ mod tests {
             max_crash_retries:         None,
             max_review_rejections:     None,
             max_turns:                 None,
+            max_turns_step:            None,
             elastic:                   None,
             min_vcpus:                 None,
             max_vcpus:                 None,

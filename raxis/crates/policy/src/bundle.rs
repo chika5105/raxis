@@ -2144,6 +2144,42 @@ pub struct GatewaySection {
     /// is never useful and almost always a typo).
     #[serde(default)]
     pub planner_max_turns_default: Option<u32>,
+
+    /// **V3 — `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`.**
+    /// Operator-supplied default scaling **step** applied on each
+    /// crash-retry attempt when the per-task
+    /// `[[tasks]].max_turns_step` field is absent. The kernel
+    /// resolves the effective per-attempt budget as
+    /// `min(base + (attempt - 1) * step, hard_ceiling)` where
+    /// `base` is the per-task / per-policy / compiled `max_turns`
+    /// (per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`) and
+    /// `hard_ceiling` is `240` by default, overridable via
+    /// `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING`.
+    ///
+    /// **Resolution precedence** (per-spawn):
+    ///
+    /// 1. `[[tasks]].max_turns_step` from the parsed plan (per-task
+    ///    override).
+    /// 2. `[gateway].planner_max_turns_step_default` (this field —
+    ///    policy default).
+    /// 3. Derived default `max(round_up_to_5(base/2), 10)` so
+    ///    cold-start retries still get a useful step even on plans
+    ///    that never declared one.
+    ///
+    /// **Why this exists.** The historical `materialize-records` /
+    /// `lint-runner` cold-start retry failure mode reproduces when
+    /// the executor VM is respawned with zero in-VM context and
+    /// must re-discover state from scratch — a budget that sufficed
+    /// for attempt 1 is reproducibly exhausted on attempt 2+
+    /// without progress. Progressive scaling is the defense-in-
+    /// depth backstop: any task with a sane per-attempt budget
+    /// still gets a graceful-degradation path before the
+    /// crash-retry ceiling kicks in.
+    ///
+    /// `None` ⇒ fall through to the per-task field, then the
+    /// derived default.
+    #[serde(default)]
+    pub planner_max_turns_step_default: Option<u32>,
 }
 
 fn default_gateway_spawn_timeout_secs() -> u64 { 5 }

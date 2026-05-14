@@ -517,6 +517,7 @@ mod tests {
             respawn_backoff_ms: backoff_ms,
             max_consecutive_respawns: max_respawns,
             planner_max_turns_default: None,
+            planner_max_turns_step_default: None,
         }
     }
 
