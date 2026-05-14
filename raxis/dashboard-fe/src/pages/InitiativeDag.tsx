@@ -128,6 +128,19 @@ export function InitiativeDagPage() {
           </p>
         </div>
 
+        {/*
+         * Layout-direction buttons. The mapping is pinned by
+         * `src/test/dag-layout-buttons.test.tsx` (iter48 QA defect
+         * #1: operator screenshots showed the visual layout doing
+         * the opposite of the labels). The contract is:
+         *
+         *   "Left → Right"  →  rankdir="LR"  →  dagre horizontal row
+         *   "Top → Bottom"  →  rankdir="TB"  →  dagre vertical column
+         *
+         * Do NOT swap the `onClick` / `aria-pressed` values without
+         * updating that test — the test is the gate against any
+         * future "buttons feel inverted" regression.
+         */}
         <div className="flex items-center gap-2">
           <div className="text-xs text-ink-subtle mr-1">Layout</div>
           <button
@@ -136,6 +149,7 @@ export function InitiativeDagPage() {
               rankdir === "LR" ? "border-accent text-ink" : ""
             }`}
             aria-pressed={rankdir === "LR"}
+            title="Lay out tasks as a horizontal pipeline (LR)"
           >
             Left → Right
           </button>
@@ -145,6 +159,7 @@ export function InitiativeDagPage() {
               rankdir === "TB" ? "border-accent text-ink" : ""
             }`}
             aria-pressed={rankdir === "TB"}
+            title="Stack tasks as a vertical column (TB)"
           >
             Top → Bottom
           </button>
