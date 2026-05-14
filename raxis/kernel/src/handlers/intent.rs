@@ -5471,14 +5471,22 @@ async fn handle_retry_sub_task(
                             // `prior_state` is structurally non-
                             // retryable; nothing when the round is
                             // a clean redo attempt).
+                            // iter54 reversal of the iter48 admission:
+                            // the admit_set no longer includes
+                            // `PendingActivation+review_reject_count>0`.
+                            // The hint now points the LLM/operator at
+                            // `ActivateSubTask` for the PendingActivation
+                            // pivot — that intent spawns the executor for
+                            // the existing pending row (which the prior
+                            // `RetrySubTask` admitted).
                             eprintln!(
                                 "{{\"level\":\"warn\",\"event\":\"RetrySubTaskRejectedNotRetryable\",\
                                  \"task_id\":\"{task_id_clone}\",\
                                  \"prior_activation_id\":\"{prior_activation_id}\",\
                                  \"prior_state\":\"{prior_state}\",\
                                  \"review_reject_count\":{review_reject_count},\
-                                 \"admit_set\":\"Failed | Completed+review_reject_count>0 | PendingActivation+review_reject_count>0\",\
-                                 \"hint\":\"audit-chain anchor: ExecutorRespawnFromReviewRejection / SessionVmSpawned for prior_activation_id\"}}",
+                                 \"admit_set\":\"Failed | Completed+review_reject_count>0\",\
+                                 \"hint\":\"if prior_state=PendingActivation and review_reject_count>0, the orchestrator's correct next intent is ActivateSubTask against the existing pending row (per INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01); audit-chain anchor: prior ExecutorRespawnFromReviewRejection for prior_activation_id\"}}",
                             );
                             emit_admit(false, crate::observability::ADMIT_REASON_RETRY_INADMISSIBLE);
                             return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
@@ -10423,53 +10431,47 @@ mod tests {
         );
     }
 
-    /// `iter48` regression witness — `INV-RETRY-FROM-COMPLETED-
-    /// REVIEW-REJECTED-01` extension. Reproduces the audit-chain
-    /// shape that wedged the `realistic_session_lifecycle` live-
-    /// e2e iter48 run on `lint-defect`:
+    /// `iter54` regression witness —
+    /// `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`.
+    /// Reverses the iter48 admission. Reproduces the orchestrator-
+    /// no-progress-loop shape that wedged the
+    /// `realistic_session_lifecycle` live-e2e iter54 run on
+    /// `lint-runner`:
     ///
-    ///   1. Round-1 Completed activation got two reviewer
-    ///      rejections; kernel bumped `review_reject_count = 1`.
-    ///   2. Orchestrator session 88a256b1 submitted `RetrySubTask`;
-    ///      kernel admitted via the `Completed +
-    ///      review_reject_count > 0` branch and inserted a
-    ///      round-2 `PendingActivation` row carrying
-    ///      `review_reject_count = 1` forward
-    ///      (`prior_activation_id=cba693a4 →
-    ///      new_activation_id=bcfdd7ce` per the iter48 audit chain).
-    ///   3. Orchestrator session 88a256b1 exited cleanly BEFORE
-    ///      issuing the follow-up `ActivateSubTask`. The post-
-    ///      exit hook respawned a fresh orchestrator (84d011c5).
-    ///   4. The fresh orchestrator read the cumulative trajectory
-    ///      (`review_reject_count = 1`, still
-    ///      `aggregate=AtLeastOneRejected`) and re-issued
-    ///      `RetrySubTask` against the `bcfdd7ce` PendingActivation
-    ///      row.
-    ///   5. **Pre-iter48 (failure mode):** kernel rejected with
-    ///      `RetrySubTaskRejectedNotRetryable`,
-    ///      `prior_state=PendingActivation`,
-    ///      `review_reject_count=1`. The orchestrator exited, the
+    ///   1. Round-1 `Completed` activation gets two reviewer
+    ///      rejections; kernel bumps `review_reject_count = 1`.
+    ///   2. Orchestrator submits `RetrySubTask`; kernel admits via
+    ///      the `Completed + review_reject_count > 0` branch and
+    ///      inserts a round-2 `PendingActivation` row carrying
+    ///      `review_reject_count = 1` forward.
+    ///   3. Decision-cycle orchestrator exits cleanly after the
+    ///      `RetrySubTask` (per `v2-deep-spec.md §Step 12 V2.5b`)
+    ///      BEFORE issuing the follow-up `ActivateSubTask`. The
+    ///      post-exit hook respawns a fresh orchestrator.
+    ///   4. Iter48 (pre-iter54): kernel admitted a second
+    ///      `RetrySubTask` against the round-2 PendingActivation
+    ///      row, the LLM kept re-issuing the retry because the
+    ///      KSB stamped `retry_admissible=true`, and the
     ///      no-progress respawn ceiling
     ///      (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fired
-    ///      after three rounds, and the initiative deadlocked to
-    ///      `Failed`.
-    ///   6. **Post-iter48 (this test):** the kernel admit
-    ///      predicate accepts the retry — the same cumulative-
-    ///      rejection witness (`review_reject_count > 0`) gates
-    ///      both the `Completed` and `PendingActivation`
-    ///      branches. The handler inserts a NEW `PendingActivation`
-    ///      row (bringing the per-task activation count to 2 since
-    ///      this test's seed already started in PendingActivation),
-    ///      keeps the prior PendingActivation row immutable, and
-    ///      emits `ExecutorRespawnFromReviewRejection` as the
-    ///      audit-chain anchor.
+    ///      after three rounds — initiative deadlocked to `Failed`.
+    ///   5. Iter54 (this test): kernel REJECTS the second
+    ///      `RetrySubTask` with `RetrySubTaskRejectedNotRetryable`,
+    ///      `prior_state=PendingActivation`,
+    ///      `review_reject_count=1`. The KSB now projects
+    ///      `retry_admissible=false reason="prior state
+    ///      PendingActivation; …"`; the orchestrator's NNSP rule
+    ///      3a steers the LLM to `activate_subtask` (which spawns
+    ///      the executor for the EXISTING pending row), breaking
+    ///      the no-progress loop.
     ///
-    /// The counter `review_reject_count = 1` MUST carry forward
-    /// verbatim — `handle_retry_sub_task` does not bump (bumps
-    /// happen at the aggregator, never at retry admit), and a
-    /// reset would silently widen the per-round retry surface.
+    /// Defensive pin against silent regressions: no new activation
+    /// row is inserted, the prior PendingActivation row is left
+    /// immutable, and no `ExecutorRespawnFromReviewRejection` audit
+    /// event fires (that anchor belongs to the admission flow, not
+    /// the rejection flow).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn retry_from_pending_activation_with_review_rejection_admits_and_emits_audit() {
+    async fn retry_from_pending_activation_with_review_rejection_is_rejected_per_iter54() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, registry, sink) = build_retry_test_ctx(store.clone());
 
@@ -10486,102 +10488,69 @@ mod tests {
         }).await.unwrap();
 
         let req = make_retry_request("exe-pending-retry", 1);
-        let resp = handle_retry_sub_task(
+        let err = handle_retry_sub_task(
             req,
             dummy_orchestrator_session_row(),
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect(
-            "PendingActivation activation + review_reject_count > 0 \
-             MUST admit the retry per iter48 \
-             INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01 extension",
+        ).await.expect_err(
+            "iter54 (INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01): \
+             PendingActivation + review_reject_count > 0 MUST be \
+             rejected so the KSB retry_admissible projection lines \
+             up with what the orchestrator NNSP rule 3a tells the \
+             LLM (call activate_subtask against the existing pending \
+             row, not another retry_subtask)",
         );
-        assert_eq!(resp.task_state, TaskState::Admitted);
-        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+            "wire surface: FAIL_INVALID_REQUEST (the same coarse code \
+             as every other NotRetryable rejection — iter54 narrows \
+             the admit-set, never widens the coarse code set)");
 
         let activations = read_activations(
             store.clone(), "exe-pending-retry",
         ).await;
-        assert_eq!(activations.len(), 2,
-            "iter48 retry-from-PendingActivation MUST insert a \
-             new row, leaving the prior PendingActivation row \
-             immutable (FSM forward-only)");
+        assert_eq!(activations.len(), 1,
+            "iter54 rejection MUST NOT insert a new activation row \
+             — the prior PendingActivation row IS the retry; the \
+             orchestrator must call activate_subtask against it");
         assert_eq!(activations[0].0, prior_activation_id);
         assert_eq!(activations[0].1, "PendingActivation",
-            "prior row state MUST remain PendingActivation — the \
-             retry handler does NOT mutate prior activation rows; \
-             it inserts a fresh one and lets the dashboard's \
-             per-row history stay forensic");
-        assert_eq!(activations[1].1, "PendingActivation",
-            "new row state MUST also be PendingActivation (the \
-             spawn handoff lands on `ActivateSubTask`); the two \
-             rows differ only by `created_at` and counters");
-        assert!(activations[1].2.is_none(),
-            "new PendingActivation row MUST have NULL session_id");
-        assert_eq!(activations[1].4, 1,
-            "new row MUST carry review_reject_count = 1 forward \
-             from the prior row (the counter is denormalised; \
-             handle_retry_sub_task itself does NOT bump and does \
-             NOT reset on the iter48 PendingActivation branch)");
+            "prior row state MUST remain PendingActivation, untouched");
+        assert_eq!(activations[0].4, 1,
+            "prior row's review_reject_count MUST remain 1 \
+             (handle_retry_sub_task neither bumps nor resets on a \
+             rejection)");
 
-        // Audit anchor — the iter48 extension reuses the existing
-        // `ExecutorRespawnFromReviewRejection` event because the
-        // operator-visible question is the same ("did this respawn
-        // originate from a Reviewer rejection in the cumulative
-        // trajectory?"). The `prior_activation_id` payload
-        // disambiguates the Completed vs PendingActivation
-        // branches for forensic replay.
+        // Audit silence: the rejection path must NOT emit
+        // `ExecutorRespawnFromReviewRejection` (that's the admission
+        // anchor) and must NOT emit `SessionRevoked` (no prior
+        // session was bound — the prior `RetrySubTask` already
+        // revoked it). Iter48's noise-mode would have emitted the
+        // respawn anchor here even on the pre-iter54 admission;
+        // iter54's rejection path keeps the audit chain quiet so
+        // the dashboard's per-task history doesn't show a phantom
+        // "respawn from review rejection" that never actually
+        // produced a new row.
         let events = sink.events();
-        let respawn = events.iter().find(|e| matches!(
-            &e.kind,
-            raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection { .. },
-        )).expect(
-            "iter48 retry-from-PendingActivation MUST emit \
-             ExecutorRespawnFromReviewRejection — the chain-side \
-             anchor for retry-after-review (vs retry-after-crash); \
-             without it ReviewerSubstantiveDisagreementWitness \
-             cannot disambiguate the two paths",
+        assert!(
+            !events.iter().any(|e| matches!(
+                &e.kind,
+                raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection { .. },
+            )),
+            "iter54 rejection MUST NOT emit \
+             ExecutorRespawnFromReviewRejection — that anchor \
+             belongs to the admission flow, never to the rejection",
         );
-        match &respawn.kind {
-            raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection {
-                task_id, prior_activation_id: ev_prior, new_activation_id: ev_new,
-                review_reject_count,
-            } => {
-                assert_eq!(task_id, "exe-pending-retry");
-                assert_eq!(ev_prior, &prior_activation_id,
-                    "audit payload MUST quote the actual prior \
-                     PendingActivation activation id (the iter48 \
-                     bcfdd7ce shape) — forensic replay relies on \
-                     it to grep the matching prior \
-                     ExecutorRespawnFromReviewRejection chain anchor");
-                assert_eq!(ev_new, &activations[1].0,
-                    "audit payload MUST quote the activation_id of \
-                     the freshly-inserted PendingActivation row");
-                assert_eq!(*review_reject_count, 1,
-                    "audit payload MUST carry the round-of-rejection \
-                     counter (the value at admission time, carried \
-                     forward verbatim from the prior PendingActivation \
-                     row's column)");
-            }
-            _ => unreachable!(),
-        }
-
-        // No prior session was bound (the prior `RetrySubTask`
-        // revoked it; the new PendingActivation row never reached
-        // `ActivateSubTask`), so `SessionRevoked` MUST NOT fire on
-        // this path. Defensive pin: a future refactor that conflated
-        // the iter48 branch with the `Failed` branch and tried to
-        // revoke a phantom session would silently emit
-        // `SessionRevoked` for `NULL`-session, surfacing as audit
-        // noise; this assertion catches it.
         assert!(
             !events.iter().any(|e| matches!(
                 &e.kind,
                 raxis_audit_tools::AuditEventKind::SessionRevoked { .. },
             )),
-            "iter48 retry-from-PendingActivation with no prior \
-             bound session MUST NOT emit SessionRevoked",
+            "iter54 rejection MUST NOT emit SessionRevoked — no \
+             prior bound session existed (the prior RetrySubTask \
+             already revoked it; the PendingActivation row never \
+             reached ActivateSubTask)",
         );
     }
 

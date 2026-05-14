@@ -275,8 +275,8 @@ The corresponding regressions are pinned by:
 
 - `kernel/src/handlers/intent.rs::tests::retry_from_completed_with_review_rejection_admits_and_emits_audit` (positive admission + audit emit).
 - `kernel/src/handlers/intent.rs::tests::retry_from_completed_without_review_rejection_is_rejected` (negative regression guard against accidentally widening the retry surface).
-- `kernel/src/handlers/intent.rs::tests::retry_from_pending_activation_with_review_rejection_admits_and_emits_audit` (iter48 positive admission + audit emit on the `PendingActivation` branch).
-- `kernel/src/handlers/intent.rs::tests::retry_from_pending_activation_without_review_rejection_is_rejected` (iter48 negative regression guard against admitting brand-new round-1 PendingActivation rows).
+- `kernel/src/handlers/intent.rs::tests::retry_from_pending_activation_with_review_rejection_is_rejected_per_iter54` (iter54 reversal of the iter48 admission — the kernel now rejects `PendingActivation + review_reject_count > 0` with `FAIL_INVALID_REQUEST` per `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`, the KSB stamps `retry_admissible=false`, and the orchestrator NNSP rule 3a steers the LLM to `activate_subtask`).
+- `kernel/src/handlers/intent.rs::tests::retry_from_pending_activation_without_review_rejection_is_rejected` (negative regression guard against admitting brand-new round-1 PendingActivation rows).
 - `kernel/src/handlers/intent.rs::tests::increment_review_reject_count_bumps_most_recent_terminated_row` (counter-no-op fix — pre-fix `terminated_at IS NULL` filter would have matched zero rows).
 - `kernel/src/handlers/intent.rs::tests::increment_review_reject_count_targets_latest_when_multiple_rows` (per-round counter semantics).
 - `kernel/tests/ksb_capabilities_parity.rs::predicate_and_ksb_view_agree_across_admission_matrix` (extended with `pending-activation-with-rejection-iter48` admissible row + `active-with-rejection-still-not-retryable` inadmissible row).

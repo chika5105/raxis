@@ -102,25 +102,31 @@ fn parity_matrix() -> Vec<ParityCase> {
             max_review_rejections:  2,
             expected_admissible:    false,
         },
-        // iter48 extension — `INV-RETRY-FROM-COMPLETED-REVIEW-
-        // REJECTED-01`. When the prior `RetrySubTask` admit landed
-        // but the orchestrator session exited before issuing the
-        // follow-up `ActivateSubTask`, the cumulative-trajectory
-        // witness `review_reject_count > 0` MUST be load-bearing
-        // for both the kernel admit predicate AND the KSB
-        // `retry_admissible` projection. A drift here would let
-        // the LLM gate retry on a stale `retry_admissible=true`
-        // (or, conversely, miss a legitimate retry path because
-        // the KSB said `false` while the kernel was about to say
-        // `true`).
+        // iter54 reversal of the iter48 extension —
+        // `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`.
+        // Iter48 originally admitted `PendingActivation +
+        // review_reject_count > 0` so a fresh orchestrator
+        // respawned between `RetrySubTask` and the follow-up
+        // `ActivateSubTask` could re-issue the retry. In practice
+        // that admission contradicted the NNSP rule 3a (which
+        // already told the orchestrator to call `activate_subtask`),
+        // the KSB stamped `retry_admissible=true`, and the LLM
+        // chained RetrySubTask→exit→respawn→RetrySubTask until the
+        // no-progress respawn ceiling fired. Iter54 flips the
+        // predicate to `Inadmissible(NotRetryable)`; the KSB now
+        // stamps `retry_admissible=false reason="prior state
+        // PendingActivation; …"` and the NNSP rule 3a steers the
+        // LLM to `activate_subtask` against the EXISTING pending
+        // row (which is what the orchestrator should have done
+        // immediately after the prior `retry_subtask` anyway).
         ParityCase {
-            label:                  "pending-activation-with-rejection-iter48",
+            label:                  "pending-activation-with-rejection-iter54-reversal",
             prior_activation_state: Some("PendingActivation"),
             crash_retry_count:      0,
             review_reject_count:    1,
             max_crash_retries:      3,
             max_review_rejections:  2,
-            expected_admissible:    true,
+            expected_admissible:    false,
         },
         // `Active` is structurally non-retryable regardless of
         // `review_reject_count` — admitting would race the

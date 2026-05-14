@@ -1412,22 +1412,36 @@ impl Tool for ActivateSubtaskTool {
     }
 }
 
-/// Declaration-only `retry_subtask` — orchestrator re-spawns a
-/// failed sub-task with a fresh activation row. Same input shape as
-/// [`ActivateSubtaskTool`].
+/// Declaration-only `retry_subtask` — first half of the two-intent
+/// retry contract (`INV-ORCH-RETRY-SUBTASK-TWO-INTENT-CONTRACT-01`).
+/// Same input shape as [`ActivateSubtaskTool`].
 struct RetrySubtaskTool;
 
 #[async_trait::async_trait]
 impl Tool for RetrySubtaskTool {
     fn name(&self) -> &'static str { "retry_subtask" }
     fn description(&self) -> &'static str {
-        "TERMINAL — retry one failed sub-task by its task id. The \
-         kernel inserts a new `subtask_activations` row with state \
-         `PendingActivation` and re-spawns the executor (or reviewer). \
-         Use this when a row's `state` in the KSB `dag=` block is \
-         `failed` AND you have reason to believe a retry will fare \
-         better (e.g. flaky network on the previous attempt). \
-         Call exactly once per turn."
+        "TERMINAL — first half of a TWO-INTENT retry. Inserts a \
+         fresh `PendingActivation` row that supersedes the prior \
+         failed/reviewer-rejected activation. **The kernel does \
+         NOT spawn the new executor (or reviewer) VM here.** Your \
+         decision-cycle session will exit after this call; the \
+         kernel respawns a fresh orchestrator that MUST call \
+         `activate_subtask` against the same `subtask_task_id` to \
+         actually spawn the VM for the freshly-minted row. Use this \
+         when a row's `state` in the KSB `dag=` block is `failed` \
+         (Executor crash / `report_failure`) OR `completed` carrying \
+         `aggregate=AtLeastOneRejected` (Reviewer-rejection retry), \
+         AND the matching `capabilities.tasks[*]` row reports \
+         `retry_admissible=true`. If `retry_admissible=false` with \
+         `reason=\"prior state PendingActivation; …\"`, a prior \
+         `retry_subtask` already landed — call `activate_subtask` \
+         on this turn instead (the kernel will REJECT another \
+         `retry_subtask` with `FAIL_INVALID_REQUEST` and burn one \
+         of your `orch_no_progress_respawns=` budget slots; chaining \
+         this rejection eventually trips \
+         `orchestrator_respawn_ceiling_exceeded` and fails the \
+         initiative). Call exactly once per turn."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
