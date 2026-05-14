@@ -200,7 +200,40 @@ impl OtlpClient {
                 url: url.to_owned(),
                 reason: e.to_string(),
             })?;
-        Ok(resp.status().as_u16())
+        let status = resp.status().as_u16();
+        // Iter49: on any non-2xx we surface the collector's response
+        // body to stderr in the structured-log JSON shape the rest of
+        // the pusher uses. The OTel collector returns a short error
+        // string for HTTP 4xx (e.g. "proto: cannot parse invalid
+        // wire-format data"). Without this hook the kernel side sees
+        // only "http_400_client_error" and has no way to tell whether
+        // it's a config / schema / payload bug — which is exactly how
+        // the `repeated fixed64 bucket_counts` vs `uint64` regression
+        // stayed hidden through iter49 boot. Body is capped at 1 KiB
+        // because the collector's error strings are short and we do
+        // not want a misbehaving peer to drown the pusher log file.
+        if !(200..300).contains(&status) {
+            let body_bytes = resp
+                .bytes()
+                .await
+                .map(|b| b.to_vec())
+                .unwrap_or_else(|_| Vec::new());
+            let mut body = String::from_utf8_lossy(&body_bytes).into_owned();
+            if body.len() > 1024 {
+                body.truncate(1024);
+                body.push_str("…[truncated]");
+            }
+            let body_escaped = body
+                .replace('\\', "\\\\")
+                .replace('"',  "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"otel_pusher_export_http_error\",\
+                  \"url\":\"{url}\",\"status\":{status},\"body\":\"{body_escaped}\"}}"
+            );
+        }
+        Ok(status)
     }
 }
 
@@ -388,7 +421,12 @@ mod wire {
         #[derive(Clone, Copy, PartialEq, Oneof)]
         pub enum Value {
             #[prost(double, tag = "4")] AsDouble(f64),
-            #[prost(int64,  tag = "6")] AsInt(i64),
+            // OTLP `metrics.proto`: `sfixed64 as_int = 6`. We never
+            // emit the `AsInt` variant today (every authority-side
+            // scalar metric ships as `as_double`), but keep the wire
+            // tag honest so that adding integer-flavoured counters
+            // later doesn't reintroduce a wire/spec mismatch.
+            #[prost(sfixed64, tag = "6")] AsInt(i64),
         }
     }
 
@@ -422,7 +460,15 @@ mod wire {
         #[prost(fixed64,            tag = "3")] pub time_unix_nano:       u64,
         #[prost(fixed64,            tag = "4")] pub count:                u64,
         #[prost(double,             tag = "5")] pub sum:                  f64,
-        #[prost(uint64, repeated,   tag = "6")] pub bucket_counts:        Vec<u64>,
+        // OTLP `metrics.proto`: `repeated fixed64 bucket_counts = 6`
+        // (yes, fixed64 — *not* uint64; the spec switched to fixed64
+        // when explicit histograms were added in 1.0 to keep packed
+        // bucket arrays byte-addressable on the receiver). Encoding
+        // these as uint64 (packed varint) was the iter49 OTel-collector
+        // 400 root cause — the receiver tries to parse the packed
+        // payload as 8-byte-stride fixed64 and rejects the request
+        // when the length is not a multiple of 8.
+        #[prost(fixed64, repeated, tag = "6")] pub bucket_counts:        Vec<u64>,
         #[prost(double, repeated,   tag = "7")] pub explicit_bounds:      Vec<f64>,
         #[prost(double, optional,   tag = "11")] pub min:                 Option<f64>,
         #[prost(double, optional,   tag = "12")] pub max:                 Option<f64>,
@@ -770,6 +816,47 @@ mod tests {
         assert_eq!(metrics.len(), 2);
         assert_eq!(metrics[0].name, "raxis.intent.admission.total");
         assert_eq!(metrics[1].name, "raxis.intent.admission.duration");
+    }
+
+    #[test]
+    fn histogram_bucket_counts_use_packed_fixed64_wire_format() {
+        // Regression for iter49: the OTel collector was returning HTTP
+        // 400 on every metrics batch because the `bucket_counts` field
+        // was declared as `uint64` (packed varint) instead of the
+        // spec-mandated `fixed64` (packed 8-byte stride). The receiver
+        // tries to read 8-byte chunks out of the packed payload and
+        // rejects requests whose `bucket_counts` packed length is not
+        // a multiple of 8 — which is virtually every real batch.
+        //
+        // This test asserts the wire format at the byte level rather
+        // than just round-tripping through `prost::Message::decode`
+        // (which would tolerate either encoding by virtue of going
+        // through the same Rust struct).
+        let body = wire::encode_metrics(
+            &[sample_histogram()],
+            "0.1.0",
+            &sample_resource(),
+        );
+        // The histogram in `sample_histogram` has 3 explicit_bounds
+        // and 4 bucket_counts. A correctly-encoded packed fixed64
+        // bucket_counts is `0x32 0x20 ` + 4 * 8 = 32 raw little-endian
+        // u64 bytes (34 bytes including the tag + length prefix).
+        // A buggy uint64-packed encoding would be `0x32 0x04 ` + 4
+        // single-byte varints (6 bytes total).
+        let needle_fixed64 = b"\x32\x20\
+            \x00\x00\x00\x00\x00\x00\x00\x00\
+            \x01\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00";
+        assert!(
+            body.windows(needle_fixed64.len()).any(|w| w == needle_fixed64),
+            "expected packed fixed64 bucket_counts (tag 6 length 32) in encoded body"
+        );
+        let needle_varint = [0x32u8, 0x04, 0x00, 0x01, 0x00, 0x00];
+        assert!(
+            !body.windows(needle_varint.len()).any(|w| w == needle_varint),
+            "must not emit packed varint encoding for bucket_counts"
+        );
     }
 
     #[test]
