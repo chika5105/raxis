@@ -90,7 +90,8 @@
 | Dashboard kernel-lifecycle — V2.5 | INV-DASHBOARD-KERNEL-LIFECYCLE-01, INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 | 2 |
 | Observability metric coverage — V3 (iter44) | INV-OBS-RESPAWN-KIND-LABEL-01, INV-OBS-KERNEL-RESPAWN-COVERAGE-01, INV-OBS-OPERATOR-IPC-COVERAGE-01, INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 | 4 |
 | KSB capabilities envelope — V2.6 | INV-KSB-CAPABILITIES-PARITY-01, INV-KSB-CAPABILITIES-ROLE-SCOPED-01, INV-KSB-CAPABILITIES-TURN-COHERENT-01 | 3 |
-| **Total** | | **112** |
+| Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
+| **Total** | | **113** |
 
 ---
 
@@ -1834,6 +1835,124 @@ relies on.
     (3 cases) covering single-connection self-write
     observation, sibling-connection committed-write visibility,
     and uncommitted-write opacity to concurrent readers.
+
+---
+
+## §6.8 — Kernel DAG authority (INV-KERNEL-DAG-AUTHORITY-*)
+
+Canonical home: `paradigm.md §3.4` (the orchestrator is an untrusted
+LLM agent confined to its own VM); `paradigm.md` rules `R-2`
+(mediated I/O), `R-5` (bounded capabilities), `R-11` (mediated
+coordination); `v2/agent-disagreement.md §3.6` (Authority boundary
+block); `v2/v2-deep-spec.md §Step 8` (`IntegrationMerge`
+adjudication), `§Step 20` (static dispatch matrix), `§Step 21`
+(`DEPENDENCY_NOT_MET`).
+
+This section consolidates the structural fences that keep the kernel
+— not the orchestrator — in authority over every DAG-release
+decision (task activation, retry admission, integration merge). The
+orchestrator's only DAG-driving primitive is to *emit advisory
+intents*; the kernel mechanically adjudicates each intent against
+the parsed plan-registry DAG, the per-task FSM admit predicates, and
+the bounded-capability counters BEFORE any state transition or VM
+spawn.
+
+### INV-KERNEL-DAG-AUTHORITY-01 — Kernel mechanically gates `ActivateSubTask` on predecessor completion
+
+**Statement.** The kernel admits an Orchestrator's `ActivateSubTask
+{ task_id }` intent if and only if every row in `task_dag_edges
+WHERE successor_task_id = task_id` resolves to a predecessor whose
+`tasks.state = 'Completed'` at the moment of admission. The check
+is performed inside the same SQLite transaction as the `subtask_
+activations` row pivot (`PendingActivation → Active`); a
+predecessor whose state is anything other than `Completed`
+(`Admitted`, `Running`, `GatesPending`, `BlockedRecoveryPending`,
+`Failed`, `Aborted`, `Cancelled`) causes the kernel to reject the
+intent with `IntentResponse::Rejected { reason: DEPENDENCY_NOT_MET }`
+BEFORE the substrate spawn step. The check uses kernel-owned tables
+exclusively (`tasks`, `task_dag_edges`); the orchestrator's intent
+payload contributes only the `task_id` lookup key.
+
+**Justification.** The orchestrator is an untrusted LLM agent
+running inside a confined VM (`paradigm.md §3.4`). If it owned DAG
+release, it could (i) skip review gates by activating a downstream
+Executor before its predecessor Reviewer finishes voting, (ii)
+provision extra VMs out of plan order to race the kernel's
+bounded-capability counters, or (iii) reorder tasks to circumvent
+plan-author-declared dependency constraints. Every one of those
+violates `R-2` (mediated I/O), `R-5` (bounded capabilities), and
+`R-11` (mediated coordination). The Layer 2 prompt-hiding mechanism
+(`v2-deep-spec.md §Step 21`) reduces the rate of premature
+activation an *honest* orchestrator will produce, but is not a
+structural defense against a hallucinating or compromised
+orchestrator that ignores its prompt — only the kernel-side
+admission gate is.
+
+**Scope.** The gate fires on every `ActivateSubTask` admission,
+covering both Executor-after-Executor and Executor-after-Reviewer
+edges. The Reviewer-after-Executor edge is *additionally* gated by
+the `evaluation_sha IS NOT NULL` lookup at worktree-provisioning
+time (the Reviewer's predecessor Executor must have stamped
+`tasks.evaluation_sha` via its own `CompleteTask` admission), but
+that secondary gate is a defense-in-depth check, not a substitute
+for `INV-KERNEL-DAG-AUTHORITY-01`'s primary predecessor-state
+verification.
+
+**Audit chain.** A `DEPENDENCY_NOT_MET` rejection emits
+`IntentRejectedDependencyNotMet { task_id,
+missing_predecessors: [(predecessor_task_id, observed_state), ...] }`
+to the audit chain so forensic replay can reconstruct (a) which
+DAG edges were unsatisfied at admission time and (b) what state
+each unsatisfied predecessor was in. The audit emit happens
+post-rejection, audit-after-rejection per
+`audit-paired-writes.md §6` (no SQLite write occurred — the gate
+rolled back its own transaction — so the audit emit is the only
+event for the rejection).
+
+**Witness.** `kernel/src/handlers/intent.rs::tests::
+inv_kernel_dag_authority_01_activate_subtask_rejects_unsatisfied_predecessor`
+— pins the kernel-side `missing_predecessors_for_activation` free
+fn (the structural payload of this invariant) against a 2-task DAG
+`task-A → task-B` seeded into a real `DiskStore`. Phase 1: both
+rows in `Admitted`; the predicate MUST return
+`[("task-A", "Admitted")]` (the non-empty list that triggers the
+`ActivateRejection::DependencyNotMet` arm in
+`handle_activate_sub_task`). Phase 2: flip A to `Completed`; the
+predicate MUST return `[]`. A sibling test
+`inv_kernel_dag_authority_01_reports_every_unmet_predecessor` pins
+the multi-predecessor fan-in case (every non-Completed edge appears
+in the rejection payload, no Completed edge leaks through) so the
+`IntentRejected` audit row's `missing_predecessors` field carries
+the full forensic record. The free-fn factoring is mandated by
+`raxis-kernel`'s bin-only crate shape (`kernel/tests/*.rs` cannot
+reach `handle_activate_sub_task` without standing up the kernel
+binary + IPC harness); the rejection wiring (audit emit + return
+shape) is exercised by the `extended_e2e_*` lifecycle harnesses
+that drive the kernel binary directly.
+
+**Composition with other authority gates.** This invariant slots
+into the per-intent gate cascade BEFORE the substrate spawn and
+AFTER the dispatch-matrix authorization (`§Step 20`):
+
+1. `evaluate_dispatch((ActivateSubTask, Some(Orchestrator))) ⇒
+   Authorized` — only orchestrator-typed sessions can submit at all.
+2. Replay protection (envelope nonce + sequence advance, `INV-01`).
+3. Disk-full watchdog (`INV-CAPACITY-02`).
+4. VM concurrency cap (`INV-CAPACITY-01`).
+5. Activation row state == `PendingActivation` (kernel-owned column).
+6. Task state == `Admitted` (kernel-owned column).
+7. **`INV-KERNEL-DAG-AUTHORITY-01` predecessor-completion gate**
+   (this invariant).
+8. Plan-registry lookup (Orchestrator-typed task rejection;
+   `INV-PLANNER-HARNESS-06` defense-in-depth).
+9. VM image override resolution (`INV-OPERATOR-CUSTOM-IMAGE-01`).
+10. Worktree provisioning (Reviewer-side `evaluation_sha`
+    secondary check).
+11. Substrate spawn (`ctx.session_spawn.spawn_session()`).
+12. Activation row pivot `PendingActivation → Active` + audit emit.
+
+A failure at any of steps 1–10 short-circuits before the
+irreversible substrate spawn.
 
 ---
 

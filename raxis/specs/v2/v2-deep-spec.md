@@ -549,7 +549,19 @@ spec for forensic reproducibility.
 
 ---
 
-### Step 8: Orchestrator Owns `IntegrationMerge`
+### Step 8: Orchestrator Performs `IntegrationMerge`; Kernel Adjudicates It
+
+> **Authority boundary clarification (`INV-KERNEL-DAG-AUTHORITY-01`).** "Orchestrator owns
+> the merge" in this section — and in any cross-spec reference such as
+> `integration-merge.md §Cross-references` — refers narrowly to *who semantically resolves
+> conflicts in the merge clone and emits the `IntegrationMerge` advisory intent*. It does
+> NOT mean the Orchestrator decides whether the merge lands. The kernel structurally
+> adjudicates every `IntegrationMerge` intent against (a) the dispatch matrix, (b) the
+> hybrid path allowlist (Check 5), (c) ancestry / reachability (Check 4 / 8), and (d) the
+> iter49 outstanding-review fail-closed backstop (`run_phase_a` Step 3d, per
+> `agent-disagreement.md §3.6`). Only after every gate admits does the kernel call
+> `raxis_domain_git::commit_merge_to_main` to advance `refs/heads/main`. A rejected
+> `IntegrationMerge` intent leaves `target_ref` untouched.
 
 **Context:** After all Executor sub-tasks complete, their commits must be merged into the
 main branch. The question was which actor performs the merge and submits it for Kernel
@@ -1248,11 +1260,15 @@ V1 intent kinds). The full cell table:
   code author (Step 8). It only ever submits `IntegrationMerge` to land work; per-Executor
   diffs are produced by Executors. A future "Orchestrator may also write" mode would be a
   separate spec amendment, not a silent matrix edit.
-* `Orchestrator + CompleteTask = Authorized` — the Orchestrator owns its top-level
-  initiative-orchestration task; once every reachable sub-task is `Completed` and the
-  final `IntegrationMerge` lands, the Orchestrator submits `CompleteTask` against its own
-  task row to drive the initiative-level FSM (`Executing → Completed`). Without this cell
-  the Orchestrator would have no way to terminate the initiative on the success path.
+* `Orchestrator + CompleteTask = Authorized` — the Orchestrator's per-initiative
+  coordinator task is the only task row the Orchestrator session is bound to; once every
+  reachable sub-task is `Completed` and the final `IntegrationMerge` lands, the Orchestrator
+  emits `CompleteTask` against its own task row, and the kernel adjudicates the intent
+  against the per-task FSM (predecessors, claim manifest, etc.) before flipping the
+  initiative-level FSM (`Executing → Completed`). Without this cell the Orchestrator would
+  have no advisory primitive available to request the success-path terminal transition.
+  ("Owns" here means "the dispatch matrix authorises this session type to emit the advisory
+  intent" — admission authority remains with the kernel per `INV-KERNEL-DAG-AUTHORITY-01`.)
 * `Reviewer + ReportFailure = Unauthorized` — the Reviewer's only authorized output is
   `SubmitReview`. The "I cannot review this" path is `SubmitReview { approved: false,
   critique: "..." }`, NOT a V1-style failure self-report. Reviewer crash recovery is
@@ -1275,9 +1291,11 @@ authority but load-bearing for the operator-debugging surface).
 ### Step 21: DEPENDENCY_NOT_MET — A Timing Error, Not an Authority Error
 
 **Context:** The Orchestrator receives `KernelPush::SubTaskCompleted { task_id, newly_activatable }`
-when a dependency is satisfied. Ideally the Orchestrator activates tasks only when they appear
-in `newly_activatable`. But LLMs hallucinate — the Orchestrator might call `ActivateSubTask`
-for a task whose dependencies are not yet complete.
+when a dependency is satisfied. Ideally the Orchestrator emits `ActivateSubTask` only for tasks
+that appear in `newly_activatable` (note the verb: the Orchestrator *emits the advisory intent*;
+the kernel performs the actual activation per `INV-KERNEL-DAG-AUTHORITY-01`). But LLMs
+hallucinate — the Orchestrator might call `ActivateSubTask` for a task whose dependencies are
+not yet complete.
 
 **Alternative A — Return `FAIL_POLICY_VIOLATION` for premature `ActivateSubTask`.**
 Rejected. `FAIL_POLICY_VIOLATION` signals that the Orchestrator has done something structurally
@@ -1293,15 +1311,31 @@ Layer 2 prompt hiding prevents the Orchestrator from seeing tasks whose dependen
 unmet). The Kernel's intent processing model is synchronous: receive a frame, process it,
 return a response.
 
-**Decision (Step 21):** A distinct `DEPENDENCY_NOT_MET` error code:
-- The Orchestrator receives `IntentResponse::Rejected { reason: DEPENDENCY_NOT_MET }`.
-- The Orchestrator's non-negotiable prompt explicitly handles this: "If you receive
+**Decision (Step 21):** A distinct `DEPENDENCY_NOT_MET` error code, returned by a
+**kernel-side** admission gate that mechanically verifies predecessor completion (per
+`INV-KERNEL-DAG-AUTHORITY-01` in `specs/invariants.md`). Specifically:
+
+- `kernel/src/handlers/intent.rs::handle_activate_sub_task` reads the activation row's
+  task's `task_dag_edges` predecessors out of the kernel store and asserts that every
+  predecessor row's `tasks.state = 'Completed'` BEFORE the substrate spawn step. The check
+  runs inside the same transaction that pivots the activation row from `PendingActivation`
+  to `Active`, so a concurrent predecessor failure cannot be raced past the gate.
+- On a missing-predecessor admission attempt, the kernel returns
+  `IntentResponse::Rejected { reason: DEPENDENCY_NOT_MET }` and emits the audit event
+  `IntentRejectedDependencyNotMet { task_id, missing_predecessors, observed_predecessor_states }`
+  for forensic reconstruction.
+- The Orchestrator's non-negotiable prompt explicitly handles the rejection: "If you receive
   `DEPENDENCY_NOT_MET`, do NOT abandon the task. Wait for the next `SubTaskCompleted`
   push notification, then re-attempt activation."
 - This is complemented by Layer 2 prompt hiding: the Orchestrator's prompt assembler only
   surfaces tasks in `PendingActivation` whose `task_dag_edges` predecessors are all
   `Completed`. The Orchestrator should never see the task in its activatable list until it
-  is ready. `DEPENDENCY_NOT_MET` is the backstop, not the primary defense.
+  is ready. **Both layers are required — the kernel admission gate is the structural
+  defense (per `R-2` / `R-5` / `R-11`); the prompt hiding is operational hygiene that
+  reduces the rate of `DEPENDENCY_NOT_MET` rejections an honest Orchestrator will produce.**
+  The kernel admission gate is the only guard against a malicious or hallucinating
+  Orchestrator that ignores the prompt hiding and emits `ActivateSubTask` for a task whose
+  predecessors are not yet `Completed`.
 
 ---
 

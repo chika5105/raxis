@@ -148,7 +148,34 @@ If `on_max_rounds = "fail_task"`, step 6 instead transitions the task directly t
 
 ### 3.6 Orchestrator NNSP responsibility (`INV-PLANNER-ORCH-RETRY-ON-REJECT-01`)
 
-The kernel mechanisms in §3.1–§3.5 enforce the *ceiling* on reviewer-rejection rounds, but the actual `RetrySubTask` intent that drives a fresh executor session must come from the Orchestrator agent in-band. The kernel does not auto-issue `RetrySubTask` on `AtLeastOneRejected` aggregator outcomes — the Orchestrator owns the DAG-driving decision and the Executor task remains in `Completed` state from the kernel FSM's perspective regardless of reviewer verdict (per `kernel-store.md §2.5.1` the executor's task-FSM is independent of downstream review verdicts; the verdict is captured in `subtask_activations.review_reject_count` and the cross-Reviewer aggregator's `ReviewAggregationCompleted` audit row).
+> **Authority boundary (paradigm-`R-2` / `R-5` / `R-11` / `INV-KERNEL-DAG-AUTHORITY-01`).**
+> The kernel — NOT the Orchestrator — owns every DAG-release decision. The Orchestrator is an
+> untrusted LLM agent confined to its own VM (`paradigm.md §3.4`) and has *no* "release this
+> task" capability. Its only DAG-driving primitive is to *emit advisory intents*
+> (`activate_subtask`, `retry_subtask`, `integration_merge`) over the kernel's IPC surface;
+> every such intent is adjudicated by the kernel against (a) the static
+> `(intent_kind × session_agent_type)` dispatch matrix
+> (`kernel/src/authority/dispatch_matrix.rs`), (b) the parsed plan-registry DAG and the
+> per-task FSM admit predicates (`crates/types/src/intent_admit.rs::admit_retry_subtask_check`,
+> `kernel/src/handlers/intent.rs::handle_activate_sub_task` predecessor-completion gate), and
+> (c) the operator-signed bounded-capability counters
+> (`subtask_activations.crash_retry_count` / `review_reject_count`, `lane_reservations`,
+> `host_capacity.max_concurrent_vms`, `INV-04` financial ceiling) BEFORE any task FSM
+> transition or VM spawn. A rejected intent never advances state; an admitted intent is
+> mutated by the kernel atomically (paired-write per `audit-paired-writes.md §4`); only after
+> admission does the kernel call `ctx.session_spawn.spawn_session()` to provision the VM.
+> The Orchestrator therefore cannot (i) skip a review gate by activating a downstream
+> Executor before its predecessors complete (`handle_activate_sub_task` rejects with
+> `FAIL_DEPENDENCY_NOT_MET` per `INV-KERNEL-DAG-AUTHORITY-01`), (ii) provision extra VMs
+> beyond what the plan authorizes (`subtask_activations` rows are inserted at `approve_plan`
+> time exclusively, one per plan-declared task — `lifecycle::insert_subtask_activation_in_tx`),
+> or (iii) reorder tasks to circumvent dependency constraints (the dispatch matrix forbids
+> any non-Orchestrator session from `ActivateSubTask`, and the predecessor-completion gate
+> forbids the Orchestrator from activating out-of-order). "DAG-driving" in the rest of this
+> section is shorthand for "emit the advisory intent that triggers the kernel-side admission
+> pipeline" — never for "make the structural decision to advance the DAG."
+
+The kernel mechanisms in §3.1–§3.5 enforce the *ceiling* on reviewer-rejection rounds, but the actual `RetrySubTask` intent that triggers the kernel's admit pipeline must originate from the Orchestrator agent in-band. The kernel does not auto-issue `RetrySubTask` on `AtLeastOneRejected` aggregator outcomes — the Orchestrator emits the advisory intent (the kernel adjudicates whether to admit it via `admit_retry_subtask_check`), and the Executor task remains in `Completed` state from the kernel FSM's perspective regardless of reviewer verdict (per `kernel-store.md §2.5.1` the executor's task-FSM is independent of downstream review verdicts; the verdict is captured in `subtask_activations.review_reject_count` and the cross-Reviewer aggregator's `ReviewAggregationCompleted` audit row).
 
 The Orchestrator's KSB (per `v2_extended_gaps.md §2.4`) renders the kernel's cross-Reviewer state in **two** distinct surfaces (see `crates/ksb/src/lib.rs::render_ksb`):
 
@@ -167,13 +194,21 @@ The Orchestrator NNSP — shipped at `crates/planner-core/src/driver.rs::render_
 
 **The aggregator's terminal verdict is the hand-off contract.** The kernel computes the verdict the same way for two purposes: (a) the post-commit aggregator branch in `handle_submit_review` that bumps `review_reject_count` and emits `ReviewAggregationCompleted{verdict=AtLeastOneRejected}`, and (b) the KSB projection that stamps `DagRow::aggregate_verdict` for the orchestrator agent. Both paths call `review_aggregation::compute_aggregate_review_outcome_with_conn` (the `&Connection`-borrowing variant the KSB projection uses without re-acquiring the store mutex). The wire-stable strings `Pending` / `AllPassed` / `AtLeastOneRejected` / `NoSuccessors` come from `AggregateReviewVerdict::wire_str()` and are pinned by `wire_str_returns_stable_variant_names`. This equivalence pins the contract that the orchestrator's prompt rule and the kernel's admission gate cannot silently disagree.
 
-#### Why this rule lives in the NNSP, not in kernel logic
+#### Why the *trigger* lives in the NNSP, not in kernel logic
+
+> Note carefully: "trigger" here means *who emits the advisory `RetrySubTask` intent*. Per the
+> Authority boundary above, the *admission* of that intent — the structural decision to
+> advance the DAG — always lives in the kernel (`admit_retry_subtask_check` +
+> `INV-KERNEL-DAG-AUTHORITY-01`). The question this subsection settles is solely whether the
+> kernel should *itself synthesize* the `RetrySubTask` intent on behalf of the Orchestrator
+> when the cross-Reviewer aggregator concludes `AtLeastOneRejected`. The answer is no — the
+> intent must originate from the Orchestrator agent reading the critique.
 
 A natural alternative is "kernel auto-issues `RetrySubTask` on `AtLeastOneRejected`." That alternative is rejected for three reasons grounded in this spec:
 
-- **§1.1 — "It does not arbitrate disagreements."** Auto-retry would be a kernel-side judgment that the rejection is recoverable. The kernel cannot know that — only the agent sees the critique. An auto-retry of a structurally unrecoverable rejection (e.g., "the requested feature is incompatible with the codebase") wastes budget on a doomed loop until `max_rounds` fires; the Orchestrator's read of the critique is the only way to short-circuit.
-- **paradigm.md `R-12` — Out-of-Band Escalation.** Disagreement is a coordination failure to be resolved by an authorized principal. The Orchestrator IS that principal in the V2 hierarchical model; routing the decision through the agent layer is on-paradigm.
-- **`integration-merge.md §8` — IntegrationMerge predicate.** The merge predicate (kernel-side) does NOT include "no outstanding rejections" *as a positive admission criterion* because the executor task is `Completed` regardless of verdict; coupling the merge handler to the cross-Reviewer aggregator as a positive predicate would tangle the dispatch matrix. The cleaner factoring is to keep the merge handler simple and let the Orchestrator gate via the prompt — but iter49 added a *negative* fail-closed backstop (Step 3d above) that REJECTS the merge when an Executor row reads `aggregate=AtLeastOneRejected`. The backstop is paradigm-`R-6` enforcement, not arbitration: the kernel does NOT issue a retry on the orchestrator's behalf; it only refuses to silently fast-forward `target_ref` over an outstanding reviewer objection. The orchestrator's next decision-cycle still owns the retry-vs-escalate decision per §3.
+- **§1.1 — "It does not arbitrate disagreements."** Auto-synthesizing the intent would be a kernel-side judgment that the rejection is recoverable. The kernel cannot know that — only the agent sees the critique. An auto-retry of a structurally unrecoverable rejection (e.g., "the requested feature is incompatible with the codebase") wastes budget on a doomed loop until `max_rounds` fires; the Orchestrator's read of the critique is the only way to short-circuit. (Note: this is about *intent synthesis*, NOT about admission authority — the kernel still adjudicates every retry intent the Orchestrator submits via the same `admit_retry_subtask_check` gate.)
+- **paradigm.md `R-12` — Out-of-Band Escalation.** Disagreement is a coordination failure to be resolved by an authorized principal. The Orchestrator IS that principal in the V2 hierarchical model; routing the *intent-synthesis* decision through the agent layer is on-paradigm. The kernel-side adjudication of the resulting intent is unchanged.
+- **`integration-merge.md §8` — IntegrationMerge predicate.** The merge predicate (kernel-side) does NOT include "no outstanding rejections" *as a positive admission criterion* because the executor task is `Completed` regardless of verdict; coupling the merge handler to the cross-Reviewer aggregator as a positive predicate would tangle the dispatch matrix. The cleaner factoring is to keep the merge handler simple and let the Orchestrator gate via the prompt — but iter49 added a *negative* fail-closed backstop (Step 3d above) that REJECTS the merge when an Executor row reads `aggregate=AtLeastOneRejected`. The backstop is paradigm-`R-6` enforcement, not arbitration: the kernel does NOT synthesize a retry intent on the orchestrator's behalf; it only refuses to silently fast-forward `target_ref` over an outstanding reviewer objection. The orchestrator's next decision-cycle still owns the retry-vs-escalate intent-emission decision per §3, and the kernel still adjudicates the resulting intent via the dispatch matrix + admit predicates.
 
 #### Kernel-side projection contract (the verdict feed)
 

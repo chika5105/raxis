@@ -51,6 +51,7 @@ const INITIATIVES:                 &str = Table::Initiatives.as_str();
 const TASK_EXPORTED_PATH_SNAPSHOTS:&str = Table::TaskExportedPathSnapshots.as_str();
 const SUBTASK_ACTIVATIONS:         &str = Table::SubtaskActivations.as_str();
 const SESSIONS:                    &str = Table::Sessions.as_str();
+const TASK_DAG_EDGES:              &str = Table::TaskDagEdges.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -3930,6 +3931,43 @@ async fn resolve_vm_image_override(
     })
 }
 
+/// INV-KERNEL-DAG-AUTHORITY-01 — predecessor-completion query for
+/// `handle_activate_sub_task`. Joins `task_dag_edges → tasks` for
+/// every edge whose `successor_task_id` equals `task_id` and returns
+/// the `(predecessor_task_id, observed_state)` tuples whose state is
+/// anything other than `Completed`. An empty `Vec` means every
+/// predecessor is satisfied and the activation may proceed; a
+/// non-empty `Vec` is the kernel's structural rejection trigger
+/// (caller emits `IntentRejected { error_code: "DEPENDENCY_NOT_MET" }`
+/// and returns `(PlannerErrorCode::DependencyNotMet,
+/// TaskState::Admitted)`).
+///
+/// Pure-SQL: takes only the open `Transaction` and the target task
+/// id; no kernel-context dependency, no audit emit, no logging. The
+/// caller wires the rejection. Extracted as a free fn so the
+/// invariant's witness test
+/// (`inv_kernel_dag_authority_01_activate_subtask_rejects_unsatisfied_predecessor`)
+/// can pin the predicate against `task_dag_edges` + `tasks` without
+/// standing up a full `HandlerContext` + substrate spawn service.
+fn missing_predecessors_for_activation(
+    tx:      &rusqlite::Transaction<'_>,
+    task_id: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = tx.prepare(&format!(
+        "SELECT pred.task_id, pred.state \
+           FROM {TASK_DAG_EDGES} AS e \
+           JOIN {TASKS} AS pred \
+             ON pred.task_id = e.predecessor_task_id \
+          WHERE e.successor_task_id = ?1 \
+            AND pred.state != ?2"
+    ))?;
+    let rows = stmt.query_map(
+        rusqlite::params![task_id, TaskState::Completed.as_sql_str()],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    rows.collect()
+}
+
 async fn handle_activate_sub_task(
     req:        IntentRequest,
     _session:   authority::session::SessionRow,
@@ -4070,13 +4108,37 @@ async fn handle_activate_sub_task(
         task_prompt: String,
     }
 
+    // `ActivateRejection` carries either the conventional
+    // `(PlannerErrorCode, TaskState)` reject pair OR the structured
+    // `INV-KERNEL-DAG-AUTHORITY-01` `DependencyNotMet` info the
+    // async caller emits to the audit chain. Defined inside the
+    // function body so the variant set tracks the lookup
+    // transaction's reject classes.
+    #[derive(Debug)]
+    enum ActivateRejection {
+        Standard { code: PlannerErrorCode, state: TaskState },
+        DependencyNotMet {
+            /// `(predecessor_task_id, observed_state)` for every
+            /// edge whose predecessor was NOT `Completed` at the
+            /// moment of admission. Caller emits a structured
+            /// audit record carrying this list verbatim.
+            missing: Vec<(String, String)>,
+        },
+    }
+    impl ActivateRejection {
+        fn standard(code: PlannerErrorCode, state: TaskState) -> Self {
+            Self::Standard { code, state }
+        }
+    }
+
     let lookup: ActivationLookup = {
         let store_arc = Arc::clone(&ctx.store);
         let task_id   = task_id_owned.clone();
-        tokio::task::spawn_blocking(move || -> Result<ActivationLookup, (PlannerErrorCode, TaskState)> {
+        let lookup_result = tokio::task::spawn_blocking(move || -> Result<ActivationLookup, ActivateRejection> {
             let mut conn = store_arc.lock_sync();
             let tx = conn.transaction()
-                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+                .map_err(|_| ActivateRejection::standard(
+                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
 
             // 2a. Activation row — must exist, must be PendingActivation.
             let activation_id: String = {
@@ -4093,10 +4155,12 @@ async fn handle_activate_sub_task(
                 );
                 let (activation_id, state, _initiative_id) = match row {
                     Ok(r)  => r,
-                    Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+                    Err(_) => return Err(ActivateRejection::standard(
+                        PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
                 };
                 if state != "PendingActivation" {
-                    return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+                    return Err(ActivateRejection::standard(
+                        PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
                 }
                 activation_id
             };
@@ -4110,12 +4174,56 @@ async fn handle_activate_sub_task(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             ) {
                 Ok(r)  => r,
-                Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+                Err(_) => return Err(ActivateRejection::standard(
+                    PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
             };
             let (initiative_id, task_state_str) = task_row;
             if task_state_str != TaskState::Admitted.as_sql_str() {
-                return Err((PlannerErrorCode::FailTaskNotRunning,
-                            parse_task_state(&task_state_str)));
+                return Err(ActivateRejection::standard(
+                    PlannerErrorCode::FailTaskNotRunning,
+                    parse_task_state(&task_state_str)));
+            }
+
+            // 2b.5. INV-KERNEL-DAG-AUTHORITY-01 — predecessor-completion
+            //       gate. The Orchestrator is an untrusted LLM agent
+            //       (paradigm.md §3.4); even if its NNSP and the KSB's
+            //       Layer-2 prompt-hiding both correctly steer it to
+            //       only emit `ActivateSubTask` for tasks whose
+            //       predecessors have completed, a hallucinating or
+            //       compromised orchestrator could ignore those signals
+            //       and submit `ActivateSubTask` for a task whose
+            //       predecessors are still `Admitted` / `Running` /
+            //       `GatesPending`. Without a kernel-side gate, that
+            //       admission would (a) skip review gates by activating
+            //       a downstream Executor before its predecessor
+            //       Reviewer voted, (b) reorder tasks to circumvent
+            //       plan-author-declared dependency constraints, and
+            //       (c) violate paradigm-`R-2` / `R-5` / `R-11`.
+            //
+            //       The check joins `task_dag_edges` (predecessors of
+            //       this task) against `tasks` (predecessor states)
+            //       inside the same transaction as 2a/2b so the
+            //       admission decision is atomic with the rest of the
+            //       activation-row pivot pipeline. The check uses
+            //       kernel-owned tables exclusively — the Orchestrator
+            //       contributes only the `task_id` lookup key.
+            //
+            //       Spec: `agent-disagreement.md §3.6` (Authority
+            //       boundary), `v2-deep-spec.md §Step 21` (the
+            //       `DEPENDENCY_NOT_MET` rejection contract), and
+            //       `specs/invariants.md
+            //       INV-KERNEL-DAG-AUTHORITY-01`.
+            let missing_predecessors = match missing_predecessors_for_activation(
+                &tx, &task_id,
+            ) {
+                Ok(v)  => v,
+                Err(_) => return Err(ActivateRejection::standard(
+                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)),
+            };
+            if !missing_predecessors.is_empty() {
+                return Err(ActivateRejection::DependencyNotMet {
+                    missing: missing_predecessors,
+                });
             }
 
             // The plan registry holds the typed `session_agent_type`
@@ -4129,7 +4237,8 @@ async fn handle_activate_sub_task(
                 );
                 let fields = match plan_registry_arc.get(&key) {
                     Some(f) => f,
-                    None    => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+                    None    => return Err(ActivateRejection::standard(
+                        PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
                 };
                 let kind = match fields.session_agent_type {
                     raxis_types::SessionAgentType::Executor =>
@@ -4142,7 +4251,8 @@ async fn handle_activate_sub_task(
                         // `[[tasks]]` blocks, but a corrupt registry
                         // entry would surface here as a policy
                         // violation rather than a substrate error.
-                        return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+                        return Err(ActivateRejection::standard(
+                            PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
                     }
                 };
                 // V2 `v2_extended_gaps.md §1.1` — fetch the
@@ -4162,7 +4272,8 @@ async fn handle_activate_sub_task(
             let new_lineage_id  = uuid::Uuid::new_v4().to_string();
             let session_token   = match raxis_crypto::token::generate_session_token() {
                 Ok(t)  => t,
-                Err(_) => return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)),
+                Err(_) => return Err(ActivateRejection::standard(
+                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)),
             };
             let now_secs   = unix_now_secs();
             let expires_at = now_secs + 86_400;
@@ -4195,10 +4306,12 @@ async fn handle_activate_sub_task(
                     expires_at,
                     agent_type_str,
                 ],
-            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+            ).map_err(|_| ActivateRejection::standard(
+                PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
 
             tx.commit()
-                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+                .map_err(|_| ActivateRejection::standard(
+                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
 
             Ok(ActivationLookup {
                 agent_kind,
@@ -4210,8 +4323,79 @@ async fn handle_activate_sub_task(
                 task_prompt,
             })
         })
-        .await
-        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))??
+        .await;
+        let lookup_result: Result<ActivationLookup, ActivateRejection> = match lookup_result {
+            Ok(inner) => inner,
+            Err(_join_err) => {
+                // `spawn_blocking` panic / cancellation — surface as
+                // a generic policy violation so the orchestrator
+                // sees a structured rejection rather than a hung
+                // intent. Audit chain is not extended for this
+                // path (the spawn_blocking failure is a kernel-
+                // internal infra fault, not an admission decision).
+                return Err((
+                    PlannerErrorCode::FailPolicyViolation,
+                    TaskState::Admitted,
+                ));
+            }
+        };
+        match lookup_result {
+            Ok(v)  => v,
+            Err(rej) => match rej {
+                ActivateRejection::Standard { code, state } => {
+                    return Err((code, state));
+                }
+                ActivateRejection::DependencyNotMet { missing } => {
+                    // INV-KERNEL-DAG-AUTHORITY-01 audit emit. The
+                    // structured `eprintln` carries the missing-
+                    // predecessor list verbatim so an operator can
+                    // read it from the kernel log without joining
+                    // SQLite (mirrors the iter49
+                    // `IntegrationMergeBlockedByOutstandingReview`
+                    // pattern in `run_phase_a` Step 3d).
+                    let missing_json = missing
+                        .iter()
+                        .map(|(id, st)| format!(
+                            "{{\"task\":\"{id}\",\"state\":\"{st}\"}}",
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"ActivateSubTaskBlockedByDependencyNotMet\",\
+                         \"task_id\":\"{}\",\
+                         \"missing_predecessors\":[{}],\
+                         \"invariant\":\"INV-KERNEL-DAG-AUTHORITY-01\"}}",
+                        task_id_owned, missing_json,
+                    );
+                    // Emit the generic `IntentRejected` audit row
+                    // (audit-after-rejection per
+                    // `audit-paired-writes.md §6` — no SQLite
+                    // write occurred; the rejection itself is the
+                    // event). Best-effort emit; an audit-emit
+                    // failure does not change the rejection.
+                    if let Err(e) = ctx.audit.emit(
+                        raxis_audit_tools::AuditEventKind::IntentRejected {
+                            task_id:         task_id_owned.clone(),
+                            session_id:      session_id.as_str().to_owned(),
+                            intent_kind:     IntentKind::ActivateSubTask.as_str().to_owned(),
+                            error_code:      "DEPENDENCY_NOT_MET".to_owned(),
+                            sequence_number: seq,
+                        },
+                        Some(session_id.as_str()),
+                        Some(task_id_owned.as_str()),
+                        None,
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"IntentRejectedAuditEmitFailed\",\
+                             \"intent_kind\":\"ActivateSubTask\",\"task_id\":\"{}\",\
+                             \"reason\":\"{e}\"}}",
+                            task_id_owned,
+                        );
+                    }
+                    return Err((PlannerErrorCode::DependencyNotMet, TaskState::Admitted));
+                }
+            },
+        }
     };
 
     // ── Step 3: substrate spawn via ctx.session_spawn ──────────────────
@@ -10259,6 +10443,213 @@ mod tests {
             &ctx,
         ).await.expect_err("explicit zero ceiling must reject every retry");
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+    }
+
+    // ── INV-KERNEL-DAG-AUTHORITY-01 — predecessor-completion gate ──────────
+    //
+    // Pins the structural fence that keeps the kernel — not the
+    // orchestrator — in authority over `ActivateSubTask` admission.
+    // The orchestrator is an untrusted LLM agent confined to its
+    // own VM (`paradigm.md §3.4`); the kernel-side
+    // `missing_predecessors_for_activation` query is the only
+    // structural defence against a hallucinating or compromised
+    // orchestrator that emits `ActivateSubTask` for a task whose
+    // declared predecessors are not yet `Completed`.
+
+    /// Witness: `INV-KERNEL-DAG-AUTHORITY-01`.
+    ///
+    /// Scenario:
+    ///   * 2-task DAG: `task-A → task-B` (B's only predecessor is A).
+    ///   * Both rows seeded in `Admitted` (the kernel-canonical
+    ///     pre-activation `TaskState`; the v1 DDL has no `Pending`
+    ///     variant — the closest "predecessor not yet done" state is
+    ///     `Admitted` per `crates/types/src/fsm.rs::TaskState::ALL`).
+    ///   * Query for B → MUST return `[("task-A", "Admitted")]`. This
+    ///     is the non-empty list that triggers the
+    ///     `ActivateRejection::DependencyNotMet` arm in
+    ///     `handle_activate_sub_task`, which returns
+    ///     `PlannerErrorCode::DependencyNotMet` + emits
+    ///     `IntentRejected { error_code: "DEPENDENCY_NOT_MET" }` on
+    ///     the audit chain.
+    ///   * Flip A to `Completed`; query for B → MUST return `[]`. The
+    ///     handler then falls through to the existing per-role
+    ///     checks and (on success) provisions the substrate.
+    ///
+    /// Why this is a free-fn predicate test rather than a full-
+    /// handler integration test: `raxis-kernel` is a bin-only crate
+    /// (`Cargo.toml [[bin]] name = "raxis-kernel"`), so
+    /// `kernel/tests/*.rs` cannot reach `handle_activate_sub_task`
+    /// without standing up the kernel binary + IPC harness. The
+    /// `missing_predecessors_for_activation` free fn is the entire
+    /// structural payload of `INV-KERNEL-DAG-AUTHORITY-01`; pinning
+    /// it here gives a tight, fast witness that fails loudly the
+    /// moment the predicate query stops returning unsatisfied
+    /// predecessors (e.g. someone reverts the JOIN, drops the
+    /// `state != Completed` predicate, or moves the gate to
+    /// post-spawn). The rejection-wiring (audit emit + return
+    /// shape) lives downstream of the predicate and is exercised by
+    /// the existing `extended_e2e_*` lifecycle harnesses against
+    /// the kernel binary.
+    #[test]
+    fn inv_kernel_dag_authority_01_activate_subtask_rejects_unsatisfied_predecessor() {
+        let initiatives = raxis_store::Table::Initiatives.as_str();
+        let tasks       = raxis_store::Table::Tasks.as_str();
+        let edges       = raxis_store::Table::TaskDagEdges.as_str();
+
+        let disk          = DiskStore::new();
+        let initiative_id = "init-dag-authority-01";
+
+        // ── Seed: 1 initiative + 2 tasks (both Admitted) + edge A→B ──
+        {
+            let g = disk.store().lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {initiatives} \
+                        (initiative_id, state, terminal_criteria_json, \
+                         plan_artifact_sha256, created_at, git_apply_pending) \
+                     VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, 0)"
+                ),
+                rusqlite::params![initiative_id],
+            ).unwrap();
+            for tid in ["task-A", "task-B"] {
+                g.execute(
+                    &format!(
+                        "INSERT INTO {tasks} \
+                            (task_id, initiative_id, lane_id, state, actor, \
+                             policy_epoch, admitted_at, transitioned_at) \
+                         VALUES (?1, ?2, 'lane-0', 'Admitted', 'op-0', 0, 100, 100)"
+                    ),
+                    rusqlite::params![tid, initiative_id],
+                ).unwrap();
+            }
+            g.execute(
+                &format!(
+                    "INSERT INTO {edges} \
+                        (initiative_id, predecessor_task_id, successor_task_id, \
+                         predecessor_satisfied) \
+                     VALUES (?1, 'task-A', 'task-B', 0)"
+                ),
+                rusqlite::params![initiative_id],
+            ).unwrap();
+        }
+
+        // ── Phase 1: A=Admitted ⇒ B's predecessor query surfaces A. ──
+        {
+            let mut g = disk.store().lock_sync();
+            let tx    = g.transaction().unwrap();
+            let missing = missing_predecessors_for_activation(&tx, "task-B")
+                .expect("predecessor query (A=Admitted)");
+            assert_eq!(
+                missing,
+                vec![("task-A".to_owned(), "Admitted".to_owned())],
+                "INV-KERNEL-DAG-AUTHORITY-01: B's predecessor A is NOT \
+                 Completed; query MUST surface (task-A, Admitted) so the \
+                 ActivateSubTask handler rejects the orchestrator's intent \
+                 with DEPENDENCY_NOT_MET BEFORE the substrate spawn step",
+            );
+        }
+
+        // ── Phase 2: A=Completed ⇒ B's predecessor query returns []. ──
+        {
+            let g = disk.store().lock_sync();
+            g.execute(
+                &format!(
+                    "UPDATE {tasks} SET state = 'Completed' WHERE task_id = 'task-A'"
+                ),
+                [],
+            ).unwrap();
+        }
+        {
+            let mut g = disk.store().lock_sync();
+            let tx    = g.transaction().unwrap();
+            let missing = missing_predecessors_for_activation(&tx, "task-B")
+                .expect("predecessor query (A=Completed)");
+            assert!(
+                missing.is_empty(),
+                "INV-KERNEL-DAG-AUTHORITY-01: with A=Completed, B's \
+                 predecessor gate MUST admit (no missing predecessors); \
+                 got {missing:?}",
+            );
+        }
+    }
+
+    /// `INV-KERNEL-DAG-AUTHORITY-01` corollary: a task with multiple
+    /// predecessors MUST surface every unsatisfied edge, not just
+    /// the first. Pins the "report every unmet predecessor in one
+    /// shot" contract that the handler's `eprintln!` /
+    /// `IntentRejected` audit row depends on for forensic value.
+    #[test]
+    fn inv_kernel_dag_authority_01_reports_every_unmet_predecessor() {
+        let initiatives = raxis_store::Table::Initiatives.as_str();
+        let tasks       = raxis_store::Table::Tasks.as_str();
+        let edges       = raxis_store::Table::TaskDagEdges.as_str();
+
+        let disk          = DiskStore::new();
+        let initiative_id = "init-dag-authority-fan-in";
+
+        {
+            let g = disk.store().lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {initiatives} \
+                        (initiative_id, state, terminal_criteria_json, \
+                         plan_artifact_sha256, created_at, git_apply_pending) \
+                     VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, 0)"
+                ),
+                rusqlite::params![initiative_id],
+            ).unwrap();
+            // A=Completed, B=Running, C=Admitted; successor D depends
+            // on all three. Predecessor query for D MUST surface B
+            // and C (the two non-Completed predecessors) and MUST
+            // NOT surface A.
+            for (tid, state) in [
+                ("task-A", "Completed"),
+                ("task-B", "Running"),
+                ("task-C", "Admitted"),
+                ("task-D", "Admitted"),
+            ] {
+                g.execute(
+                    &format!(
+                        "INSERT INTO {tasks} \
+                            (task_id, initiative_id, lane_id, state, actor, \
+                             policy_epoch, admitted_at, transitioned_at) \
+                         VALUES (?1, ?2, 'lane-0', ?3, 'op-0', 0, 100, 100)"
+                    ),
+                    rusqlite::params![tid, initiative_id, state],
+                ).unwrap();
+            }
+            for pred in ["task-A", "task-B", "task-C"] {
+                g.execute(
+                    &format!(
+                        "INSERT INTO {edges} \
+                            (initiative_id, predecessor_task_id, successor_task_id, \
+                             predecessor_satisfied) \
+                         VALUES (?1, ?2, 'task-D', 0)"
+                    ),
+                    rusqlite::params![initiative_id, pred],
+                ).unwrap();
+            }
+        }
+
+        let mut g = disk.store().lock_sync();
+        let tx    = g.transaction().unwrap();
+        let mut missing = missing_predecessors_for_activation(&tx, "task-D")
+            .expect("predecessor query");
+        // SQLite row order is `task_dag_edges` insertion order in
+        // practice but is not guaranteed by the spec; sort so the
+        // assertion is order-independent.
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec![
+                ("task-B".to_owned(), "Running".to_owned()),
+                ("task-C".to_owned(), "Admitted".to_owned()),
+            ],
+            "INV-KERNEL-DAG-AUTHORITY-01: every non-Completed \
+             predecessor edge MUST appear in the missing list so the \
+             IntentRejected audit row carries the full forensic \
+             record (A=Completed must NOT appear)",
+        );
     }
 
 }

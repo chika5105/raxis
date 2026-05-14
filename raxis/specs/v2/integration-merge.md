@@ -2,7 +2,7 @@
 
 > **Status:** V2 Specified  
 > **Cross-references:**  
-> - `v2-deep-spec.md §Step 8` — Orchestrator Owns IntegrationMerge (decision + rationale)  
+> - `v2-deep-spec.md §Step 8` — Orchestrator Performs `IntegrationMerge`; Kernel Adjudicates It (decision + rationale; the cross-reference language was tightened by `INV-KERNEL-DAG-AUTHORITY-01` — "owns the merge" is shorthand for "semantically resolves conflicts in the merge clone and emits the advisory intent", NOT "decides whether the merge lands")  
 > - `v2-deep-spec.md §Step 9` — Bundle Routing (how Executor commits reach the Orchestrator)  
 > - `v2-deep-spec.md §Step 11` — Hybrid Allowlist computation  
 > - `v2-deep-spec.md §Step 24b` — Orchestrator Workspace Provisioning (RW clone from base SHA at initiative boot; the workspace this spec's merges happen in)  
