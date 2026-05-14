@@ -77,6 +77,19 @@ const MAP: Record<string, StateBadgeTone> = {
   // ── SessionState (raxis-types::fsm::SessionState) ───────────
   Spawning: "muted",
   Paused: "warn",
+  // Terminal session classifications surfaced by the dashboard's
+  // forensic-detail path (`INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`)
+  // — sessions that have terminated are still navigable from the
+  // list page, and the badge needs to spell out *why* the row is
+  // no longer active.
+  //
+  //  * `Revoked` — deliberate kernel / operator revocation; gets
+  //    the `block` tone (matches `Cancelled`/`Aborted` semantics:
+  //    terminal-but-unnatural cause).
+  //  * `Expired` — passive lapse of `expires_at`; rendered muted
+  //    because it's the expected terminal state, not a failure.
+  Revoked: "block",
+  Expired: "muted",
 
   // ── Legacy / human-typed aliases ────────────────────────────
   // Older callsites (and a few test fixtures) used these names
