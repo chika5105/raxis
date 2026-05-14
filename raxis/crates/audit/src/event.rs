@@ -3484,11 +3484,14 @@ pub enum AuditEventKind {
     // variants below close the gaps identified in
     // `dashboard-operator-action-audit-coverage.md §gap-analysis`.
 
-    /// Operator listed initiatives via `GET /api/initiatives`. Polled
-    /// every few seconds by the dashboard; the data layer therefore
-    /// debounces emissions to one per operator+endpoint per 5-minute
-    /// window (`INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`
-    /// "polling-style queries" carve-out).
+    /// Operator listed initiatives via `GET /api/initiatives`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained on
+    /// the enum so audit-tools can deserialize already-persisted
+    /// chains that contain this variant; emit sites have been
+    /// retired. See `specs/v2/dashboard-operator-action-audit-
+    /// coverage.md §signal-vs-noise`.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedInitiativeList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3501,7 +3504,13 @@ pub enum AuditEventKind {
     },
 
     /// Operator opened the initiative-detail surface via
-    /// `GET /api/initiatives/:id`. Per-resource read; not debounced.
+    /// `GET /api/initiatives/:id`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization of older chains; emit
+    /// sites have been retired (signal-vs-noise policy in
+    /// `specs/v2/dashboard-operator-action-audit-coverage.md`).
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedInitiative {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3513,6 +3522,10 @@ pub enum AuditEventKind {
 
     /// Operator opened the initiative DAG view via
     /// `GET /api/initiatives/:id/dag`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedInitiativeDag {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3524,6 +3537,10 @@ pub enum AuditEventKind {
 
     /// Operator opened the per-initiative task list via
     /// `GET /api/initiatives/:id/tasks`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedInitiativeTasks {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3536,6 +3553,10 @@ pub enum AuditEventKind {
     },
 
     /// Operator opened a task detail surface via `GET /api/tasks/:id`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedTask {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3546,8 +3567,11 @@ pub enum AuditEventKind {
     },
 
     /// Operator opened the task structured-outputs surface via
-    /// `GET /api/tasks/:id/outputs`. Audited because structured
-    /// outputs may carry session-private artefacts.
+    /// `GET /api/tasks/:id/outputs`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedTaskOutputs {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3559,10 +3583,11 @@ pub enum AuditEventKind {
         outcome:              String,
     },
 
-    /// Operator listed sessions via `GET /api/sessions`. Like the
-    /// initiative-list endpoint, this is polled; the data layer
-    /// debounces emissions to one per 5-minute window per
-    /// operator+filter combination.
+    /// Operator listed sessions via `GET /api/sessions`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedSessionList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3576,6 +3601,10 @@ pub enum AuditEventKind {
 
     /// Operator opened a session detail surface via
     /// `GET /api/sessions/:id`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedSession {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3599,6 +3628,10 @@ pub enum AuditEventKind {
     },
 
     /// Operator listed escalations via `GET /api/escalations`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedEscalationList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3610,6 +3643,10 @@ pub enum AuditEventKind {
 
     /// Operator opened an escalation detail surface via
     /// `GET /api/escalations/:id`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedEscalation {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3619,10 +3656,15 @@ pub enum AuditEventKind {
         outcome:              String,
     },
 
-    /// Operator paginated the audit chain via `GET /api/audit`. The
-    /// audit chain is the most operator-private surface on the
-    /// dashboard; paging through it is itself audited so a forensic
-    /// review can reconstruct who walked which range and when.
+    /// Operator paginated the audit chain via `GET /api/audit`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    /// The chain re-verify path (`?reverify=true`) still audits
+    /// via `OperatorAuditChainReverified` — that pins a kernel
+    /// worker thread on a full chain walk and remains a
+    /// state-affecting load.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedAuditChain {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3637,6 +3679,10 @@ pub enum AuditEventKind {
     },
 
     /// Operator opened the operator inbox via `GET /api/inbox`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedInbox {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3646,9 +3692,14 @@ pub enum AuditEventKind {
         outcome:              String,
     },
 
-    /// Operator listed notifications via `GET /api/notifications`
-    /// (or `GET /api/notifications/unread-count`). Polled; debounced
-    /// per `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`.
+    /// Operator listed notifications via `GET /api/notifications`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    /// The mark-read / mark-all-read mutations still audit via
+    /// `OperatorNotificationMarkedRead` /
+    /// `OperatorNotificationsMarkedAllRead`.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedNotifications {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3661,6 +3712,12 @@ pub enum AuditEventKind {
     },
 
     /// Operator viewed the policy snapshot via `GET /api/policy`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    /// The `PUT /api/policy/toml` mutation still audits via
+    /// `PolicyUpdatedViaDashboard`.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedPolicySnapshot {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3671,9 +3728,14 @@ pub enum AuditEventKind {
     },
 
     /// Operator viewed the raw `policy.toml` via
-    /// `GET /api/policy/toml`. Audited at high granularity because
-    /// the raw TOML carries the full operator roster + permitted-op
-    /// allowlist.
+    /// `GET /api/policy/toml`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    /// The `write_policy` role gate (and its `OperatorAuth*`
+    /// chain) remain the forensic trail for "who has the keys
+    /// to surface the raw allowlist".
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedPolicyToml {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3684,6 +3746,14 @@ pub enum AuditEventKind {
     },
 
     /// Operator listed git worktrees via `GET /api/git/worktrees`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    /// The per-worktree detail / log / tree / file paths still
+    /// audit via `OperatorWorktreeAccessed` / `OperatorDiffViewed`
+    /// / `OperatorFileContentFetched` because they surface
+    /// operator-blessed source material.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedWorktreeList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3694,10 +3764,16 @@ pub enum AuditEventKind {
     },
 
     /// Operator viewed a worktree's `git log` via
-    /// `GET /api/git/worktrees/:name/log`. Distinct from
-    /// `OperatorWorktreeAccessed` (which fires on the metadata read)
-    /// and `OperatorDiffViewed` so a forensic walk can distinguish
-    /// "looked at history" from "looked at diff".
+    /// `GET /api/git/worktrees/:name/log`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization. The current
+    /// `/log` route emits `OperatorWorktreeAccessed { surface =
+    /// "log" }` instead so the "looked at history" event still
+    /// reaches the chain under the surviving worktree-access
+    /// variant. New emits should use that variant; this one is
+    /// dead but kept for chain-decode parity with older boots.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedWorktreeLog {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3710,9 +3786,11 @@ pub enum AuditEventKind {
     },
 
     /// Operator viewed the plan TOML for one initiative via
-    /// `GET /api/initiatives/:id/plan` (the in-flight
-    /// `worker/dashboard-plan-view` will wire the route; the variant
-    /// is reserved here so both workers agree on the wire shape).
+    /// `GET /api/initiatives/:id/plan`.
+    ///
+    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// backwards-compatible deserialization; emit sites retired.
+    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
     OperatorViewedPlanToml {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
@@ -3728,6 +3806,11 @@ pub enum AuditEventKind {
 
 impl AuditEventKind {
     /// The canonical event_kind string written to the `event_kind` field.
+    // Deprecated variants are still matched here so already-persisted
+    // chains continue to decode cleanly; emit sites have been retired
+    // by `worker/audit-tightening` (see signal-vs-noise policy in
+    // `specs/v2/dashboard-operator-action-audit-coverage.md`).
+    #[allow(deprecated)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::KernelStarted { .. } => "KernelStarted",

@@ -241,6 +241,12 @@ pub fn notification_priority_for_kind_str(
 ///     [`tests::every_variant_has_a_decision`] doubles as a wire-
 ///     shape regression test against silent additions.
 #[allow(clippy::too_many_lines)]
+// Deprecated `OperatorViewed*` variants are still matched here so
+// already-persisted chains continue to classify deterministically.
+// Emit sites for these variants were retired in
+// `worker/audit-tightening`; see signal-vs-noise policy in
+// `specs/v2/dashboard-operator-action-audit-coverage.md`.
+#[allow(deprecated)]
 pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriority> {
     use AuditEventKind as K;
     use NotificationPriority::{Critical, High, Low, Medium};
@@ -704,7 +710,15 @@ mod tests {
     /// reverify, view-health) MUST be `None`. They live in the
     /// audit chain for forensic accountability, never in the
     /// inbox.
+    ///
+    /// The two `OperatorViewed*` fixtures at the bottom of the
+    /// case list are constructed via deprecated variants so the
+    /// classifier proves it still maps already-persisted chain
+    /// rows of those kinds to `None` (the variants survive on
+    /// the wire for backwards compatibility; emit sites were
+    /// retired by `worker/audit-tightening`).
     #[test]
+    #[allow(deprecated)]
     fn operator_passive_actions_are_audit_only() {
         let cases: Vec<AuditEventKind> = vec![
             AuditEventKind::OperatorNotificationMarkedRead {

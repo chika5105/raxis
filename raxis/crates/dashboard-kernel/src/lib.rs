@@ -1922,6 +1922,14 @@ impl DashboardData for KernelDashboardData {
 /// surface and does not require correlation fields, so missing
 /// links are not an error — they just mean the resulting audit
 /// row has those columns NULL.
+///
+/// Deprecated `OperatorViewed*` variants are still matched here
+/// for backwards-compat: emit sites for those variants were
+/// retired in `worker/audit-tightening`, but already-persisted
+/// chains may still carry them, and a future caller passing one
+/// in (e.g. a replay harness) should still hit the correct
+/// correlation columns.
+#[allow(deprecated)]
 fn correlation_fields_for_operator_event(
     event: &raxis_audit_tools::AuditEventKind,
 ) -> (Option<String>, Option<String>, Option<String>) {
