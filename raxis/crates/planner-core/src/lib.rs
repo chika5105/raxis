@@ -135,10 +135,11 @@ pub use cmdline_env::{
     HydrationOutcome, CMDLINE_ENV_TOKEN,
 };
 pub use guest_init::{
-    init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares,
-    parse_virtiofs_mounts, shutdown_or_exit, MountAttempt, MountStatus, VirtioFsMountSpec,
+    ensure_cargo_offline_default, init_pid1_a3_egress, init_pid1_filesystem,
+    mount_workspace_shares, parse_virtiofs_mounts, shutdown_or_exit,
+    CargoOfflineDefaultOutcome, MountAttempt, MountStatus, VirtioFsMountSpec,
     WorkspaceMountOutcome, A3_DEFAULT_TPROXY_PORT, A3_TPROXY_PORT_ENV,
-    VIRTIOFS_MOUNTS_ENV,
+    CARGO_OFFLINE_ENV, VIRTIOFS_MOUNTS_ENV,
 };
 pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
 pub use gemini_client::GeminiClient;

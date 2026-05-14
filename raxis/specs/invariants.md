@@ -97,7 +97,8 @@
 | Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01, INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01 | 2 |
 | Integration-merge completion cascade — V3 (iter54) | INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01, INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01 | 2 |
 | Executor image lint-toolchain pre-bake — V3 (iter56) | INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01, INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 | 2 |
-| **Total** | | **129** |
+| Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
+| **Total** | | **131** |
 
 ---
 
@@ -4473,6 +4474,203 @@ toolchain" subsection) and `§14.4` (image-build pipeline). The
 witness binds the Containerfile pin, the manifest pin, and the
 verifier-script pin into one auditable triple, identical in
 shape to the Python invariant.
+
+---
+
+### INV-EXECUTOR-IMAGE-RUST-OFFLINE-01 — `executor-starter` defaults `CARGO_NET_OFFLINE=true` so cargo invocations never probe `crates.io`
+
+**Statement.** The `executor-starter` PID-1 boot path
+(`raxis-planner-executor`'s `main`) MUST set
+`CARGO_NET_OFFLINE=true` in its own process env BEFORE the
+tokio runtime starts AND BEFORE any `BashTool`-spawned child
+inherits the env. The default applies if and only if the
+operator has not already set the variable — any non-empty
+value (including the explicit string `"false"`) is preserved
+verbatim, so an operator who explicitly opts back into online
+cargo can do so via the kernel-injected env channel without
+this default overriding their choice. The helper emits a
+structured `step="cargo-net-offline-default"` info line to
+stderr so the post-mortem audit-chain replay can prove which
+branch fired for each session.
+
+**Justification.** This invariant is the Rust half of the
+offline-first deps surface that the two sibling lint-toolchain
+invariants (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01`,
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`) cover for Python
+and JS / TS respectively. Together the three pin the
+realistic-scenario plan
+(`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`)
+to an empty per-session egress allowlist
+(`INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01`).
+
+The realistic seed's `rust-crate/Cargo.toml` declares no
+third-party dependencies, so `cargo fmt --all -- --check` and
+`cargo clippy --all-targets -- -D warnings` succeed offline
+today. But `cargo` defaults to "refresh the registry index on
+first invocation per project", which under the canonical
+empty per-session egress allowlist surfaces as a silent
+index-fetch retry that delays every cargo invocation by the
+registry-fetch timeout window before bailing with a generic
+`failed to download` error. Defaulting `CARGO_NET_OFFLINE`
+to `true` short-circuits the index fetch (cargo treats it as
+"trust the local cache, fail if a missing dep is needed")
+and makes the cargo-tool path completely deterministic
+regardless of network state — the LLM observes a crisp
+`error: no matching package … found (lock file only)` when a
+genuinely missing dep would have triggered the registry
+probe, never a flaky timeout.
+
+This is defence-in-depth: today no seed dep would actually
+need the network, so a future seed that adds a third-party
+Rust dep would surface as a deterministic "package not
+locally cached" error, not a silent index probe — which is
+the structurally honest behaviour. An operator who does want
+online cargo (e.g. a starter image embedded inside a tier-3
+BYO workflow that genuinely needs the registry) can flip the
+default by setting `CARGO_NET_OFFLINE=false` in the
+kernel-injected env and the planner respects that choice.
+
+The single-threaded `unsafe { set_var }` contract is the
+load-bearing mechanism: the helper MUST run from PID-1 main
+BEFORE the tokio runtime spawns any worker threads, so no
+concurrent reader/writer can race on the env mutation. The
+call site in `planner-executor/src/main.rs::main` sits
+between `mount_workspace_shares()` and the
+`tokio::runtime::Builder::new_multi_thread()` construction
+specifically to satisfy that contract.
+
+**Scenario.** A future seed adds `serde = "1"` to the
+realistic seed's `rust-crate/Cargo.toml` and a corresponding
+`#[derive(Serialize)]` in `lib.rs`. Without the offline
+default, `cargo clippy` would silently retry the registry
+index against the empty egress allowlist for ~30 s before
+bailing with a generic `failed to download serde` error —
+the LLM would observe a flaky timeout and waste retries. With
+the offline default, the first `cargo clippy` invocation
+bails immediately with `error: no matching package named
+'serde' found (lock file only)`, the LLM observes a
+deterministic miss, and the operator's response is to either
+prebundle the cargo crate set into the image (parallel to
+the JS prebundle contract) or open the egress allowlist for
+`crates.io` AND `index.crates.io` AND document the rationale
+in the airgap-architecture spec. Both rational choices.
+
+**Witness.**
+[`raxis_planner_core::guest_init::cargo_offline_default_tests::ensure_cargo_offline_default_sets_when_absent`](../crates/planner-core/src/guest_init.rs)
++
+[`…::ensure_cargo_offline_default_preserves_existing_truthy_value`](../crates/planner-core/src/guest_init.rs)
++
+[`…::ensure_cargo_offline_default_preserves_explicit_falsy_value`](../crates/planner-core/src/guest_init.rs)
++
+[`…::ensure_cargo_offline_default_treats_empty_as_unset`](../crates/planner-core/src/guest_init.rs)
+pin the precedence contract: default-on when unset OR empty,
+preserve when set to any non-empty value (including the
+explicit operator-override `"false"`). The executor planner
+main calls the helper exactly once after
+`mount_workspace_shares()` and BEFORE the tokio runtime
+spawns any worker thread (the
+`tokio::runtime::Builder::new_multi_thread()` construction
+sits below the helper call site); a structured info line
+`step="cargo-net-offline-default"` is emitted so the
+post-mortem audit chain can prove which branch fired for
+each session.
+
+**Canonical home.** `v2/planner-harness.md §10.6` (executor
+image manifest — "Per-language pre-bundling for the
+realistic-scenario plan" subsection).
+
+---
+
+### INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 — `executor-starter` MUST be able to drive every realistic-scenario task with an empty per-session egress allowlist
+
+**Statement.** The canonical `executor-starter` rootfs +
+PID-1 boot path MUST be sufficient to execute every Executor
+task in the realistic-scenario plan
+(`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`)
+with the executor's per-session egress allowlist
+(`policy.toml [egress] domains` ∪ implicit-provider FQDNs)
+restricted to the inference-gateway endpoint
+(`api.anthropic.com` or the operator's configured provider
+chain). NO realistic-scenario Executor task MAY require
+opening the allowlist for `registry.npmjs.org`, `pypi.org`,
+`crates.io`, `index.crates.io`, or any other package-index
+endpoint at session-spawn time. Any new per-language tool
+introduced into the realistic plan MUST be pre-bundled (via
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` /
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01` /
+`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01` or a successor)
+BEFORE its task lands in `plan_realistic.rs`.
+
+**Justification.** Two independent considerations converge
+on the offline-first posture:
+
+1. **Operator authority.** The kernel's egress allowlist is
+   the operator's mechanism for controlling which third-party
+   networks the executor can reach. Forcing the canonical
+   plan to add `registry.npmjs.org` (etc.) to every
+   operator's `policy.toml` would silently grant the
+   executor's LLM the ability to fetch arbitrary npm
+   packages (including post-install scripts) — a far broader
+   capability than "lint a TypeScript file". The right
+   default is "the executor reaches no third-party indexes
+   unless the operator explicitly opts in for an opt-in
+   image" — pre-bundling makes that default viable.
+
+2. **Iter-loop reproducibility.** Every package-index fetch
+   is a third-party dependency on availability + version
+   stability of an external service. A live-e2e iter that
+   succeeds today might fail tomorrow because npm flapped
+   or a transitive `eslint` dep was yanked. Pre-bundling
+   pins the toolchain set to the image manifest's
+   `image_artefact_sha256` (which the verify-rebuild
+   pipeline pins to the Containerfile + lockfile contents),
+   so the test surface is fully reproducible from
+   `git rev-parse HEAD` alone.
+
+This invariant is the umbrella spec that the three sibling
+invariants implement: `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01`
+pre-bakes `ruff` into the image; `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`
+pre-bakes `eslint` / `prettier` / `typescript` / `tsx` /
+`@types/node` into the image; `INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`
+defaults `CARGO_NET_OFFLINE=true` so cargo fails closed on a
+missing dep rather than retrying the registry. A future
+GO-OFFLINE-01 (or any other language) joins the family the
+same way.
+
+**Scenario.** An operator launches iter57 with
+`policy.toml [egress] domains = []`. The kernel boots the
+canonical `executor-starter` image; the executor planner
+mounts `/workspace`, defaults `CARGO_NET_OFFLINE=true`, and
+dispatches `lint-runner-python` / `lint-runner-rust` /
+`lint-runner-js` in turn. Each task runs to completion
+without a single `getaddrinfo` (or any other third-party
+network call) firing — the audit chain's `tproxy_admit`
+events for the executor session contain only the
+inference-gateway hostname. The realistic-scenario test
+passes end-to-end on a host whose external DNS / TCP egress
+is restricted to the gateway alone.
+
+**Witness.** Composed: the three sibling invariants
+(`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01`,
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`,
+`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`) each pin one slice of
+the offline-first contract; together they mechanically
+prevent any realistic-scenario task from needing inbound
+network beyond the gateway. The realistic-scenario plan
+(`extended_e2e_support/plan_realistic.rs`) MUST NOT declare
+any per-task `allowed_egress` entries beyond the empty list
+default; a future task author who tries to opt-in surfaces
+as a code-review-time TODO ("does this task really need
+egress, or can it be satisfied by extending the prebundle
+contract?"). The audit chain's `egress_admission_decision`
+events for the realistic-scenario test scope provide the
+runtime proof: zero non-gateway entries.
+
+**Canonical home.** `v2/airgap-architecture.md §9` (Path A3
+egress posture — cross-reference to the executor-side
+pre-bundling contract); `v2/planner-harness.md §10.6`
+documents the per-language pre-bundling protocol that makes
+the contract viable.
 
 ---
 

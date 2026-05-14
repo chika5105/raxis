@@ -1047,3 +1047,179 @@ pub fn shutdown_or_exit(code: u8) -> ! {
 
     std::process::exit(code as i32)
 }
+
+// ---------------------------------------------------------------------------
+// Cargo-offline default (`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`)
+// ---------------------------------------------------------------------------
+
+/// Env var the executor planner-core sets at PID-1 boot so every
+/// `BashTool`-spawned `cargo` invocation defaults to offline mode.
+///
+/// The realistic-scenario seed's `rust-crate/Cargo.toml` declares
+/// no third-party dependencies, so `cargo fmt --check` + `cargo
+/// clippy --all-targets -- -D warnings` succeed without any
+/// `index.crates.io` probe. Defaulting `CARGO_NET_OFFLINE=true`
+/// short-circuits cargo's first-invocation registry-index refresh
+/// — which would otherwise hit the canonical empty per-session
+/// egress allowlist (`INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01`),
+/// retry the resolver for the registry-fetch timeout window, and
+/// surface a flaky `failed to download` error rather than the
+/// crisp `no matching package … found (lock file only)` shape
+/// `--offline` produces.
+///
+/// The two sibling lint-toolchain invariants
+/// (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-{PYTHON,JS}-01`, canonical
+/// home `v2/planner-harness.md §10.6`) bake their per-language
+/// deps directly into the executor-starter rootfs at image-build
+/// time. This invariant covers the Rust half of the same
+/// offline-first surface for the realistic-scenario plan
+/// (`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`):
+/// the seed's `rust-crate/` has no third-party deps so there's
+/// nothing to bake, and the env-default is the load-bearing
+/// guard against a future seed dep accidentally introducing a
+/// registry probe.
+pub const CARGO_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
+
+/// Set [`CARGO_OFFLINE_ENV`] = `"true"` in the current process env
+/// IF AND ONLY IF the operator has not already set it (any
+/// non-empty value wins; an explicit `CARGO_NET_OFFLINE=false`
+/// stays in force). The executor planner-core invokes this once
+/// during PID-1 boot, BEFORE the tokio runtime spawns any worker
+/// thread, so the `unsafe { set_var }` call is single-threaded
+/// per Rust 2024's env-mutation contract.
+///
+/// Returns the action taken so the caller can log it (and a
+/// post-mortem audit-chain replay can prove which branch fired
+/// for each session).
+pub fn ensure_cargo_offline_default() -> CargoOfflineDefaultOutcome {
+    match std::env::var(CARGO_OFFLINE_ENV) {
+        Ok(v) if !v.is_empty() => {
+            CargoOfflineDefaultOutcome::PreservedExisting { value: v }
+        }
+        _ => {
+            // SAFETY: `set_var` is unsafe-by-Rust-2024 because of
+            // multi-threaded access semantics. This call runs
+            // from the planner's PID-1 main BEFORE the tokio
+            // runtime spawns any worker threads (the call site
+            // in planner-executor sits between
+            // `mount_workspace_shares()` and the
+            // `tokio::runtime::Builder::new_multi_thread()`
+            // construction), so there is no concurrent env
+            // reader/writer. The whole point of running this
+            // before runtime construction is to ensure the
+            // single-threaded contract holds.
+            unsafe {
+                std::env::set_var(CARGO_OFFLINE_ENV, "true");
+            }
+            CargoOfflineDefaultOutcome::DefaultedToOffline
+        }
+    }
+}
+
+/// Outcome of [`ensure_cargo_offline_default`]. Logged by the
+/// caller so a post-mortem can prove whether the executor's
+/// `cargo` invocations defaulted to offline OR inherited an
+/// operator-set value.
+#[derive(Clone, Debug)]
+pub enum CargoOfflineDefaultOutcome {
+    /// The env var was unset / empty when the helper ran; the
+    /// helper set it to `"true"`.
+    DefaultedToOffline,
+    /// The env var was already set; the helper preserved the
+    /// existing value.
+    PreservedExisting {
+        /// The value the operator pre-set.
+        value: String,
+    },
+}
+
+#[cfg(test)]
+mod cargo_offline_default_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Helper: snapshot/restore the env var around a test that
+    /// mutates it. Tests in the same process can race on env
+    /// mutation, so we serialise via a process-wide mutex around
+    /// the snapshot/restore pair.
+    fn with_env_snapshot<F: FnOnce()>(key: &str, f: F) {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(key).ok();
+        // SAFETY: holding the static mutex serialises every test
+        // in this module against any other test in this module
+        // that touches the same env key.
+        unsafe { std::env::remove_var(key); }
+        f();
+        // SAFETY: see above.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None    => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_cargo_offline_default_sets_when_absent() {
+        with_env_snapshot(CARGO_OFFLINE_ENV, || {
+            let outcome = ensure_cargo_offline_default();
+            assert!(matches!(outcome, CargoOfflineDefaultOutcome::DefaultedToOffline));
+            assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "true");
+        });
+    }
+
+    #[test]
+    fn ensure_cargo_offline_default_preserves_existing_truthy_value() {
+        with_env_snapshot(CARGO_OFFLINE_ENV, || {
+            // SAFETY: serialised via `with_env_snapshot`'s mutex.
+            unsafe { std::env::set_var(CARGO_OFFLINE_ENV, "true"); }
+            let outcome = ensure_cargo_offline_default();
+            match outcome {
+                CargoOfflineDefaultOutcome::PreservedExisting { value } => {
+                    assert_eq!(value, "true");
+                }
+                other => panic!("expected PreservedExisting, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn ensure_cargo_offline_default_preserves_explicit_falsy_value() {
+        // Operator override: `CARGO_NET_OFFLINE=false` MUST win
+        // over the planner default. This is the load-bearing
+        // precedence contract — an operator who explicitly opts
+        // back into online cargo (e.g. a starter image embedded
+        // inside a tier-3 BYO workflow that genuinely needs the
+        // registry index) needs the planner to respect that
+        // choice.
+        with_env_snapshot(CARGO_OFFLINE_ENV, || {
+            // SAFETY: serialised via `with_env_snapshot`'s mutex.
+            unsafe { std::env::set_var(CARGO_OFFLINE_ENV, "false"); }
+            let outcome = ensure_cargo_offline_default();
+            match outcome {
+                CargoOfflineDefaultOutcome::PreservedExisting { value } => {
+                    assert_eq!(value, "false");
+                }
+                other => panic!("expected PreservedExisting, got {other:?}"),
+            }
+            assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "false");
+        });
+    }
+
+    #[test]
+    fn ensure_cargo_offline_default_treats_empty_as_unset() {
+        // Pin: an empty-string env var is treated as "unset" so
+        // an operator who exported the variable without a value
+        // still gets the default. This matches cargo's own
+        // env-handling: cargo treats `CARGO_NET_OFFLINE=` (empty)
+        // as "no preference set".
+        with_env_snapshot(CARGO_OFFLINE_ENV, || {
+            // SAFETY: serialised via `with_env_snapshot`'s mutex.
+            unsafe { std::env::set_var(CARGO_OFFLINE_ENV, ""); }
+            let outcome = ensure_cargo_offline_default();
+            assert!(matches!(outcome, CargoOfflineDefaultOutcome::DefaultedToOffline));
+            assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "true");
+        });
+    }
+}

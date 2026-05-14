@@ -18,10 +18,10 @@
 //! scaffold.
 
 use raxis_planner_core::{
-    hydrate_from_proc_cmdline, init_pid1_a3_egress, init_pid1_filesystem,
-    mount_workspace_shares, park_on_signal, render_boot_log, run_role_session, shutdown_or_exit,
-    BootContext, DriverError, DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role,
-    WorkspaceMountOutcome,
+    ensure_cargo_offline_default, hydrate_from_proc_cmdline, init_pid1_a3_egress,
+    init_pid1_filesystem, mount_workspace_shares, park_on_signal, render_boot_log,
+    run_role_session, shutdown_or_exit, BootContext, CargoOfflineDefaultOutcome, DriverError,
+    DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
@@ -48,6 +48,24 @@ fn main() -> ! {
     // rationale.
     let mount_outcome = mount_workspace_shares();
     log_workspace_mount_outcome(&mount_outcome);
+
+    // Step 3a: default `CARGO_NET_OFFLINE=true` for every
+    // `BashTool`-spawned `cargo` invocation the executor's LLM
+    // dispatches. The realistic-scenario seed's `rust-crate/
+    // Cargo.toml` declares no third-party deps, so `cargo fmt
+    // --check` + `cargo clippy --all-targets -- -D warnings`
+    // succeed offline; defaulting `--offline` mode here defends
+    // against a future seed dep accidentally introducing a
+    // registry probe against the canonical empty per-session
+    // egress allowlist (`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`,
+    // `INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01`). MUST run BEFORE
+    // the tokio runtime is constructed below — the helper's
+    // `unsafe { set_var }` call is single-threaded contract per
+    // Rust 2024, and any worker thread spawn would invalidate
+    // that. Operator override is preserved (the helper only
+    // sets when the variable is unset/empty); see the helper's
+    // docstring for the precedence contract.
+    log_cargo_offline_default_outcome(&ensure_cargo_offline_default());
 
     // Step 3b: Path A3 — install the in-guest egress chokepoint
     // (disable IPv6 via sysfs, point `/etc/resolv.conf` at the
@@ -361,6 +379,27 @@ async fn run() -> Result<(), PlannerError> {
 
 fn driver_to_planner_error(e: DriverError) -> PlannerError {
     PlannerError::DriverFailure(e.to_string())
+}
+
+/// Emit one structured JSON line summarising the
+/// `CARGO_NET_OFFLINE` env-default action taken at PID-1 boot.
+/// The post-mortem audit-chain replay uses this line to prove
+/// whether the executor's `cargo` invocations defaulted to
+/// offline OR inherited an operator-set value
+/// (`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`).
+fn log_cargo_offline_default_outcome(outcome: &CargoOfflineDefaultOutcome) {
+    match outcome {
+        CargoOfflineDefaultOutcome::DefaultedToOffline => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"cargo-net-offline-default\",\
+              \"role\":\"executor\",\"event\":\"defaulted\",\"value\":\"true\"}}"
+        ),
+        CargoOfflineDefaultOutcome::PreservedExisting { value } => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"cargo-net-offline-default\",\
+              \"role\":\"executor\",\"event\":\"preserved_existing\",\
+              \"value\":{:?}}}",
+            value,
+        ),
+    }
 }
 
 fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {

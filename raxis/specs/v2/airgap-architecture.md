@@ -295,3 +295,51 @@ This file is the canonical home for:
   audit event (low-severity, single-class).
 
 Each invariant has a witness test in `kernel/tests/airgap_a3_*.rs`.
+
+## 9. Cross-reference: executor offline-first deps surface
+
+The egress posture above relies on the canonical
+`executor-starter` image carrying every per-language tool the
+realistic-scenario plan exercises WITHOUT runtime third-party
+network fetches. That contract is codified by four sibling
+invariants whose canonical home is `planner-harness.md §10.6`
+(mirrored in `invariants.md`):
+
+- `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` — `ruff`
+  pip-installed at bake time, not runtime-fetched.
+- `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01` — `eslint`,
+  `prettier`, `typescript` (`tsc`), `tsx`, `@types/node`
+  globally installed at bake time so `npx --no-install`'s
+  resolution-fallback to `$PATH` finds them before the
+  `--no-install` branch fires.
+- `INV-EXECUTOR-IMAGE-RUST-OFFLINE-01` — the Executor
+  planner-core sets `CARGO_NET_OFFLINE=true` in its process
+  env at PID-1 boot so cargo never probes `crates.io`
+  against the canonical empty allowlist.
+- `INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01` — the umbrella
+  invariant: the realistic-scenario plan MUST be runnable
+  with the executor's per-session egress allowlist
+  restricted to the inference gateway. New per-language
+  tools added to the plan MUST extend the bake-time
+  prebundle BEFORE the task lands; opening the allowlist
+  for `registry.npmjs.org` / `pypi.org` / `crates.io` is
+  a documented last resort, never the default.
+
+The structural rationale: the kernel's egress allowlist is
+the operator's mechanism for controlling which third-party
+networks the executor can reach. Forcing the canonical plan
+to add `registry.npmjs.org` to every operator's
+`policy.toml` would silently grant the executor's LLM the
+ability to fetch arbitrary npm packages (including
+post-install scripts) — a far broader capability than "lint
+a TypeScript file". Pre-bundling makes the offline-first
+default viable.
+
+When pre-bundling IS infeasible (e.g. an operator-supplied
+custom tool needs a transitive PyPI package the canonical
+image cannot ship for license reasons), the operator opens
+the allowlist via `policy.toml [egress] domains` AND
+declares the rationale alongside the plan; the audit chain's
+`tproxy_admit` events for the executor session then carry
+the matching domain entries as witnesses of the
+operator-blessed exception.
