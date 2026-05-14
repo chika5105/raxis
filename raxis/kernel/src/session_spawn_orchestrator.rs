@@ -1206,7 +1206,19 @@ pub fn spawn_planner_dispatcher(
     };
     let session_id = handle.session_id.clone();
     tokio::spawn(async move {
-        let dispatch_result = crate::ipc::server::drive_planner_stream(stream, Arc::clone(&ctx)).await;
+        // INV-FAILURE-REASON-MANDATORY-01 (clean-exit-no-terminal-
+        // intent sub-case) — pass the session_id into the
+        // dispatch loop so every IntentRequest round-trip
+        // records a per-session last-activity entry on
+        // `ctx.session_activity`. The Mode-B post-exit synthesis
+        // hook below `take`s the entry on a clean-EOF exit to
+        // weave a non-generic `block_reason`. See
+        // `crate::session_activity` for the full design rationale.
+        let dispatch_result = crate::ipc::server::drive_planner_stream(
+            stream,
+            Arc::clone(&ctx),
+            Some(session_id.clone()),
+        ).await;
         // INV-FAILURE-REASON-MANDATORY-01: capture the planner-side
         // dispatch error string (if any) so the Mode-B premature-exit
         // synthesis below can inline it as the operator-facing
@@ -1442,6 +1454,23 @@ pub fn spawn_planner_dispatcher(
         let store_for_post_exit = Arc::clone(&ctx.store);
         let session_for_post_exit = session_id.clone();
         let dispatch_err_for_synth = dispatch_err_for_post_exit.clone();
+        // INV-FAILURE-REASON-MANDATORY-01 (clean-exit-no-terminal-
+        // intent sub-case) — consume the per-session last-
+        // activity record BEFORE entering the SQL preflight so
+        // the synthesis arm can quote it inside the same
+        // `spawn_blocking` closure that holds the SQLite
+        // transaction. `take` is idempotent on `None` (no
+        // IntentRequest was ever observed for this session,
+        // e.g. planner-boot-error before the first model turn);
+        // the synthesis arm distinguishes the two cases via
+        // distinct `block_reason` templates so the operator can
+        // tell boot-failure exits from runaway-loop exits at a
+        // glance. The entry is always consumed because the
+        // session row was just revoked above and will not be
+        // reused — leaving a stale entry would let a later
+        // session under the same id (re-spawn after retry)
+        // inherit a predecessor's activity.
+        let last_activity_for_synth = ctx.session_activity.take(&session_id);
         let preflight = tokio::task::spawn_blocking(
             move || -> Option<PostExitAction> {
                 use raxis_store::Table;
@@ -1709,16 +1738,47 @@ pub fn spawn_planner_dispatcher(
                     // Continue: the FSM transition is the structural
                     // unstall; a missed counter increment is forensic.
                 }
-                // INV-FAILURE-REASON-MANDATORY-01: prefer the
-                // dispatch-side error string captured above (the
-                // planner's own view of why it exited) so the
-                // dashboard's per-task FailureReasonPanel surfaces
-                // the actual cause (planner-boot-error, transport
-                // EOF reason, codec failure, etc.) rather than the
-                // generic umbrella message. Falls back to the
-                // umbrella when the dispatch error is unavailable
-                // (clean EOF after a planner-side reboot powers off
-                // the VM).
+                // INV-FAILURE-REASON-MANDATORY-01 — three-tier
+                // synthesis ladder, in priority order:
+                //
+                //   1. **Dispatch-side error string** (`Some(err)`).
+                //      Inlined verbatim. This is the planner's
+                //      own view of why the IPC channel broke
+                //      (planner-boot-error, transport EOF reason,
+                //      codec failure, …); always preferred when
+                //      `drive_planner_stream` returned `Err(_)`.
+                //   2. **Last-activity record** (clean-EOF case;
+                //      tracker entry is `Some(_)`). The planner
+                //      submitted at least one IntentRequest and
+                //      then dialed its socket cleanly to EOF
+                //      without landing a terminal intent. We
+                //      quote `(intent_kind, sequence_number,
+                //      outcome, timestamp)` so the operator can
+                //      correlate against the dispatch matrix and
+                //      the audit chain timeline. This is the
+                //      branch that closes the iter56 bug — the
+                //      pre-fix code path fell through to (3)
+                //      and surfaced the generic umbrella.
+                //   3. **No-activity record** (clean-EOF case;
+                //      tracker entry is `None`). The kernel
+                //      observed EOF on the IPC channel without
+                //      receiving a single IntentRequest. This is
+                //      the boot-failure / model-init-failure
+                //      branch (the planner died before issuing
+                //      its first intent), and the synthesis text
+                //      names that distinct failure surface so
+                //      the operator does not chase the wrong
+                //      hypothesis. Distinct from (2) by design —
+                //      "no IntentRequest observed before EOF" is
+                //      operationally a different incident class
+                //      than "planner ran for N turns and then
+                //      hit MaxTurnsExceeded".
+                //
+                // The pre-fix umbrella `"MaxTurnsExceeded /
+                // TokensExceeded / DispatchIdle / process death"`
+                // string is no longer reachable on any tier —
+                // its appearance in `tasks.block_reason` would be
+                // the regression alarm for this fix.
                 let role_str = if is_executor { "executor" } else { "reviewer" };
                 let justification = match dispatch_err_for_synth.as_deref() {
                     Some(err) => format!(
@@ -1726,13 +1786,15 @@ pub fn spawn_planner_dispatcher(
                          without submitting a terminal intent. \
                          planner_dispatch error: {err}",
                     ),
-                    None => format!(
-                        "session_spawn_orchestrator: {role_str} VM exited \
-                         without submitting a terminal intent (MaxTurnsExceeded \
-                         / TokensExceeded / DispatchIdle / process death). \
-                         Kernel synthesised Running → Failed so the orchestrator \
-                         can decide retry_subtask vs. settle Blocked.",
-                    ),
+                    None => match last_activity_for_synth.as_ref() {
+                        Some(activity) => crate::session_activity::render_clean_exit_with_activity(
+                            role_str,
+                            activity,
+                        ),
+                        None => crate::session_activity::render_clean_exit_without_activity(
+                            role_str,
+                        ),
+                    },
                 };
                 if let Err(e) = transition_task_in_tx(
                     &tx,

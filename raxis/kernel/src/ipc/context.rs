@@ -459,6 +459,32 @@ pub struct HandlerContext {
     /// dispatch; cloning the `Arc` is cheap and the inner
     /// `Mutex<HashMap>` already serialises mutations.
     pub egress_stall_tracker: Arc<raxis_egress_admission::EgressStallTracker>,
+
+    /// `INV-FAILURE-REASON-MANDATORY-01` (clean-exit-no-terminal-
+    /// intent sub-case) — per-session in-memory tracker of the
+    /// last `IntentRequest` each substrate-spawned planner
+    /// submitted before its IPC channel went to EOF.
+    ///
+    /// Written by [`crate::ipc::server::drive_planner_stream`] on
+    /// every IntentRequest arm; read (and consumed) by the Mode-B
+    /// post-exit synthesis hook in
+    /// [`crate::session_spawn_orchestrator::spawn_planner_dispatcher`]
+    /// when the planner-dispatch task returned `Ok(())` — i.e.
+    /// the planner dialed its socket cleanly to EOF — but never
+    /// landed a terminal intent. The synthesised `block_reason`
+    /// the hook writes inlines the recorded
+    /// `(intent_kind, sequence_number, outcome, timestamp)`
+    /// tuple verbatim, so the dashboard's `<FailureReasonPanel>`
+    /// surfaces a non-generic reason instead of the pre-fix
+    /// umbrella `"MaxTurnsExceeded / TokensExceeded /
+    /// DispatchIdle / process death"` placeholder.
+    ///
+    /// **Why non-Option**: the tracker is forensic, never gates
+    /// admission, and the default-empty state is a no-op for
+    /// every code path that doesn't write to it. Threading
+    /// `Option<Arc<...>>` would litter the session-spawn /
+    /// IPC-server callsites with a no-op guard for zero benefit.
+    pub session_activity: Arc<crate::session_activity::SessionActivityTracker>,
 }
 
 impl HandlerContext {
@@ -599,6 +625,16 @@ impl HandlerContext {
             // against. See the `egress_stall_tracker` binding
             // earlier in this constructor.
             egress_stall_tracker,
+            // INV-FAILURE-REASON-MANDATORY-01 — fresh per-process
+            // tracker. Production boot in `main.rs` keeps this
+            // default; tests get a fresh empty tracker per
+            // `HandlerContext::new` call. The tracker holds at
+            // most one entry per active substrate-spawned VM
+            // session, so production memory footprint is
+            // negligible.
+            session_activity: Arc::new(
+                crate::session_activity::SessionActivityTracker::new(),
+            ),
         }
     }
 

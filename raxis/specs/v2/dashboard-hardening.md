@@ -867,6 +867,23 @@ the runtime debug_assert — file an immediate kernel bug citing
 `INV-FAILURE-REASON-MANDATORY-01` and the violating entity's
 `event_id` from the audit chain.
 
+**iter56 — clean-exit-no-terminal-intent sub-case.** The kernel's
+Mode-B post-exit synthesis path
+(`kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`)
+now writes a non-generic `tasks.block_reason` even when the
+planner-side dispatch loop returned `Ok(())` (clean EOF) without
+landing a terminal intent — the previous fall-back to the generic
+`"MaxTurnsExceeded / TokensExceeded / DispatchIdle / process death"`
+umbrella violated the operator-experience contract above. The
+two new templates (with-activity and without-activity, see
+`specs/invariants.md §INV-FAILURE-REASON-MANDATORY-01` for the
+canonical text) are operationally distinct so the
+`<FailureReasonPanel>` surfaces a row that lets the operator
+disambiguate a runaway-loop exit (planner ran for N turns then
+hit `MaxTurnsExceeded`) from a boot-failure exit (planner died
+before its first model turn) at a glance, with no kernel-log
+spelunking required.
+
 ### 5.6 Action-failure rule
 
 When a dashboard mutation rejects (`Approve` → `RejectedPermission`,

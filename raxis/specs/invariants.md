@@ -6137,6 +6137,57 @@ resume or abort"). The fix populates `block_reason` with a
 structural reason that names operator action and references
 this invariant.
 
+**Sub-cases of the Mode-B kernel-side synthesis path
+(`session_spawn_orchestrator::spawn_planner_dispatcher`).** Three
+priority-ordered sub-cases produce non-generic `block_reason`
+text on a worker (Executor / Reviewer) premature exit; the
+synthesis MUST NOT fall back to the pre-iter56 generic umbrella
+`"MaxTurnsExceeded / TokensExceeded / DispatchIdle / process
+death"` placeholder under any condition (its appearance in
+`tasks.block_reason` is a regression alarm for this invariant):
+
+  1. **`drive_planner_stream` returned `Err(_)`** — the
+     dispatch error string is inlined verbatim. Template:
+     `"session_spawn_orchestrator: <role> VM exited without
+     submitting a terminal intent. planner_dispatch error:
+     <err>"`.
+  2. **`drive_planner_stream` returned `Ok(())` AND the kernel
+     observed at least one `IntentRequest` for the session**
+     (clean-EOF-with-activity sub-case, iter56). The
+     per-session activity tracker
+     ([`kernel/src/session_activity.rs::SessionActivityTracker`])
+     surfaces the last `(intent_kind, sequence_number,
+     outcome, timestamp)` tuple; the synthesised
+     `block_reason` quotes it. Template:
+     `"session_spawn_orchestrator: <role> VM exited cleanly
+     after last intent <Kind> #<seq> (<outcome>) at
+     unix=<ts>; no terminal intent submitted before EOF
+     (likely MaxTurnsExceeded / TokensExceeded /
+     DispatchIdle)."` — example:
+     `"session_spawn_orchestrator: executor VM exited cleanly
+     after last intent StructuredOutput #7 (Accepted) at
+     unix=1715694342; no terminal intent submitted before EOF
+     (likely MaxTurnsExceeded / TokensExceeded /
+     DispatchIdle)."`.
+  3. **`drive_planner_stream` returned `Ok(())` AND the kernel
+     observed NO `IntentRequest` for the session** (clean-EOF-
+     without-activity sub-case, iter56). Distinct from (2) by
+     design — "no IntentRequest observed before EOF" is
+     operationally a different incident class than "planner
+     ran for N turns and then hit MaxTurnsExceeded". Template:
+     `"session_spawn_orchestrator: <role> VM exited cleanly
+     without ever submitting an IntentRequest before EOF;
+     likely planner-boot-error / model-init failure /
+     dispatch loop returned Idle on the very first turn (no
+     terminal intent observed)."`.
+
+The two iter56 sub-cases MUST surface operator-actionable text
+that lets the dashboard's `<FailureReasonPanel>` distinguish
+boot-failure exits from runaway-loop exits without operator log
+spelunking. Per the anti-pattern catalogue below, a placeholder
+that doesn't carry operator-actionable detail is structurally
+equivalent to `None` from the dashboard's perspective.
+
 **Witness:**
 - `crates/types/src/error.rs::FailureReason` (newtype impl)
 - `crates/types/src/error.rs::EmptyReasonError` (constructor
@@ -6148,10 +6199,20 @@ this invariant.
 - `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`
   (Mode-B premature-exit synthesis — captures the
   `drive_planner_stream` dispatch error as the operator-facing
-  reason; falls back to the umbrella `MaxTurnsExceeded /
-  TokensExceeded / DispatchIdle / process death` when the
-  dispatch channel returned `Ok(())` after a clean planner-side
-  reboot)
+  reason; on a clean `Ok(())` return reads
+  `ctx.session_activity` for the last observed IntentRequest
+  and emits one of the two iter56 sub-case templates listed
+  above; the pre-iter56 umbrella `"MaxTurnsExceeded /
+  TokensExceeded / DispatchIdle / process death"` placeholder
+  is no longer reachable on any tier)
+- `kernel/src/session_activity.rs::{SessionActivityTracker,
+  render_clean_exit_with_activity, render_clean_exit_without_activity}`
+  (kernel-side per-session activity tracker + the two iter56
+  sub-case rendering helpers; the `Mutex<HashMap>` is keyed by
+  session_id, written by
+  `kernel/src/ipc/server.rs::drive_planner_stream` on every
+  IntentRequest round-trip, and consumed by the post-exit
+  hook before the synthesis arm fires)
 - `kernel/src/session_spawn_orchestrator.rs` ceiling cascade
   (`OrchestratorRespawnCeilingExceeded` arm — non-terminal
   tasks under the ceiling-exceeded initiative get
@@ -6171,7 +6232,11 @@ this invariant.
   transient-retry loop still owns terminality)
 - `kernel/tests/failure_reason_invariant_witness.rs`
   (cross-crate witness — newtype contract + audit-event variant
-  shapes + SQL projection)
+  shapes + SQL projection;
+  `tasks_block_reason_clean_exit_with_activity_is_non_generic`
+  and `tasks_block_reason_clean_exit_without_activity_is_non_generic`
+  pin the iter56 sub-case templates and assert the pre-fix
+  umbrella substring is absent from both branches)
 - `kernel/src/initiatives/task_transitions.rs::tests::failed_transition_persists_non_empty_block_reason`
 - `kernel/src/initiatives/task_transitions.rs::tests::failed_transition_with_none_reason_trips_debug_assert`
 - `kernel/src/recovery.rs::tests::reconcile_populates_block_reason_for_swept_tasks`

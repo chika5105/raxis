@@ -64,6 +64,7 @@ mod policy_manager;
 mod prompt;
 mod push;
 mod runtime;
+mod session_activity;
 mod session_spawn_orchestrator;
 mod worktree_gc;
 // V2 §Step 24 / §Step 24b — host-side worktree provisioning seam.

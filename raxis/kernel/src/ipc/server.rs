@@ -373,7 +373,17 @@ async fn handle_planner_connection(
     stream: tokio::net::UnixStream,
     ctx: Arc<HandlerContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    drive_planner_stream(stream, ctx).await
+    // UDS-substrate connections are not session-bound at the
+    // accept layer (`planner.sock` accepts every connection that
+    // presents a valid session-token on the first frame; a single
+    // VM may even reconnect mid-session in pathological cases).
+    // The Mode-B post-exit synthesis hook does not run for the
+    // UDS-substrate path (`spawn_planner_dispatcher` is a no-op
+    // when `kernel_ipc_stream = None`), so passing `None` here is
+    // both correct and the only safe choice — recording activity
+    // against a session_id we don't yet know would let one VM's
+    // last intent leak into a sibling VM's synthesised reason.
+    drive_planner_stream(stream, ctx, None).await
 }
 
 /// **The planner dispatch loop, transport-agnostic.**
@@ -395,9 +405,25 @@ async fn handle_planner_connection(
 /// matrix (e.g. a new `IpcMessage` variant) lands in exactly one
 /// place. `drive_planner_stream` is `pub(crate)` because the
 /// session-spawn callsite lives in `kernel/src/session_spawn_*.rs`.
+///
+/// **`session_id_for_activity`** — when `Some(_)`, the dispatch
+/// loop records every successful `IntentRequest` round-trip into
+/// [`crate::ipc::context::HandlerContext::session_activity`] keyed
+/// by this `session_id`. The Mode-B post-exit synthesis hook in
+/// [`crate::session_spawn_orchestrator::spawn_planner_dispatcher`]
+/// reads (and consumes) the entry to weave a non-generic
+/// `tasks.block_reason` for the clean-exit-no-terminal-intent
+/// sub-case of `INV-FAILURE-REASON-MANDATORY-01`.
+///
+/// Substrate-spawned VM sessions (the only callers that exercise
+/// the post-exit hook) pass `Some(session_id)`. UDS-substrate
+/// callers pass `None` (see `handle_planner_connection`'s call
+/// site for the rationale: the UDS path is not session-bound at
+/// accept time, and the post-exit hook does not run for it).
 pub(crate) async fn drive_planner_stream<S>(
     mut stream: S,
     ctx: Arc<HandlerContext>,
+    session_id_for_activity: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin,
@@ -438,6 +464,12 @@ where
                 // Capture context BEFORE moving `req` into the handler.
                 let task_id_for_log = req.task_id.as_str().to_owned();
                 let seq_for_log     = req.sequence_number;
+                // INV-FAILURE-REASON-MANDATORY-01 — also capture
+                // the intent kind here so we can record the
+                // last-activity entry post-handle for the
+                // Mode-B post-exit synthesis hook. Cheap copy
+                // (`IntentKind` is `Copy`).
+                let intent_kind_for_activity = req.intent_kind;
                 let started         = std::time::Instant::now();
                 let resp = handlers::intent::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
@@ -447,6 +479,28 @@ where
                     &resp,
                     latency_ms,
                 );
+                // INV-FAILURE-REASON-MANDATORY-01 — record the
+                // last activity entry BEFORE the response write
+                // so a write_frame failure (planner socket
+                // closed mid-handshake) still leaves a forensic
+                // breadcrumb the post-exit hook can quote. The
+                // tracker stores at most one entry per session
+                // (the most recent intent), so this is a constant
+                // cost per intent regardless of session length.
+                if let Some(sid) = session_id_for_activity.as_deref() {
+                    ctx.session_activity.record(
+                        sid,
+                        crate::session_activity::SessionActivity {
+                            last_intent_kind:    intent_kind_for_activity,
+                            last_intent_seq:     seq_for_log,
+                            last_intent_outcome:
+                                crate::session_activity::LastIntentOutcome::from_response(
+                                    &resp.outcome,
+                                ),
+                            recorded_at_unix:    raxis_types::clock::unix_now_secs(),
+                        },
+                    );
+                }
                 write_frame(&mut stream, &IpcMessage::KernelIntentResponse(resp)).await?;
             }
 
