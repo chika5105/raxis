@@ -2919,7 +2919,7 @@ fn maybe_emit_planner_max_turns_scaled_audit(
         return;
     };
     if let Err(e) = service.audit().emit(
-        AuditEventKind::PlannerMaxTurnsProgressivelyScaled {
+        raxis_audit_tools::AuditEventKind::PlannerMaxTurnsProgressivelyScaled {
             task_id:      task_id.to_owned(),
             attempt:      resolved.attempt,
             base:         resolved.base,
