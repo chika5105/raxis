@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -6,8 +7,22 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { Mono } from "@/components/Mono";
+import { isOperatorRelevantEvent } from "@/lib/audit-importance";
 import { auditBadgeClasses } from "@/lib/audit-tone";
 import { fmtRelative, fmtTokens, plural } from "@/lib/format";
+
+// How many operator-relevant rows the "Recent activity" widget
+// surfaces.
+const RECENT_ACTIVITY_DISPLAY_LIMIT = 10;
+// How many raw rows we ask the backend for. We over-fetch so the
+// after-filter rendered set typically lands at the display limit
+// even when the chain tail is dominated by `OperatorViewed*` page
+// views (the 1260-event iter48 chain had ~90% read-only spam — at
+// that ratio fetching the 10 newest entries surfaces ZERO useful
+// rows). 80 rows × 10% useful ≈ 8 rendered; we round up to a
+// margin of safety, but keep the cap modest so the home-page query
+// stays cheap.
+const RECENT_ACTIVITY_FETCH_LIMIT = 80;
 
 /// Operator landing page. Shows kernel health, top-level
 /// counters, and a recent-activity feed (newest 10 audit
@@ -34,11 +49,24 @@ export function OverviewPage() {
     refetchInterval: 3_000,
   });
 
+  // The Recent Activity widget filters out `OperatorViewed*` /
+  // `OperatorOpened*` read-only page-view events
+  // (`INV-DASHBOARD-RECENT-ACTIVITY-FILTER-01`). We over-fetch
+  // (see `RECENT_ACTIVITY_FETCH_LIMIT`) so the filtered teaser
+  // typically lands at the operator-facing display limit even when
+  // the audit chain tail is dominated by read-only spam.
   const audit = useQuery({
-    queryKey: ["audit", { limit: 10 }],
-    queryFn: ({ signal }) => dashboardApi.audit.list({ limit: 10 }, signal),
+    queryKey: ["audit", { limit: RECENT_ACTIVITY_FETCH_LIMIT }],
+    queryFn: ({ signal }) =>
+      dashboardApi.audit.list({ limit: RECENT_ACTIVITY_FETCH_LIMIT }, signal),
     refetchInterval: 5_000,
   });
+  const recentActivity = useMemo(() => {
+    if (!audit.data) return [];
+    return audit.data
+      .filter((a) => isOperatorRelevantEvent(a.event_kind))
+      .slice(0, RECENT_ACTIVITY_DISPLAY_LIMIT);
+  }, [audit.data]);
 
   if (health.isPending) return <PageSpinner />;
   if (health.error)
@@ -319,7 +347,18 @@ export function OverviewPage() {
         </section>
       </div>
 
-      {/* Recent activity */}
+      {/*
+       * Recent activity — operator-relevant subset of the audit
+       * chain (`INV-DASHBOARD-RECENT-ACTIVITY-FILTER-01`).
+       * `OperatorViewed*` / `OperatorOpened*` read-only page-view
+       * events are filtered out here so a busy operator session
+       * (the iter48 chain hit 1260 events / 17 min, ~90% page-
+       * view spam) does not bury the meaningful state transitions
+       * the teaser exists to surface. The full chain remains on
+       * `/audit`, which ships its own toggle to show / hide the
+       * read-only views (`INV-DASHBOARD-AUDIT-OPERATOR-READ-
+       * TOGGLE-01`).
+       */}
       <section className="card p-0 overflow-hidden">
         <header className="px-4 py-3 border-b border-edge flex items-center justify-between">
           <h2 className="text-sm font-semibold text-ink">Recent activity</h2>
@@ -335,13 +374,15 @@ export function OverviewPage() {
           <div className="p-4">
             <ErrorBox error={audit.error} />
           </div>
-        ) : audit.data.length === 0 ? (
+        ) : recentActivity.length === 0 ? (
           <div className="py-12 text-center text-ink-subtle text-sm">
-            No audit events.
+            {audit.data.length === 0
+              ? "No audit events."
+              : "No operator-relevant events in the recent chain — only page-view audits."}
           </div>
         ) : (
           <ul className="divide-y divide-edge/50">
-            {audit.data.map((a) => (
+            {recentActivity.map((a) => (
               <li
                 key={a.event_id}
                 className="px-4 py-2.5 flex items-center gap-3 text-sm"
