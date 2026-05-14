@@ -1,13 +1,12 @@
-//! Path A3 universal-airgap admission flow.
+//! Path A3 universal-airgap admission flow — the only production
+//! egress path under Mediated.
 //!
 //! Normative reference: `specs/v2/airgap-architecture.md §3` + §4.
 //!
 //! # Flow
 //!
-//! The legacy `KernelChannel::Tcp` path uses `raxis-tproxy-protocol`
-//! bincode framing over a TCP loopback (host-side dev only). A3
-//! talks to the kernel over per-session AF_VSOCK using the
-//! kernel-wide [`raxis_ipc::IpcMessage`] envelope:
+//! The guest talks to the kernel over per-session AF_VSOCK using
+//! the kernel-wide [`raxis_ipc::IpcMessage`] envelope:
 //!
 //! 1. **Open admission vsock.** `tokio_vsock::VsockStream::connect`
 //!    to `(VMADDR_CID_HOST, admission_port)`.
@@ -22,10 +21,11 @@
 //!    frame (`16-byte tunnel_id || 32-byte tunnel_token`). The
 //!    kernel-side tunnel listener consumes the handshake from its
 //!    `TunnelRegistry`, opens the upstream TCP, and from that point
-//!    the agent ↔ kernel-tunnel pair runs through
-//!    [`crate::shuttle::shuttle_with_prelude`] like the legacy path.
+//!    the agent ↔ kernel-tunnel pair is spliced via
+//!    `tokio::io::copy_bidirectional` — see
+//!    [`crate::linux::accept_loop_a3`].
 //! 5. **On Deny** — shutdown the agent socket. The agent's library
-//!    surfaces `ECONNREFUSED` exactly like the legacy chokepoint.
+//!    surfaces `ECONNREFUSED`.
 //!
 //! # Wire shape of the handshake frame
 //!

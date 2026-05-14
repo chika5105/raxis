@@ -1,6 +1,6 @@
-//! `raxis-tproxy` — in-VM Tier 1 transparent egress proxy.
+//! `raxis-tproxy` — in-VM transparent egress proxy (Path A3 / Mediated only).
 //!
-//! Normative reference: `specs/v2/vm-network-isolation.md §3`.
+//! Normative reference: `specs/v2/airgap-architecture.md §3`.
 //!
 //! # What this crate provides
 //!
@@ -12,18 +12,17 @@
 //!    `AsyncRead + AsyncWrite`; cross-platform. Tests run on the
 //!    macOS build host with no special privileges.
 //!
-//! 2. **`shuttle` module** — bidirectional byte-shuttle between the
-//!    agent socket and the kernel-tunnel socket once the kernel
-//!    admits the connection. Uses `tokio::io::copy_bidirectional`,
-//!    which is portable.
+//! 2. **`a3` module** — Path A3 admission round-trip
+//!    (`IpcMessage`-framed over vsock) and the 48-byte tunnel
+//!    handshake. Cross-platform; tests use `tokio::io::duplex`.
 //!
 //! 3. **`linux` module** — Linux-only glue: listening on TCP :3129,
-//!    reading `SO_ORIGINAL_DST` after iptables REDIRECT, talking to
-//!    the kernel over `AF_VSOCK`. Guarded by `cfg(target_os =
-//!    "linux")`; on macOS the symbols don't exist and the module is
-//!    empty. Production VM image is built with
-//!    `cargo build --target x86_64-unknown-linux-musl --release -p
-//!    raxis-tproxy`.
+//!    reading `SO_ORIGINAL_DST` after iptables REDIRECT, dialing
+//!    the kernel over `AF_VSOCK` for admission + tunnel splice.
+//!    Guarded by `cfg(target_os = "linux")`; on macOS the symbols
+//!    don't exist and the module is empty. Production VM image is
+//!    built with `cargo build --target x86_64-unknown-linux-musl
+//!    --release -p raxis-tproxy`.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -31,7 +30,6 @@
 pub mod a3;
 pub mod loopback_forwarder;
 pub mod peek;
-pub mod shuttle;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

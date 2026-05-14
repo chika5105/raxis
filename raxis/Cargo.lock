@@ -4058,10 +4058,7 @@ name = "raxis-tproxy"
 version = "0.1.0"
 dependencies = [
  "nix 0.27.1",
- "raxis-audit-tools",
- "raxis-egress-admission",
  "raxis-ipc",
- "raxis-test-support",
  "raxis-tproxy-protocol",
  "raxis-types",
  "raxis-vsock-loopback",

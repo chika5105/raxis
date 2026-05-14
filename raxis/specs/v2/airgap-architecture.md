@@ -57,9 +57,11 @@ asymmetric:
    at PID 1 boot — the historical "Tier-1 §3.1 rules" were
    normative but not wired into `crates/planner-core::guest_init`.
 3. The kernel-side admission accept loop only handled the
-   *dev-fallback* TCP transport from `raxis-tproxy`'s
-   `KernelChannel::Tcp` variant. A real `KernelChannel::Vsock`
-   variant was unimplemented.
+   *dev-fallback* TCP transport (`KernelChannel::Tcp`). The real
+   vsock-based admission channel was unimplemented at the time.
+   Both the dev TCP fallback and the `KernelChannel` enum were
+   deleted alongside `EgressTier::Tier1Tproxy`; the only
+   surviving path is `accept_loop_a3` over AF_VSOCK.
 
 The combined effect: an Executor that ran a `bash`-invoked
 `curl https://evil.example` reached **the NAT** directly because

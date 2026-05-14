@@ -30,15 +30,18 @@ name = "raxis-tproxy"
 path = "src/main.rs"
 
 [dependencies]
+# `raxis-tproxy-protocol` provides the SNI / Host parser helpers
+# used by `peek.rs` (`extract_sni_from_client_hello`,
+# `extract_host_header_from_http_request_line_block`). The legacy
+# `KernelChannel::Tcp` admission protocol round-trip code in this
+# crate is dead under Mediated egress; only the parser helpers
+# remain in active use.
 raxis-tproxy-protocol  = { workspace = true }
 raxis-vsock-loopback   = { workspace = true }
-# Path A3 — the new admission flow uses the kernel-wide `IpcMessage`
-# envelope (bincode length-prefixed frames) rather than the bespoke
-# `raxis-tproxy-protocol` framing, so a single per-session vsock
+# Path A3 admission flow uses the kernel-wide `IpcMessage` envelope
+# (bincode length-prefixed frames) so a single per-session vsock
 # channel can multiplex the admission decision, the DNS resolver,
-# and any future kernel-mediated guest service. The legacy
-# `KernelChannel::Tcp` dev path still uses `raxis-tproxy-protocol`
-# verbatim for back-compat.
+# and any future kernel-mediated guest service.
 raxis-ipc              = { workspace = true }
 raxis-types            = { workspace = true }
 
@@ -58,8 +61,3 @@ nix = { version = "0.27", features = ["socket", "net"] }
 # port plan is `RAXIS_VSOCK_LOOPBACK_PLAN`. Linux-only at the build
 # level — `tokio-vsock` does not compile on macOS / Windows.
 tokio-vsock = { workspace = true }
-
-[dev-dependencies]
-raxis-test-support     = { path = "../crates/test-support" }
-raxis-egress-admission = { workspace = true }
-raxis-audit-tools      = { workspace = true }

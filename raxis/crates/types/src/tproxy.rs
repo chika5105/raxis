@@ -19,9 +19,10 @@
 // `IntentRequest` carries the tproxy admission and DNS requests too. That
 // envelope coupling means the wire shape MUST live where every other
 // IpcMessage payload struct lives — here in `raxis-types`. The standalone
-// `raxis-tproxy-protocol` crate is retained for the legacy / dev-only
-// `KernelChannel::Tcp` transport which speaks its own bincode-framed
-// protocol (kept stable for downstream forensic tools).
+// `raxis-tproxy-protocol` crate is retained for its SNI / Host parser
+// helpers consumed by `raxis_tproxy::peek` and for forensic tools that
+// still parse pre-Mediated audit chains carrying the legacy bincode
+// admission frames.
 //
 // # Why a fresh IPC envelope for A3 instead of reusing
 // `raxis-tproxy-protocol::ProxyAdmissionRequest`

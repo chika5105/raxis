@@ -1,38 +1,37 @@
-//! Linux-only glue for `raxis-tproxy`.
+//! Linux-only glue for `raxis-tproxy` (Path A3 / Mediated egress only).
 //!
 //! Provides:
-//!   * [`accept_loop`] — bind TCP :3129, accept, read
-//!     `SO_ORIGINAL_DST`, peek the flow, ask the kernel via vsock
-//!     for an admission verdict, and either tunnel or RST.
+//!   * [`accept_loop_a3`] — bind TCP :3129, accept, read
+//!     `SO_ORIGINAL_DST`, peek the flow, ask the kernel via
+//!     AF_VSOCK for an admission verdict, and either tunnel the
+//!     bytes through a kernel-opened upstream (`Admit`) or RST
+//!     the agent socket (`Deny`).
+//!   * [`bind_default_listener`] — bind the canonical V2 tproxy
+//!     port (`3129`) for `iptables -j REDIRECT` to target.
 //!
-//! Not yet implemented (V2 GA target):
-//!   * Real vsock client — currently a TCP fallback for development
-//!     bring-up (`KernelChannel::Tcp`). The wire shape is the same
-//!     bincode-framed protocol; only the transport differs.
+//! The legacy `KernelChannel::Tcp` dev-fallback (in-guest direct
+//! upstream `connect()`) was removed when `EgressTier::Tier1Tproxy`
+//! was deleted — the guest VM has no NIC under Mediated egress, so
+//! a TCP `connect()` from inside the VM has no route. The kernel —
+//! not the guest — opens the upstream TCP; the guest just shuttles
+//! bytes between the agent socket and the kernel-tunnel vsock
+//! stream.
 //!
-//! The wire-protocol code is in `raxis-tproxy-protocol`. The
-//! decision-making code is in `raxis-egress-admission`. This
-//! module is just orchestration over a TCP listener and the
-//! kernel transport.
+//! The wire-protocol code is in `raxis-tproxy-protocol` (SNI / Host
+//! parser helpers used by [`crate::peek`]) and `raxis-types`
+//! (`TproxyAdmissionRequest` / `TproxyAdmissionResponse` carried
+//! over `IpcMessage` for A3). This module is just orchestration
+//! over the TCP listener and the kernel transport.
 
 #![allow(unsafe_code)]
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
-use raxis_tproxy_protocol::{
-    decode_response, encode_request, AdmissionProtocol, ProxyAdmissionRequest,
-    ProxyAdmissionResponse,
-};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-
-use crate::peek::{peek_https_client_hello_or_http_request, PeekKind};
-use crate::shuttle::shuttle_with_prelude;
 
 /// Errors surfaced by the accept loop.
 #[derive(Debug, Error)]
@@ -41,167 +40,6 @@ pub enum AcceptLoopError {
     /// the supervising init-script restarts the binary.
     #[error("listener i/o: {0}")]
     Io(#[from] io::Error),
-}
-
-/// Per-connection counter — each accepted TCP stream gets a
-/// monotonically increasing `connection_id`.
-fn next_connection_id() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Pluggable transport for the kernel admission channel. In
-/// production this is `KernelChannel::Vsock` (AF_VSOCK
-/// CID/port-pair) — see
-/// `specs/v2/airgap-architecture.md §3`; during dev bring-up and
-/// integration tests it's `KernelChannel::Tcp` so the same
-/// protocol code runs over loopback.
-#[derive(Debug, Clone)]
-pub enum KernelChannel {
-    /// Connect to the kernel via a TCP socket — for development
-    /// bring-up on hosts without an `AF_VSOCK` device. Speaks the
-    /// legacy `raxis-tproxy-protocol` bincode framing.
-    Tcp(SocketAddr),
-    /// Path A3 production transport — `AF_VSOCK` to
-    /// `(VMADDR_CID_HOST, admission_port)` for admission, plus
-    /// `tunnel_port` for the post-admit byte tunnel. Speaks the
-    /// kernel-wide `IpcMessage` envelope (length-prefixed bincode)
-    /// — see [`crate::a3`]. The dual-port shape (admission +
-    /// tunnel) keeps the byte path framed-free so
-    /// `tokio::io::copy_bidirectional` can splice the agent socket
-    /// to the kernel-side upstream TCP without an extra parser.
-    Vsock {
-        /// CID of the kernel-side listener. Always
-        /// `VMADDR_CID_HOST` (2) in the production substrate; the
-        /// field is exposed so unit tests on host machines can
-        /// point the listener at a different CID.
-        host_cid:       u32,
-        /// Port the kernel binds for `IpcMessage`-framed
-        /// admission requests.
-        admission_port: u32,
-        /// Port the kernel binds for the byte-tunnel handshake +
-        /// raw shuttle stream.
-        tunnel_port:    u32,
-    },
-}
-
-impl KernelChannel {
-    async fn open(&self) -> io::Result<TcpStream> {
-        match self {
-            KernelChannel::Tcp(addr) => TcpStream::connect(addr).await,
-            // The Vsock arm of the legacy `open` path is
-            // intentionally unreachable: the A3 admission flow
-            // runs through `accept_loop_a3` (see below), which
-            // opens vsock streams directly via `tokio_vsock`. The
-            // legacy `handle_one_connection` is TCP-only.
-            KernelChannel::Vsock { .. } => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "KernelChannel::Vsock must be driven via `accept_loop_a3`, not the legacy TCP path",
-            )),
-        }
-    }
-}
-
-/// One inbound connection — peek, admit, shuttle.
-async fn handle_one_connection(
-    mut agent: TcpStream,
-    kernel:    KernelChannel,
-) -> Result<(), AcceptLoopError> {
-    let cid = next_connection_id();
-
-    // Read SO_ORIGINAL_DST.
-    let original_dst = original_dst_v4(&agent)?;
-    let original_dst_ip = match original_dst {
-        SocketAddr::V4(v4) => v4.ip().to_string(),
-        SocketAddr::V6(v6) => v6.ip().to_string(),
-    };
-    let original_dst_port = original_dst.port();
-
-    // Peek the flow.
-    let peeked = match peek_https_client_hello_or_http_request(&mut agent).await {
-        Ok(p) => p,
-        Err(_) => {
-            let _ = agent.shutdown().await;
-            return Ok(());
-        }
-    };
-
-    let protocol = match peeked.kind {
-        PeekKind::TlsClientHello => AdmissionProtocol::Https,
-        PeekKind::Http           => AdmissionProtocol::Http,
-    };
-    let req = ProxyAdmissionRequest {
-        connection_id: cid,
-        original_dst_ip: original_dst_ip.clone(),
-        original_dst_port,
-        host_or_sni: peeked.host_or_sni.clone(),
-        protocol,
-    };
-
-    // Ask the kernel.
-    let mut kernel_stream = kernel.open().await?;
-    let req_bytes = encode_request(&req)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    kernel_stream.write_all(&req_bytes).await?;
-
-    let mut len_buf = [0u8; 4];
-    kernel_stream.read_exact(&mut len_buf).await?;
-    let body_len = u32::from_be_bytes(len_buf) as usize;
-    if body_len > raxis_tproxy_protocol::MAX_FRAME_BYTES {
-        return Err(AcceptLoopError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "kernel admission frame too large",
-        )));
-    }
-    let mut body = vec![0u8; body_len];
-    kernel_stream.read_exact(&mut body).await?;
-    let mut full = Vec::with_capacity(4 + body_len);
-    full.extend_from_slice(&len_buf);
-    full.extend_from_slice(&body);
-    let (resp, _consumed) = decode_response(&full)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    match resp {
-        ProxyAdmissionResponse::Admit { .. } => {
-            // Open the upstream TCP. (V2 GA: the kernel returns a
-            // tunnel handle — for dev bring-up we open the
-            // upstream from inside the VM.) The kernel's audit
-            // event already records the admission; we don't need
-            // to re-ask. Real V2 will close the loopback
-            // `kernel_stream` here and accept the kernel-side
-            // tunnel FD over an SCM_RIGHTS / VSOCK_TRANSFER
-            // channel.
-            let upstream_addr = SocketAddr::new(IpAddr::V4(original_dst_ip.parse().unwrap_or("0.0.0.0".parse().unwrap())), original_dst_port);
-            match TcpStream::connect(upstream_addr).await {
-                Ok(upstream) => {
-                    let _ = shuttle_with_prelude(&mut agent, upstream, &peeked.buffered).await;
-                }
-                Err(_) => {
-                    let _ = agent.shutdown().await;
-                }
-            }
-        }
-        ProxyAdmissionResponse::Deny { .. } => {
-            let _ = agent.shutdown().await;
-        }
-    }
-    Ok(())
-}
-
-/// Accept connections on `listener`, dispatch each to
-/// `handle_one_connection`. Runs forever; intended to be the
-/// last step of `main()`.
-pub async fn accept_loop(
-    listener: TcpListener,
-    kernel:   KernelChannel,
-) -> Result<(), AcceptLoopError> {
-    loop {
-        let (agent, _peer) = listener.accept().await?;
-        let kernel_clone = kernel.clone();
-        tokio::spawn(async move {
-            let _ = handle_one_connection(agent, kernel_clone).await;
-        });
-    }
 }
 
 /// Bind the V2 default tproxy port (`3129`) for `iptables -j REDIRECT`.
@@ -215,9 +53,9 @@ pub async fn bind_default_listener() -> io::Result<TcpListener> {
 //
 // Normative reference: `specs/v2/airgap-architecture.md §3`.
 //
-// Architectural differences vs `accept_loop` above:
+// Architectural shape:
 //   * Two vsock connections per accepted agent flow (admission +
-//     byte tunnel) instead of one mixed loopback-TCP connection.
+//     byte tunnel) — the only production code path.
 //   * Wire shape is `IpcMessage` (length-prefixed bincode) for the
 //     admission round-trip, fixed 48-byte handshake then raw bytes
 //     for the tunnel.
@@ -226,9 +64,9 @@ pub async fn bind_default_listener() -> io::Result<TcpListener> {
 //     kernel-tunnel vsock stream.
 // ---------------------------------------------------------------------------
 
-/// Accept loop for the A3 universal-airgap path. Same listener
-/// shape as [`accept_loop`] but routes each accepted flow through
-/// the A3 admission protocol over vsock.
+/// Accept loop for the A3 universal-airgap path. Binds 0.0.0.0:3129
+/// for `iptables -j REDIRECT`, then routes each accepted flow
+/// through the A3 admission protocol over vsock.
 ///
 /// The `session_token` comes from the spawned-guest environment
 /// (`RAXIS_SESSION_TOKEN`); the kernel stamps it at session-spawn
