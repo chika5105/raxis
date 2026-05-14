@@ -83,7 +83,7 @@
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 | 10 |
-| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 | 2 |
+| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 | 3 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
@@ -93,7 +93,7 @@
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
 | Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
-| **Total** | | **116** |
+| **Total** | | **117** |
 
 ---
 
@@ -5754,6 +5754,182 @@ contract + the rules for which credentials are OK to commit);
 `raxis/specs/v2/secrets-model.md §2.5` (operator-supplied-
 placeholder discipline that this invariant operationalises for
 the harness's own self-managed examples bundle).
+
+---
+
+### INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 — Live-e2e harness MUST produce a working dashboard React bundle (or hard-fail), never silently degrade
+
+**Statement.** When the live-e2e harness mounts the operator
+dashboard during a `realistic_session_lifecycle` (or sibling
+`full_e2e_session_lifecycle`) run, the React production bundle
+([`dashboard-fe/dist/index.html`]) MUST be present on disk
+before the kernel's `[dashboard]` block consumes it as
+`static_dir`, UNLESS the operator has explicitly opted out by
+setting `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1`. The harness's
+single source of truth for this contract is
+[`tests::common::dashboard::locate_dashboard_dist`]; that
+function MUST:
+
+1. Return `Some(dist)` immediately when
+   `dashboard-fe/dist/index.html` is already on disk (the fast
+   path; no subprocess work).
+2. Return `None` with a single explicit `[dashboard-bundle]
+   <opt-out>` log line when `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1`
+   is set (the operator-explicit JSON-only path).
+3. Run `npm ci` (bounded by `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS`,
+   default 600 s) when `dashboard-fe/node_modules/.bin/vite`
+   is absent. This is the iter52 root-cause shape: a fresh
+   `git worktree add` carries `package.json` but not
+   `node_modules/`, so the previous behaviour of jumping
+   straight to `npm run build` produced `tsc: command not
+   found` — which the previous implementation swallowed.
+4. Run `npm run build` (bounded by
+   `RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS`, default 300 s).
+5. **Hard-panic** with a message containing the literal token
+   `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED` on
+   ANY of: missing `package.json`, `npm ci` failure (spawn /
+   non-zero exit / timeout), `npm run build` failure, or
+   post-build sanity check (the `dist/index.html` artefact
+   missing after `npm run build` returned success).
+
+The classifier
+[`tests::common::dashboard::classify_bundle_state`] is the
+pure-data half of this contract — the policy decision pivots
+on `(dist_index_present, skip_env_set, package_json_present,
+node_modules_vite_present)` and the classifier is exhaustively
+witness-tested independent of the host's `npm` availability.
+The actual subprocess steps in `locate_dashboard_dist` compose
+the classifier's decision with `run_npm_bounded` invocations.
+
+**Justification.** Operator visibility is a kernel-level
+guarantee — every other dashboard invariant in §11.9 is
+predicated on the dashboard rendering the React UI to a
+browser, not just serving the JSON API. Without the bundle the
+React app cannot mount and `/`, `/login`, every SPA route
+return HTTP 404, while the JSON API at `/api/*` continues to
+respond. A Dashboard QA worker attached during such a run
+would correctly classify the surface as broken even though the
+kernel itself is healthy — exactly the iter52 false-RED
+verdict that consumed an entire QA worker iteration cycle.
+
+**Iter52 reproduction.** The iter52 fix-loop ran in a fresh
+sibling worktree (`/private/tmp/raxis-iter52-fixloop/`) where
+`dashboard-fe/node_modules/` was absent. The previous
+implementation logged the four lines below and returned
+`None`, leaving the dashboard server in JSON-only mode for the
+entire 65 min run:
+
+```
+[dashboard-bundle] dashboard-fe/dist/index.html missing — running `npm run build` in /private/tmp/raxis-iter52-fixloop/raxis/raxis/dashboard-fe (opt out via RAXIS_E2E_SKIP_DASHBOARD_BUILD=1)
+
+> raxis-dashboard-fe@0.1.0 build
+> tsc -b && vite build
+
+sh: tsc: command not found
+[dashboard-bundle] npm run build exited with ExitStatus(unix_wait_status(32512)); dashboard will serve JSON API only (no UI). Re-run `cd raxis/dashboard-fe && npm install && npm run build` manually to diagnose.
+```
+
+The `tsc: command not found` message is the iter52 fingerprint:
+`tsc` lives at `node_modules/.bin/tsc`, so its absence
+means `npm ci` was never run for this worktree. With this
+invariant in force the harness:
+
+1. Detects `node_modules/.bin/vite` (and `.bin/tsc`) absent.
+2. Runs `npm ci` automatically (bounded 600 s).
+3. Then runs `npm run build` (bounded 300 s).
+4. Hands the resulting `dist/` to the kernel.
+5. If ANY step fails (cold registry pull broken, network
+   blocked, real `tsc` error, …) hard-panics so the operator
+   sees the root cause in seconds rather than discovering 65
+   min later that the dashboard QA worker can't see anything.
+
+**Bounded-wait composition.** Both subprocess steps satisfy
+`INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` via
+[`tests::common::dashboard::run_npm_bounded`], which polls
+`Child::try_wait` and `SIGKILL`s the child when the bounded
+deadline elapses. The bound defaults are deliberately generous
+(`npm ci` 600 s for cold pulls; `npm run build` 300 s for a
+real `tsc -b && vite build`) and clamp safely on
+non-positive / unparseable env overrides — a regression that
+flipped either default to `0` would silently disable the
+bound, which the witness
+[`inv_live_e2e_dashboard_fe_bundle_present_01_default_timeouts_are_generous_but_bounded`]
+catches.
+
+**Opt-out contract.** Setting
+`RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` skips both the install and
+the build step and returns `None` (dashboard serves JSON-only),
+with a single explicit `[dashboard-bundle]` log line. This is
+the path for release-CI lanes that bake the React bundle
+externally as a separate workflow step. The classifier proves
+the opt-out wins over the missing-`package.json` and
+missing-`node_modules` arms — a CI lane that pre-bakes the
+bundle does not need a Node toolchain installed at all.
+
+**Scenario.** Operator clones a fresh worktree of the repo
+(typical for a fix-loop iteration or a PR review) and runs
+`cargo test --release --test extended_e2e_realistic_scenario`.
+With this invariant in force the harness auto-installs the
+Node deps within the 600 s bound and proceeds — the operator
+does NOT need to remember to `cd raxis/dashboard-fe && npm
+ci && npm run build` first. In the opt-out mode the harness
+fail-fast surfaces the literal opt-out log line and serves
+JSON-only. Without this invariant the iter52 silent-degrade
+ships: dashboard is broken, QA reports false-RED, the failure
+mode is buried in the cargo log under several MB of unrelated
+build output.
+
+**Witness.**
+[`tests::common::dashboard::tests::inv_live_e2e_dashboard_fe_bundle_present_01_classifier_dist_already_built_wins`](../kernel/tests/common/dashboard.rs):
+exhaustively pins the fast-path arm — when `dist/index.html`
+is already present the classifier returns
+`BundleState::DistAlreadyBuilt` regardless of every other
+input (`skip × 2 × pkg × 2 × nm × 2` = 8 cases). Pairs with
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_classifier_skip_env_wins_over_failure_arms`](../kernel/tests/common/dashboard.rs)
+(opt-out wins over package.json missing / node_modules
+missing — the operator's "I'll handle it externally"
+overrides workspace-shape arms),
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_classifier_missing_package_json_hard_fails`](../kernel/tests/common/dashboard.rs)
+(no dist + no opt-out + no package.json ⇒ hard-fail arm),
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_classifier_missing_node_modules_needs_install`](../kernel/tests/common/dashboard.rs)
+(no dist + no opt-out + package.json present + no
+node_modules ⇒ install-then-build arm — the iter52 root cause
+shape),
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_classifier_node_modules_present_needs_build_only`](../kernel/tests/common/dashboard.rs)
+(no dist + no opt-out + node_modules populated ⇒ skip
+install, just build), and
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_node_modules_probe_handles_missing_tree`](../kernel/tests/common/dashboard.rs)
+(`node_modules_vite_present` returns `false` for missing
+tree, present-but-empty-`.bin`, and the half-pruned shape that
+bites in practice). Operator-surface stability is pinned by
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_opt_out_env_var_name_pinned`](../kernel/tests/common/dashboard.rs)
+(env var spellings),
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_violation_token_shape`](../kernel/tests/common/dashboard.rs)
+(panic-message scraper token), and
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_default_timeouts_are_generous_but_bounded`](../kernel/tests/common/dashboard.rs)
+(timeout defaults are bounded, with the iter52 lower-bound
+floor + a 30 min ceiling so a future regression that flipped
+either default to `0` would trip here).
+[`…::inv_live_e2e_dashboard_fe_bundle_present_01_timeout_overrides_clamp_safely`](../kernel/tests/common/dashboard.rs)
+exercises the env-override path: a missing var falls back to
+the default, a positive value is honoured, and `0` /
+unparseable values fall back to the default (the
+"misconfigured CI lane" shape).
+
+**Canonical home.**
+`kernel/tests/common/dashboard.rs::locate_dashboard_dist` (the
+mechanical enforcement site — every panic body carries the
+`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED` token);
+`kernel/tests/common/dashboard.rs::classify_bundle_state` (the
+pure-data classifier the witness tests pin exhaustively);
+`live-e2e/README.md §Dashboard FE bundle contract`
+(operator-facing recipe + opt-out + bounded-wait env var
+documentation).
+
+[`dashboard-fe/dist/index.html`]: ../dashboard-fe/
+[`tests::common::dashboard::locate_dashboard_dist`]: ../kernel/tests/common/dashboard.rs
+[`tests::common::dashboard::classify_bundle_state`]: ../kernel/tests/common/dashboard.rs
+[`tests::common::dashboard::run_npm_bounded`]: ../kernel/tests/common/dashboard.rs
 
 ---
 

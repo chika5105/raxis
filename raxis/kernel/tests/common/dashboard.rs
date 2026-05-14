@@ -30,17 +30,45 @@
 //! `dashboard-fe/dist`, without `open(1)`, and (for the realistic
 //! scenario) without the live-e2e gates set.
 //!
-//! ## Auto-build of the React bundle
+//! ## Auto-build of the React bundle (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`)
 //!
-//! [`locate_dashboard_dist`] runs `npm run build` on demand if
+//! [`locate_dashboard_dist`] runs `npm ci` (when `node_modules/`
+//! is absent) followed by `npm run build` on demand if
 //! `dashboard-fe/dist/index.html` is missing. Without the bundle
 //! the kernel's dashboard server returns HTTP 404 for `/`,
 //! `/login`, and every SPA route — silently breaking operator-side
-//! review during a live-e2e run. CI lanes that pre-build the
-//! bundle (or genuinely want JSON-only) can opt out via
-//! `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1`. Build failure is tolerated
-//! (falls back to JSON-only) so the live-e2e fix loop can still
-//! iterate on non-UI failure modes when the FE is broken.
+//! review during a live-e2e run.
+//!
+//! **Hard-fail policy.** When
+//! `RAXIS_E2E_SKIP_DASHBOARD_BUILD` is **unset** the harness
+//! MUST produce a working bundle. Any failure in the auto-install
+//! / auto-build / post-build-sanity chain panics the test with an
+//! actionable remediation message rather than silently degrading
+//! the dashboard to JSON-only. This is the iter52 lesson: the
+//! previous behaviour swallowed `tsc: command not found` (caused
+//! by a fresh worktree with no `node_modules/`), surfaced only as
+//! a single `[dashboard-bundle]` warning line buried in the cargo
+//! log, and left the operator-facing dashboard UI silently broken
+//! for the duration of the live-e2e run. Dashboard QA workers
+//! attached to such a run could not validate any V2.7 / V3
+//! evidence and reported false-RED verdicts. Hard-fail forces
+//! the failure to surface immediately so the operator fixes
+//! `node_modules/` (or sets the explicit opt-out) before the
+//! test ever submits its first plan.
+//!
+//! **Opt-out (CI lanes that pre-build).** Set
+//! `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` to skip both the install and
+//! the build. The dashboard will serve JSON API only (no UI) and
+//! the harness logs the explicit opt-out. This is the path for
+//! release-build CI that bakes `dashboard-fe/dist/` outside the
+//! cargo-test driver.
+//!
+//! **Bounded waits.** `npm ci` is bounded by
+//! `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS` (default 600 s, override
+//! upward for cold registry pulls). `npm run build` is bounded
+//! by `RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS` (default 300 s). Both
+//! satisfy
+//! [`INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`](../../specs/invariants.md).
 
 #![allow(dead_code)]
 
@@ -70,103 +98,366 @@ pub fn configured_dashboard_port() -> u16 {
         .unwrap_or(DASHBOARD_DEFAULT_PORT)
 }
 
-/// Absolute path to the React production bundle, building it on
-/// demand if missing. The kernel's `[dashboard].static_dir` field
-/// consumes this; without a real `dist/index.html` the dashboard
-/// server returns HTTP 404 for `/`, `/login`, and every SPA route,
-/// which silently breaks operator-side review during a live-e2e
-/// run (the JSON API still works, but no UI). The CARGO_MANIFEST_DIR
-/// anchor is the `kernel/` crate root, so `..` walks to `raxis/`.
+/// Operator opt-out env var (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`).
+/// When set to `1`, [`locate_dashboard_dist`] skips both the
+/// `npm ci` install and the `npm run build` step and returns
+/// `None` (dashboard serves JSON API only). The opt-out is for
+/// release-CI lanes that bake the React bundle externally.
+pub const ENV_SKIP_DASHBOARD_BUILD: &str = "RAXIS_E2E_SKIP_DASHBOARD_BUILD";
+
+/// Bounded-wait override for the `npm ci` step
+/// (`INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` /
+/// `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`). Default 600 s
+/// — generous to cover a cold-registry pull on a fresh worktree.
+pub const ENV_NPM_INSTALL_TIMEOUT_SECS: &str = "RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS";
+const DEFAULT_NPM_INSTALL_TIMEOUT_SECS: u64 = 600;
+
+/// Bounded-wait override for the `npm run build` step. Default
+/// 300 s — generous to cover a full `tsc -b && vite build`
+/// production build on a slow CI runner.
+pub const ENV_NPM_BUILD_TIMEOUT_SECS: &str = "RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS";
+const DEFAULT_NPM_BUILD_TIMEOUT_SECS: u64 = 300;
+
+/// The token included in every panic message produced by the
+/// auto-bundle pipeline so a CI log scraper / operator can pin
+/// the failure mode by substring without parsing the whole
+/// remediation block.
+pub const FE_BUNDLE_VIOLATION_TOKEN: &str =
+    "INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED";
+
+/// Pure-data classification of the `dashboard-fe` workspace state
+/// at the moment the harness needs to mount the dashboard. Drives
+/// the dispatch in [`locate_dashboard_dist`] and is exhaustively
+/// witness-tested below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleState {
+    /// `dashboard-fe/dist/index.html` is already on disk — the
+    /// fast path. No subprocess work needed; the harness just
+    /// hands the path to the kernel.
+    DistAlreadyBuilt,
+
+    /// `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` is set; harness must
+    /// silently return `None` (dashboard serves JSON-only). No
+    /// subprocess work; this is the operator-explicit opt-out.
+    OptOutByEnv,
+
+    /// `dashboard-fe/package.json` is absent. The workspace shape
+    /// is broken; nothing the harness can do. Hard-fail with a
+    /// remediation message.
+    HardFailMissingPackageJson,
+
+    /// `dashboard-fe/node_modules/` is absent (or its
+    /// `.bin/vite` is missing). Run `npm ci` first, then proceed
+    /// to the build step.
+    NeedsInstallThenBuild,
+
+    /// `node_modules/` is populated; just need the build step.
+    NeedsBuildOnly,
+}
+
+/// Pure classifier — exhaustively witnessable without spawning
+/// any subprocess. The actual dispatch in
+/// [`locate_dashboard_dist`] composes this with the install +
+/// build subprocess steps; pinning the policy decision here
+/// means the witness coverage need not depend on the host
+/// having a usable `npm` binary.
+pub fn classify_bundle_state(
+    dist_index_present: bool,
+    skip_env_set: bool,
+    package_json_present: bool,
+    node_modules_vite_present: bool,
+) -> BundleState {
+    if dist_index_present {
+        return BundleState::DistAlreadyBuilt;
+    }
+    if skip_env_set {
+        return BundleState::OptOutByEnv;
+    }
+    if !package_json_present {
+        return BundleState::HardFailMissingPackageJson;
+    }
+    if !node_modules_vite_present {
+        return BundleState::NeedsInstallThenBuild;
+    }
+    BundleState::NeedsBuildOnly
+}
+
+/// Resolve the bounded timeout for `npm ci` from the env, with
+/// fallback to [`DEFAULT_NPM_INSTALL_TIMEOUT_SECS`]. A garbage
+/// or non-positive value falls back to the default (does not
+/// panic) so a misconfigured CI lane does not falsely fail the
+/// invariant witness.
+fn npm_install_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var(ENV_NPM_INSTALL_TIMEOUT_SECS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(DEFAULT_NPM_INSTALL_TIMEOUT_SECS),
+    )
+}
+
+/// Resolve the bounded timeout for `npm run build` from the env.
+/// Same fallback policy as [`npm_install_timeout`].
+fn npm_build_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var(ENV_NPM_BUILD_TIMEOUT_SECS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(DEFAULT_NPM_BUILD_TIMEOUT_SECS),
+    )
+}
+
+/// Run an `npm` subcommand under the given bounded timeout. On
+/// timeout the child is SIGKILL'd (and reaped) and we return an
+/// `Err(reason)` carrying the elapsed wall-clock + the timeout.
+/// On non-zero exit returns `Err` with the exit code. On spawn
+/// failure (e.g., `npm` not installed) returns `Err` with the
+/// underlying `io::Error`.
 ///
-/// Auto-build policy: if `dashboard-fe/dist/index.html` is absent,
-/// run `npm run build` from `dashboard-fe/`. This is opt-out via
-/// `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` for CI lanes that pre-build
-/// the bundle as a separate step. Build failure surfaces a clear
-/// remediation message and falls back to JSON-only mode (rather
-/// than panicking the entire test) so the live-e2e fix loop can
-/// still iterate on non-UI failure modes when the FE is broken.
+/// `inherit_io = true` streams the npm output to the harness's
+/// stderr so the operator sees the real `tsc: command not found`
+/// / `EACCES` / `network unreachable` reason; `false` swallows
+/// for the witness tests that don't want stderr clutter.
+fn run_npm_bounded(
+    fe_root: &Path,
+    args: &[&str],
+    timeout: Duration,
+    inherit_io: bool,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let stdout_cfg = if inherit_io {
+        std::process::Stdio::inherit()
+    } else {
+        std::process::Stdio::null()
+    };
+    let stderr_cfg = if inherit_io {
+        std::process::Stdio::inherit()
+    } else {
+        std::process::Stdio::null()
+    };
+    let mut child = match std::process::Command::new("npm")
+        .args(args)
+        .current_dir(fe_root)
+        .stdout(stdout_cfg)
+        .stderr(stderr_cfg)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(format!(
+                "spawn `npm {}` in {}: {e} (install Node + npm, then re-run, \
+                 or set {}=1 to opt out)",
+                args.join(" "),
+                fe_root.display(),
+                ENV_SKIP_DASHBOARD_BUILD,
+            ));
+        }
+    };
+
+    // Bounded poll on the child. `try_wait` is non-blocking; we
+    // sleep a short tick between polls so we don't spin hot.
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let elapsed = started.elapsed();
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "`npm {}` exited with {status:?} after {:.1}s in {}",
+                    args.join(" "),
+                    elapsed.as_secs_f32(),
+                    fe_root.display(),
+                ));
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "`npm {}` exceeded bounded timeout {:?} (override via \
+                         {} for install or {} for build); SIGKILL'd",
+                        args.join(" "),
+                        timeout,
+                        ENV_NPM_INSTALL_TIMEOUT_SECS,
+                        ENV_NPM_BUILD_TIMEOUT_SECS,
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "`npm {}` try_wait error: {e}",
+                    args.join(" "),
+                ));
+            }
+        }
+    }
+}
+
+/// Probe whether `node_modules/` looks healthy enough to skip
+/// `npm ci`. We pin on `node_modules/.bin/vite` because that is
+/// the binary `npm run build` actually invokes (after the `tsc -b`
+/// step which lives at `node_modules/.bin/tsc`); a partial /
+/// half-pruned `node_modules/` will fail the build with the
+/// exact iter52 symptom (`tsc: command not found`).
+fn node_modules_vite_present(fe_root: &Path) -> bool {
+    fe_root.join("node_modules").join(".bin").join("vite").is_file()
+        || fe_root.join("node_modules").join(".bin").join("tsc").is_file()
+}
+
+/// Absolute path to the React production bundle, installing
+/// deps + building it on demand if missing.
+///
+/// **Invariant**:
+/// `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01` (this is the
+/// canonical enforcement site). When
+/// [`ENV_SKIP_DASHBOARD_BUILD`] is unset, every failure in the
+/// install / build / post-build chain panics the test with the
+/// [`FE_BUNDLE_VIOLATION_TOKEN`] in the panic body. When the
+/// env var is set the function silently returns `None`
+/// (dashboard serves JSON-only) and never panics.
+///
+/// The kernel's `[dashboard].static_dir` field consumes the
+/// returned path; without a real `dist/index.html` the dashboard
+/// server returns HTTP 404 for `/`, `/login`, and every SPA
+/// route. The `CARGO_MANIFEST_DIR` anchor is the `kernel/` crate
+/// root, so `..` walks to `raxis/`.
 pub fn locate_dashboard_dist() -> Option<PathBuf> {
-    let raxis_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.to_path_buf();
+    let raxis_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("kernel/ crate root has a parent (raxis/)")
+        .to_path_buf();
     let fe_root = raxis_root.join("dashboard-fe");
     let dist = fe_root.join("dist");
 
-    if dist.join("index.html").is_file() {
-        return Some(dist);
-    }
-
-    if std::env::var("RAXIS_E2E_SKIP_DASHBOARD_BUILD")
+    let dist_index = dist.join("index.html");
+    let skip_env = std::env::var(ENV_SKIP_DASHBOARD_BUILD)
         .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        eprintln!(
-            "[dashboard-bundle] dashboard-fe/dist not present and \
-             RAXIS_E2E_SKIP_DASHBOARD_BUILD=1 — dashboard will serve \
-             JSON API only (no UI)."
-        );
-        return None;
-    }
+        .unwrap_or(false);
+    let package_json_present = fe_root.join("package.json").is_file();
+    let node_modules_ok = node_modules_vite_present(&fe_root);
 
-    if !fe_root.join("package.json").is_file() {
-        eprintln!(
-            "[dashboard-bundle] dashboard-fe/package.json missing at {}; \
-             cannot auto-build the React bundle. Dashboard will serve \
-             JSON API only (no UI).",
-            fe_root.display()
-        );
-        return None;
-    }
-
-    eprintln!(
-        "[dashboard-bundle] dashboard-fe/dist/index.html missing — \
-         running `npm run build` in {} (opt out via \
-         RAXIS_E2E_SKIP_DASHBOARD_BUILD=1)",
-        fe_root.display()
+    let state = classify_bundle_state(
+        dist_index.is_file(),
+        skip_env,
+        package_json_present,
+        node_modules_ok,
     );
-    let build_started = std::time::Instant::now();
-    let status = std::process::Command::new("npm")
-        .arg("run")
-        .arg("build")
-        .current_dir(&fe_root)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!(
-                "[dashboard-bundle] npm run build OK in {:.1}s",
-                build_started.elapsed().as_secs_f32()
-            );
-        }
-        Ok(s) => {
-            eprintln!(
-                "[dashboard-bundle] npm run build exited with {s:?}; \
-                 dashboard will serve JSON API only (no UI). Re-run \
-                 `cd raxis/dashboard-fe && npm install && npm run build` \
-                 manually to diagnose."
-            );
-            return None;
-        }
-        Err(e) => {
-            eprintln!(
-                "[dashboard-bundle] failed to spawn `npm run build`: \
-                 {e}. Dashboard will serve JSON API only (no UI). \
-                 Install Node + npm or set RAXIS_E2E_SKIP_DASHBOARD_BUILD=1 \
-                 to silence this."
-            );
-            return None;
-        }
-    }
 
-    if dist.join("index.html").is_file() {
-        Some(dist)
-    } else {
-        eprintln!(
-            "[dashboard-bundle] post-build sanity check failed: {} not \
-             present after `npm run build`. Falling back to JSON-only.",
-            dist.join("index.html").display()
-        );
-        None
+    match state {
+        BundleState::DistAlreadyBuilt => Some(dist),
+        BundleState::OptOutByEnv => {
+            eprintln!(
+                "[dashboard-bundle] {ENV_SKIP_DASHBOARD_BUILD}=1 — skipping \
+                 `npm ci` and `npm run build`. Dashboard will serve JSON \
+                 API only (no UI). Per INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, \
+                 this is the explicit opt-out path."
+            );
+            None
+        }
+        BundleState::HardFailMissingPackageJson => {
+            panic!(
+                "{FE_BUNDLE_VIOLATION_TOKEN}: dashboard-fe/package.json missing \
+                 at {}. The harness expected a `dashboard-fe/` workspace at \
+                 the canonical path; without it the React bundle cannot be \
+                 built. Either restore the workspace shape OR set \
+                 {ENV_SKIP_DASHBOARD_BUILD}=1 to explicitly opt out (the \
+                 dashboard will then serve JSON-only).",
+                fe_root.display(),
+            );
+        }
+        BundleState::NeedsInstallThenBuild => {
+            eprintln!(
+                "[dashboard-bundle] dashboard-fe/node_modules/.bin/vite missing — \
+                 running `npm ci` in {} (bounded by {}={}s; opt out via \
+                 {ENV_SKIP_DASHBOARD_BUILD}=1)",
+                fe_root.display(),
+                ENV_NPM_INSTALL_TIMEOUT_SECS,
+                npm_install_timeout().as_secs(),
+            );
+            let install_started = Instant::now();
+            if let Err(reason) = run_npm_bounded(
+                &fe_root,
+                &["ci"],
+                npm_install_timeout(),
+                true,
+            ) {
+                panic!(
+                    "{FE_BUNDLE_VIOLATION_TOKEN}: `npm ci` failed in {}: \
+                     {reason}. Either install a working Node + npm \
+                     toolchain (see raxis/guides/getting-started/), pre-build \
+                     the bundle and re-run, OR set \
+                     {ENV_SKIP_DASHBOARD_BUILD}=1 to explicitly opt out (the \
+                     dashboard will then serve JSON-only).",
+                    fe_root.display(),
+                );
+            }
+            eprintln!(
+                "[dashboard-bundle] npm ci OK in {:.1}s",
+                install_started.elapsed().as_secs_f32(),
+            );
+            run_build_or_panic(&fe_root, &dist, &dist_index)
+        }
+        BundleState::NeedsBuildOnly => {
+            run_build_or_panic(&fe_root, &dist, &dist_index)
+        }
     }
+}
+
+/// Run `npm run build` in `fe_root` and return the dist path on
+/// success, panicking with the [`FE_BUNDLE_VIOLATION_TOKEN`] on
+/// any failure. Factored out so the
+/// [`BundleState::NeedsInstallThenBuild`] and
+/// [`BundleState::NeedsBuildOnly`] arms share one panic shape.
+fn run_build_or_panic(
+    fe_root: &Path,
+    dist: &Path,
+    dist_index: &Path,
+) -> Option<PathBuf> {
+    eprintln!(
+        "[dashboard-bundle] running `npm run build` in {} (bounded by {}={}s; \
+         opt out via {ENV_SKIP_DASHBOARD_BUILD}=1)",
+        fe_root.display(),
+        ENV_NPM_BUILD_TIMEOUT_SECS,
+        npm_build_timeout().as_secs(),
+    );
+    let build_started = Instant::now();
+    if let Err(reason) = run_npm_bounded(
+        fe_root,
+        &["run", "build"],
+        npm_build_timeout(),
+        true,
+    ) {
+        panic!(
+            "{FE_BUNDLE_VIOLATION_TOKEN}: `npm run build` failed in {}: \
+             {reason}. Diagnose with `cd raxis/dashboard-fe && npm ci && \
+             npm run build` directly, OR set \
+             {ENV_SKIP_DASHBOARD_BUILD}=1 to explicitly opt out (the \
+             dashboard will then serve JSON-only).",
+            fe_root.display(),
+        );
+    }
+    eprintln!(
+        "[dashboard-bundle] npm run build OK in {:.1}s",
+        build_started.elapsed().as_secs_f32(),
+    );
+    if !dist_index.is_file() {
+        panic!(
+            "{FE_BUNDLE_VIOLATION_TOKEN}: post-build sanity check failed in \
+             {}: {} is not a file after `npm run build` returned success. \
+             The build step is lying about success — inspect the npm output \
+             above for warnings, OR set {ENV_SKIP_DASHBOARD_BUILD}=1 to \
+             explicitly opt out (the dashboard will then serve JSON-only).",
+            fe_root.display(),
+            dist_index.display(),
+        );
+    }
+    Some(dist.to_path_buf())
 }
 
 /// Result of [`mint_dashboard_jwt`]. `None` ⇒ best-effort failure
@@ -473,4 +764,212 @@ pub fn open_dashboard_with_autologin(
         );
     }
     Some(url)
+}
+
+// ---------------------------------------------------------------------------
+// Witness tests for INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01` — exhaustive
+    /// pure-data witness over [`classify_bundle_state`]. Pinning
+    /// the policy decision here means a future maintainer cannot
+    /// silently re-introduce the iter52 silent-degrade behaviour
+    /// (every regression flips at least one of these arms).
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_dist_already_built_wins() {
+        // Even with everything else broken, an existing dist
+        // index file is always the fast path — never re-build.
+        for skip in [false, true] {
+            for pkg in [false, true] {
+                for nm in [false, true] {
+                    assert_eq!(
+                        classify_bundle_state(true, skip, pkg, nm),
+                        BundleState::DistAlreadyBuilt,
+                        "skip={skip} pkg={pkg} nm={nm}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_skip_env_wins_over_failure_arms() {
+        // Opt-out wins over package_json_missing /
+        // node_modules_missing — the operator's "I'll handle the
+        // bundle externally" wins over the workspace-shape arms.
+        for pkg in [false, true] {
+            for nm in [false, true] {
+                assert_eq!(
+                    classify_bundle_state(false, true, pkg, nm),
+                    BundleState::OptOutByEnv,
+                    "pkg={pkg} nm={nm}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_missing_package_json_hard_fails() {
+        // No dist + no opt-out + no package.json ⇒ workspace
+        // shape is broken; hard-fail.
+        for nm in [false, true] {
+            assert_eq!(
+                classify_bundle_state(false, false, false, nm),
+                BundleState::HardFailMissingPackageJson,
+                "nm={nm}",
+            );
+        }
+    }
+
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_missing_node_modules_needs_install() {
+        // No dist + no opt-out + package.json present + no
+        // node_modules ⇒ run `npm ci` first then build.
+        assert_eq!(
+            classify_bundle_state(false, false, true, false),
+            BundleState::NeedsInstallThenBuild,
+        );
+    }
+
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_node_modules_present_needs_build_only() {
+        // No dist + no opt-out + package.json + node_modules.bin
+        // populated ⇒ skip install, just build.
+        assert_eq!(
+            classify_bundle_state(false, false, true, true),
+            BundleState::NeedsBuildOnly,
+        );
+    }
+
+    /// The opt-out env var name is part of the operator-facing
+    /// surface — the [`classify_bundle_state`] decision pivots
+    /// on it and the `dashboard-bundle` log lines reference it
+    /// verbatim. Pin the spelling so a typo (`SKIP_DASHBOARD` vs
+    /// `SKIP_BUILD` etc.) trips here rather than silently
+    /// breaking the opt-out path on a release-CI lane.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_opt_out_env_var_name_pinned() {
+        assert_eq!(ENV_SKIP_DASHBOARD_BUILD, "RAXIS_E2E_SKIP_DASHBOARD_BUILD");
+        assert_eq!(ENV_NPM_INSTALL_TIMEOUT_SECS, "RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS");
+        assert_eq!(ENV_NPM_BUILD_TIMEOUT_SECS, "RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS");
+    }
+
+    /// Every panic produced by the auto-bundle pipeline carries
+    /// the [`FE_BUNDLE_VIOLATION_TOKEN`] verbatim so a CI log
+    /// scraper can pin the failure mode without parsing the
+    /// whole remediation body. Pin the token shape so a
+    /// rephrase doesn't silently break the scraper.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_violation_token_shape() {
+        assert_eq!(
+            FE_BUNDLE_VIOLATION_TOKEN,
+            "INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED",
+        );
+    }
+
+    /// `npm install` / `npm run build` timeouts default to
+    /// generous-but-bounded values. Pin the defaults so a
+    /// regression that flipped one of them to `0` (which would
+    /// disable the bound, re-introducing the
+    /// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` violation)
+    /// trips here.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_default_timeouts_are_generous_but_bounded() {
+        assert!(DEFAULT_NPM_INSTALL_TIMEOUT_SECS >= 60, "install timeout must allow a cold registry pull");
+        assert!(DEFAULT_NPM_INSTALL_TIMEOUT_SECS <= 1800, "install timeout must be bounded (30 min ceiling)");
+        assert!(DEFAULT_NPM_BUILD_TIMEOUT_SECS >= 30, "build timeout must allow a real `tsc -b && vite build`");
+        assert!(DEFAULT_NPM_BUILD_TIMEOUT_SECS <= 900, "build timeout must be bounded (15 min ceiling)");
+    }
+
+    /// `node_modules_vite_present` returns `false` for an
+    /// empty / missing tree (the iter52 root-cause shape: a
+    /// fresh `git worktree add` with no `npm ci` ever run leaves
+    /// `dashboard-fe/node_modules/` absent, which the previous
+    /// implementation silently glossed over and tried to run
+    /// `npm run build` against, getting `tsc: command not found`).
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_node_modules_probe_handles_missing_tree() {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        // No node_modules/ at all.
+        assert!(
+            !node_modules_vite_present(tmp.path()),
+            "missing node_modules/ MUST classify as absent",
+        );
+        // node_modules/ present but empty (.bin missing) — the
+        // half-pruned shape that bites in practice.
+        std::fs::create_dir_all(tmp.path().join("node_modules"))
+            .expect("mkdir node_modules");
+        assert!(
+            !node_modules_vite_present(tmp.path()),
+            "node_modules/ without .bin/vite|.bin/tsc MUST classify as absent",
+        );
+        // node_modules/.bin/vite present (synthetic shape) — happy
+        // path. We only stat the file so any non-empty marker works.
+        std::fs::create_dir_all(tmp.path().join("node_modules").join(".bin"))
+            .expect("mkdir node_modules/.bin");
+        std::fs::write(
+            tmp.path().join("node_modules").join(".bin").join("vite"),
+            b"#!/bin/sh\nexit 0\n",
+        )
+        .expect("write fake vite");
+        assert!(
+            node_modules_vite_present(tmp.path()),
+            "node_modules/.bin/vite presence MUST classify as healthy",
+        );
+    }
+
+    /// Bounded-timeout helpers honour the env-var override and
+    /// fall back to the default on a parse error / empty
+    /// string / non-positive value (so a misconfigured CI lane
+    /// does not falsely fail the invariant witness).
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_timeout_overrides_clamp_safely() {
+        // Snapshot + restore the env vars so the test is
+        // hermetic against parallel runs in the same process.
+        struct EnvGuard(&'static str, Option<String>);
+        impl EnvGuard {
+            fn set(key: &'static str, value: &str) -> Self {
+                let prior = std::env::var(key).ok();
+                // SAFETY: Test-only mutation guarded by Drop.
+                unsafe { std::env::set_var(key, value); }
+                EnvGuard(key, prior)
+            }
+            fn unset(key: &'static str) -> Self {
+                let prior = std::env::var(key).ok();
+                // SAFETY: Test-only mutation guarded by Drop.
+                unsafe { std::env::remove_var(key); }
+                EnvGuard(key, prior)
+            }
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.1 {
+                    // SAFETY: Test-only restore.
+                    Some(v) => unsafe { std::env::set_var(self.0, v); },
+                    None    => unsafe { std::env::remove_var(self.0); },
+                }
+            }
+        }
+
+        let _g = EnvGuard::unset(ENV_NPM_INSTALL_TIMEOUT_SECS);
+        assert_eq!(npm_install_timeout(), Duration::from_secs(DEFAULT_NPM_INSTALL_TIMEOUT_SECS));
+        let _g = EnvGuard::set(ENV_NPM_INSTALL_TIMEOUT_SECS, "1200");
+        assert_eq!(npm_install_timeout(), Duration::from_secs(1200));
+        let _g = EnvGuard::set(ENV_NPM_INSTALL_TIMEOUT_SECS, "0");
+        assert_eq!(
+            npm_install_timeout(),
+            Duration::from_secs(DEFAULT_NPM_INSTALL_TIMEOUT_SECS),
+            "non-positive override MUST fall back to default",
+        );
+        let _g = EnvGuard::set(ENV_NPM_INSTALL_TIMEOUT_SECS, "garbage");
+        assert_eq!(
+            npm_install_timeout(),
+            Duration::from_secs(DEFAULT_NPM_INSTALL_TIMEOUT_SECS),
+            "unparseable override MUST fall back to default",
+        );
+    }
 }

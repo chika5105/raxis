@@ -208,6 +208,84 @@ service to start, which env var to set) on failure.
 
 ---
 
+## Dashboard FE bundle contract (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`)
+
+Every realistic-scenario / full-lifecycle live-e2e run mounts
+the operator dashboard at `127.0.0.1:19820` (override via
+`RAXIS_E2E_DASHBOARD_PORT`). The dashboard is the operator's
+primary visibility surface for an in-flight run; without the
+React production bundle on disk it falls back to JSON-only
+mode and every SPA route returns HTTP 404 — silently breaking
+operator-side review and Dashboard QA workers attached to the
+run.
+
+**Auto-install + auto-build (default).** When
+`RAXIS_E2E_SKIP_DASHBOARD_BUILD` is **unset**, the harness
+([`tests::common::dashboard::locate_dashboard_dist`]) ensures
+the bundle is present before the kernel binds the dashboard
+port:
+
+1. Fast path: if `dashboard-fe/dist/index.html` already exists
+   on disk, the harness uses it as-is (no subprocess work).
+2. If `dashboard-fe/node_modules/.bin/vite` is absent, the
+   harness runs `npm ci` in `dashboard-fe/` (bounded by
+   `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS`, default 600 s).
+3. The harness then runs `npm run build` in `dashboard-fe/`
+   (bounded by `RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS`, default
+   300 s).
+4. Post-build sanity: the harness re-checks
+   `dashboard-fe/dist/index.html` exists.
+
+**Hard-fail policy.** Any failure in steps 2-4 panics the
+test with a panic body containing the literal token
+`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED`.
+Failure modes that hard-fail:
+
+| Failure                              | Surface                                 |
+|--------------------------------------|-----------------------------------------|
+| `dashboard-fe/package.json` missing  | Workspace shape broken; restore or opt out. |
+| `npm ci` spawn failure (no Node)     | Install Node + npm; toolchain hint in panic body. |
+| `npm ci` non-zero exit               | Real install failure (cold registry, EACCES, …); diagnose with the surfaced npm output. |
+| `npm ci` timeout                     | Cold pull >600 s; raise `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS`. |
+| `npm run build` failure / timeout    | Real `tsc -b && vite build` failure; surfaced in npm output. |
+| Post-build dist still absent         | Build step lying about success; inspect npm warnings. |
+
+This is the iter52 lesson: the previous behaviour silently
+swallowed `tsc: command not found` (caused by a fresh worktree
+with no `node_modules/`), surfaced only as a single
+`[dashboard-bundle]` warning line buried in the cargo log, and
+left the dashboard UI broken for the entire 65 min run.
+Dashboard QA workers attached to such a run reported false-RED
+verdicts and consumed an entire iteration cycle. Hard-fail
+forces the failure to surface immediately so the operator
+fixes `node_modules/` (or sets the explicit opt-out) before
+the test ever submits its first plan.
+
+**Opt-out (release-CI lanes that pre-build).** Set
+`RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` to skip both the install
+and the build step. The harness logs an explicit opt-out line
+and the dashboard serves JSON API only (no UI). Use this when
+your CI workflow bakes `dashboard-fe/dist/` outside the
+cargo-test driver.
+
+**Bounded-wait composition.** Both subprocess steps satisfy
+`INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` via
+[`tests::common::dashboard::run_npm_bounded`], which polls
+`Child::try_wait` and `SIGKILL`s the child when the bounded
+deadline elapses. Non-positive / unparseable timeout overrides
+fall back to the default rather than disabling the bound.
+
+**Witness coverage:**
+[`tests::common::dashboard::tests::inv_live_e2e_dashboard_fe_bundle_present_01_*`](../kernel/tests/common/dashboard.rs)
+— 9 tests covering classifier exhaustion, env-var spelling,
+panic-token shape, timeout default bounds, env-override
+clamping, and `node_modules` probe edge cases.
+
+[`tests::common::dashboard::locate_dashboard_dist`]: ../kernel/tests/common/dashboard.rs
+[`tests::common::dashboard::run_npm_bounded`]: ../kernel/tests/common/dashboard.rs
+
+---
+
 ## Harness preflight: host disk hygiene + auto-bring-up + bounded waits
 
 The realistic-scenario kernel test
