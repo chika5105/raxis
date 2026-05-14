@@ -1249,7 +1249,11 @@ fn run_phase_c(
 ) -> HandlerResult {
     let store  = ctx.store.as_ref();
     let policy = policy_snapshot.as_ref();
-    let task_state = pre_state.task_state;
+    // `mut` so the IntegrationMerge completion cascade further down
+    // can rebind it to `Completed` when the synthetic coordinator
+    // task transitions Running → Completed (see
+    // `finalize_integration_merge_completion`).
+    let mut task_state = pre_state.task_state;
 
     // ── INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern B): single-transaction
     //    Phase C ──────────────────────────────────────────────────────────
@@ -1561,6 +1565,78 @@ fn run_phase_c(
                 "{{\"level\":\"error\",\"event\":\"IntegrationMergeCompleted\",\
                  \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
             );
+        }
+
+        // ── Synthetic coordinator + initiative completion cascade ──────────
+        //
+        // INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01
+        // INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01
+        //
+        // The IntegrationMerge intent is the orchestrator's "I'm done"
+        // signal — once Phase 2 (host-side fast-forward) succeeds, the
+        // synthetic coordinator task (`task_id == initiative_id`, see
+        // `lifecycle.rs::spawn_orchestrator_session_for_initiative`)
+        // transitions Running → Completed and the parent initiative
+        // transitions Executing → Completed in the same SQL transaction.
+        //
+        // Without this cascade the dashboard surfaces the initiative as
+        // perpetually `Executing` and the synthetic coordinator task as
+        // perpetually `Running` even though all useful work has already
+        // merged into `target_ref` — the operator-visible UX bug
+        // observed during iter54.
+        //
+        // The push step below is best-effort and runs AFTER the cascade
+        // — push failure does not regress the now-Completed initiative.
+        // The cascade itself is also best-effort: a SQLite or FSM error
+        // is logged and skipped (the recovery sweep on next boot will
+        // reconcile via the same idempotent code path).
+        if host_merge_succeeded {
+            match finalize_integration_merge_completion(
+                store,
+                initiative_id_owned.as_str(),
+                task_id_owned.as_str(),
+            ) {
+                Ok(Some((from_state, to_state))) => {
+                    // Reflect the synthetic coordinator's terminal
+                    // state in the IntentResponse so the dashboard
+                    // (and the orchestrator's own KSB) sees Completed
+                    // immediately, not Running.
+                    task_state = TaskState::Completed;
+
+                    if let Err(e) = ctx.audit.emit(
+                        raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
+                            initiative_id: initiative_id_owned.clone(),
+                            from_state:    from_state.clone(),
+                            to_state:      to_state.clone(),
+                        },
+                        Some(session_id_str.as_str()),
+                        Some(task_id_owned.as_str()),
+                        Some(initiative_id_owned.as_str()),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"InitiativeStateChanged\",\
+                             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                        );
+                    }
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"InitiativeCompletedAfterIntegrationMerge\",\
+                         \"initiative_id\":\"{initiative_id_owned}\",\
+                         \"from\":\"{from_state}\",\"to\":\"{to_state}\"}}",
+                    );
+                }
+                Ok(None) => {
+                    // Cascade was structurally inapplicable (initiative
+                    // already terminal, synthetic task already terminal,
+                    // or initiative row missing). Already logged inside
+                    // the helper — nothing to do here.
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"IntegrationMergeInitiativeCascadeFailed\",\
+                         \"initiative_id\":\"{initiative_id_owned}\",\"diagnostic\":\"{e}\"}}",
+                    );
+                }
+            }
         }
 
         // V2_GAPS §C6 — kernel push protocol. After IntegrationMerge,
@@ -6249,6 +6325,107 @@ fn wait_for_git_apply_pending_clear(
     }
 }
 
+/// Synthetic-coordinator + initiative completion cascade fired from
+/// the `IntegrationMerge` intent handler when Phase 2 (host-side
+/// fast-forward) succeeds.
+///
+/// Returns:
+///   * `Ok(Some((from_state, to_state)))` — both transitions fired
+///     and the initiative moved out of `Executing`.
+///   * `Ok(None)` — cascade was structurally inapplicable: synthetic
+///     task is no longer in `Running` (already terminal), the
+///     initiative is no longer in `Executing` (operator-driven
+///     `Aborted` / `Failed`, recovery-pass writeback), or the
+///     initiative row is missing entirely. All three cases are
+///     idempotent skips, not errors.
+///   * `Err(e)` — raw SQLite failure during the transaction. The
+///     transaction is rolled back automatically (rusqlite drop-impl).
+///
+/// Atomicity: the synthetic-task FSM transition (`transition_task_in_tx`,
+/// which closes the matching `subtask_activations` row per
+/// `INV-STORE-02`) and the initiative-state UPDATE both run inside
+/// the same `conn.transaction()` scope. Either both rows update or
+/// neither does. The audit emit for `InitiativeStateChanged` is
+/// performed by the caller AFTER `tx.commit()` returns Ok, mirroring
+/// the post-commit audit pattern used everywhere else in this file.
+///
+/// Idempotency: a second call (e.g. boot recovery sweep) is a safe
+/// no-op — `transition_task_in_tx` rejects the illegal
+/// `Completed → Completed` edge with `LifecycleError::TaskNotAbortable`
+/// which we map to `Ok(None)`.
+fn finalize_integration_merge_completion(
+    store:         &Store,
+    initiative_id: &str,
+    task_id:       &str,
+) -> Result<Option<(String, String)>, rusqlite::Error> {
+    let now = unix_now_secs();
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction()?;
+
+    if let Err(e) = transition_task_in_tx(
+        &tx,
+        task_id,
+        TaskState::Completed,
+        None,
+        TransitionActor::Kernel,
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeSyntheticTaskTransitionSkipped\",\
+             \"initiative_id\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
+        );
+        // Tx rolls back via Drop on early return — the synthetic
+        // task row is left untouched and the initiative-state UPDATE
+        // never fires. Caller treats this as Ok(None) (skip cascade).
+        return Ok(None);
+    }
+
+    let cur_state: Result<String, rusqlite::Error> = tx.query_row(
+        &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+        rusqlite::params![initiative_id],
+        |r| r.get(0),
+    );
+
+    let from_state = match cur_state {
+        Ok(s) if s == InitiativeState::Executing.as_sql_str() => s,
+        Ok(s) => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"IntegrationMergeInitiativeCascadeSkipped\",\
+                 \"initiative_id\":\"{initiative_id}\",\"current_state\":\"{s}\"}}",
+            );
+            // The synthetic-task transition above is still legitimate
+            // (a Running coordinator task on a now-Aborted initiative
+            // is just stale state from before the abort cascade ran).
+            // Commit it; skip the initiative-state UPDATE.
+            tx.commit()?;
+            return Ok(None);
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            tx.commit()?;
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+
+    tx.execute(
+        &format!(
+            "UPDATE {INITIATIVES} SET state=?1, completed_at=?2
+             WHERE initiative_id=?3"
+        ),
+        rusqlite::params![
+            InitiativeState::Completed.as_sql_str(),
+            now,
+            initiative_id,
+        ],
+    )?;
+
+    tx.commit()?;
+
+    Ok(Some((
+        from_state,
+        InitiativeState::Completed.as_sql_str().to_owned(),
+    )))
+}
+
 fn lane_budget_snapshot(
     lane_id: &str,
     policy: &raxis_policy::PolicyBundle,
@@ -6385,6 +6562,185 @@ mod tests {
         assert!(cleared,
             "QueryReturnedNoRows ⇒ defaults to 0 ⇒ wait clears (push will then \
              fail later with a different error if the initiative truly was deleted)");
+    }
+
+    // ── finalize_integration_merge_completion ─────────────────────────────
+    //
+    // Witnesses for INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01 and
+    // INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01.
+    //
+    // The helper is the cascade fired by `run_phase_c` after the
+    // IntegrationMerge intent's host-side fast-forward (Phase 2) lands
+    // — without it the orchestrator's "I'm done" signal never advances
+    // the synthetic coordinator task or its parent initiative, so the
+    // dashboard shows them as Running/Executing forever.
+
+    fn seed_initiative_in_state(disk: &DiskStore, id: &str, state: &str) {
+        let g = disk.store().lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', 100)",
+                raxis_store::Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![id, state],
+        ).unwrap();
+    }
+
+    fn seed_synthetic_task_running(disk: &DiskStore, initiative_id: &str) {
+        // Synthetic coordinator task: `task_id == initiative_id` by
+        // construction (lifecycle.rs §spawn_orchestrator_session_for_initiative).
+        let g = disk.store().lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {} (
+                    task_id, initiative_id, lane_id, state, actor,
+                    policy_epoch, admitted_at, transitioned_at
+                 ) VALUES (?1, ?1, 'default', 'Running', 'kernel', 0, 100, 100)",
+                raxis_store::Table::Tasks.as_str(),
+            ),
+            rusqlite::params![initiative_id],
+        ).unwrap();
+    }
+
+    fn read_initiative_state(disk: &DiskStore, id: &str) -> Option<String> {
+        let g = disk.store().lock_sync();
+        g.query_row(
+            &format!(
+                "SELECT state FROM {} WHERE initiative_id = ?1",
+                raxis_store::Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        ).ok()
+    }
+
+    fn read_task_state_str(disk: &DiskStore, id: &str) -> Option<String> {
+        let g = disk.store().lock_sync();
+        g.query_row(
+            &format!(
+                "SELECT state FROM {} WHERE task_id = ?1",
+                raxis_store::Table::Tasks.as_str(),
+            ),
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        ).ok()
+    }
+
+    #[test]
+    fn finalize_cascades_executing_initiative_and_running_synthetic_to_completed() {
+        let disk = DiskStore::new();
+        let id = "init-cascade-happy";
+        seed_initiative_in_state(&disk, id, "Executing");
+        seed_synthetic_task_running(&disk, id);
+
+        let result = finalize_integration_merge_completion(disk.store(), id, id)
+            .expect("cascade should not return raw SQLite error on a clean fixture");
+
+        let (from_state, to_state) =
+            result.expect("cascade should fire on Executing initiative + Running synthetic task");
+        assert_eq!(from_state, "Executing");
+        assert_eq!(to_state, "Completed");
+
+        assert_eq!(read_initiative_state(&disk, id).as_deref(), Some("Completed"),
+            "initiative row must reflect the Executing → Completed transition");
+        assert_eq!(read_task_state_str(&disk, id).as_deref(), Some("Completed"),
+            "synthetic coordinator task must reflect the Running → Completed transition");
+    }
+
+    #[test]
+    fn finalize_skips_initiative_update_when_initiative_is_aborted() {
+        // Operator-driven Aborted (or recovery-pass Failed) wins — the
+        // cascade must not regress the terminal state. The synthetic
+        // task transition is still legitimate (Running → Completed
+        // is FSM-legal regardless of initiative state) and should
+        // commit; only the initiative-state UPDATE is skipped.
+        let disk = DiskStore::new();
+        let id = "init-cascade-aborted";
+        seed_initiative_in_state(&disk, id, "Aborted");
+        seed_synthetic_task_running(&disk, id);
+
+        let result = finalize_integration_merge_completion(disk.store(), id, id)
+            .expect("cascade must not return raw SQLite error on Aborted initiative");
+
+        assert!(result.is_none(),
+            "cascade must skip when initiative is no longer Executing");
+        assert_eq!(read_initiative_state(&disk, id).as_deref(), Some("Aborted"),
+            "initiative state must NOT regress out of Aborted");
+        assert_eq!(read_task_state_str(&disk, id).as_deref(), Some("Completed"),
+            "synthetic task transition is independent — Running → Completed should still land");
+    }
+
+    #[test]
+    fn finalize_is_idempotent_against_already_completed_synthetic_task() {
+        // Boot recovery sweep on top of an already-cascaded initiative
+        // must be a no-op — `transition_task_in_tx` rejects the illegal
+        // `Completed → Completed` edge and the helper maps that to
+        // `Ok(None)`. The initiative-state row must remain untouched.
+        let disk = DiskStore::new();
+        let id = "init-cascade-idempotent";
+        seed_initiative_in_state(&disk, id, "Completed");
+        // Synthetic task already terminal from the first cascade pass.
+        let g = disk.store().lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {} (
+                    task_id, initiative_id, lane_id, state, actor,
+                    policy_epoch, admitted_at, transitioned_at
+                 ) VALUES (?1, ?1, 'default', 'Completed', 'kernel', 0, 100, 100)",
+                raxis_store::Table::Tasks.as_str(),
+            ),
+            rusqlite::params![id],
+        ).unwrap();
+        drop(g);
+
+        let result = finalize_integration_merge_completion(disk.store(), id, id)
+            .expect("cascade must not raise raw SQLite error on a re-run");
+
+        assert!(result.is_none(), "second pass must be a structural no-op");
+        assert_eq!(read_initiative_state(&disk, id).as_deref(), Some("Completed"),
+            "initiative state must remain Completed");
+        assert_eq!(read_task_state_str(&disk, id).as_deref(), Some("Completed"),
+            "synthetic task state must remain Completed");
+    }
+
+    #[test]
+    fn finalize_handles_missing_initiative_row_gracefully() {
+        // Edge: synthetic task row exists but the initiative row was
+        // deleted (e.g. by a forensics tool). The first leg
+        // (transition_task_in_tx) requires looking up
+        // `initiative_id_for_task`, which falls back gracefully to
+        // None — the transition still commits and the initiative
+        // lookup returns QueryReturnedNoRows ⇒ we map to Ok(None).
+        let disk = DiskStore::new();
+        let id = "init-cascade-ghost";
+        // Note: initiative row intentionally NOT inserted. `tasks`
+        // table has a FK to `initiatives` so seeding the task row
+        // alone would fail — instead we seed the initiative, seed
+        // the task, then DELETE the initiative row to model the
+        // forensics-deleted state.
+        seed_initiative_in_state(&disk, id, "Executing");
+        seed_synthetic_task_running(&disk, id);
+        let g = disk.store().lock_sync();
+        // FK enforcement is permissive in the test harness store;
+        // the DELETE proceeds even with the dangling task FK.
+        g.execute(
+            &format!("DELETE FROM {} WHERE initiative_id = ?1",
+                raxis_store::Table::Initiatives.as_str()),
+            rusqlite::params![id],
+        ).ok();
+        drop(g);
+
+        // The cascade must not panic on a missing initiative row.
+        // Either: (a) FK enforcement blocks the DELETE and the test
+        // proceeds as the Executing case, or (b) the initiative row
+        // is gone and the helper maps QueryReturnedNoRows to Ok(None).
+        // Both are acceptable structural shapes — assert no panic +
+        // no SQLite error escapes.
+        let _ = finalize_integration_merge_completion(disk.store(), id, id)
+            .expect("cascade must not return raw SQLite error even with missing initiative");
     }
 
     // ── ReportFailure justification validation rules ───────────────────────

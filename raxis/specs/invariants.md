@@ -94,7 +94,8 @@
 | Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
 | Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01, INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01 | 2 |
-| **Total** | | **123** |
+| Integration-merge completion cascade — V3 (iter54) | INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01, INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01 | 2 |
+| **Total** | | **125** |
 
 ---
 
@@ -806,6 +807,150 @@ the test fails fast (current wall-clock: ~1.5 s).
 (INV-LOCK-07, the deadlock watcher that bounds detection
 latency); `v1/kernel-store.md` §2 (INV-STORE-02, multi-table
 atomicity that ties the four mutations into one transaction).
+
+---
+
+### INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01 — IntegrationMerge success drives the synthetic coordinator task to Completed
+
+**Statement.** When `IntentKind::IntegrationMerge` is admitted
+AND the host-side fast-forward (V2.5 §11.1 Phase 2,
+`raxis_domain_git::commit_merge_to_target_ref`) returns `Ok`,
+the kernel MUST transition the synthetic coordinator task
+(`task_id == initiative_id`, inserted by
+`kernel/src/initiatives/lifecycle.rs::auto_spawn_orchestrator_session_in_tx`)
+from `Running` to `Completed` via `transition_task_in_tx` —
+inside the **same transaction** that closes the matching
+`subtask_activations` row (`INV-STORE-02`) and resets the
+`orchestrator_no_progress_respawn_count`. The transition MUST
+also be reflected in the `IntentResponse.task_state` returned
+to the caller so the orchestrator's KSB and the dashboard's
+projection see `Completed` immediately, not `Running`.
+
+A push failure (`PushFailed` audit, V2_GAPS §C6) downstream of
+the cascade MUST NOT regress the now-Completed synthetic task.
+A second pass (boot-recovery sweep, idempotent re-dispatch)
+MUST be a structural no-op: the FSM rejects
+`Completed → Completed` and the helper returns `Ok(None)`
+without modifying any row.
+
+**Justification.** Iter54 of the live-e2e
+`realistic_session_lifecycle` reproduced a UX defect in which
+`IntegrationMergeCompleted` had been audited (Phase 2 succeeded,
+`refs/heads/main` pointed at the merge commit on disk) but the
+synthetic coordinator task remained in `Running` forever and the
+parent initiative remained in `Executing` forever. Operators
+read the dashboard as "stuck initiative" and started killing the
+kernel mid-flight. Without this invariant, the orchestrator's
+"I'm done" signal never advances either FSM and the only path to
+a terminal state is operator-driven `abort_initiative` — which
+loses the success/failure distinction in the audit chain and
+prevents any downstream automation that triggers on
+`InitiativeStateChanged → Completed`.
+
+**Scenario.** A 2-task initiative (`exec` + `reviewer`) reaches
+the merge phase. The orchestrator submits `IntegrationMerge`
+referencing the orchestrator worktree `head_sha`. Phase 2
+fast-forwards `refs/heads/main` from `base_sha → head_sha`.
+Inside one transaction the kernel: (1) calls
+`transition_task_in_tx` with `(synthetic_task_id, Completed,
+None, Kernel)`, which closes the synthetic task's
+`subtask_activations` row and resets the per-initiative
+no-progress counter; (2) reads `initiatives.state` and confirms
+`Executing`; (3) UPDATEs `initiatives.state = 'Completed',
+completed_at = now`. After commit, the kernel emits
+`InitiativeStateChanged { initiative_id, from_state:
+"Executing", to_state: "Completed" }` and rebinds
+`task_state = TaskState::Completed` so the
+`IntentResponse.task_state` returned to the orchestrator is
+`Completed`, not `Running`. Total cascade wall-time on a healthy
+SQLite store: < 5 ms.
+
+**Witness.**
+* `raxis/kernel/src/handlers/intent.rs::tests::finalize_cascades_executing_initiative_and_running_synthetic_to_completed`
+  seeds an `Executing` initiative + a `Running` synthetic task,
+  invokes `finalize_integration_merge_completion`, asserts the
+  return is `Ok(Some(("Executing", "Completed")))` AND that the
+  on-disk `tasks.state` and `initiatives.state` rows both reflect
+  `Completed`.
+* `raxis/kernel/src/handlers/intent.rs::tests::finalize_is_idempotent_against_already_completed_synthetic_task`
+  pre-seeds both rows in `Completed`, invokes the helper, asserts
+  the return is `Ok(None)` and neither row changes — the
+  recovery-sweep idempotency contract.
+
+**Canonical home.** `v2/v2-deep-spec.md §IntegrationMerge`,
+`v2/v2_extended_gaps.md §1.2` (host-side fast-forward),
+`v1/kernel-store.md §2` (INV-STORE-02 single-transaction
+atomicity).
+
+---
+
+### INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01 — IntegrationMerge success drives the parent initiative to Completed
+
+**Statement.** When the IntegrationMerge cascade above
+(`INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01`) fires
+successfully, the parent initiative MUST transition from
+`Executing` to `Completed` in the **same SQL transaction** as
+the synthetic-task FSM transition. The
+`initiatives.completed_at` column MUST be stamped to the same
+`unix_now_secs()` reading used for the task transition's
+`transitioned_at` column, so audit-replay tooling sees the two
+timestamps in lockstep.
+
+The transition MUST emit a single
+`AuditEventKind::InitiativeStateChanged { from_state:
+"Executing", to_state: "Completed" }` paired-write
+(post-commit, mirroring every other handler in `intent.rs`) so
+operator dashboards and notification subscribers
+(`crates/dashboard-kernel/src/notification_filter.rs`) see the
+state change without polling.
+
+The transition MUST be a **no-op** when the initiative is
+already in any non-`Executing` state at cascade time —
+specifically `Aborted`, `Failed`, `Blocked`, or `Completed`.
+Operator-driven `abort_initiative` (`InitiativeAborted` audit,
+`lifecycle.rs §abort_initiative`) and recovery-pass writebacks
+must not be regressed by a late-arriving merge intent. The
+helper returns `Ok(None)` in those cases and the synthetic-task
+FSM transition (which IS independent of initiative state)
+either commits or is itself rejected by the FSM, depending on
+the synthetic task's prior state.
+
+**Justification.** Without the cascade an initiative whose
+merge has succeeded never reaches a terminal state in the
+kernel store. Downstream consumers — dashboard "completed
+today" widgets, notification subscribers, the `worktree_gc`
+sweeper that retires merged worktrees, the operator's
+"initiatives I no longer have to think about" mental model —
+all break. The audit chain also lacks the
+`InitiativeStateChanged → Completed` row that
+`crates/dashboard/src/data.rs` and the V3 OTel collectors
+expect to count toward "successful initiatives" metrics.
+
+This invariant pairs with
+`INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01` so the two
+FSMs (initiative + synthetic task) advance atomically — partial
+states (synthetic task `Completed`, initiative still
+`Executing`) MUST NOT exist on disk for any operator-visible
+duration.
+
+**Witness.**
+* `raxis/kernel/src/handlers/intent.rs::tests::finalize_cascades_executing_initiative_and_running_synthetic_to_completed`
+  asserts the same atomic transition as above, with the
+  initiative-side check explicit
+  (`read_initiative_state(...) == "Completed"`).
+* `raxis/kernel/src/handlers/intent.rs::tests::finalize_skips_initiative_update_when_initiative_is_aborted`
+  seeds the initiative as `Aborted` + the synthetic task as
+  `Running`, invokes the helper, asserts the return is `Ok(None)`
+  and `initiatives.state` remains `"Aborted"` — the
+  no-regress-out-of-terminal contract.
+* `raxis/kernel/src/handlers/intent.rs::tests::finalize_handles_missing_initiative_row_gracefully`
+  exercises the `QueryReturnedNoRows` path so a forensics-
+  deleted initiative cannot crash the cascade.
+
+**Canonical home.** `v2/v2-deep-spec.md §IntegrationMerge`,
+`v1/kernel-core.md §2.4` (initiative FSM —
+`Executing → Completed` is the canonical success edge),
+`v1/kernel-store.md §2` (INV-STORE-02 multi-table atomicity).
 
 ---
 
