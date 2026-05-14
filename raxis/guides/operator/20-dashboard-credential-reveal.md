@@ -41,9 +41,16 @@ The dashboard surfaces credentials in two places:
     injects into the agent's session), byte size, and SHA-256
     prefix.
   * **System-wide credentials** live at `/system/credentials`.
-    Sidebar nav → `System Credentials` (visible only to
-    `admin` tokens). One card per provider; the Anthropic key
-    is the canonical example.
+    Sidebar nav → `Credentials`. The link is visible to every
+    authenticated operator (`read` or higher) — per
+    `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`,
+    every credential the kernel uses, including the planner /
+    reviewer LLM provider keys, MUST appear here so the
+    operator can audit the surface area without shelling onto
+    the kernel host. The Anthropic key is the canonical
+    example. Read-role operators see metadata only; the
+    `Reveal plaintext` action stays admin-only and a non-admin
+    attempt returns a structured 403 with a paired audit row.
 
 The default state is hidden. The card shows a `Reveal plaintext`
 button but no bytes — per
@@ -150,7 +157,8 @@ accurate countdown.
     `INV-DASHBOARD-CREDENTIAL-REVEAL-AUDITED-01` /
     `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01` /
     `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01` /
-    `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` —
+    `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` /
+    `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01` —
     canonical statements.
   * `specs/v2/dashboard-operator-action-audit-coverage.md` —
     the per-endpoint emission table.

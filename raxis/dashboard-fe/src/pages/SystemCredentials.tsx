@@ -1,13 +1,19 @@
 /* `<SystemCredentialsPage>` — top-level page for system-wide
  * credentials (Anthropic API key, other provider keys, etc.).
  *
- * Admin-role-gated by the kernel
- * (`INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`); a `read`
- * operator who navigates here will see the
- * `<CredentialsView>`'s structured 403 panel rather than a
- * crash. The Shell sidebar additionally hides the link for
- * non-admin operators so the affordance only surfaces where
- * it can succeed.
+ * Listing surface: visible to every authenticated operator
+ * (`read` or higher) per
+ * `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
+ * — every credential the kernel uses MUST appear here so the
+ * operator can audit the surface area. The wire shape is
+ * metadata-only; plaintext never leaves the kernel on the
+ * listing path.
+ *
+ * Reveal surface: admin-only per
+ * `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`. Non-admin
+ * reveal attempts return a structured 403 with a paired
+ * `RejectedPermission` audit row so the denied attempt is
+ * forensically visible.
  *
  * Spec: `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` —
  * the page renders an explicit warning banner above the
@@ -56,12 +62,15 @@ export function SystemCredentialsPage() {
       {!isAdmin && (
         <div
           className="card border-warn/40 bg-warn/10 px-4 py-3 text-xs text-warn"
-          role="alert"
+          role="note"
           data-testid="system-credentials-no-admin"
         >
-          Your operator token does not carry the <strong>admin</strong> role.
-          Listing system credentials is admin-only; the kernel will reject
-          this request.
+          Your operator token carries roles{" "}
+          <strong>{operatorRoles.join(", ") || "(none)"}</strong>. Listing
+          credentials is allowed for the <strong>read</strong> role; the{" "}
+          <strong>Reveal plaintext</strong> action is gated on{" "}
+          <strong>admin</strong> and a non-admin attempt will return a
+          structured 403 with a paired audit row.
         </div>
       )}
       <CredentialsView scope={{ kind: "system" }} operatorRoles={operatorRoles} />

@@ -57,15 +57,18 @@ const NAV: NavSection[] = [
     label: "System",
     items: [
       { to: "/policy", label: "Policy", glyph: "P" },
-      // Admin-only — the kernel rejects non-admin GETs of the
-      // system-credentials surface (`INV-DASHBOARD-CREDENTIAL
-      // -REVEAL-ROLE-GATED-01`), so we hide the affordance for
-      // operators whose token cannot succeed.
+      // Visible to every authenticated operator (read or higher) —
+      // `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
+      // requires that the system-credential viewer surfaces every
+      // credential the kernel uses (planner LLM keys, gateway
+      // upstreams, …) so the operator can audit the surface area.
+      // The listing wire is metadata-only; the reveal endpoint
+      // stays admin-only and emits a paired audit row on the
+      // deny path.
       {
         to: "/system/credentials",
         label: "Credentials",
         glyph: "K",
-        rolesAny: ["admin"],
       },
     ],
   },

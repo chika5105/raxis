@@ -311,14 +311,22 @@ The dashboard's credential-viewer surface is the only path
 through which an operator inspects credential plaintext from
 inside the dashboard. The contract here mirrors the on-disk
 backend contract from §2.2 + the agent-isolation contract from
-§2.3, with three additional dashboard-specific properties:
+§2.3, with four additional dashboard-specific properties:
 
-  * **Default-masked.** The listing endpoints
+  * **Operator-visible inventory.** The listing endpoints
     (`/api/initiatives/:id/credentials`,
-    `/api/system/credentials`) return metadata only — never
-    plaintext. The wire shape pins this at compile time
-    (`CredentialMetadata` has no `plaintext` / `bytes`
-    field).
+    `/api/system/credentials`) are gated at the `read` role —
+    every credential the kernel uses, including the planner /
+    reviewer LLM provider keys under `<data_dir>/providers/`,
+    MUST appear here for any authenticated operator
+    (`INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`).
+    The plaintext stays gated; the listing surface lets the
+    operator audit the full set of credentials the kernel
+    can reach without reading the kernel host's disk.
+  * **Default-masked.** The listing endpoints return metadata
+    only — never plaintext. The wire shape pins this at
+    compile time (`CredentialMetadata` has no `plaintext` /
+    `bytes` field).
   * **Explicit reveal.** Plaintext is returned only via
     `POST .../reveal`, which requires the `admin` role,
     rate-limits to 5 reveals per operator per 60 s, and emits

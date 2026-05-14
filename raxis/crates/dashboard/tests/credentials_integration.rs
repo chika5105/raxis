@@ -239,18 +239,18 @@ async fn list_initiative_credentials_unknown_initiative_returns_404() {
     handle.shutdown().await.expect("shutdown");
 }
 
-/// `worker/audit-noise-sweep-r2` retired the
-/// `OperatorListedSystemCredentials` emission. The role gate
-/// (admin-only) is still enforced — a `read` caller cannot
-/// even discover the provider names — but the rejection no
-/// longer appends a chain row. The denied-attempt forensic
-/// trail moved off the audit chain and onto the dashboard
-/// access-log surface; the chain reserves its rows for state
-/// mutations and security events (signal-vs-noise policy in
+/// `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`:
+/// `read`-role suffices for the system-credential listing wire — every
+/// credential the kernel uses (including planner LLM API keys under
+/// `<data_dir>/providers/`) MUST surface here scoped by role. Plaintext
+/// is never on the listing wire (`is_revealable` + the reveal-required-
+/// role hint let the FE render the same masked-by-default cards); the
+/// reveal endpoints stay `admin`-only. Read-only browse leaves the audit
+/// chain untouched (signal-vs-noise policy in
 /// `specs/v2/dashboard-operator-action-audit-coverage.md`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(deprecated)] // pattern-matches the deprecated variant on purpose
-async fn list_system_credentials_rejects_read_role() {
+async fn list_system_credentials_metadata_visible_to_read_role() {
     let (handle, base, token, data, _fp) =
         serve_with_role(DashboardRole::Read).await;
     data.push_system_credential(fixture("providers.anthropic", "sk-ant-…"));
@@ -262,7 +262,21 @@ async fn list_system_credentials_rejects_read_role() {
         .send()
         .await
         .expect("send");
-    assert_eq!(res.status(), 403, "system listing is admin-only");
+    assert_eq!(
+        res.status(),
+        200,
+        "system listing must surface metadata to read-role operators",
+    );
+    let body_text = res.text().await.expect("text");
+    assert!(
+        !body_text.contains("sk-ant"),
+        "no plaintext on the listing wire; body was: {body_text}",
+    );
+    assert!(
+        body_text.contains("providers.anthropic"),
+        "Anthropic credential MUST appear in the read-role listing; \
+         body was: {body_text}",
+    );
 
     let audits = data.recorded_operator_audits();
     let any_listing = audits.iter().any(|e| {

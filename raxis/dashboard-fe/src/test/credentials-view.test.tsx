@@ -175,6 +175,36 @@ describe("<CredentialsView> — masked baseline", () => {
       await screen.findByTestId("credentials-forbidden"),
     ).toHaveTextContent(/permission denied/i);
   });
+
+  it("renders the system-credential listing as a read operator (Anthropic visible)", async () => {
+    // INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01:
+    // a read operator can list every system credential the
+    // kernel uses (planner LLM keys, gateway upstreams, …).
+    // Plaintext stays masked; reveal stays admin-only.
+    vi.spyOn(dashboardApi.systemCredentials, "list").mockResolvedValue(
+      listOf(
+        meta({
+          name: "providers.anthropic-prod",
+          proxy_type: "provider",
+          mount_as: null,
+          format_hint: "Anthropic provider TOML (api_key = \"…\")",
+          upstream_host_port: null,
+        }),
+      ),
+    );
+    renderWithProviders(
+      <CredentialsView scope={{ kind: "system" }} operatorRoles={["read"]} />,
+    );
+    const row = await screen.findByTestId(
+      "credential-row-providers.anthropic-prod",
+    );
+    expect(row).toBeInTheDocument();
+    expect(row).toHaveAttribute("data-anthropic", "true");
+    // Header pill calls out the limited role.
+    expect(screen.getByTestId("credentials-role-warning")).toHaveTextContent(
+      /read-only/i,
+    );
+  });
 });
 
 describe("<CredentialsView> — role gate", () => {

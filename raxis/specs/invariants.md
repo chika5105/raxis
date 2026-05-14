@@ -93,7 +93,8 @@
 | Kernel DAG authority — V2 | INV-KERNEL-DAG-AUTHORITY-01 | 1 |
 | Planner turn budget — V2.7 | INV-PLANNER-MAX-TURNS-PRECEDENCE-01, INV-KSB-MAX-TURNS-VISIBILITY-01 | 2 |
 | Grafana provisioning lifecycle — V3 (iter52) | INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01 | 1 |
-| **Total** | | **121** |
+| Dashboard credential viewer completeness — V3 (iter53) | INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01 | 1 |
+| **Total** | | **122** |
 
 ---
 
@@ -7839,6 +7840,78 @@ description. Operator-facing recipe:
 `guides/recipes/ops/19-grafana-datasource-provisioning.md`
 (canonical YAML + the six known gotchas + the witness
 invocation).
+
+---
+
+## §11.14 — Dashboard credential viewer completeness (INV-DASHBOARD-CREDENTIAL-VIEWER-*)
+
+V3 (iter53) tightens the dashboard's credential-viewer surface
+so an operator with at least the `read` role can audit every
+credential the kernel uses, including planner / reviewer LLM
+provider keys.
+
+### INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01 — Every credential the kernel uses appears in the dashboard list, scoped by role
+
+**Statement.** Every credential the kernel resolves at runtime —
+per-initiative proxies declared in plan TOML AND system-wide
+provider credentials under `<data_dir>/providers/*.toml`
+(Anthropic, OpenAI, …) — MUST appear in the dashboard
+credential-viewer's listing wire (`GET
+/api/initiatives/:id/credentials` or `GET
+/api/system/credentials`) for any authenticated operator
+carrying at least the `read` role. Plaintext is never on the
+listing wire; the metadata MUST include the credential name,
+proxy / kind, format hint, byte size, SHA-256 prefix,
+on-disk path, `is_revealable`, and `reveal_required_role`
+fields so an operator can audit the surface area without
+reading the kernel host's disk.
+
+**Justification.** A credential the kernel uses but the
+dashboard hides is a forensic blind spot — the operator has
+no way to confirm that the planner's LLM provider key is
+the one the policy intended, that an old test fixture
+hasn't been left in `<data_dir>/providers/`, or that a
+gateway-bound credential isn't quietly being read on every
+session spawn. The dashboard is the operator's single
+window onto the kernel's credential surface; if a
+credential is reachable from the kernel but not from the
+dashboard, the operator is forced to ssh into the host and
+`ls /var/raxis/providers/`, defeating the principle that
+the operator workstation is the only privileged surface.
+
+**Scenario.** A planner agent makes Anthropic API calls every
+turn during iter53. The operator opens the dashboard
+expecting to confirm WHICH key the kernel is using
+(test-only, prod, recently rotated, …) but the credential
+viewer hides system credentials from `read` operators
+entirely; the planner key is invisible. The operator
+escalates to `admin` and only then discovers
+`providers/anthropic-realism-e2e.toml` — a delay that turns
+a 30-second sanity check into a five-minute flow.
+With this invariant + witness, the listing wire returns
+the Anthropic credential's metadata to any `read` operator
+and the operator confirms the source path on the first
+page load.
+
+**Witness.**
+`raxis/crates/dashboard/tests/credentials_integration.rs::list_system_credentials_metadata_visible_to_read_role`
+boots the dashboard server, registers a `read`-role operator,
+seeds an `InMemoryDashboardData` with a `providers.anthropic`
+fixture, and asserts that `GET /api/system/credentials` returns
+200 + a body containing `providers.anthropic` + NO plaintext.
+A second witness
+(`crates/dashboard/src/routes/credentials.rs::tests::list_system_metadata_visible_to_read_role`)
+exercises the same contract at the route handler level. The
+in-tree `<CredentialsView>` test
+(`raxis/dashboard-fe/src/test/credentials-view.test.tsx::"renders the system-credential listing as a read operator (Anthropic visible)"`)
+pins the FE rendering side: a read operator on the System
+Credentials page sees the Anthropic row + a `read-only`
+header pill.
+
+**Canonical home.**
+`specs/v2/dashboard-hardening.md §2.7.1` (listing surfaces +
+role gate) and `specs/v2/secrets-model.md §5.1` (operator-
+visible inventory bullet).
 
 ---
 

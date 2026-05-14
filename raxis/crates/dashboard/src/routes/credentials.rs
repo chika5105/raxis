@@ -8,9 +8,11 @@
 //!     Listing is `read`-role; reveal is `admin`-only.
 //!   * System-wide: `GET /api/system/credentials` lists provider /
 //!     gateway-bound credentials; `POST /api/system/credentials/:name/
-//!     reveal` returns the plaintext. Both are `admin`-only — a
-//!     `read`-role caller can't even discover the system credential
-//!     names.
+//!     reveal` returns the plaintext. Listing is `read`-role
+//!     (`INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
+//!     — every credential the kernel uses, including planner LLM
+//!     keys, MUST appear in the operator-visible list scoped by
+//!     role); reveal stays `admin`-only.
 //!
 //! Audit discipline:
 //!
@@ -182,11 +184,18 @@ fn emit_initiative_revealed<D>(
 
 /// System-wide credential listing.
 ///
-/// Admin-only — even discovering the names of provider credentials
-/// requires the admin role. `read` callers cannot enumerate which
-/// providers the kernel is configured against. Read-only browse;
-/// no `Operator*` audit fires (the reveal endpoint records the
-/// security-relevant moment).
+/// `read`-role suffices for the metadata listing — operators must
+/// be able to see WHICH credentials the kernel is bound to (planner
+/// LLM keys, gateway upstreams, …) so they can audit the surface
+/// area. Plaintext is never on this wire shape; the reveal endpoint
+/// stays `admin`-only.
+///
+/// `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
+/// pins the contract: every credential the kernel uses (including
+/// the Anthropic planner key under `<data_dir>/providers/`) MUST
+/// surface here for any operator with at least the `read` role.
+/// Read-only browse; no `Operator*` audit fires (the reveal
+/// endpoint records the security-relevant moment).
 pub async fn list_system<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -194,8 +203,11 @@ pub async fn list_system<D>(
 where
     D: crate::data::DashboardData,
 {
-    if !op.has_role(DashboardRole::Admin) {
-        return Err(ApiError::Forbidden { required: "admin".into() });
+    if !op.has_role(DashboardRole::Read)
+        && !op.has_role(DashboardRole::WritePolicy)
+        && !op.has_role(DashboardRole::Admin)
+    {
+        return Err(ApiError::Forbidden { required: "read".into() });
     }
     let credentials = state.data.list_system_credentials()?;
     Ok(Json(CredentialListResponse { credentials }))
@@ -537,28 +549,29 @@ mod tests {
         }
     }
 
-    /// `read`-role can't even list system credentials.
-    ///
-    /// `worker/audit-noise-sweep-r2` retired the
-    /// `OperatorListedSystemCredentials` emission; the test
-    /// flipped from "rejection emits an audit row" to "the
-    /// read-only browse leaves the audit ledger untouched"
-    /// (signal-vs-noise policy in
+    /// `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`:
+    /// `read`-role MUST be able to list system credentials so the
+    /// Anthropic planner key (and every other gateway-bound
+    /// credential the kernel uses) is operator-auditable. Listing
+    /// returns metadata only — plaintext stays gated behind the
+    /// admin-only reveal endpoint. Read-only browse leaves the
+    /// audit ledger untouched (signal-vs-noise policy in
     /// `specs/v2/dashboard-operator-action-audit-coverage.md`).
     #[tokio::test]
-    async fn list_system_forbidden_for_read_role() {
+    async fn list_system_metadata_visible_to_read_role() {
         let d = InMemoryDashboardData::new();
         d.push_system_credential(fixture("providers.anthropic-prod", "sk"));
-        let err = list_system(
+        let resp = list_system(
             axum::extract::State(_app_state(&d)),
             read_op(),
         )
         .await
-        .expect_err("read can't list system creds");
-        match err {
-            ApiError::Forbidden { required } => assert_eq!(required, "admin"),
-            other => panic!("expected Forbidden, got {other:?}"),
-        }
+        .expect("read role lists system credential metadata");
+        let names: Vec<String> = resp.0.credentials.iter().map(|c| c.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "providers.anthropic-prod"),
+            "Anthropic credential MUST appear in the read-operator listing; got: {names:?}",
+        );
         let audits = d.recorded_operator_audits();
         assert!(
             audits.is_empty(),

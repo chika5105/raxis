@@ -398,10 +398,17 @@ admin-only reveal endpoints. The contract is **default-masked
     plaintext. Wire shape pinned by
     `crates/dashboard/src/data.rs::CredentialMetadata`; no
     `plaintext` / `bytes` field.
-  * `GET /api/system/credentials` — `admin` role.
+  * `GET /api/system/credentials` — `read` role.
     Same metadata wire shape; covers
     `<data_dir>/providers/*.toml` (Anthropic, OpenAI, etc.).
-    `read`-role tokens cannot enumerate these.
+    `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
+    pins this contract: every credential the kernel uses —
+    including the planner / reviewer LLM provider keys — MUST
+    appear here for any operator with at least the `read`
+    role, so the operator can audit the surface area without
+    reading the disk. Plaintext is never on this wire; the
+    reveal endpoint stays admin-only and emits a paired
+    audit row on every attempt regardless of outcome.
 
 Both listings audit at emission time:
 `OperatorListedCredentials` and
