@@ -19,3 +19,11 @@ tokio       = { workspace = true }
 thiserror   = { workspace = true }
 uuid        = { workspace = true }
 raxis-types = { workspace = true }
+# iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-05`. The framing
+# layer times its four sub-stages (encode / write / read / decode)
+# and emits one `raxis.kernel.substrate.ipc.frame.stage.duration`
+# histogram sample per stage when a global `ObservabilityHub` is
+# wired via `set_global_observability_hub`. Optional handle; the
+# crate remains usable without a hub (planner-side fixtures + every
+# CLI tool that doesn't boot the full kernel).
+raxis-observability = { workspace = true }

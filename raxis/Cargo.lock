@@ -3675,6 +3675,7 @@ name = "raxis-ipc"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "raxis-observability",
  "raxis-types",
  "serde",
  "serde_json",

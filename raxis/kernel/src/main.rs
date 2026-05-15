@@ -624,6 +624,18 @@ async fn main() {
     // don't panic.
     raxis_worktree_provision::set_global_observability_hub(Arc::clone(&observability_hub));
 
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-05 — pin the bincode-IPC
+    // framing layer's process-global hub so every `write_frame` /
+    // `read_frame` emits per-stage histograms (`encode` / `write`
+    // / `read` / `decode`) under
+    // `raxis.kernel.substrate.ipc.frame.stage.duration`. Pairs with
+    // the existing per-message-kind `KernelSubstrateIpcRoundtripDuration`
+    // (round-trip total) so the dashboard can decompose a slow RTT
+    // into serialise / wire / deserialise components. Idempotent
+    // — `set_global_observability_hub` discards a second
+    // `OnceLock::set` so re-entrant test boots don't panic.
+    raxis_ipc::frame::set_global_observability_hub(Arc::clone(&observability_hub));
+
     // Chain the streaming-audit bridge on top of the notifying
     // decorator so:
     //   1. every audit emit reaches the JSONL writer first

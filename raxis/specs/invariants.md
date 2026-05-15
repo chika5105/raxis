@@ -100,8 +100,8 @@
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
 | Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
-| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04 | 2 |
-| **Total** | | **139** |
+| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05 | 3 |
+| **Total** | | **140** |
 
 ---
 
@@ -9869,6 +9869,61 @@ under one `OnceLock`-aware serial guard).
 
 **Canonical home.** `v3/otel-observability.md §8` row
 `GitWorktreeStageDuration` + Prometheus inventory in
+`v3/observability-prometheus.md §3` (iter61 expansion).
+
+---
+
+### INV-OBSERVABILITY-DATAPLANE-LATENCY-05 — Bincode-IPC framing emits per-stage histograms (encode / write / read / decode) on every `write_frame` / `read_frame`
+
+**Statement.** Every successful or failed
+`raxis_ipc::frame::write_frame` MUST produce one
+`raxis.kernel.substrate.ipc.frame.stage.duration` histogram
+observation each for the `encode` and `write` stages; every
+`raxis_ipc::frame::read_frame` MUST produce one each for the
+`read` and `decode` stages. Closed `stage` lexicon:
+`encode` / `write` / `read` / `decode`, pinned by
+`crates/ipc/src/frame.rs::IPC_FRAME_STAGE_*`. Closed `outcome`
+lexicon: `ok` / `error`. The `role` and `message_kind` labels
+collapse to `"unknown"` at this layer (the framing API is
+generic over `T`); per-call (role, message_kind) tagging stays
+at the kernel substrate IPC dispatcher seam where
+`KernelSubstrateIpcRoundtrip` already pivots the end-to-end
+RTT histogram by the static `(role, message_kind)` closed
+lexicon.
+
+A clean EOF on the head-of-frame length read counts as
+`outcome = "ok"` (it's the polite peer-closed signal, not a
+mid-frame failure); every other read failure (UnexpectedEof
+mid-body, TooLarge, transport error) emits `outcome =
+"error"`.
+
+The hub is wired ONCE at kernel boot via
+`raxis_ipc::frame::set_global_observability_hub` (an
+`OnceLock`-backed seam mirroring the worktree-provision crate).
+Hub-disabled fast path: when no hub is wired (planner-side
+fixtures, kernel-less CLI tools, the standalone bincode round-
+trip tests in this same module), `record_frame_stage` early-
+returns on the `OnceLock::get()` arm — zero per-frame overhead.
+
+**Justification.** Pre-iter61 a slow kernel↔substrate round-
+trip surfaced as one undifferentiated
+`KernelSubstrateIpcRoundtripDuration` spike — operators could
+see the round-trip took 200ms but not whether the regression
+lived in the bincode serialise (large payload), the wire
+transport (back-pressure), the wire receive (slow peer), or
+the bincode deserialise (wire-protocol drift). The four-stage
+breakdown decomposes the RTT into the right four buckets so
+the dashboard's bottleneck pivot lands on the right culprit.
+Pairs with the existing per-message-kind end-to-end RTT so the
+operator sees both "which kernel↔substrate frame is slow" and
+"which sub-stage of the slow frame is the culprit".
+
+**Witness.** `crates/ipc/src/frame.rs::tests::frame_stage_histograms_cover_encode_write_read_decode`
+(combined witness exercising the disabled / happy / error
+arms under one `OnceLock`-aware serial guard).
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`IpcFrameStageDuration` + Prometheus inventory in
 `v3/observability-prometheus.md §3` (iter61 expansion).
 
 ---
