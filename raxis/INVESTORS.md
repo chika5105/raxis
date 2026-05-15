@@ -52,6 +52,6 @@ By invoking the concept of a **Reference Monitor**, we establish a local, struct
 
 The answer is that they structurally cannot. OpenAI cannot build a reference monitor into their API because the API is inherently on the wrong side of the trust boundary—it *is* the untrusted intelligence. A true reference monitor must live on the host machine, independently mediating the VM, the filesystem, and the local credentials. This proves RAXIS has a deep, defensible moat that an LLM provider cannot easily subsume.
 
-We have solved the hard problems to make this local reference monitor a reality: UDS (Unix Domain Socket) mediation, microVM lifecycle management, deterministic capability bounding, and cryptographic attestation exchanges.
+We have solved the hard problems to make this local reference monitor a reality: UDS (Unix Domain Socket) mediation, microVM lifecycle management, **air-gapped network tunneling via vsock**, deterministic capability bounding, and cryptographic attestation exchanges.
 
 Companies are desperate to deploy autonomous engineering workforces, but CISOs cannot and will not authorize them without guaranteed, fail-closed auditability. RAXIS is the OS kernel that makes the agentic economy enterprise-ready.
