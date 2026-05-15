@@ -320,38 +320,38 @@ or the verifier-token TTL elapses (whereupon the task transitions to
 
 ## The full pipeline (visual)
 
-```text
-                     ┌──── IntentRequest arrives ────┐
-                     │  kernel/src/handlers/intent.rs │
-                     └────────────────┬───────────────┘
-                                      │
-                     vcs::diff::touched_paths(base, head)
-                                      │
-                     gates::policy_lookup::required_claims
-                                      │
-                     gates::mod::auto_derive_claims  ←── only synthetic
-                                      │                  claims; planner
-                                      │                  submitted_claims
-                                      │                  is discarded
-                     gates::claim::evaluate
-                       ├── Check A: delegation
-                       ├── Check B: submission present
-                       └── Check C: scope covers paths
-                                      │
-                     gates::mod::witness presence check (every policy.gates())
-                                      │
-                  ┌───────────────────┴──────────────────┐
-                  ▼                                      ▼
-       all gates satisfied                    one or more missing
-       record_capability_use                  spawn_verifier(...)
-       on every stale cap                     return PendingWitness
-                  │                                      │
-                  ▼                                      ▼
-           Pass { renewal? }                       GatesPending
-                  │                                      │
-                  ▼                                      ▼
-        IntentResponse::Accepted          IntentResponse::Accepted
-        { warn_delegation_stale }         { task_state: GatesPending }
+```mermaid
+flowchart TD
+    Intent["<b>IntentRequest arrives</b><br/>kernel/src/handlers/intent.rs"]
+    TouchedPaths["vcs::diff::touched_paths(base, head)"]
+    RequiredClaims["gates::policy_lookup::required_claims"]
+    AutoDerive["gates::mod::auto_derive_claims<br/><i>only synthetic claims; planner<br/>submitted_claims is discarded</i>"]
+    Evaluate["gates::claim::evaluate<br/>├── Check A: delegation<br/>├── Check B: submission present<br/>└── Check C: scope covers paths"]
+    WitnessPresence["gates::mod::witness presence check (every policy.gates())"]
+
+    Intent --> TouchedPaths
+    TouchedPaths --> RequiredClaims
+    RequiredClaims --> AutoDerive
+    AutoDerive --> Evaluate
+    Evaluate --> WitnessPresence
+
+    AllSatisfied["all gates satisfied<br/>record_capability_use<br/>on every stale cap"]
+    MissingGates["one or more missing<br/>spawn_verifier(...)<br/>return PendingWitness"]
+
+    WitnessPresence --> AllSatisfied
+    WitnessPresence --> MissingGates
+
+    Pass["Pass { renewal? }"]
+    GatesPending["GatesPending"]
+
+    AllSatisfied --> Pass
+    MissingGates --> GatesPending
+
+    RespAccepted["IntentResponse::Accepted<br/>{ warn_delegation_stale }"]
+    RespPending["IntentResponse::Accepted<br/>{ task_state: GatesPending }"]
+
+    Pass --> RespAccepted
+    GatesPending --> RespPending
 ```
 
 ---

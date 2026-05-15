@@ -567,39 +567,19 @@ Defaults: `abandoned_commits_retention = "30d"`, `salvage_window = "7d"`. These 
 
 ### 7.2 The lifecycle states
 
-```text
-                              ┌────────────────────────────────────────┐
-                              │  Task transitions to Failed            │
-                              │  (any reason: disagreement, abandon,   │
-                              │   wall-clock, circular, etc.)          │
-                              └─────────────┬──────────────────────────┘
-                                            │
-                                            ▼
-                              ┌──────────────────────────┐
-                              │   AbandonedSalvageable   │
-                              │   (salvage_window active)│
-                              │                          │
-                              │   Operator may run:      │
-                              │   - inspect              │
-                              │   - salvage              │
-                              │   - purge (early)        │
-                              └─────────────┬────────────┘
-                                            │  salvage_window elapses
-                                            ▼
-                              ┌──────────────────────────┐
-                              │   AbandonedArchived      │
-                              │   (read-only inspection) │
-                              │                          │
-                              │   Operator may run:      │
-                              │   - inspect              │
-                              │   - purge (early)        │
-                              └─────────────┬────────────┘
-                                            │  abandoned_commits_retention elapses
-                                            ▼
-                              ┌──────────────────────────┐
-                              │   Purged                 │
-                              │   (worktree deleted)     │
-                              └──────────────────────────┘
+```mermaid
+flowchart TD
+    Failed["Task transitions to Failed<br/>(any reason: disagreement, abandon,<br/>wall-clock, circular, etc.)"]
+    
+    AbandonedSalvageable["AbandonedSalvageable<br/>(salvage_window active)<br/><br/>Operator may run:<br/>- inspect<br/>- salvage<br/>- purge (early)"]
+    
+    AbandonedArchived["AbandonedArchived<br/>(read-only inspection)<br/><br/>Operator may run:<br/>- inspect<br/>- purge (early)"]
+    
+    Purged["Purged<br/>(worktree deleted)"]
+
+    Failed --> AbandonedSalvageable
+    AbandonedSalvageable -- "salvage_window elapses" --> AbandonedArchived
+    AbandonedArchived -- "abandoned_commits_retention elapses" --> Purged
 ```
 
 Transitions are time-driven by a daily kernel sweep (similar to the disk watchdog in `host-capacity.md`). Audited at every transition.

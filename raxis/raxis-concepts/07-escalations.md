@@ -330,47 +330,24 @@ provides — see `04-delegations-and-authority.md`.
 
 ## Visual: the full lifecycle
 
-```text
-Agent                  Kernel                    Operator
-  │                      │                           │
-  │  EscalationRequest   │                           │
-  ├─────────────────────▶│                           │
-  │                      │  INSERT escalations       │
-  │                      │  (status='Pending')       │
-  │                      │  emit EscalationSubmitted │
-  │                      │                           │
-  │  Submitted{esc_id}   │                           │
-  │◀─────────────────────┤                           │
-  │                      │                           │
-  │                      │  raxis log --kind …       │
-  │                      │◀──────────────────────────┤
-  │                      │                           │
-  │                      │   raxis escalation        │
-  │                      │   approve  --scope … --max-uses … --valid-for …
-  │                      │◀──────────────────────────┤
-  │                      │  validate operator cert   │
-  │                      │  verify Ed25519 sig       │
-  │                      │  INSERT approval_tokens   │
-  │                      │  UPDATE escalations       │
-  │                      │  emit EscalationApproved  │
-  │                      │  (optional) grant delegation
-  │                      │                           │
-  │  KernelPush::Escalated  Resolved{token}          │
-  │◀─────────────────────┤                           │
-  │                      │                           │
-  │  IntentRequest{      │                           │
-  │    …,                │                           │
-  │    approval_token: …}│                           │
-  ├─────────────────────▶│                           │
-  │                      │  validate_approval_token  │
-  │                      │  (8 checks)               │
-  │                      │  consume nonce            │
-  │                      │  emit ApprovalConsumed    │
-  │                      │  UPDATE escalations       │
-  │                      │  (status='Consumed')      │
-  │                      │  → normal admission        │
-  │  Accepted{…}         │                           │
-  │◀─────────────────────┤                           │
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Kernel
+    participant Operator
+
+    Agent->>Kernel: EscalationRequest
+    Note over Kernel: INSERT escalations<br/>(status='Pending')<br/>emit EscalationSubmitted
+    Kernel-->>Agent: Submitted{esc_id}
+    
+    Operator->>Kernel: raxis log --kind …
+    Operator->>Kernel: raxis escalation approve<br/>--scope … --max-uses … --valid-for …
+    Note over Kernel: validate operator cert<br/>verify Ed25519 sig<br/>INSERT approval_tokens<br/>UPDATE escalations<br/>emit EscalationApproved<br/>(optional) grant delegation
+    Kernel-->>Agent: KernelPush::Escalated Resolved{token}
+    
+    Agent->>Kernel: IntentRequest{…, approval_token: …}
+    Note over Kernel: validate_approval_token<br/>(8 checks)<br/>consume nonce<br/>emit ApprovalConsumed<br/>UPDATE escalations<br/>(status='Consumed')<br/>→ normal admission
+    Kernel-->>Agent: Accepted{…}
 ```
 
 ---

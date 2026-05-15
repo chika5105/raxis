@@ -87,34 +87,37 @@ single-task e2e and skips silently otherwise.
 
 ## §2 — Topology
 
-```text
-                          extended initiative (UUIDv7)
-                                       │
-                                       ▼
-                  ┌────────────────────────────────────────┐
-                  │         orchestrator                    │
-                  │  (real microVM, real LLM)               │
-                  └─────────┬──────────┬──────────┬─────────┘
-                            │          │          │
-              ┌─────────────┘          │          └────────────┐
-              ▼                        ▼                       ▼
-     ┌────────────────┐       ┌────────────────┐      ┌────────────────┐
-     │  materializer  │       │   fan-out 1    │      │   fan-out 2    │
-     │  (Executor)    │       │   (Executor)   │      │   (Executor)   │
-     │  reads pg+mongo│       │  README       │      │  formatter      │
-     │  writes JSON   │       │  (fast)        │      │  (fast)         │
-     │  + git commit  │       │                │      │                 │
-     └────────┬───────┘       └────────┬───────┘      └────────┬────────┘
-              │                        │                       │
-              └─────────┬──────────────┴────────────┬──────────┘
-                        ▼                           ▼
-            ┌──────────────────────┐   ┌──────────────────────┐
-            │  reviewer-A (rejects)│   │  reviewer-B (approves)│
-            │  (Reviewer)          │   │  (Reviewer)           │
-            │  triggers re-review  │   │  on second pass       │
-            └──────────────────────┘   └──────────────────────┘
-                        │
-                        └─────────────► IntegrationMerge
+```mermaid
+flowchart TD
+    Initiative["extended initiative (UUIDv7)"]
+    
+    Orchestrator["orchestrator<br/>(real microVM, real LLM)"]
+    
+    Materializer["materializer<br/>(Executor)<br/>reads pg+mongo<br/>writes JSON<br/>+ git commit"]
+    
+    FanOut1["fan-out 1<br/>(Executor)<br/>README<br/>(fast)"]
+    
+    FanOut2["fan-out 2<br/>(Executor)<br/>formatter<br/>(fast)"]
+    
+    ReviewerA["reviewer-A (rejects)<br/>(Reviewer)<br/>triggers re-review"]
+    
+    ReviewerB["reviewer-B (approves)<br/>(Reviewer)<br/>on second pass"]
+    
+    IntegrationMerge["IntegrationMerge"]
+
+    Initiative --> Orchestrator
+    Orchestrator --> Materializer
+    Orchestrator --> FanOut1
+    Orchestrator --> FanOut2
+    
+    Materializer --> ReviewerA
+    Materializer --> ReviewerB
+    FanOut1 --> ReviewerA
+    FanOut1 --> ReviewerB
+    FanOut2 --> ReviewerA
+    FanOut2 --> ReviewerB
+    
+    ReviewerA --> IntegrationMerge
 ```
 
 * Tasks 2 + 3 are intentionally concurrent (no DAG predecessors

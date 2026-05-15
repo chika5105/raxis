@@ -120,41 +120,25 @@ if new_micros > ceiling {
 
 ## The Budget Flow (Visual)
 
-```text
-Intent passes gate evaluation
-        │
-        ▼
-    ┌── Compute Cost ──────────────────┐
-    │  base_cost + (paths × per_path)  │
-    │  = estimated_cost                │
-    └──────────────────────────────────┘
-        │
-        ▼
-    ┌── BEGIN TRANSACTION ─────────────┐
-    │                                  │
-    │  SELECT SUM(reserved_cost)       │
-    │  FROM lane_budget_reservations   │
-    │  WHERE lane_id = ?               │
-    │                                  │
-    │  Check: active_tasks < max?      │
-    │  Check: sum + cost <= max?       │
-    │                                  │
-    │  INSERT OR IGNORE reservation    │
-    │                                  │
-    │  COMMIT                          │
-    └──────────────────────────────────┘
-        │
-        ▼
-    ┌── Token Budget Check ────────────┐
-    │  cumulative_µ$ <= ceiling_µ$?    │
-    └──────────────────────────────────┘
-        │
-    ┌───┴───┐
-    ▼       ▼
-  Pass    Reject
-  │       │
-  ▼       ▼
-Admitted  BudgetExceeded
+```mermaid
+flowchart TD
+    Start["Intent passes gate evaluation"]
+    ComputeCost["<b>Compute Cost</b><br/>base_cost + (paths × per_path)<br/>= estimated_cost"]
+    Tx["<b>BEGIN TRANSACTION</b><br/><br/>SELECT SUM(reserved_cost)<br/>FROM lane_budget_reservations<br/>WHERE lane_id = ?<br/><br/>Check: active_tasks < max?<br/>Check: sum + cost <= max?<br/><br/>INSERT OR IGNORE reservation<br/><br/>COMMIT"]
+    TokenCheck["<b>Token Budget Check</b><br/>cumulative_µ$ <= ceiling_µ$?"]
+    
+    Pass["Pass"]
+    Reject["Reject"]
+    Admitted["Admitted"]
+    BudgetExceeded["BudgetExceeded"]
+
+    Start --> ComputeCost
+    ComputeCost --> Tx
+    Tx --> TokenCheck
+    TokenCheck --> Pass
+    TokenCheck --> Reject
+    Pass --> Admitted
+    Reject --> BudgetExceeded
 ```
 
 ---

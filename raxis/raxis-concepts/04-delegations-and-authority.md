@@ -168,29 +168,17 @@ On success the operator handler returns
 
 ## Step 3: Delegation lifecycle FSM
 
-```text
-            ┌──────────── Active ──────────────┐
-            │  TTL countdown running           │
-            │  (revoked_at IS NULL)            │
-            │  effective_from <= now <= expires_at
-            └────────┬─────────────────┬───────┘
-                     │                 │
-       policy epoch  │                 │ TTL elapses
-       advances      │                 │ (now() >= expires_at)
-                     ▼                 ▼
-            ┌─ StaleOnNextUse ─┐   ┌── Expired ──┐
-            │ one grace use   │   │ runtime-     │
-            │ left;           │   │ derived,     │
-            │ planner gets    │   │ never stored │
-            │ warn flag       │   └──────────────┘
-            └───────┬─────────┘
-       grace use   │
-       consumed    │
-                    ▼
-            ┌── RenewalRequired ──┐
-            │ permanent reject    │
-            │ until re-grant      │
-            └─────────────────────┘
+```mermaid
+flowchart TD
+    Active["<b>Active</b><br/>TTL countdown running<br/>(revoked_at IS NULL)<br/>effective_from <= now <= expires_at"]
+    
+    StaleOnNextUse["<b>StaleOnNextUse</b><br/>one grace use left;<br/>planner gets warn flag"]
+    Expired["<b>Expired</b><br/>runtime-derived,<br/>never stored"]
+    RenewalRequired["<b>RenewalRequired</b><br/>permanent reject<br/>until re-grant"]
+
+    Active -- "policy epoch<br/>advances" --> StaleOnNextUse
+    Active -- "TTL elapses<br/>(now() >= expires_at)" --> Expired
+    StaleOnNextUse -- "grace use<br/>consumed" --> RenewalRequired
 ```
 
 There is also a soft-delete branch from any state to `Revoked`

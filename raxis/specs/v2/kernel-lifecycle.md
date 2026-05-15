@@ -51,47 +51,34 @@ Per `INV-LIFECYCLE-03`, V2 does not implement a custom Rust-based daemon supervi
 
 ### 2.1 Component diagram
 
-```text
-                    ┌─────────────────────────────┐
-                    │  raxis CLI                  │
-                    │                             │
-                    │  raxis kernel start          │ ── (foreground) ──► kernel runs in shell
-                    │  raxis kernel start --daemon │ ──┐
-                    │  raxis kernel stop           │   │
-                    │  raxis kernel status         │   │
-                    │  raxis kernel logs           │   │
-                    │  raxis kernel install        │   │
-                    │  raxis kernel uninstall      │   │
-                    └─────────────────────────────┘   │
-                                                      │
-                                                      ▼ (writes service file;
-                                                         invokes supervisor commands)
-                                                      
-                    ┌──────────────────────────────────────────────────────┐
-                    │  Platform service supervisor                          │
-                    │  (systemd | launchd; chosen by host OS at install)    │
-                    │                                                       │
-                    │  - Starts kernel process; redirects stdout/stderr     │
-                    │    to log destination                                 │
-                    │  - Restarts on crash with configured backoff          │
-                    │  - Sends SIGTERM on stop request; SIGKILL after grace │
-                    │  - Manages enable-at-login (or enable-at-boot for     │
-                    │    system mode)                                       │
-                    └────────────────────┬─────────────────────────────────┘
-                                         │
-                                         │ exec()
-                                         ▼
-                            ┌─────────────────────────┐
-                            │  raxis-kernel process   │
-                            │                         │
-                            │  Reads policy.toml      │
-                            │  Acquires PID lock      │
-                            │  Runs as designed       │
-                            │  Handles SIGTERM via    │
-                            │  graceful-shutdown path │
-                            │  per key-revocation     │
-                            │  §7 Graceful semantics  │
-                            └─────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph CLI["raxis CLI"]
+        direction TB
+        Start["raxis kernel start"]
+        Daemon["raxis kernel start --daemon"]
+        Stop["raxis kernel stop"]
+        Status["raxis kernel status"]
+        Logs["raxis kernel logs"]
+        Install["raxis kernel install"]
+        Uninstall["raxis kernel uninstall"]
+    end
+    
+    Shell["kernel runs in shell"]
+    
+    Supervisor["<b>Platform service supervisor</b><br/>(systemd | launchd; chosen by host OS at install)<br/>- Starts kernel process; redirects stdout/stderr to log destination<br/>- Restarts on crash with configured backoff<br/>- Sends SIGTERM on stop request; SIGKILL after grace<br/>- Manages enable-at-login (or enable-at-boot for system mode)"]
+    
+    KernelProcess["<b>raxis-kernel process</b><br/>Reads policy.toml<br/>Acquires PID lock<br/>Runs as designed<br/>Handles SIGTERM via graceful-shutdown path per key-revocation §7 Graceful semantics"]
+
+    Start -- "(foreground)" --> Shell
+    Daemon -- "writes service file; invokes supervisor commands" --> Supervisor
+    Stop --> Supervisor
+    Status --> Supervisor
+    Logs --> Supervisor
+    Install --> Supervisor
+    Uninstall --> Supervisor
+    
+    Supervisor -- "exec()" --> KernelProcess
 ```
 
 ### 2.2 What the kernel itself does NOT do
@@ -735,64 +722,32 @@ The CLI's intent-submitting commands (`raxis approve-plan`, `raxis init`, etc.) 
 
 The service's lifecycle follows a small state machine that operators see via `raxis kernel status`:
 
-```text
-┌───────────────┐
-│  Not Installed│ ──install (writes service file; enables boot)──► ┌──────────────┐
-│  (no service  │ ◄──────────────uninstall─────────────────────────│  Stopped     │
-│   file exists)│                                                  │  (service    │
-└───────────────┘                                                  │   exists,    │
-                                                                   │   not active)│
-                                                                   └──────┬───────┘
-                                                                          │
-                                                            ┌──────start──┘
-                                                            │
-                                                            ▼
-                                                    ┌──────────────┐
-                                                    │  Starting    │
-                                                    │  (sd_notify  │
-                                                    │   pending)    │
-                                                    └──────┬───────┘
-                                                           │ READY=1
-                                                           ▼
-                                                    ┌──────────────┐
-                                                    │  Active      │
-                                                    │  (running)   │
-                                                    └──────┬───────┘
-                                                           │
-                                            ┌──────stop───┴──crash──┐
-                                            │                       │
-                                            ▼                       ▼
-                                   ┌──────────────┐      ┌─────────────────────┐
-                                   │  Stopping    │      │  CrashedRestarting  │
-                                   │  (SIGTERM    │      │  (RestartSec wait;  │
-                                   │   sent;      │      │   then back to      │
-                                   │   draining)  │      │   Starting)          │
-                                   └──────┬───────┘      └─────────────────────┘
-                                          │
-                              ┌──exit_0──┴──TimeoutStopSec──┐
-                              │                              │
-                              ▼                              ▼
-                      ┌──────────────┐              ┌──────────────────┐
-                      │  Stopped     │              │  KilledByTimeout │
-                      │              │              │  (SIGKILL'd)     │
-                      └──────────────┘              └─────────┬────────┘
-                                                              │
-                                                              ▼
-                                                  ┌─────────────────────┐
-                                                  │  CrashedRestarting  │
-                                                  │  (treated as crash) │
-                                                  └─────────────────────┘
-                                                              │
-                                          if crash count exceeds StartLimitBurst
-                                          within StartLimitIntervalSec:
-                                                              │
-                                                              ▼
-                                                  ┌──────────────────────┐
-                                                  │  Failed              │
-                                                  │  (no auto-restart;   │
-                                                  │   manual reset       │
-                                                  │   required)          │
-                                                  └──────────────────────┘
+```mermaid
+flowchart TD
+    NotInstalled["<b>Not Installed</b><br/>(no service file exists)"]
+    Stopped["<b>Stopped</b><br/>(service exists, not active)"]
+    Starting["<b>Starting</b><br/>(sd_notify pending)"]
+    Active["<b>Active</b><br/>(running)"]
+    Stopping["<b>Stopping</b><br/>(SIGTERM sent; draining)"]
+    CrashedRestarting["<b>CrashedRestarting</b><br/>(RestartSec wait; then back to Starting)"]
+    KilledByTimeout["<b>KilledByTimeout</b><br/>(SIGKILL'd)"]
+    Failed["<b>Failed</b><br/>(no auto-restart; manual reset required)"]
+
+    NotInstalled -- "install (writes service file; enables boot)" --> Stopped
+    Stopped -- "uninstall" --> NotInstalled
+    
+    Stopped -- "start" --> Starting
+    Starting -- "READY=1" --> Active
+    
+    Active -- "stop" --> Stopping
+    Active -- "crash" --> CrashedRestarting
+    
+    Stopping -- "exit_0" --> Stopped
+    Stopping -- "TimeoutStopSec" --> KilledByTimeout
+    
+    KilledByTimeout --> CrashedRestarting
+    
+    CrashedRestarting -- "if crash count exceeds StartLimitBurst within StartLimitIntervalSec:" --> Failed
 ```
 
 ### 10.1 Audit events for lifecycle transitions

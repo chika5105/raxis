@@ -68,9 +68,14 @@ When the Orchestrator submits `ActivateSubTask { task_id: "implement" }`:
 2. If not → `DEPENDENCY_NOT_MET` → the Orchestrator must wait
 3. If yes → the kernel spawns a session for the Executor
 
-```text
-orchestrate ──→ implement ──→ review
-   (orch)         (exec)       (rev)
+```mermaid
+flowchart LR
+    Orchestrate["orchestrate<br/>(orch)"]
+    Implement["implement<br/>(exec)"]
+    Review["review<br/>(rev)"]
+
+    Orchestrate --> Implement
+    Implement --> Review
 ```
 
 ---
@@ -131,36 +136,28 @@ Each retry creates a **new** `subtask_activations` row with a fresh `PendingActi
 
 ## The Full V2 Flow (Visual)
 
-```text
-Operator submits plan with DAG
-        │
-        ▼
-    Kernel spawns Orchestrator
-        │
-        ▼
-    Orchestrator: ActivateSubTask("implement")
-        │
-        ├── Dependency check: predecessors completed? ✅
-        │
-        ▼
-    Kernel spawns Executor for "implement"
-        │
-        ▼
-    Executor: SingleCommit → IntentAdmitted
-    Executor: CompleteTask → task Completed
-        │
-        ▼
-    Orchestrator: ActivateSubTask("review")
-        │
-        ▼
-    Kernel spawns Reviewer for "review"
-    Sets review_evaluation_sha = executor's head_sha
-        │
-        ▼
-    Reviewer: SubmitReview { approved: true }
-        │
-        ▼
-    All tasks Completed → Initiative Completed
+```mermaid
+flowchart TD
+    Submit["Operator submits plan with DAG"]
+    SpawnOrch["Kernel spawns Orchestrator"]
+    ActImplement["Orchestrator: ActivateSubTask('implement')"]
+    CheckDep["Dependency check: predecessors completed? ✅"]
+    SpawnExec["Kernel spawns Executor for 'implement'"]
+    ExecWork["Executor: SingleCommit → IntentAdmitted<br/>Executor: CompleteTask → task Completed"]
+    ActReview["Orchestrator: ActivateSubTask('review')"]
+    SpawnRev["Kernel spawns Reviewer for 'review'<br/>Sets review_evaluation_sha = executor's head_sha"]
+    RevWork["Reviewer: SubmitReview { approved: true }"]
+    Complete["All tasks Completed → Initiative Completed"]
+
+    Submit --> SpawnOrch
+    SpawnOrch --> ActImplement
+    ActImplement --> CheckDep
+    CheckDep --> SpawnExec
+    SpawnExec --> ExecWork
+    ExecWork --> ActReview
+    ActReview --> SpawnRev
+    SpawnRev --> RevWork
+    RevWork --> Complete
 ```
 
 ---

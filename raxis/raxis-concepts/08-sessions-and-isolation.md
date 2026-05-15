@@ -34,40 +34,20 @@ An agent cannot act without a session. A session cannot be created by the agent.
 
 ## Session Lifecycle
 
-```text
-Kernel receives plan with tasks
-        │
-        ▼
-    ┌── Session Creation ──────┐
-    │  1. Generate session_id  │
-    │  2. Generate session     │
-    │     token (HMAC)         │
-    │  3. Bind to task_id      │
-    │  4. Set agent_type       │
-    │     (Orchestrator/       │
-    │      Executor/Reviewer)  │
-    │  5. Start credential     │
-    │     proxies              │
-    │  6. Spawn agent VM       │
-    └──────────────────────────┘
-        │
-        ▼
-    ┌── Active ────────────────┐
-    │  Agent submits intents   │
-    │  Token validated on each │
-    │  Sequence number enforced│
-    └──────────────────────────┘
-        │                    │
-        │ Task completes     │ Operator revokes
-        │ or fails           │ or TTL expires
-        ▼                    ▼
-    ┌── Teardown ─────────────┐
-    │  1. Stop credential     │
-    │     proxies              │
-    │  2. Kill agent VM       │
-    │  3. Release budget      │
-    │  4. Mark session revoked│
-    └──────────────────────────┘
+```mermaid
+flowchart TD
+    Start["Kernel receives plan with tasks"]
+    
+    SessionCreation["<b>Session Creation</b><br/>1. Generate session_id<br/>2. Generate session token (HMAC)<br/>3. Bind to task_id<br/>4. Set agent_type (Orchestrator/Executor/Reviewer)<br/>5. Start credential proxies<br/>6. Spawn agent VM"]
+    
+    Active["<b>Active</b><br/>Agent submits intents<br/>Token validated on each<br/>Sequence number enforced"]
+    
+    Teardown["<b>Teardown</b><br/>1. Stop credential proxies<br/>2. Kill agent VM<br/>3. Release budget<br/>4. Mark session revoked"]
+
+    Start --> SessionCreation
+    SessionCreation --> Active
+    Active -- "Task completes<br/>or fails" --> Teardown
+    Active -- "Operator revokes<br/>or TTL expires" --> Teardown
 ```
 
 ---

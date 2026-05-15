@@ -153,30 +153,17 @@ For every query the agent sends:
 
 ## The Full Flow (Visual)
 
-```text
-Agent (in microVM)
-    │
-    │  "SELECT * FROM users"
-    │  → localhost:54321
-    ▼
-┌────────────────────────────────┐
-│    Credential Proxy (Postgres) │
-│                                │
-│  1. Parse SQL → SELECT         │
-│  2. Check: SELECT ∈ allowed?   │
-│     ✅ allowed                 │
-│  3. Check: users ∈ allowed?    │
-│     ✅ allowed                 │
-│  4. Audit → audit chain        │
-│  5. Inject real credentials    │
-│  6. Forward to prod-db:5432    │
-└────────────────────────────────┘
-    │
-    ▼
-Real Postgres (prod-db.internal:5432)
-    │
-    ▼ response flows back through proxy
-Agent receives rows
+```mermaid
+flowchart TD
+    Agent["Agent (in microVM)"]
+    
+    Proxy["<b>Credential Proxy (Postgres)</b><br/>1. Parse SQL → SELECT<br/>2. Check: SELECT ∈ allowed?<br/>&nbsp;&nbsp;&nbsp;✅ allowed<br/>3. Check: users ∈ allowed?<br/>&nbsp;&nbsp;&nbsp;✅ allowed<br/>4. Audit → audit chain<br/>5. Inject real credentials<br/>6. Forward to prod-db:5432"]
+    
+    RealDb["Real Postgres (prod-db.internal:5432)"]
+
+    Agent -- "\"SELECT * FROM users\"<br/>→ localhost:54321" --> Proxy
+    Proxy --> RealDb
+    RealDb -- "response flows back through proxy" --> Agent
 ```
 
 ---

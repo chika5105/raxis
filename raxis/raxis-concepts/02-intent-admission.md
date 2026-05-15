@@ -60,61 +60,22 @@ evaluation. Phases A and C are sync and run inside
 (`raxis_store::Store::lock_sync`) does not block the tokio runtime.
 Phase B is async (it spawns verifier subprocesses).
 
-```text
-                ┌─ accept_planner_loop (kernel/src/ipc/server.rs) ─┐
-                │   read frame; auth via session token             │
-                │   evaluate_dispatch (intent_kind × role)         │
-                └──────────────────┬───────────────────────────────┘
-                                   │
-              ActivateSubTask /    │       SingleCommit /
-              RetrySubTask         │       IntegrationMerge /
-              early-dispatch       │       CompleteTask / ReportFailure /
-              (separate handler)   │       SubmitReview / StructuredOutput
-                                   │
-                                   ▼
-                ┌── Phase A (run_phase_a, sync, spawn_blocking) ──┐
-                │   Step 2 : accept_envelope_and_advance_sequence │
-                │   Step 3 : load_task                            │
-                │   Step 3A: initiative quarantine guard          │
-                │   §2.5   : per-task LLM token-cost ceiling       │
-                │   Dispatch by kind:                             │
-                │     ReportFailure / CompleteTask / SubmitReview │
-                │     / StructuredOutput   →  EarlyResponse       │
-                │     SingleCommit / IntegrationMerge → fall thru │
-                │   Step 3b: IntegrationMerge attribution gate     │
-                │   Step 3c: IntegrationMerge git_apply_pending    │
-                │   Step 4 : worktree_root_allowed                │
-                │   Step 5 : SHA validation + ancestry            │
-                │   Step 6 : topology check (SingleCommit)         │
-                │   Step 7 : VCS diff → touched_paths             │
-                │   Step 7A: path_scope::check_paths              │
-                │   Step 8 : compute_admission_cost               │
-                └──────────────────┬───────────────────────────────┘
-                                   ▼
-                ┌── Phase B (async) ──────────────────────────────┐
-                │   gates::evaluate_claims                        │
-                │     - auto-derive claims from witnesses         │
-                │     - delegation + scope checks                 │
-                │     - witness presence per gate type            │
-                │     - spawn_verifier for any missing gate       │
-                └──────────────────┬───────────────────────────────┘
-                                   ▼
-                ┌── Phase C (run_phase_c, sync, spawn_blocking) ──┐
-                │   ONE SQLite transaction (INV-STORE-02):        │
-                │     - if pending_gates: Admitted → GatesPending │
-                │     - else: reserve_budget_in_tx (atomic, INV-  │
-                │       STORE-02 — closes the V1 TOCTOU bug)      │
-                │     - Step 11: Admitted → Running               │
-                │     - Step 12: update_task_intent_fields_in_tx  │
-                │     - Step 12A: insert_task_intent_range_in_tx  │
-                │     - Step 12B: set git_apply_pending = 1       │
-                │       (IntegrationMerge only)                    │
-                │   commit                                        │
-                │   Step 13: emit audit + (IntegrationMerge only) │
-                │     run host-side fast-forward + clear          │
-                │     git_apply_pending in Phase 3 transaction    │
-                │   Build IntentResponse::Accepted                │
-                └─────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    AcceptLoop["<b>accept_planner_loop (kernel/src/ipc/server.rs)</b><br/>read frame; auth via session token<br/>evaluate_dispatch (intent_kind × role)"]
+    
+    EarlyDispatch["<b>early-dispatch (separate handler)</b><br/>ActivateSubTask /<br/>RetrySubTask"]
+    
+    PhaseA["<b>Phase A (run_phase_a, sync, spawn_blocking)</b><br/>Step 2: accept_envelope_and_advance_sequence<br/>Step 3: load_task<br/>Step 3A: initiative quarantine guard<br/>§2.5: per-task LLM token-cost ceiling<br/>Dispatch by kind:<br/>&nbsp;&nbsp;ReportFailure / CompleteTask / SubmitReview / StructuredOutput → EarlyResponse<br/>&nbsp;&nbsp;SingleCommit / IntegrationMerge → fall thru<br/>Step 3b: IntegrationMerge attribution gate<br/>Step 3c: IntegrationMerge git_apply_pending<br/>Step 4: worktree_root_allowed<br/>Step 5: SHA validation + ancestry<br/>Step 6: topology check (SingleCommit)<br/>Step 7: VCS diff → touched_paths<br/>Step 7A: path_scope::check_paths<br/>Step 8: compute_admission_cost"]
+
+    PhaseB["<b>Phase B (async)</b><br/>gates::evaluate_claims<br/>- auto-derive claims from witnesses<br/>- delegation + scope checks<br/>- witness presence per gate type<br/>- spawn_verifier for any missing gate"]
+
+    PhaseC["<b>Phase C (run_phase_c, sync, spawn_blocking)</b><br/>ONE SQLite transaction (INV-STORE-02):<br/>- if pending_gates: Admitted → GatesPending<br/>- else: reserve_budget_in_tx (atomic, INV-STORE-02 — closes the V1 TOCTOU bug)<br/>- Step 11: Admitted → Running<br/>- Step 12: update_task_intent_fields_in_tx<br/>- Step 12A: insert_task_intent_range_in_tx<br/>- Step 12B: set git_apply_pending = 1 (IntegrationMerge only)<br/>commit<br/>Step 13: emit audit + (IntegrationMerge only) run host-side fast-forward + clear git_apply_pending in Phase 3 transaction<br/>Build IntentResponse::Accepted"]
+
+    AcceptLoop -- "ActivateSubTask / RetrySubTask" --> EarlyDispatch
+    AcceptLoop -- "SingleCommit / IntegrationMerge /<br/>CompleteTask / ReportFailure /<br/>SubmitReview / StructuredOutput" --> PhaseA
+    PhaseA --> PhaseB
+    PhaseB --> PhaseC
 ```
 
 The detailed step numbers and their canonical homes:

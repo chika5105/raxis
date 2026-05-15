@@ -219,27 +219,19 @@ independently of the planner binary.
 
 **What "separate process" means structurally:**
 
-```text
-┌─────────────────────────────────────────────────────────┐
-│                    HOST MACHINE                          │
-│                                                          │
-│  ┌──────────────┐    UDS socket    ┌──────────────────┐ │
-│  │ raxis-kernel │◄─────────────────│  raxis-gateway   │ │
-│  │  (authority) │                  │ (provider proxy) │ │
-│  └──────┬───────┘                  └──────────────────┘ │
-│         │ VSock                                          │
-│  ┌──────▼───────────────────────────────────────────┐   │
-│  │         AVF microVM (per agent session)           │   │
-│  │                                                   │   │
-│  │   ┌─────────────────────────────────────────┐    │   │
-│  │   │  raxis-planner (intelligence only)      │    │   │
-│  │   │  - No API keys                          │    │   │
-│  │   │  - No network access                    │    │   │
-│  │   │  - No policy visibility                 │    │   │
-│  │   │  - No audit store access                │    │   │
-│  │   └─────────────────────────────────────────┘    │   │
-│  └──────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Host["Host Machine"]
+        Kernel["<b>raxis-kernel</b><br/>(authority)"]
+        Gateway["<b>raxis-gateway</b><br/>(provider proxy)"]
+        
+        subgraph VM["AVF microVM (per agent session)"]
+            Planner["<b>raxis-planner (intelligence only)</b><br/>- No API keys<br/>- No network access<br/>- No policy visibility<br/>- No audit store access"]
+        end
+        
+        Gateway -- "UDS socket" --> Kernel
+        Kernel -- "VSock" --> Planner
+    end
 ```
 
 **The IPC boundary is the trust boundary.** Every intent crosses from the untrusted
@@ -1369,25 +1361,16 @@ intervention. It enforces:
 
 ### Escalation States
 
-```text
-                     ┌─────────────────────────┐
-                     │         Pending          │
-                     │  (EscalationRequested)   │
-                     └──────────┬───────────────┘
-                                │ Operator resolves
-                                ▼
-                     ┌─────────────────────────┐
-                     │        Consumed          │
-             ┌───────┤  (EscalationConsumed)   ├────────┐
-             │       └──────────────────────────┘        │
-             │ Kernel delivers hint                       │ Operator rejects
-             ▼                                            ▼
-    ┌────────────────┐                         ┌──────────────────┐
-    │    Delivered   │                         │     Rejected     │
-    │ (KernelPush    │                         │ (initiative may  │
-    │  ::Escalation  │                         │  be aborted)     │
-    │  Resolved)     │                         └──────────────────┘
-    └────────────────┘
+```mermaid
+flowchart TD
+    Pending["<b>Pending</b><br/>(EscalationRequested)"]
+    Consumed["<b>Consumed</b><br/>(EscalationConsumed)"]
+    Delivered["<b>Delivered</b><br/>(KernelPush::EscalationResolved)"]
+    Rejected["<b>Rejected</b><br/>(initiative may be aborted)"]
+
+    Pending -- "Operator resolves" --> Consumed
+    Consumed -- "Kernel delivers hint" --> Delivered
+    Consumed -- "Operator rejects" --> Rejected
 ```
 
 ### Security Properties of the Escalation FSM

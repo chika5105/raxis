@@ -83,67 +83,31 @@ This is the single rule that makes the rest of the spec coherent. Every design d
 
 ### §3.1 Three-process model
 
-```text
-┌────────────────────────────┐
-│        raxis-kernel        │
-│                            │
-│  Intent / Gateway / Vfr /  │
-│  Cred Proxy / Notify /     │
-│  IPC / Escalation handlers │
-│            │               │
-│            ▼               │
-│  ObservabilityHub          │
-│  (in-process)              │
-│   - in-memory ring queue   │
-│   - bounded by             │
-│     `max_queue_depth`      │
-│   - drops on overflow      │
-│     (counter incremented)  │
-│            ▲               │
-│            │               │
-│  spawn_periodic_flush task │
-│  (one tokio task / kernel) │
-│   - cadence =              │
-│     `[observability.metrics] │
-│       .export_interval`    │
-│   - calls hub.flush() →    │
-│     drains queue → exporter│
-│   - WITHOUT THIS LOOP THE  │
-│     QUEUE FILLS AND THE    │
-│     RING FILE STAYS 0 BYTES│
-│            │               │
-│            ▼               │
-│  RingFileWriter            │
-│   - JSONL segments under   │
-│     <data_dir>/observability/ │
-│   - rotates at             │
-│     segment_max_bytes      │
-│   - capped at               │
-│     max_total_bytes        │
-│   - drop-oldest GC         │
-└────────────┬───────────────┘
-             │ /var/lib/raxis/observability/
-             │   ├── spans-NNNN.jsonl
-             │   ├── metrics-NNNN.jsonl
-             │   └── cursor.toml  (held by pusher)
-             │
-             ▼
-┌────────────────────────────┐
-│    raxis-otel-pusher       │
-│  (separate process, UID)   │
-│                            │
-│  - Tails JSONL segments    │
-│  - Persists cursor file    │
-│  - Batches per OTLP rules  │
-│  - HTTPS/gRPC client       │
-│  - Retries, jitter, backoff│
-└────────────┬───────────────┘
-             │ OTLP gRPC :4317  or  HTTPS :4318
-             ▼
-┌────────────────────────────┐
-│  Operator's OTLP collector │
-│  (Grafana, Datadog, ...)   │
-└────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Kernel ["raxis-kernel"]
+        Handlers["Intent / Gateway / Vfr /<br/>Cred Proxy / Notify /<br/>IPC / Escalation handlers"]
+        
+        Hub["ObservabilityHub<br/>(in-process)<br/>- in-memory ring queue<br/>- bounded by `max_queue_depth`<br/>- drops on overflow<br/>  (counter incremented)"]
+        
+        FlushTask["spawn_periodic_flush task<br/>(one tokio task / kernel)<br/>- cadence = `[observability.metrics].export_interval`<br/>- calls hub.flush() → drains queue → exporter<br/>- WITHOUT THIS LOOP THE QUEUE FILLS<br/>  AND THE RING FILE STAYS 0 BYTES"]
+        
+        Writer["RingFileWriter<br/>- JSONL segments under<br/>  &lt;data_dir&gt;/observability/<br/>- rotates at segment_max_bytes<br/>- capped at max_total_bytes<br/>- drop-oldest GC"]
+        
+        Handlers --> Hub
+        FlushTask -->|flush| Hub
+        FlushTask -->|drains queue| Writer
+    end
+
+    Dir["/var/lib/raxis/observability/<br/>├── spans-NNNN.jsonl<br/>├── metrics-NNNN.jsonl<br/>└── cursor.toml  (held by pusher)"]
+    
+    Pusher["raxis-otel-pusher<br/>(separate process, UID)<br/><br/>- Tails JSONL segments<br/>- Persists cursor file<br/>- Batches per OTLP rules<br/>- HTTPS/gRPC client<br/>- Retries, jitter, backoff"]
+    
+    Collector["Operator's OTLP collector<br/>(Grafana, Datadog, ...)"]
+
+    Kernel -->|Writes| Dir
+    Dir -->|Reads| Pusher
+    Pusher -- "OTLP gRPC :4317  or  HTTPS :4318" --> Collector
 ```
 
 ### §3.2 Why a separate pusher process

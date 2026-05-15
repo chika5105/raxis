@@ -48,45 +48,21 @@ This split is the single most important architectural commitment of this spec. S
 
 ### 2.1 Component diagram
 
-```text
-┌───────────────────────────┐
-│   Planner (in microVM)    │
-│                           │
-│   InferenceRequest        │
-│   { model: "alias:..."    │
-│     messages, tools }     │
-└────────────┬──────────────┘
-             │ VSock (planner ↔ kernel)
-             ▼
-┌───────────────────────────────────────────────────────────────┐
-│                       Kernel                                   │
-│                                                                │
-│  1. Resolve alias → concrete model (consult breaker state)     │
-│  2. Reserve worst-case budget across alias chain               │
-│  3. Audit InferenceAttempt { attempt_idx, resolved_model }     │
-│  4. Dispatch GatewayInvoke to a worker                         │
-│  5. Receive GatewayInvokeResult                                │
-│  6. Categorize error (if any), update breaker state            │
-│  7. Decide: success → finalize | retry → goto 1 | fatal → fail │
-│  8. Audit InferenceCompleted { actual_model_used, attempts }   │
-│  9. Debit budget lane with full per-attempt token breakdown    │
-│ 10. Return InferenceResponse to planner                        │
-└────────────┬──────────────────────────────────────────────────┘
-             │ UDS pool (kernel ↔ gateway workers)
-             │ /var/run/raxis/gateway-workers/{0..N-1}.sock
-             ▼
-┌───────────────────────────────────────────────────────────────┐
-│  Gateway Worker Pool (N stateless workers)                     │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌──────────┐  │
-│  │ Worker 0   │  │ Worker 1   │  │ Worker 2   │  │ Worker 3 │  │
-│  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘  └─────┬────┘  │
-│        │               │               │               │       │
-│        ├───────────────┴───────────────┴───────────────┤       │
-│        │  Each worker: TLS to api.anthropic.com,        │       │
-│        │  api.openai.com, etc. via per-provider HTTPS   │       │
-│        │  client. Holds NO retry, breaker, or session   │       │
-│        │  state. One HTTP call per GatewayInvoke.       │       │
-└────────┴──────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Planner["Planner (in microVM)<br/><br/>InferenceRequest<br/>{ model: 'alias:...'<br/>  messages, tools }"]
+    
+    Kernel["Kernel<br/><br/>1. Resolve alias → concrete model (consult breaker state)<br/>2. Reserve worst-case budget across alias chain<br/>3. Audit InferenceAttempt { attempt_idx, resolved_model }<br/>4. Dispatch GatewayInvoke to a worker<br/>5. Receive GatewayInvokeResult<br/>6. Categorize error (if any), update breaker state<br/>7. Decide: success → finalize | retry → goto 1 | fatal → fail<br/>8. Audit InferenceCompleted { actual_model_used, attempts }<br/>9. Debit budget lane with full per-attempt token breakdown<br/>10. Return InferenceResponse to planner"]
+    
+    subgraph GatewayWorkerPool ["Gateway Worker Pool (N stateless workers)"]
+        direction TB
+        Workers["Worker 0 | Worker 1 | Worker 2 | Worker 3"]
+        WorkerDesc["Each worker: TLS to api.anthropic.com,<br/>api.openai.com, etc. via per-provider HTTPS<br/>client. Holds NO retry, breaker, or session<br/>state. One HTTP call per GatewayInvoke."]
+        Workers --- WorkerDesc
+    end
+
+    Planner -- "VSock (planner ↔ kernel)" --> Kernel
+    Kernel -- "UDS pool (kernel ↔ gateway workers)<br/>/var/run/raxis/gateway-workers/{0..N-1}.sock" --> GatewayWorkerPool
 ```
 
 ---
@@ -950,34 +926,12 @@ The `total_retry_budget_ms` (default 60s) caps the total wait time across all at
 
 State per `(provider, model)` pair, stored in `provider_circuit_state`:
 
-```text
-            ┌─────────────────────────────────────────┐
-            │                                         │
-            │   record_success → reset failures = 0   │
-            │   ◄────────────────────────────────┐    │
-            ▼                                    │    │
-        ┌────────┐                          ┌────┴────┴──┐
-        │ Closed │  ── trip_threshold ─►    │ HalfOpen   │
-        │        │  consecutive failures    │            │
-        └────┬───┘                          └─────┬──────┘
-             │                                     │
-             │              record_success         │
-             │            ◄──────────────────┐    │
-             │  trip_threshold       ┌───────┴────┴─┐
-             │  consecutive failures │              │
-             ├──────────────────────►│     Open     │
-             │                       │              │
-             │  open_duration_ms     └──────────────┘
-             │  expired                       │
-             ▼                                 │
-        ┌─────────┐                            │
-        │HalfOpen │ ◄───── transition ─────────┘
-        │ (probe) │
-        └─────────┘
-             │
-             │  one probe attempt allowed (half_open_max_inflight = 1)
-             │  ── success → Closed
-             │  ── failure → Open (fresh open_duration_ms)
+```mermaid
+stateDiagram-v2
+    Closed --> Open: trip_threshold consecutive failures
+    Open --> HalfOpen: open_duration_ms expired
+    HalfOpen --> Closed: success (one probe attempt allowed)
+    HalfOpen --> Open: failure (fresh open_duration_ms)
 ```
 
 **State transitions in detail:**
@@ -1461,26 +1415,28 @@ The Gateway is deployed as `worker_pool_size` (default 4) identical worker proce
 - Reads credentials from the immutable artifact store on each invocation (cached in-memory per worker, invalidated on key revocation events from the kernel).
 - Holds NO retry, breaker, session, alias, or budget state.
 
-```text
-            ┌─────────────────────────────┐
-            │ raxis-gateway-supervisor    │
-            │ (forks workers; restarts on │
-            │  exit; relays SIGTERM)      │
-            └──────────┬──────────────────┘
-                       │ fork()
-       ┌───────────────┼───────────────┬───────────────┐
-       ▼               ▼               ▼               ▼
-   ┌────────┐     ┌────────┐     ┌────────┐     ┌────────┐
-   │Worker 0│     │Worker 1│     │Worker 2│     │Worker 3│
-   │ .sock  │     │ .sock  │     │ .sock  │     │ .sock  │
-   └────┬───┘     └────┬───┘     └────┬───┘     └────┬───┘
-        │              │              │              │
-        └──────────────┴──────────────┴──────────────┘
-                              │
-                              │ HTTPS to api.anthropic.com,
-                              │ api.openai.com, etc.
-                              ▼
-                       Provider APIs
+```mermaid
+flowchart TD
+    Supervisor["raxis-gateway-supervisor<br/>(forks workers; restarts on<br/>exit; relays SIGTERM)"]
+    
+    Worker0["Worker 0<br/>.sock"]
+    Worker1["Worker 1<br/>.sock"]
+    Worker2["Worker 2<br/>.sock"]
+    Worker3["Worker 3<br/>.sock"]
+    
+    ProviderAPIs["Provider APIs"]
+    
+    Supervisor -- "fork()" --> Worker0
+    Supervisor --> Worker1
+    Supervisor --> Worker2
+    Supervisor --> Worker3
+    
+    Worker0 --> HTTPS
+    Worker1 --> HTTPS
+    Worker2 --> HTTPS
+    Worker3 --> HTTPS
+    
+    HTTPS["HTTPS to api.anthropic.com,<br/>api.openai.com, etc."] --> ProviderAPIs
 ```
 
 ### 9.2 Worker selection

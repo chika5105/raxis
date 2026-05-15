@@ -80,50 +80,40 @@ into the unfixed Tier-1 posture.
 
 ## 2. The unified A3 model end-to-end
 
-```text
-┌────────────────────────────────────────────────────────────────┐
-│ Guest VM (no virtio-net)                                       │
-│                                                                │
-│   bash, agent code, custom tool                                │
-│         │                                                      │
-│         ▼ TCP connect "evil.example:443"                       │
-│   ┌────────────────┐                                           │
-│   │ iptables nat   │  REDIRECT --to-port 3129                  │
-│   └────────┬───────┘  REDIRECT UDP/53 → 127.0.0.1:53           │
-│            ▼                                                   │
-│   ┌────────────────┐  ┌────────────────┐                       │
-│   │ raxis-tproxy   │  │ raxis-tproxy   │                       │
-│   │  (TCP redir)   │  │  (DNS stub :53)│                       │
-│   └────────┬───────┘  └────────┬───────┘                       │
-│            │ ① peek SNI         │ ① DNS query                  │
-│            │ ② admission req    │ ② resolve req                │
-│            ▼                    ▼                              │
-│   ┌──────────────────────────────────────┐                     │
-│   │  AF_VSOCK to (VMADDR_CID_HOST, port) │                     │
-│   └──────────────────────────────────────┘                     │
-└────────────┼─────────────────────────────────────┼─────────────┘
-             │                                     │
-┌────────────▼─────────────────────────────────────▼─────────────┐
-│ Kernel (host)                                                  │
-│                                                                │
-│   ┌─────────────────────────┐  ┌──────────────────────────┐    │
-│   │ handlers::tproxy_admit  │  │ handlers::dns_resolve    │    │
-│   │  • validate session     │  │  • validate session      │    │
-│   │  • match SNI/Host vs    │  │  • host-side resolver    │    │
-│   │    tproxy_allowlist     │  │  • emit DnsResolveReq.   │    │
-│   │  • emit Granted/Denied  │  │    (low-sev) BEFORE resp │    │
-│   │    BEFORE response      │  └──────────────────────────┘    │
-│   └──────────┬──────────────┘                                  │
-│              │ ③ on Admit: open upstream TCP                   │
-│              │ ④ register tunnel (tunnel_id, tunnel_token)     │
-│              ▼                                                 │
-│   ┌──────────────────────────┐                                 │
-│   │  kernel tunnel listener  │  guest re-dials with token →    │
-│   │  • verifies tunnel_token │  bidirectional copy_bidirectional│
-│   └──────────┬───────────────┘                                 │
-│              ▼                                                 │
-│         host TCP socket → upstream                             │
-└────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph GuestVM["Guest VM (no virtio-net)"]
+        direction TB
+        Agent["bash, agent code, custom tool"]
+        Iptables["iptables nat<br/>REDIRECT --to-port 3129<br/>REDIRECT UDP/53 → 127.0.0.1:53"]
+        
+        TproxyTcp["raxis-tproxy<br/>(TCP redir)"]
+        TproxyDns["raxis-tproxy<br/>(DNS stub :53)"]
+        
+        Vsock["AF_VSOCK to (VMADDR_CID_HOST, port)"]
+
+        Agent -- "TCP connect evil.example:443" --> Iptables
+        Iptables --> TproxyTcp
+        Iptables --> TproxyDns
+        
+        TproxyTcp -- "① peek SNI<br/>② admission req" --> Vsock
+        TproxyDns -- "① DNS query<br/>② resolve req" --> Vsock
+    end
+
+    subgraph KernelHost["Kernel (host)"]
+        direction TB
+        HandlerAdmit["handlers::tproxy_admit<br/>• validate session<br/>• match SNI/Host vs tproxy_allowlist<br/>• emit Granted/Denied BEFORE response"]
+        HandlerDns["handlers::dns_resolve<br/>• validate session<br/>• host-side resolver<br/>• emit DnsResolveReq (low-sev) BEFORE resp"]
+        
+        TunnelListener["kernel tunnel listener<br/>• verifies tunnel_token<br/>guest re-dials with token → bidirectional copy"]
+        Upstream["host TCP socket → upstream"]
+
+        HandlerAdmit -- "③ on Admit: open upstream TCP<br/>④ register tunnel (tunnel_id, tunnel_token)" --> TunnelListener
+        TunnelListener --> Upstream
+    end
+
+    Vsock --> HandlerAdmit
+    Vsock --> HandlerDns
 ```
 
 The kernel sees every flow. Every flow is audited (admission

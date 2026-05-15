@@ -31,26 +31,23 @@ The contract:
 
 ## The mental model in one diagram
 
-```text
-   ┌──────────────────┐
-   │  Operator (you)  │
-   └─────┬─────┬──────┘
-         │     │  signed CLI: policy, plan, approvals
-         │     ▼
-         │  ┌─────────────────────────────────────────────────┐
-         │  │ raxis-kernel  (authority core)                  │
-  email  │  │   - admission  - gates  - audit chain           │
-notif.   │  │   - VM spawn   - egress proxy supervision       │
-         │  └───┬──────────┬──────────┬───────────┬──────────┘
-         │     │ vsock     │ UDS      │ UDS       │ HTTPS
-         │     ▼           ▼          ▼           ▼
-         │ ┌────────┐  ┌─────────┐ ┌──────────┐ ┌──────────────┐
-         │ │ Agent  │  │ tproxy  │ │ creden-  │ │ raxis-gateway│
-         │ │ VMs    │  │ (egress)│ │ tial     │ │  (LLM API)   │
-         │ │  PID 1 │  │         │ │ proxies  │ └──────────────┘
-         │ └────────┘  └─────────┘ └──────────┘
-         ▼
-   git worktrees on host (virtio-fs mounted into each VM)
+```mermaid
+flowchart TD
+    Operator["Operator (you)"]
+    Kernel["<b>raxis-kernel (authority core)</b><br/>- admission - gates - audit chain<br/>- VM spawn - egress proxy supervision"]
+    Worktrees["git worktrees on host<br/>(virtio-fs mounted into each VM)"]
+    Agent["<b>Agent VMs</b><br/>PID 1"]
+    Tproxy["<b>tproxy</b><br/>(egress)"]
+    Credential["<b>credential proxies</b>"]
+    Gateway["<b>raxis-gateway</b><br/>(LLM API)"]
+
+    Operator -- "signed CLI: policy, plan, approvals" --> Kernel
+    Operator --> Worktrees
+    Kernel -- "email notif." --> Operator
+    Kernel -- "vsock" --> Agent
+    Kernel -- "UDS" --> Tproxy
+    Kernel -- "UDS" --> Credential
+    Kernel -- "HTTPS" --> Gateway
 ```
 
 - The **kernel** is the only process that holds operator-trusted

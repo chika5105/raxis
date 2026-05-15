@@ -42,21 +42,9 @@ narrow but not widen.
 The canonical section list comes straight from
 `crates/policy/src/bundle.rs::RawPolicy`:
 
-```toml
-# ┌────────────────────────────────────────────────────────────┐
-# │                     policy.toml                            │
-# ├────────────────────────────────────────────────────────────┤
-# │ [sessions]              — TTL & concurrency caps           │
-# │ [budget]                — admission cost + LLM token caps  │
-# │ [operators]             — Ed25519 signing keys + permitted │
-# │ [[gates]]               — verifier binaries per claim type │
-# │ [[lanes]]               — budget lane definitions          │
-# │ [claim_requirements]    — path → required claim types      │
-# │ [egress]                — fetch proxy allow-list           │
-# │ [[providers]]           — LLM provider catalogue (optional)│
-# │ [delegations]           — role ceilings + max TTL          │
-# │ [gateway]               — gateway proxy config (optional)  │
-# └────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Policy["<b>policy.toml</b><br/><hr/>[sessions] — TTL & concurrency caps<br/>[budget] — admission cost + LLM token caps<br/>[operators] — Ed25519 signing keys + permitted<br/>[[gates]] — verifier binaries per claim type<br/>[[lanes]] — budget lane definitions<br/>[claim_requirements] — path → required claim types<br/>[egress] — fetch proxy allow-list<br/>[[providers]] — LLM provider catalogue (optional)<br/>[delegations] — role ceilings + max TTL<br/>[gateway] — gateway proxy config (optional)"]
 ```
 
 **`[[custom_tools]]` does NOT live in `policy.toml`.** Earlier

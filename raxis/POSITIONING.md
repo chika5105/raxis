@@ -135,43 +135,19 @@ are useful. They give the comparison without inheriting the wrong mental model a
 
 The single most useful diagram for explaining RAXIS to a technical audience.
 
-```text
-┌──────────────────────────────────────────────────────────────────┐
-│  Agent Frameworks                                                │
-│  LangChain · AutoGen · MetaGPT · OpenAI Agents SDK ·             │
-│  AIOS (academic) · CrewAI · Claude Agent SDK                     │
-│  ─────────────────────────────────────────────────────────────   │
-│  Concern: "How do I build an agent that can do work?"            │
-│  Provides: orchestration, memory, prompt management, tool use    │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              │ submits work to
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  RAXIS                                                           │
-│  ─────────────────────────────────────────────────────────────   │
-│  Concern: "How do I run that agent in production with            │
-│            cryptographic accountability?"                        │
-│  Provides: policy authority, capability gating, audit chain,     │
-│            credential isolation, budget enforcement, escalation  │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              │ enforces policy on
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  Isolation & Runtime Substrates                                  │
-│  Firecracker · Apple Virtualization.framework · gVisor ·         │
-│  Docker · LXC · WebAssembly runtimes                             │
-│  ─────────────────────────────────────────────────────────────   │
-│  Concern: "How do I isolate untrusted code?"                     │
-│  Provides: process/memory/syscall isolation                      │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              │ runs on
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  Operating System & Hardware                                     │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["<b>Agent Frameworks</b><br/>LangChain · AutoGen · MetaGPT · OpenAI Agents SDK ·<br/>AIOS (academic) · CrewAI · Claude Agent SDK<br/><hr/>Concern: 'How do I build an agent that can do work?'<br/>Provides: orchestration, memory, prompt management, tool use"]
+    
+    B["<b>RAXIS</b><br/><hr/>Concern: 'How do I run that agent in production with<br/>cryptographic accountability?'<br/>Provides: policy authority, capability gating, audit chain,<br/>credential isolation, budget enforcement, escalation"]
+    
+    C["<b>Isolation & Runtime Substrates</b><br/>Firecracker · Apple Virtualization.framework · gVisor ·<br/>Docker · LXC · WebAssembly runtimes<br/><hr/>Concern: 'How do I isolate untrusted code?'<br/>Provides: process/memory/syscall isolation"]
+    
+    D["<b>Operating System & Hardware</b>"]
+
+    A -- "submits work to" --> B
+    B -- "enforces policy on" --> C
+    C -- "runs on" --> D
 ```
 
 **Reading the diagram:** RAXIS is the layer between the agent framework (which knows how to *build* an agent) and the isolation runtime (which knows how to *contain* a process). Neither layer alone provides what RAXIS provides:

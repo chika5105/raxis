@@ -39,64 +39,27 @@ The single filesystem boundary the kernel never crosses: `disk_root/audit/` file
 
 ### 2.1 Component diagram
 
-```text
-┌─────────────────────────────────┐
-│            Kernel               │
-│                                 │
-│  - Writes events to active      │
-│    segment (Merkle tree leaves) │
-│  - Finalizes segments at        │
-│    audit_segment_size_mb        │
-│  - Computes per-segment Merkle  │
-│    root; updates inter-segment  │
-│    tree                         │
-│  - Signs witnesses              │
-│  - Notifies archiver            │
-│  - Deletes locally only after   │
-│    verified ACK                 │
-└────────┬────────────────────────┘
-         │
-         │  /var/lib/raxis/audit/   (filesystem; archiver has read-only access)
-         │  ├── 0001.log
-         │  ├── 0001.merkle         (within-segment intermediate nodes)
-         │  ├── 0002.log
-         │  ├── 0002.merkle
-         │  ├── ...
-         │  ├── inter-segment.merkle (incremental tree of segment roots)
-         │  └── witnesses.log       (signed Merkle root snapshots)
-         │
-         │  /var/run/raxis/archiver.sock  (UDS for control plane)
-         │  ├── kernel sends:  AuditSegmentReady, RedactSegment, PublishWitness
-         │  └── kernel receives: AuditSegmentArchived, RedactionPropagated, WitnessPublished
-         │
-         ▼
-┌─────────────────────────────────┐
-│      raxis-archiver             │
-│ (separate process,              │
-│  separate UID,                  │
-│  unprivileged)                  │
-│                                 │
-│  - Reads finalized segments     │
-│    from kernel's audit dir      │
-│  - Uploads to backend           │
-│  - Verifies roundtrip checksum  │
-│  - ACKs to kernel               │
-│  - Optional: publishes          │
-│    witnesses to external anchor │
-│  - Supports RedactSegment if    │
-│    operator opted in to GDPR    │
-└────────┬────────────────────────┘
-         │ WAN egress to operator's backend
-         │
-         ▼
-┌─────────────────────────────────┐    ┌────────────────────────────┐
-│  Archive backend                 │    │  External anchor (opt-in)  │
-│  - S3 / Glacier                  │    │  - Sigstore Rekor          │
-│  - Azure Blob                    │    │  - Internal CT log         │
-│  - On-prem object store          │    │  - Custom HTTP endpoint    │
-│  - WORM filesystem               │    └────────────────────────────┘
-│  - Custom (operator's choice)    │
-└─────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph KernelGroup ["Kernel"]
+        direction TB
+        KernelDesc["- Writes events to active<br/>  segment (Merkle tree leaves)<br/>- Finalizes segments at<br/>  audit_segment_size_mb<br/>- Computes per-segment Merkle<br/>  root; updates inter-segment<br/>  tree<br/>- Signs witnesses<br/>- Notifies archiver<br/>- Deletes locally only after<br/>  verified ACK"]
+    end
+
+    Dir["/var/lib/raxis/audit/   (filesystem; archiver has read-only access)<br/>├── 0001.log<br/>├── 0001.merkle         (within-segment intermediate nodes)<br/>├── 0002.log<br/>├── 0002.merkle<br/>├── ...<br/>├── inter-segment.merkle (incremental tree of segment roots)<br/>└── witnesses.log       (signed Merkle root snapshots)<br/><br/>/var/run/raxis/archiver.sock  (UDS for control plane)<br/>├── kernel sends:  AuditSegmentReady, RedactSegment, PublishWitness<br/>└── kernel receives: AuditSegmentArchived, RedactionPropagated, WitnessPublished"]
+
+    subgraph ArchiverGroup ["raxis-archiver<br/>(separate process, separate UID, unprivileged)"]
+        direction TB
+        ArchiverDesc["- Reads finalized segments<br/>  from kernel's audit dir<br/>- Uploads to backend<br/>- Verifies roundtrip checksum<br/>- ACKs to kernel<br/>- Optional: publishes<br/>  witnesses to external anchor<br/>- Supports RedactSegment if<br/>  operator opted in to GDPR"]
+    end
+
+    Backend["Archive backend<br/>- S3 / Glacier<br/>- Azure Blob<br/>- On-prem object store<br/>- WORM filesystem<br/>- Custom (operator's choice)"]
+    Anchor["External anchor (opt-in)<br/>- Sigstore Rekor<br/>- Internal CT log<br/>- Custom HTTP endpoint"]
+
+    KernelGroup --> Dir
+    Dir --> ArchiverGroup
+    ArchiverGroup -- "WAN egress to operator's backend" --> Backend
+    ArchiverGroup --> Anchor
 ```
 
 ### 2.2 What changes vs V2
@@ -297,24 +260,29 @@ CREATE INDEX idx_audit_chain_truncations_segment ON audit_chain_truncations (seg
 
 V3 organizes the audit log as a two-level Merkle tree:
 
-```text
-                            ┌──────────────────────────────┐
-                            │  Inter-segment Merkle root   │
-                            │  (signed in witnesses)        │
-                            └──────────┬───────────────────┘
-                                       │
-                  ┌────────────────────┴────────────────────┐
-                  │                                         │
-          ┌───────┴────────┐                       ┌────────┴───────┐
-          │  internal node │                       │  internal node │
-          └───┬─────────┬──┘                       └───┬─────────┬──┘
-              │         │                              │         │
-       ┌──────┴──┐  ┌───┴───┐                   ┌──────┴──┐  ┌───┴───┐
-       │  Seg 1  │  │ Seg 2 │  ...              │  Seg N-1│  │ Seg N │
-       │  root   │  │ root  │                   │  root   │  │ root  │
-       └────┬────┘  └───┬───┘                   └────┬────┘  └───┬───┘
-            │           │                            │           │
-        (within-segment Merkle trees, one per segment, leaves are events)
+```mermaid
+flowchart TD
+    InterRoot["Inter-segment Merkle root<br/>(signed in witnesses)"]
+    Node1["internal node"]
+    Node2["internal node"]
+    Seg1["Seg 1<br/>root"]
+    Seg2["Seg 2<br/>root"]
+    SegNMinus1["Seg N-1<br/>root"]
+    SegN["Seg N<br/>root"]
+    Desc1["(within-segment Merkle trees, one per segment, leaves are events)"]
+    Desc2["..."]
+    Desc3["(within-segment Merkle trees, one per segment, leaves are events)"]
+
+    InterRoot --- Node1
+    InterRoot --- Node2
+    Node1 --- Seg1
+    Node1 --- Seg2
+    Node2 --- SegNMinus1
+    Node2 --- SegN
+    Seg1 -.- Desc1
+    Seg2 -.- Desc1
+    SegNMinus1 -.- Desc3
+    SegN -.- Desc3
 ```
 
 **Within-segment tree.** When a segment finalizes (rotation per `host-capacity.md §6.3`), the kernel computes a binary Merkle tree over the events in that segment. Each event is a leaf; pairs of leaves hash to internal nodes; the segment's Merkle root is the digest. The intermediate node hashes are persisted alongside the segment as `<segment_id>.merkle`. For a segment with K events, the within-segment tree has K-1 internal nodes (~32K extra bytes for SHA-256).

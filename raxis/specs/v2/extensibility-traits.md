@@ -867,19 +867,14 @@ The framing is **identical** in every row above (bincode-encoded `IpcMessage` pe
 
 `DomainAdapter` (§2) and `IsolationBackend` (§3) are **orthogonal axes**. The kernel composes them at boot independently:
 
-```text
-                ┌─── domain axis ────────────────────────────────┐
-                │ GitAdapter   TradingAdapter   HealthcareAdapter │
-                ├────────────────────────────────────────────────┤
-isolation axis  │
-                │
-FirecrackerIso  │ V2 default       (custom)          (custom)
-Apple-VZ        │ V2 default       (custom)          (custom)
-SgxEnclave      │ (custom)         attested IP        (custom)
-SevSnp          │ (custom)         (custom)           HIPAA-grade
-Wasm            │ (lightweight)    edge agents        (rare)
-Mock            │ kernel tests     test fixtures      test fixtures
-```
+| Isolation \ Domain | `GitAdapter` | `TradingAdapter` | `HealthcareAdapter` |
+| --- | --- | --- | --- |
+| **`FirecrackerIso`** | V2 default | (custom) | (custom) |
+| **`Apple-VZ`** | V2 default | (custom) | (custom) |
+| **`SgxEnclave`** | (custom) | attested IP | (custom) |
+| **`SevSnp`** | (custom) | (custom) | HIPAA-grade |
+| **`Wasm`** | (lightweight) | edge agents | (rare) |
+| **`Mock`** | kernel tests | test fixtures | test fixtures |
 
 Any cell in this matrix is a valid V2-or-future deployment. The kernel binary does not change between cells; only the two `Arc<dyn Trait>` injections at boot do. A trading firm running on AWS Nitro might pick `TradingAdapter + SgxEnclaveIsolation`; a hospital might pick `HealthcareAdapter + SevSnpIsolation`; the V2 reference target picks `GitAdapter + FirecrackerIsolation` (Linux) or `GitAdapter + AppleVirtualizationIsolation` (macOS).
 
@@ -1808,13 +1803,16 @@ Instead, the kernel ships a built-in `HttpSidecarRouter` impl of
 operator runs alongside the kernel. The kernel communicates with
 it over localhost HTTP using a fixed, RAXIS-defined JSON schema.
 
-```text
-                RAXIS protocol              Provider API
-                (fixed schema)              (their format)
-┌──────────┐   ──────────────►  ┌─────────┐  ──────────►  ┌──────────┐
-│  Kernel  │   POST /complete   │Sidecar  │  POST /v1/... │ Provider │
-│(concrete)│   ◄──────────────  │(adapter)│  ◄──────────  │   API    │
-└──────────┘   SidecarResponse  └─────────┘  their JSON   └──────────┘
+```mermaid
+flowchart LR
+    Kernel["Kernel<br/>(concrete)"]
+    Sidecar["Sidecar<br/>(adapter)"]
+    Provider["Provider<br/>API"]
+
+    Kernel -- "RAXIS protocol<br/>(fixed schema)<br/>POST /complete" --> Sidecar
+    Sidecar -- "Provider API<br/>(their format)<br/>POST /v1/..." --> Provider
+    Provider -- "their JSON" --> Sidecar
+    Sidecar -- "SidecarResponse" --> Kernel
 ```
 
 **Security properties:**
