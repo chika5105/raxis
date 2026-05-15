@@ -46,9 +46,9 @@ As models get smarter, they write tighter plans, require fewer human escalations
 
 ## 5. Defensibility & The Moat
 
-The barrier to entry here is immense. RAXIS is not a thin wrapper around the OpenAI API. It is a deep-tech, Rust-based infrastructure play built on 12 non-negotiable structural invariants (`specs/paradigm.md`). 
+The barrier to entry here is immense. RAXIS is not a thin wrapper around the OpenAI API. It is a deep-tech, Rust-based infrastructure play built on 12 non-negotiable structural invariants ([`specs/paradigm.md`](specs/paradigm.md)). 
 
-By invoking the concept of a **Reference Monitor**, we establish a local, structural boundary. A major question investors ask is: *"What stops OpenAI or Anthropic from just building this into their API?"*
+By invoking the concept of a **Reference Monitor**, we establish a local, structural boundary. *"What stops OpenAI or Anthropic from just building this into their API?"*
 
 The answer is that they structurally cannot. OpenAI cannot build a reference monitor into their API because the API is inherently on the wrong side of the trust boundary—it *is* the untrusted intelligence. A true reference monitor must live on the host machine, independently mediating the VM, the filesystem, and the local credentials. This proves RAXIS has a deep, defensible moat that an LLM provider cannot easily subsume.
 
