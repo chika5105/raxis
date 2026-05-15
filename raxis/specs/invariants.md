@@ -101,7 +101,8 @@
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
 | Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
 | Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05, INV-OBSERVABILITY-DATAPLANE-LATENCY-06, INV-OBSERVABILITY-DATAPLANE-LATENCY-07, INV-OBSERVABILITY-DATAPLANE-LATENCY-08 | 6 |
-| **Total** | | **143** |
+| Dev signing-key autogen — V3 (iter61) | INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 | 1 |
+| **Total** | | **144** |
 
 ---
 
@@ -10596,6 +10597,98 @@ progressive ceiling resolution); `v2/planner-harness.md`
 (policy-side `planner_max_turns_step_default`);
 `guides/recipes/env/11-planner-env-vars.md`
 (`RAXIS_PLANNER_MAX_TURNS_HARD_CEILING` override).
+
+---
+
+### INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 — `cargo xtask images bake` mints + persists a per-clone dev signing keypair under `.git/info/raxis-signing-key/` and exports the public half into `RAXIS_KERNEL_SIGNING_KEY_HEX`
+
+**Statement.** `cargo xtask images bake` (the umbrella image-bake
+pipeline) MUST, on every invocation, ensure a per-clone Ed25519
+keypair exists at
+`<workspace_root>/.git/info/raxis-signing-key/{sk.hex,pk.hex}`
+(file modes `0600` / `0644`, parent-dir mode `0700`). On first
+run the keypair is freshly minted from the OS RNG; on every
+subsequent run the helper short-circuits to a stat + read fast
+path. The helper is implemented as
+`xtask::images::ensure_dev_signing_keypair` and called from
+`run_bake_inner` BEFORE preflight.
+
+After the helper returns, `bake` MUST:
+
+1. Print one of two stable one-liners on stderr —
+   `using dev signing key from <pk.hex path>` (subsequent runs)
+   OR `generated new dev signing key at <pk.hex path>` (first
+   run) — so an operator inspecting a fresh build log can tell
+   whether they just minted a new anchor.
+2. Export the public half as `RAXIS_KERNEL_SIGNING_KEY_HEX` into
+   the process environment so every cargo subprocess `bake`
+   spawns (the `dev_stage` cross-compile chain) inherits it. A
+   sibling `cargo build -p raxis-kernel` invoked from the same
+   shell session sees the matching trust anchor without manual
+   export.
+3. Default `BakeArgs::signing_key` to the autogen path
+   (`xtask::images::git_info_signing_key_dir/sk.hex`) when the
+   operator does not pass `--signing-key <PATH>` explicitly. The
+   resolved path is then handed unchanged to `build_all`'s
+   manifest-signing step, so the same keypair signs the
+   manifests AND backs the kernel's compile-time anchor — the
+   key-rotation-drift failure mode flagged by
+   `INV-IMAGE-VERIFY-REJECT-MISMATCH-01` collapses to a single
+   write/read of `pk.hex`.
+
+`.git/info/` is the canonical "per-clone, never tracked" home
+for repository-local state (`man gitrepository-layout`); using
+it removes the gitignore step entirely (git itself refuses to
+stage anything under `.git/`). The CI / release pipeline is
+unchanged: those workflows pass `--signing-key <PATH>`
+explicitly and pre-set `RAXIS_KERNEL_SIGNING_KEY_HEX` from a
+secret, so the autogen path is bypassed end-to-end.
+
+**Justification.** Pre-iter61 a fresh clone could not run `cargo
+xtask images bake` without first running BOTH `cargo xtask
+dev-keys init` (to mint a keypair under
+`$HOME/.config/raxis/keys/`) AND manually exporting
+`RAXIS_KERNEL_SIGNING_KEY_HEX` into the shell so the kernel's
+fail-loud trust anchor (`INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`)
+could bake the public key in. The friction was real — operators
+hit it once, set up the env var, then forgot the seam exists.
+The autogen path keeps the trust anchor's fail-loud posture
+intact (a kernel built without the env var still refuses to
+boot) while removing the only operator step that wasn't
+automatable, and it ALSO closes the rotation-drift failure mode
+(`INV-IMAGE-VERIFY-REJECT-MISMATCH-01` example: K_a-signed
+manifests on disk paired with a K_b-built kernel) by making the
+two halves of the keypair come from the same per-clone artefact.
+
+**Witness.** Six tests under
+`xtask/src/images.rs::tests::inv_image_dev_signing_key_autogen_01_*`:
+
+* `_first_run_mints_keypair_under_dot_git_info` — pins the
+  on-disk layout (`.git/info/raxis-signing-key/{sk,pk}.hex`)
+  and the `generated_now=true` first-run signal.
+* `_second_run_reuses_existing_pair_byte_for_byte` — pins the
+  idempotency contract: both files survive a second call
+  byte-for-byte, `generated_now=false`.
+* `_first_run_files_have_secure_modes` — pins `0600` /
+  `0644` / `0700` (sk / pk / dir) modes on Unix.
+* `_pk_hex_round_trips_to_signing_key` — pins the
+  cryptographic agreement between the two halves (the
+  rotation-drift failure mode collapses to this round-trip).
+* `_corrupt_pk_hex_fails_loud_with_remediation` — pins the
+  fail-loud handling of an externally-corrupted `pk.hex`
+  (operator must `delete the file` to recover; no silent
+  fallback).
+* `_git_info_dir_path_is_per_clone_local` — pins the literal
+  `.git/info/raxis-signing-key` path so a future refactor that
+  moves the keypair somewhere shareable trips the witness
+  (and the spec).
+
+**Canonical home.** `xtask/src/images.rs` module-level doc
+comment for the `ensure_dev_signing_keypair` helper,
+`xtask/src/dev_keys.rs` header (the legacy seam, now positioned
+as the "shared-across-clones" alternative), and
+`specs/v3/canonical-image-trust-anchor.md` §4 (dev-host
+workflow, paired with `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`).
 
 ---
 

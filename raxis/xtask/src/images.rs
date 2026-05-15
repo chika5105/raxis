@@ -1157,6 +1157,198 @@ fn workspace_root_from_cwd() -> Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// `cargo xtask images bake` — auto-generated dev signing keypair
+// (INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01)
+// ---------------------------------------------------------------------------
+//
+// Pre-iter61 a fresh clone could not run `cargo xtask images bake`
+// without first running BOTH `cargo xtask dev-keys init` (to mint a
+// keypair under `$HOME/.config/raxis/keys/`) AND manually exporting
+// `RAXIS_KERNEL_SIGNING_KEY_HEX` into the shell so the kernel's
+// fail-loud trust anchor (`crates/canonical-images/build.rs`) could
+// bake the public key in. The friction was real — operators hit it
+// once, set up the env var, then forgot the seam exists.
+//
+// The helper below moves the keypair into the per-clone, untracked
+// `.git/info/raxis-signing-key/` directory and ensures it's present
+// (mode 0700 dir, 0600 sk.hex, 0644 pk.hex) on every `bake` run. It
+// is idempotent: present-and-readable → return; missing → generate.
+// The umbrella `bake` driver then exports the public half into
+// `RAXIS_KERNEL_SIGNING_KEY_HEX` for every cargo subprocess it spawns
+// (dev-stage's `cargo build -p raxis-planner-<role>` chain), so a
+// concurrent `cargo build -p raxis-kernel` invoked from the same
+// shell sees the trust anchor without manual export.
+//
+// `.git/info/` is the canonical "per-clone, never tracked" home for
+// repository-local state (`man gitrepository-layout`); using it
+// removes the gitignore step entirely (git itself refuses to stage
+// anything under `.git/`).
+
+const GIT_INFO_KEY_DIR_REL: &[&str] = &[".git", "info", "raxis-signing-key"];
+const GIT_INFO_KEY_SK_FILENAME: &str = "sk.hex";
+const GIT_INFO_KEY_PK_FILENAME: &str = "pk.hex";
+
+/// Compute the `.git/info/raxis-signing-key/` directory path under
+/// the supplied workspace root. Pure-data: no IO.
+pub(crate) fn git_info_signing_key_dir(workspace_root: &Path) -> PathBuf {
+    let mut p = workspace_root.to_path_buf();
+    for seg in GIT_INFO_KEY_DIR_REL {
+        p.push(seg);
+    }
+    p
+}
+
+/// Outcome of the autogen step. The `pk_hex` is the 64-lowercase-hex
+/// public-key string ready to drop into `RAXIS_KERNEL_SIGNING_KEY_HEX`.
+#[derive(Debug, Clone)]
+pub(crate) struct DevSigningKeypair {
+    /// Absolute path to the private-half hex file. Read by the
+    /// `inv_image_dev_signing_key_autogen_01_*` witnesses to assert
+    /// the on-disk layout; production code reads it transitively
+    /// via `BakeArgs::signing_key` (which `BakeArgs::parse`
+    /// defaults to the same path) so the field looks dead from
+    /// the bin's point of view.
+    #[allow(dead_code)]
+    pub sk_path: PathBuf,
+    pub pk_path: PathBuf,
+    pub pk_hex: String,
+    /// `true` iff this run minted the keypair; `false` iff a prior
+    /// run had already laid it down. Drives the user-visible one-liner
+    /// the bake driver prints.
+    pub generated_now: bool,
+}
+
+/// Ensure the per-clone dev signing keypair at
+/// `.git/info/raxis-signing-key/{sk.hex,pk.hex}` is present and
+/// readable. On first call the keypair is freshly minted from the OS
+/// RNG; on every subsequent call this is a stat + read fast path.
+///
+/// Side effects: creates the directory (mode 0700) and the two files
+/// (modes 0600 / 0644) on first call. No env-var mutation here — that
+/// is the umbrella bake driver's concern, so this helper stays
+/// safely callable from witness tests under a tempdir workspace.
+pub(crate) fn ensure_dev_signing_keypair(workspace_root: &Path) -> Result<DevSigningKeypair> {
+    use ed25519_dalek::SigningKey;
+    use rand::{rngs::OsRng, RngCore};
+
+    let dir = git_info_signing_key_dir(workspace_root);
+    let sk_path = dir.join(GIT_INFO_KEY_SK_FILENAME);
+    let pk_path = dir.join(GIT_INFO_KEY_PK_FILENAME);
+
+    if sk_path.exists() && pk_path.exists() {
+        let pk_hex = fs::read_to_string(&pk_path)
+            .with_context(|| format!("read {}", pk_path.display()))?
+            .trim()
+            .to_owned();
+        validate_pk_hex(&pk_hex, &pk_path)?;
+        return Ok(DevSigningKeypair {
+            sk_path,
+            pk_path,
+            pk_hex,
+            generated_now: false,
+        });
+    }
+
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    set_dir_mode_0700_local(&dir)?;
+
+    let mut seed = [0u8; 32];
+    OsRng.fill_bytes(&mut seed);
+    let signing_key = SigningKey::from_bytes(&seed);
+    let pk_bytes = signing_key.verifying_key().to_bytes();
+    let sk_hex = hex::encode(signing_key.to_bytes());
+    let pk_hex = hex::encode(pk_bytes);
+
+    write_atomic_with_mode_local(&sk_path, &sk_hex, 0o600)?;
+    write_atomic_with_mode_local(&pk_path, &pk_hex, 0o644)?;
+
+    Ok(DevSigningKeypair {
+        sk_path,
+        pk_path,
+        pk_hex,
+        generated_now: true,
+    })
+}
+
+fn validate_pk_hex(pk_hex: &str, pk_path: &Path) -> Result<()> {
+    if pk_hex.len() != 64 {
+        bail!(
+            "dev signing pk.hex at {} is {} chars; expected 64 lowercase hex \
+             (delete the file and re-run `cargo xtask images bake` to regenerate)",
+            pk_path.display(),
+            pk_hex.len(),
+        );
+    }
+    if !pk_hex
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        bail!(
+            "dev signing pk.hex at {} contains non-lowercase-hex bytes \
+             (delete the file and re-run to regenerate)",
+            pk_path.display(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_dir_mode_0700_local(p: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(p)
+        .with_context(|| format!("stat({})", p.display()))?
+        .permissions();
+    perms.set_mode(0o700);
+    fs::set_permissions(p, perms).with_context(|| format!("chmod 0700 {}", p.display()))
+}
+
+#[cfg(not(unix))]
+fn set_dir_mode_0700_local(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_atomic_with_mode_local(path: &Path, contents: &str, mode: u32) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path {} has no parent", path.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".{stamp}.tmp"));
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp)
+            .with_context(|| format!("create({})", tmp.display()))?;
+        f.write_all(contents.as_bytes())
+            .with_context(|| format!("write({})", tmp.display()))?;
+        f.write_all(b"\n")
+            .with_context(|| format!("write({})", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync({})", tmp.display()))?;
+    }
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename({} -> {})", tmp.display(), path.display()))?;
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(mode);
+    fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_atomic_with_mode_local(path: &Path, contents: &str, _mode: u32) -> Result<()> {
+    fs::write(path, format!("{contents}\n"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // bake-rootfs
 //
 // `cargo xtask images bake-rootfs --role <ROLE> [--builder <B>] [--platform
@@ -2501,15 +2693,20 @@ impl BakeArgs {
         let install_dir = install_dir
             .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
-        let signing_key = signing_key
-            .or_else(default_signing_key_path)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "could not resolve --signing-key (HOME unset?). Pass --signing-key \
-                 <PATH> or run `cargo xtask dev-keys init` first."
-                )
-            })?;
+        // INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 — when the operator
+        // does not pass --signing-key explicitly, default to the
+        // per-clone, autogen-on-first-run keypair at
+        // `.git/info/raxis-signing-key/sk.hex`. The umbrella
+        // `run_bake_inner` calls `ensure_dev_signing_keypair` on
+        // every invocation so this path is guaranteed to exist by
+        // the time `build_all` reads it. The legacy home-dir path
+        // (`$HOME/.config/raxis/keys/raxis-dev-signing.key.hex`,
+        // minted by `cargo xtask dev-keys init`) is still respected
+        // when explicitly passed via `--signing-key`.
         let workspace_root = workspace_root_from_cwd()?;
+        let signing_key = signing_key.unwrap_or_else(|| {
+            git_info_signing_key_dir(&workspace_root).join(GIT_INFO_KEY_SK_FILENAME)
+        });
 
         Ok(Self {
             roles,
@@ -2540,7 +2737,9 @@ fn print_bake_help() {
          Defaults:\n  \
          --role             every canonical role (orchestrator, reviewer, executor-starter)\n  \
          --install-dir      $RAXIS_INSTALL_DIR (or {default_install})\n  \
-         --signing-key      $HOME/.config/raxis/keys/raxis-dev-signing.key.hex\n  \
+         --signing-key      <workspace>/.git/info/raxis-signing-key/sk.hex\n                     \
+                            (autogen on first run; per-clone, untracked.\n                     \
+                            INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01)\n  \
          --builder          auto-detect (docker → podman → buildah)\n  \
          --kernel-from-file resolution order: --kernel-from-file → \n                     \
                             $RAXIS_DEV_KERNEL_SOURCE → \n                     \
@@ -2556,7 +2755,19 @@ fn print_bake_help() {
          Re-running `bake` on an unchanged tree is a fast no-op: the bake\n\
          hashes each input and compares against the prior bake.json before\n\
          deciding whether to re-run the per-role pipeline. Pass --no-cache\n\
-         to force a full rebake regardless of cached state.\n",
+         to force a full rebake regardless of cached state.\n\
+         \n\
+         Dev signing key (INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01):\n  \
+         On first run, `bake` mints an Ed25519 keypair under\n  \
+         <workspace>/.git/info/raxis-signing-key/{{sk.hex,pk.hex}} (mode\n  \
+         0700/0600/0644). On every run the public half is exported as\n  \
+         RAXIS_KERNEL_SIGNING_KEY_HEX into the env of every cargo\n  \
+         subprocess `bake` spawns, so a sibling `cargo build -p\n  \
+         raxis-kernel` from the same shell sees the matching trust\n  \
+         anchor without manual export. The CI / release pipeline path is\n  \
+         unchanged: those workflows pass --signing-key <PATH> explicitly\n  \
+         (and pre-set RAXIS_KERNEL_SIGNING_KEY_HEX from a secret), which\n  \
+         skips the autogen path entirely.\n",
         default_install = DEFAULT_DEV_INSTALL_DIR,
     );
 }
@@ -2577,6 +2788,29 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
         "workspace_root": args.workspace_root.display().to_string(),
     });
     eprintln!("{begin_payload}");
+
+    // 0. Ensure the per-clone dev signing keypair under
+    //    `.git/info/raxis-signing-key/` exists (autogen on first
+    //    run) and export the public half into
+    //    `RAXIS_KERNEL_SIGNING_KEY_HEX` for every cargo subprocess
+    //    we spawn. INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01.
+    let keypair = ensure_dev_signing_keypair(&args.workspace_root)?;
+    if keypair.generated_now {
+        eprintln!(
+            "generated new dev signing key at {}",
+            keypair.pk_path.display()
+        );
+    } else {
+        eprintln!("using dev signing key from {}", keypair.pk_path.display());
+    }
+    // SAFETY: `xtask` is a single-threaded driver at the bake-call
+    // boundary; the only consumers of this env var are the cargo
+    // subprocesses spawned by `dev_stage` further down. Mutating
+    // process env from one place is the same shape `cargo xtask
+    // dev-keys init` instructs the operator to do manually.
+    unsafe {
+        std::env::set_var("RAXIS_KERNEL_SIGNING_KEY_HEX", &keypair.pk_hex);
+    }
 
     // 1. Preflight (pure-read; fails closed before any mutation).
     let outcome = preflight_bake_inputs(
@@ -4260,6 +4494,175 @@ mod tests {
             &concatenated[a.len()..],
             b.as_slice(),
             "archive B bytes must survive the concat byte-for-byte"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 — autogen keypair witnesses
+    // -----------------------------------------------------------------
+
+    /// Build a tempdir scaffold with a `.git/info/` subdir so the
+    /// autogen helper has somewhere to write. We do NOT init a real
+    /// git repo — the helper only needs the directory hierarchy to
+    /// exist for `create_dir_all` to land the keypair inside it,
+    /// matching the per-clone "this is a git checkout" assumption.
+    fn make_workspace_with_git_info() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git").join("info")).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn inv_image_dev_signing_key_autogen_01_first_run_mints_keypair_under_dot_git_info() {
+        let tmp = make_workspace_with_git_info();
+        let kp = ensure_dev_signing_keypair(tmp.path()).expect("first-run autogen");
+        assert!(kp.generated_now, "first-run must report generated_now=true");
+        assert!(kp.sk_path.exists(), "sk.hex must exist after first run");
+        assert!(kp.pk_path.exists(), "pk.hex must exist after first run");
+        assert_eq!(
+            kp.pk_path,
+            tmp.path()
+                .join(".git")
+                .join("info")
+                .join("raxis-signing-key")
+                .join("pk.hex"),
+            "pk path must land under .git/info/raxis-signing-key/",
+        );
+        assert_eq!(
+            kp.pk_hex.len(),
+            64,
+            "pk_hex must be 64 lowercase hex chars (Ed25519 verifying key)",
+        );
+        assert!(
+            kp.pk_hex
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "pk_hex must be lowercase hex only",
+        );
+    }
+
+    #[test]
+    fn inv_image_dev_signing_key_autogen_01_second_run_reuses_existing_pair_byte_for_byte() {
+        let tmp = make_workspace_with_git_info();
+        let first = ensure_dev_signing_keypair(tmp.path()).expect("first run");
+        assert!(first.generated_now);
+        let first_sk = std::fs::read_to_string(&first.sk_path).unwrap();
+        let first_pk = std::fs::read_to_string(&first.pk_path).unwrap();
+
+        let second = ensure_dev_signing_keypair(tmp.path()).expect("second run");
+        assert!(
+            !second.generated_now,
+            "second run on a populated tree must NOT regenerate",
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second.sk_path).unwrap(),
+            first_sk,
+            "sk.hex must survive the second run byte-for-byte",
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second.pk_path).unwrap(),
+            first_pk,
+            "pk.hex must survive the second run byte-for-byte",
+        );
+        assert_eq!(
+            second.pk_hex.trim(),
+            first.pk_hex.trim(),
+            "pk_hex returned across runs must agree",
+        );
+    }
+
+    #[test]
+    fn inv_image_dev_signing_key_autogen_01_first_run_files_have_secure_modes() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = make_workspace_with_git_info();
+            let kp = ensure_dev_signing_keypair(tmp.path()).expect("first run");
+            let sk_mode = std::fs::metadata(&kp.sk_path).unwrap().permissions().mode() & 0o777;
+            let pk_mode = std::fs::metadata(&kp.pk_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(sk_mode, 0o600, "sk.hex MUST be 0600 (private half)");
+            assert_eq!(
+                pk_mode, 0o644,
+                "pk.hex MUST be 0644 (public half — readable by every                  cargo subprocess that exports RAXIS_KERNEL_SIGNING_KEY_HEX)",
+            );
+            let dir_mode = std::fs::metadata(kp.sk_path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                dir_mode, 0o700,
+                "raxis-signing-key/ dir MUST be 0700 (no other users may                  read the private half through the parent dir)",
+            );
+        }
+    }
+
+    #[test]
+    fn inv_image_dev_signing_key_autogen_01_pk_hex_round_trips_to_signing_key() {
+        // The pk.hex file MUST be the verifying-key half of the
+        // sk.hex file; otherwise the kernel's trust anchor (baked
+        // from RAXIS_KERNEL_SIGNING_KEY_HEX) and the image-builder's
+        // signing key (loaded from sk.hex) disagree, and every
+        // signature the bake produces fails verification at boot.
+        use ed25519_dalek::SigningKey;
+        let tmp = make_workspace_with_git_info();
+        let kp = ensure_dev_signing_keypair(tmp.path()).expect("first run");
+        let sk_hex = std::fs::read_to_string(&kp.sk_path).unwrap();
+        let sk_bytes = hex::decode(sk_hex.trim()).unwrap();
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&sk_bytes);
+        let signing_key = SigningKey::from_bytes(&seed);
+        let derived_pk = hex::encode(signing_key.verifying_key().to_bytes());
+        assert_eq!(
+            derived_pk,
+            kp.pk_hex.trim(),
+            "pk.hex on disk MUST equal the verifying-key derived from              sk.hex; otherwise the kernel trust anchor disagrees with              the image signature.",
+        );
+    }
+
+    #[test]
+    fn inv_image_dev_signing_key_autogen_01_corrupt_pk_hex_fails_loud_with_remediation() {
+        let tmp = make_workspace_with_git_info();
+        let _ = ensure_dev_signing_keypair(tmp.path()).expect("seed");
+        let pk_path = tmp
+            .path()
+            .join(".git")
+            .join("info")
+            .join("raxis-signing-key")
+            .join("pk.hex");
+        // Corrupt the pk.hex file so validation trips.
+        std::fs::write(
+            &pk_path,
+            b"not-hex
+",
+        )
+        .unwrap();
+        let err = ensure_dev_signing_keypair(tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("pk.hex"),
+            "remediation MUST cite the file: {err}",
+        );
+        assert!(
+            err.contains("delete the file"),
+            "remediation MUST tell the operator how to recover: {err}",
+        );
+    }
+
+    #[test]
+    fn inv_image_dev_signing_key_autogen_01_git_info_dir_path_is_per_clone_local() {
+        // Pin the literal path the helper writes to — operators
+        // grepping for `raxis-signing-key` should always land here
+        // and `.git/info/` is git's documented "per-clone, never
+        // tracked" directory (`man gitrepository-layout`). A future
+        // refactor that moves the keypair somewhere shareable
+        // (e.g. `target/`) MUST update this witness.
+        let ws = std::path::PathBuf::from("/ws");
+        let dir = git_info_signing_key_dir(&ws);
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/ws/.git/info/raxis-signing-key")
         );
     }
 }

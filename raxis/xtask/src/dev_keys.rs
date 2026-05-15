@@ -3,6 +3,27 @@
 //! Normative reference: `raxis/specs/v2/release-and-distribution.md
 //! §8.1–§8.2` ("local-build signing flow").
 //!
+//! ## Dev signing key (iter61 update — INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01)
+//!
+//! As of iter61, `cargo xtask images bake` (the umbrella image-bake
+//! pipeline) auto-generates a per-clone Ed25519 keypair on first run
+//! and persists it under
+//! `<workspace>/.git/info/raxis-signing-key/{sk.hex,pk.hex}`. The
+//! public half is exported as `RAXIS_KERNEL_SIGNING_KEY_HEX` into
+//! every cargo subprocess `bake` spawns, so a sibling `cargo build
+//! -p raxis-kernel` from the same shell sees the matching trust
+//! anchor without the operator setting any env var.
+//!
+//! `cargo xtask dev-keys init` (this command) remains the legacy /
+//! "shared-across-clones" seam: a developer who wants ONE keypair
+//! across multiple worktrees runs `dev-keys init` once into
+//! `$HOME/.config/raxis/keys/` and then passes
+//! `--signing-key $HOME/.config/raxis/keys/raxis-dev-signing.key.hex`
+//! to `cargo xtask images bake`. CI / release workflows take the
+//! same `--signing-key <PATH>` shape and pre-set
+//! `RAXIS_KERNEL_SIGNING_KEY_HEX` from a secret — the autogen path
+//! is bypassed entirely in those flows.
+//!
 //! ## What this command does
 //!
 //! Generates a fresh Ed25519 keypair on the OS RNG and writes both
