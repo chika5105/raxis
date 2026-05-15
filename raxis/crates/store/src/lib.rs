@@ -25,6 +25,7 @@ pub mod circuit_store;
 pub mod db;
 pub mod genesis;
 pub mod migration;
+pub mod observability;
 pub mod plan_bundles;
 pub mod ro;
 pub mod table;

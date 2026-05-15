@@ -23,6 +23,12 @@ raxis-types = { workspace = true }
 # Layering rule check: `raxis-policy` does NOT depend on
 # `raxis-store`, so this edge is one-way and acyclic.
 raxis-policy = { workspace = true }
+# iter61 — `raxis_store::observability` re-exports the closed
+# `query_class` lexicon and the `time_query` helper, both of which
+# need a hub handle to record a histogram sample. Layering check:
+# `raxis-observability` is a leaf crate (no deps on store / kernel
+# / policy), so this edge is one-way and acyclic.
+raxis-observability = { workspace = true }
 
 [dev-dependencies]
 # Used by `ro::tests` to construct a temporary `data_dir` and the

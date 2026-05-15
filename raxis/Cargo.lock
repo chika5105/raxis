@@ -4004,6 +4004,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "raxis-crypto",
+ "raxis-observability",
  "raxis-policy",
  "raxis-types",
  "rusqlite",

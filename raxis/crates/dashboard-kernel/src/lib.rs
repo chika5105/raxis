@@ -273,6 +273,16 @@ pub struct KernelDashboardData {
     /// capability surfaces as an empty post-mortem list.
     /// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`.
     session_capture: Option<Arc<SessionCapture>>,
+    /// iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-01`. When
+    /// `Some(_)`, every read method funnels its store query
+    /// through `raxis_store::observability::time_query` so the
+    /// `raxis.store.query.duration` histogram observes one
+    /// sample per dashboard query, tagged with `query_class`
+    /// and `outcome`. The kernel main loop wires this in
+    /// `start_dashboard_with_advancer`; when `None` (older
+    /// integration / unit fixtures) the helper short-circuits
+    /// and the queries run untimed.
+    observability_hub: Option<Arc<raxis_observability::ObservabilityHub>>,
 }
 
 /// Sliding-window rate-limit state for the credential reveal
@@ -331,6 +341,7 @@ impl KernelDashboardData {
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
             task_llm_capture: None,
             session_capture: None,
+            observability_hub: None,
         })
     }
 
@@ -360,7 +371,20 @@ impl KernelDashboardData {
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
             task_llm_capture: None,
             session_capture: None,
+            observability_hub: None,
         }
+    }
+
+    /// iter61 — wire the observability hub so dashboard read
+    /// methods funnel their store queries through
+    /// `raxis_store::observability::time_query`. Builder-style.
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-01`.
+    pub fn with_observability_hub(
+        mut self,
+        hub: Arc<raxis_observability::ObservabilityHub>,
+    ) -> Self {
+        self.observability_hub = Some(hub);
+        self
     }
 
     /// Wire the per-task raw-LLM-turn capture (`task_llm_capture.rs`).
@@ -458,15 +482,40 @@ impl DashboardData for KernelDashboardData {
         let policy_epoch = bundle.epoch();
         let (active_initiatives, active_sessions, pending_escalations) = match self.open_ro() {
             Ok(conn) => {
-                let inits = raxis_store::views::initiatives::counts_by_state(&conn)
-                    .map(|c| (c.draft + c.approved_plan + c.executing + c.blocked) as u32)
-                    .unwrap_or(0);
-                let sess = raxis_store::views::sessions::active_counts(&conn)
-                    .map(|c| c.active as u32)
-                    .unwrap_or(0);
-                let esc = raxis_store::views::escalations::pending_count(&conn)
-                    .map(|n| n as u32)
-                    .unwrap_or(0);
+                // INV-OBSERVABILITY-DATAPLANE-LATENCY-01 — the
+                // dashboard polls `/api/health` every 5 s, so
+                // these three counts are the heaviest-traffic
+                // store reads in the system. Per-class timing
+                // localises a slow health refresh to the
+                // initiative / session / escalation counter.
+                let hub = self.observability_hub.as_ref();
+                let inits = raxis_store::observability::time_query(
+                    hub,
+                    raxis_store::observability::QUERY_CLASS_INITIATIVE_COUNT,
+                    || {
+                        raxis_store::views::initiatives::counts_by_state(&conn)
+                            .map(|c| (c.draft + c.approved_plan + c.executing + c.blocked) as u32)
+                            .unwrap_or(0)
+                    },
+                );
+                let sess = raxis_store::observability::time_query(
+                    hub,
+                    raxis_store::observability::QUERY_CLASS_SESSION_COUNT,
+                    || {
+                        raxis_store::views::sessions::active_counts(&conn)
+                            .map(|c| c.active as u32)
+                            .unwrap_or(0)
+                    },
+                );
+                let esc = raxis_store::observability::time_query(
+                    hub,
+                    raxis_store::observability::QUERY_CLASS_ESCALATION_COUNT,
+                    || {
+                        raxis_store::views::escalations::pending_count(&conn)
+                            .map(|n| n as u32)
+                            .unwrap_or(0)
+                    },
+                );
                 (inits, sess, esc)
             }
             Err(_) => (0, 0, 0),
@@ -693,11 +742,15 @@ impl DashboardData for KernelDashboardData {
         state_filter: Option<&str>,
     ) -> Result<Vec<InitiativeListEntry>, ApiError> {
         let conn = self.open_ro()?;
-        let rows =
-            raxis_store::views::initiatives::list(&conn, state_filter, limit.min(200) as usize)
-                .map_err(|e| ApiError::Internal {
-                    log_only: format!("initiatives::list: {e}"),
-                })?;
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-01.
+        let rows = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_INITIATIVE_LIST,
+            || raxis_store::views::initiatives::list(&conn, state_filter, limit.min(200) as usize),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("initiatives::list: {e}"),
+        })?;
         // Per-initiative task counts (one extra read per row — bounded
         // by `limit` so worst-case is 200 lookups).
         let mut out = Vec::with_capacity(rows.len());
@@ -825,10 +878,15 @@ impl DashboardData for KernelDashboardData {
 
     fn list_tasks(&self, initiative_id: &str) -> Result<Vec<TaskView>, ApiError> {
         let conn = self.open_ro()?;
-        let rows = raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
-            .map_err(|e| ApiError::Internal {
-                log_only: format!("tasks::list_by_initiative: {e}"),
-            })?;
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-01.
+        let rows = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_TASK_LIST,
+            || raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("tasks::list_by_initiative: {e}"),
+        })?;
         Ok(rows.iter().map(|t| task_row_to_view(&conn, t)).collect())
     }
 
@@ -1010,10 +1068,14 @@ impl DashboardData for KernelDashboardData {
     ) -> Result<Vec<SessionView>, ApiError> {
         let conn = self.open_ro()?;
         let cap = limit.min(200) as usize;
-        let rows = raxis_store::views::sessions::active_list(&conn, cap).map_err(|e| {
-            ApiError::Internal {
-                log_only: format!("sessions::active_list: {e}"),
-            }
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-01.
+        let rows = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_SESSION_LIST,
+            || raxis_store::views::sessions::active_list(&conn, cap),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("sessions::active_list: {e}"),
         })?;
         // Resolve the optional `?initiative_id=…` filter by
         // walking the initiative's tasks and collecting any
@@ -1119,10 +1181,17 @@ impl DashboardData for KernelDashboardData {
 
     fn list_escalations(&self) -> Result<Vec<EscalationView>, ApiError> {
         let conn = self.open_ro()?;
-        let rows = raxis_store::views::escalations::list(
-            &conn,
-            raxis_store::views::escalations::EscalationStatusFilter::Pending,
-            200,
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-01.
+        let rows = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_ESCALATION_LIST,
+            || {
+                raxis_store::views::escalations::list(
+                    &conn,
+                    raxis_store::views::escalations::EscalationStatusFilter::Pending,
+                    200,
+                )
+            },
         )
         .map_err(|e| ApiError::Internal {
             log_only: format!("escalations::list: {e}"),
@@ -3096,6 +3165,14 @@ pub async fn start_dashboard_with_advancer(
     .with_audit_sink(audit_sink);
     if let Some(cap) = task_llm_capture {
         data = data.with_task_llm_capture(cap);
+    }
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-01 — when the kernel
+    // wires an observability hub, plumb it onto the data layer so
+    // every dashboard read funnels its store query through
+    // `raxis_store::observability::time_query` and lands one
+    // `raxis.store.query.duration` sample per call.
+    if let Some(hub) = observability.clone() {
+        data = data.with_observability_hub(hub);
     }
     if let Some(cap) = session_capture {
         data = data.with_session_capture(cap);

@@ -241,6 +241,12 @@ pub fn status_lines(root: &Path) -> Vec<String> {
 /// `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01` pins the
 /// parallelism guarantee with a witness test that exercises a
 /// real tempdir-initialised git repo.
+// Currently constructed only by the `probe_worktree_summary` test
+// fixture in this file (line ~603). Production wiring of the
+// parallel probe path lands separately; until then `dead_code` is
+// expected. Pinned by `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`
+// once the dashboard route consumes the summary.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct WorktreeProbeSummary {
     /// HEAD commit SHA, if HEAD resolves.
@@ -266,6 +272,7 @@ pub struct WorktreeProbeSummary {
 ///
 /// `base_sha = None` skips the ahead/behind probe (it would be
 /// meaningless without a base anyway).
+#[allow(dead_code)]
 pub fn probe_worktree_summary(root: &Path, base_sha: Option<&str>) -> WorktreeProbeSummary {
     // Capture by reference: every probe reads `root`; the
     // scope keeps every borrow alive for the full duration.
