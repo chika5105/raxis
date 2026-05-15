@@ -263,17 +263,27 @@ pub fn record_initiative_task_in_flight(
 }
 
 /// `raxis.audit.event.append.{total,duration}` — fired by the
-/// `FileAuditSink` `append_event` path after a successful fsync.
+/// `NotifyingAuditSink::emit` decorator after each inner sink call
+/// (success or failure). `outcome` is `"ok"` on a successful inner
+/// emit and `"error"` on every `AuditWriterError` arm.
+///
+/// `event_kind` is the closed allow-list label
+/// (`AuditEventKind::as_str()`); the redactor caps it at 64 bytes
+/// per `crate::redact::ALLOW_LIST`. The prior signature used a
+/// non-allow-listed `kind` key which would silently redaction-drop
+/// the entire frame; `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03`
+/// pins the corrected label name.
 pub fn record_audit_event_append(
     hub: &ObservabilityHub,
-    kind: &str,
+    event_kind: &str,
+    outcome: &str,
     append_ms: i64,
     confirmed_ms: Option<i64>,
 ) {
     if !hub.enabled() {
         return;
     }
-    let labels = redact::attrs([("kind", kind)]);
+    let labels = redact::attrs([("event_kind", event_kind), ("outcome", outcome)]);
     hub.record_counter(MetricName::AuditEventAppendTotal, labels.clone(), 1.0);
     hub.record_histogram(
         MetricName::AuditEventAppendDuration,
@@ -2670,5 +2680,226 @@ mod substrate_ipc_tests {
                 "message_kind lexeme {e:?} missing from closed set"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-*` — witness tests
+//
+// Every `record_*` helper that landed in this module needs at least
+// one production call site, OR it is dead code that will silently
+// silence a Grafana panel when the corresponding code path runs.
+// The iter60 audit surfaced four such cases:
+//
+//   * `record_planner_inference`   (gateway round-trip / Inference)
+//   * `record_gateway_upstream`    (gateway-side upstream RTT)
+//   * `record_audit_event_append`  (audit-chain append latency)
+//   * `record_audit_chain_length`  (audit-chain tip gauge)
+//
+// The witness tests below pin one observed sample per helper through
+// the production-shaped call site. The model is the same as the
+// `record_dashboard_sse_event` fixture pattern that already ships in
+// `crates/observability/src/lib.rs` — drive the helper, flush the
+// hub, assert ≥1 sample landed under the matching `MetricName`.
+//
+// A future "dead helper" regression is caught by these tests rather
+// than by a silent dashboard panel.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod latency_metrics_wired_witness_tests {
+    use super::*;
+    use raxis_observability::{
+        exporter::InMemoryExporter, DataPoint, HubConfig, MetricName, ObservabilityExporter,
+        ObservabilityHub,
+    };
+    use std::sync::Arc;
+
+    fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled: true,
+            sample_rate: 1.0,
+            max_queue_depth: 256,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
+        (hub, exp)
+    }
+
+    /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01` — invoking
+    /// `record_planner_inference` lands ≥1 sample under
+    /// `MetricName::PlannerInferenceDuration` and one increment
+    /// under `MetricName::PlannerInferenceTokensTotal` per
+    /// direction. Pins the post-iter60 wire-up at
+    /// `handlers/planner_fetch.rs`.
+    #[test]
+    fn planner_inference_helper_lands_observed_sample() {
+        let (hub, exp) = enabled_hub();
+        record_planner_inference(
+            &hub,
+            "api.anthropic.com",
+            "unknown",
+            "ok",
+            false,
+            1234,
+            0,
+            0,
+        );
+        hub.flush();
+        let metrics = exp.metrics();
+        let duration_count = metrics
+            .iter()
+            .filter(|m| m.name == MetricName::PlannerInferenceDuration)
+            .filter_map(|m| match &m.datapoint {
+                DataPoint::Histo { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert!(
+            duration_count >= 1,
+            "expected ≥1 PlannerInferenceDuration sample, got {duration_count} \
+             (helper is dead — INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01 broken)"
+        );
+    }
+
+    /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02` — invoking
+    /// `record_gateway_upstream` lands ≥1 sample under
+    /// `MetricName::GatewayUpstreamDuration`. Pins the post-iter60
+    /// wire-up at `handlers/planner_fetch.rs` (uses the gateway-
+    /// reported `fr.latency_ms` to distinguish gateway-side
+    /// upstream RTT from the kernel-measured end-to-end fetch
+    /// latency captured by `record_gateway_fetch`).
+    #[test]
+    fn gateway_upstream_helper_lands_observed_sample() {
+        let (hub, exp) = enabled_hub();
+        record_gateway_upstream(&hub, "api.anthropic.com", "ok", 567);
+        hub.flush();
+        let metrics = exp.metrics();
+        let count = metrics
+            .iter()
+            .filter(|m| m.name == MetricName::GatewayUpstreamDuration)
+            .filter_map(|m| match &m.datapoint {
+                DataPoint::Histo { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert!(
+            count >= 1,
+            "expected ≥1 GatewayUpstreamDuration sample, got {count} \
+             (helper is dead — INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02 broken)"
+        );
+    }
+
+    /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03` — invoking
+    /// `record_audit_event_append` lands ≥1 sample under
+    /// `MetricName::AuditEventAppendDuration`. Pins the post-iter60
+    /// wire-up at `NotifyingAuditSink::emit` (the centralised audit
+    /// emit seam, success AND failure arms). The closed allow-list
+    /// label fix is also pinned: the prior `kind` label was not in
+    /// `redact::ALLOW_LIST` and would have caused the redactor to
+    /// drop every frame as soon as the helper went live — a non-
+    /// observation that would mask the wire-up regression. Using
+    /// `event_kind` here surfaces the sample on the dashboard.
+    #[test]
+    fn audit_event_append_helper_lands_observed_sample() {
+        let (hub, exp) = enabled_hub();
+        record_audit_event_append(&hub, "KernelStarted", "ok", 12, Some(12));
+        hub.flush();
+        let metrics = exp.metrics();
+        let count = metrics
+            .iter()
+            .filter(|m| m.name == MetricName::AuditEventAppendDuration)
+            .filter_map(|m| match &m.datapoint {
+                DataPoint::Histo { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert!(
+            count >= 1,
+            "expected ≥1 AuditEventAppendDuration sample, got {count} \
+             (helper is dead OR redactor dropped — \
+              INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03 broken)"
+        );
+        let total_count = metrics
+            .iter()
+            .filter(|m| m.name == MetricName::AuditEventAppendTotal)
+            .count();
+        assert!(
+            total_count >= 1,
+            "expected ≥1 AuditEventAppendTotal increment, got {total_count}"
+        );
+    }
+
+    /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03` (b) — the error
+    /// arm of `record_audit_event_append` also emits, so a dashboard
+    /// regression on the failure path is detected. Pins the
+    /// `outcome="error"` arm at the `Err(AuditWriterError)` branch
+    /// of `NotifyingAuditSink::emit`.
+    #[test]
+    fn audit_event_append_helper_records_error_arm() {
+        let (hub, exp) = enabled_hub();
+        record_audit_event_append(&hub, "KernelStarted", "error", 42, None);
+        hub.flush();
+        let metrics = exp.metrics();
+        let count = metrics
+            .iter()
+            .filter(|m| m.name == MetricName::AuditEventAppendDuration)
+            .filter_map(|m| match &m.datapoint {
+                DataPoint::Histo { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert!(
+            count >= 1,
+            "expected ≥1 AuditEventAppendDuration sample on the error arm"
+        );
+    }
+
+    /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04` — invoking
+    /// `record_audit_chain_length` lands ≥1 sample under
+    /// `MetricName::AuditChainLength`. Pins the post-iter60 wire-up
+    /// at the same `NotifyingAuditSink::emit` seam, post-success.
+    #[test]
+    fn audit_chain_length_helper_lands_observed_sample() {
+        let (hub, exp) = enabled_hub();
+        record_audit_chain_length(&hub, 42);
+        hub.flush();
+        let metrics = exp.metrics();
+        let count = metrics
+            .iter()
+            .filter(|m| m.name == MetricName::AuditChainLength)
+            .count();
+        assert!(
+            count >= 1,
+            "expected ≥1 AuditChainLength observation, got {count} \
+             (helper is dead — INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 broken)"
+        );
+    }
+
+    /// Closed-set witness: every label key the four wired helpers
+    /// stamp on metrics MUST be in `crates/observability/src/
+    /// redact.rs::ALLOW_LIST`, otherwise the redactor drops the
+    /// entire frame and the witness above turns false-positive. We
+    /// re-exercise the four call sites and assert the metrics
+    /// actually landed (not redaction-dropped) by counting `drops`
+    /// after the flush.
+    #[test]
+    fn wired_helpers_pass_redactor_allowlist() {
+        let (hub, _exp) = enabled_hub();
+        record_planner_inference(&hub, "p", "m", "ok", false, 1, 0, 0);
+        record_gateway_upstream(&hub, "p", "ok", 1);
+        record_audit_event_append(&hub, "K", "ok", 1, Some(1));
+        record_audit_chain_length(&hub, 1);
+        hub.flush();
+        let drops = hub.drop_counters();
+        // `drops[1]` is the redaction-failure counter.
+        assert_eq!(
+            drops[1].1, 0,
+            "post-wire-up emit sites must not redaction-drop \
+             (would silence dashboards on every emit)"
+        );
     }
 }

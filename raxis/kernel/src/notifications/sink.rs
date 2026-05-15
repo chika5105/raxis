@@ -553,7 +553,18 @@ impl AuditSink for NotifyingAuditSink {
         // borrow `&kind` once (so a noisy kind avoids the clone /
         // bundle snapshot / dispatch fan-out below).
         let priority = notification_priority(&kind);
+        // INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03 — every
+        // audit-chain append is the kernel's most-loaded write
+        // path, so we time the inner emit on both arms (success +
+        // failure). `event_kind` and `outcome` are stamped on the
+        // histogram so the dashboard's bottleneck pivot can isolate
+        // a slow audit variant (e.g. large
+        // `IntegrationMergeCompleted` payload) from a slow audit
+        // variant the kernel re-uses on every IPC frame.
+        let event_kind_label = kind.as_str().to_owned();
+        let emit_started = Instant::now();
         let inner_result = self.inner.emit(kind, session_id, task_id, initiative_id);
+        let emit_elapsed_ms = emit_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
         let event = match inner_result {
             Ok(ev) => ev,
             Err(e) => {
@@ -568,6 +579,20 @@ impl AuditSink for NotifyingAuditSink {
                         _ => "other",
                     };
                     crate::observability::record_audit_fsync_failure(hub, reason);
+                    // Pair the latency observation with the
+                    // failure arm so a regression in append latency
+                    // shows on the dashboard even when every
+                    // attempt is failing the fsync barrier. The
+                    // `confirmed_ms` argument is `None` because the
+                    // inner emit returned `Err` — there was no
+                    // post-commit confirmation.
+                    crate::observability::record_audit_event_append(
+                        hub,
+                        &event_kind_label,
+                        "error",
+                        emit_elapsed_ms,
+                        None,
+                    );
                 }
                 return Err(e);
             }
@@ -585,6 +610,28 @@ impl AuditSink for NotifyingAuditSink {
             if let Some(bk) = bridge_kind {
                 bridge_audit_to_metric(hub, &bk, &self.sessions, &self.initiatives);
             }
+            // INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03 (success
+            // arm) — paired with the failure arm above so the
+            // histogram has every-append coverage. The
+            // `confirmed_ms` argument is the same wall-clock as
+            // `append_ms` because `AuditWriter::append` is
+            // synchronous and the fsync barrier already closed
+            // before the inner emit returned (see
+            // `AuditWriterOptions::sync_on_append = true`).
+            crate::observability::record_audit_event_append(
+                hub,
+                &event_kind_label,
+                "ok",
+                emit_elapsed_ms,
+                Some(emit_elapsed_ms),
+            );
+            // INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 — bump the
+            // chain-length gauge on every successful append. The
+            // gauge tracks the highest committed seq, so emitting
+            // here (after the inner sink returns the materialised
+            // event) keeps the dashboard's chain-progress series
+            // monotonic and aligned with the on-disk JSONL tip.
+            crate::observability::record_audit_chain_length(hub, event.seq as i64);
             // V3 perf-telemetry — the kernel's audit chain is
             // sync-fsync'd on every successful append (`writer.rs`
             // calls `File::sync_data` before returning Ok), so the

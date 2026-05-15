@@ -236,6 +236,21 @@ async fn main() {
         banner::print_boot_banner();
     }
 
+    // Step 0.5: `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` — refuse to
+    // boot if the kernel binary's compile-time signing-key trust
+    // anchor is the all-zero placeholder. The check runs BEFORE
+    // every subsystem that could either (a) admit a session
+    // (operator IPC dispatcher, dashboard HTTP bind), (b) spawn a
+    // planner VM (orchestrator, session_spawn_orchestrator), or
+    // (c) service a kernel-mediated planner fetch (gateway,
+    // credential proxy), so a no-anchor kernel cannot reach a
+    // surface from which it would otherwise silently degrade onto
+    // the manifest-unverified hint path. See
+    // `canonical_images_preflight::assert_trust_anchor_present_or_panic`
+    // for the full rationale and `specs/v3/canonical-image-trust-
+    // anchor.md` for the dev / production resolution chains.
+    canonical_images_preflight::assert_trust_anchor_present_or_panic();
+
     // Step 1: Parse CLI flags and environment.
     let data_dir = data_dir();
     let bootstrap_mode = std::env::var("RAXIS_BOOTSTRAP").is_ok();

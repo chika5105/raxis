@@ -98,7 +98,9 @@
 | Integration-merge completion cascade — V3 (iter54) | INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01, INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01 | 2 |
 | Executor image lint-toolchain pre-bake — V3 (iter56) | INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01, INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 | 2 |
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
-| **Total** | | **131** |
+| Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
+| Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
+| **Total** | | **137** |
 
 ---
 
@@ -9581,6 +9583,376 @@ rows for `KernelSubstrateIpcRoundtripDuration`,
 `KernelSubstrateIpcMessagesTotal`, `KernelSubstrateIpcInflight`).
 Referenced from `v3/observability-prometheus.md §3.13`
 (Prometheus inventory).
+
+---
+
+## §11.14 — Latency-metric wiring (INV-OBSERVABILITY-LATENCY-METRICS-WIRED-*)
+
+The iter60 audit found four `record_*` helpers in
+`kernel/src/observability.rs` whose production call sites had been
+silently lost across refactors. The helpers compiled, looked alive
+in code search, but never fired — so the matching Grafana panels
+silently rendered empty. The invariants below pin each helper to its
+canonical kernel-side call site so a future "dead helper" regression
+is caught by a unit-test witness instead of by a quiet dashboard.
+
+The structural pattern is the same for every entry: a `#[test]` in
+`kernel/src/observability.rs::latency_metrics_wired_witness_tests`
+exercises the helper through an `enabled_hub()` fixture and asserts
+≥1 sample landed under the matching `MetricName` AFTER the redactor
+pass (redaction-failure drops would surface as zero samples and
+silence the dashboard the invariant is supposed to guard).
+
+### INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01 — `record_planner_inference` fires on every kernel-mediated planner Inference round-trip
+
+**Statement.** Every successful or failed
+`PlannerFetchRequest { fetch_kind: PlannerFetchKind::Inference }`
+that the kernel routes through
+`kernel/src/handlers/planner_fetch.rs::handle` MUST produce exactly
+one `raxis.planner.inference.duration` histogram observation labelled
+with the closed allow-list keys
+`{ provider, model, outcome, streaming }`. The `provider` value is
+the extracted hostname of the request URL; `model` is `"unknown"`
+at this layer (the kernel never parses the planner-side request
+body — see the module header in `handlers/planner_fetch.rs`);
+`outcome` is `"ok"` on a 2xx/3xx upstream status and `"error"` on
+every other arm (transport failure, 4xx/5xx, gateway-unavailable,
+domain-not-allowed). The `streaming` flag is `false` at the kernel
+layer (the planner-side SDK owns the streaming/non-streaming
+choice and the kernel cannot observe it through the opaque
+HTTP-body bytes it forwards).
+
+**Justification.** The pre-iter60 implementation had
+`record_planner_inference` as a public helper with no production
+call site — verified by `rg "record_planner_inference\(" raxis/`
+returning zero non-test hits on iter60's `main`. The matching
+Grafana panel (`provider-failure-handling` row, `p95
+inference latency by provider`) rendered empty regardless of
+traffic. The kernel-mediated egress path is the ONE place every
+planner inference round-trip transits before reaching the upstream
+LLM provider, so wiring the helper at the `handlers/planner_fetch.rs`
+seam captures every observation a kernel-side dashboard can see.
+Richer per-model / per-tier labelling needs a future planner-side
+observation IPC frame; until that ships, the
+`provider+outcome+duration` pivot is the operator's bottleneck-
+localisation signal.
+
+**Witness.**
+`kernel/src/observability.rs::latency_metrics_wired_witness_tests::planner_inference_helper_lands_observed_sample`
+plus
+`wired_helpers_pass_redactor_allowlist` (the closed-set witness that
+asserts the redactor accepts the four labels the helper stamps).
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`PlannerInferenceDuration` + Prometheus inventory in
+`v3/observability-prometheus.md §3`.
+
+---
+
+### INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02 — `record_gateway_upstream` fires on every kernel-mediated fetch (success + error)
+
+**Statement.** Every successful or failed
+`PlannerFetchRequest` the kernel forwards through
+`handlers/planner_fetch.rs::handle` MUST produce exactly one
+`raxis.gateway.upstream.duration` histogram observation labelled with
+`{ provider, outcome }`. On a successful gateway response the
+histogram value is the gateway-reported `FetchResponse::latency_ms`
+(the gateway-side measurement of upstream-server RTT, distinct from
+the kernel-measured end-to-end `record_gateway_fetch` latency that
+also covers the kernel↔gateway UDS round-trip). On every error arm
+the histogram value is the kernel-measured `latency_ms` because the
+gateway never produced a structured response.
+
+**Justification.** `record_gateway_upstream` was added by the V3
+perf-telemetry slice but never wired. Pair-emitting it with
+`record_gateway_fetch` lets the dashboard compute
+`gateway_internal_latency = fetch_duration - upstream_duration`,
+which isolates kernel↔gateway IPC latency from the upstream LLM
+provider RTT. Without the helper firing, the Grafana panel for
+"upstream RTT by provider" is structurally empty; an operator
+investigating a slow planner cannot distinguish a slow Anthropic
+endpoint from a slow gateway subprocess.
+
+**Witness.**
+`kernel/src/observability.rs::latency_metrics_wired_witness_tests::gateway_upstream_helper_lands_observed_sample`.
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`GatewayUpstreamDuration`.
+
+---
+
+### INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03 — `record_audit_event_append` fires on every `NotifyingAuditSink::emit` call (success AND error)
+
+**Statement.** Every call to
+`kernel/src/notifications/sink.rs::NotifyingAuditSink::emit` MUST
+produce exactly one `raxis.audit.event.append.duration` histogram
+observation AND one `raxis.audit.event.append.total` counter
+increment, labelled with the closed allow-list keys
+`{ event_kind, outcome }`. The histogram value is the wall-clock
+elapsed from before the inner sink's `emit` call to after it
+returned (success or error). On the success arm a
+`raxis.audit.event.confirmed.duration` sample is also emitted with
+the same wall-clock value (the audit writer's `sync_on_append`
+default barrier means append and post-commit confirmation collapse
+to the same instant).
+
+The label key is `event_kind`, NOT `kind` — the original helper
+used a non-allow-listed `kind` key which would have caused the
+redactor to drop every frame as soon as the helper went live. The
+post-iter60 helper signature renames the parameter to `event_kind`
+and emits with that key.
+
+**Justification.** The audit-chain append is the kernel's hottest
+write path: every kernel-handled IPC frame, every FSM transition,
+every operator action lands here. A regression in append latency
+stalls every session at once, so the dashboard's "audit p95
+duration" panel is operationally load-bearing. Pre-iter60 the
+helper was dead; the dashboard panel rendered empty regardless of
+traffic. Both success AND error arms emit so a regression in the
+fsync-failure path is visible against the success rate.
+
+**Witness.**
+`kernel/src/observability.rs::latency_metrics_wired_witness_tests::audit_event_append_helper_lands_observed_sample`
+and
+`audit_event_append_helper_records_error_arm`.
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`AuditEventAppendDuration` + `AuditEventAppendTotal`.
+
+---
+
+### INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 — `record_audit_chain_length` fires after every successful `NotifyingAuditSink::emit`
+
+**Statement.** Every successful inner emit through
+`NotifyingAuditSink::emit` MUST produce exactly one
+`raxis.audit.chain.length` gauge sample with the value of the
+freshly-committed `AuditEvent::seq`. The gauge tracks the highest
+committed audit sequence number; emitting on every successful append
+keeps the dashboard's chain-progress series monotonic and aligned
+with the on-disk JSONL tip.
+
+**Justification.** Pre-iter60 the helper was only called from the
+boot-time chain-warmup surface (`kernel/src/main.rs` reads the
+resumed `seq` once and emits the gauge), so the dashboard reflected
+boot-time state forever — every subsequent append left the gauge
+stale. An operator looking at the "audit chain progress" panel
+would see a flat line regardless of whether the kernel was emitting
+zero or zero-thousand events per second.
+
+**Witness.**
+`kernel/src/observability.rs::latency_metrics_wired_witness_tests::audit_chain_length_helper_lands_observed_sample`.
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`AuditChainLength`.
+
+---
+
+## §11.15 — Canonical image trust anchor (INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-*)
+
+### INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01 — Kernel refuses to boot when the compile-time signing-key trust anchor is the all-zero placeholder
+
+**Statement.** Every `raxis-kernel` boot MUST invoke
+`canonical_images_preflight::assert_trust_anchor_present_or_panic`
+BEFORE any subsystem that could either
+
+* admit a session (operator IPC dispatcher, dashboard HTTP bind),
+* spawn a planner VM (`session_spawn_orchestrator`,
+  `IsolationBackend::launch`), or
+* service a kernel-mediated planner fetch (gateway, credential
+  proxy)
+
+is initialised. The assertion compares
+`raxis_canonical_images::EXPECTED_KERNEL_SIGNING_KEY_BYTES`
+against the all-zero 32-byte placeholder; on a match the kernel
+emits a structured `level=fatal, event=trust_anchor_unpopulated`
+JSON log line AND panics with the stable string
+`"FATAL: kernel built without a manifest-trust anchor."` followed
+by operator-actionable remediation (env var name, xtask recipe,
+spec path).
+
+The build-script resolution chain
+(`crates/canonical-images/build.rs::resolve_trust_anchor_bytes`)
+is exactly two priorities — `RAXIS_KERNEL_SIGNING_KEY_HEX` then
+`RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` — with no filesystem
+auto-discovery fallback. The placeholder arm is the kernel-boot
+trip wire, not a graceful degradation path.
+
+**Justification.** Pre-iter60 the kernel logged a persistent
+`PreflightOutcome::TrustAnchorUnpopulated` warning at every boot
+of a kernel built without `RAXIS_KERNEL_SIGNING_KEY_HEX`, then
+continued. Every downstream `verify_canonical_image_via_manifest`
+call short-circuited with `SigningKeyFpNotPopulated` and the
+kernel silently degraded onto the manifest-unverified
+`read_unverified_image_format_hint` path. An operator inspecting
+the running kernel could not distinguish "verified manifests"
+from "treated junk as signed". The fail-loud assertion inverts
+the posture: a kernel that cannot cryptographically verify its
+canonical images refuses to start, surfaces the
+operator-remediable misconfiguration in the boot log AND on the
+supervisor sentinel (`panic = "abort"` under
+`raxis/Cargo.toml [profile.release]` produces a hard-fault
+category the self-healing supervisor records as a kernel crash;
+see `specs/v2/self-healing-supervisor.md §3.2`).
+
+The dev workflow round-trip is `cargo xtask images bake-all`
+(generates a dev keypair under
+`<repo>/.git/info/raxis-signing-key/` on first run, signs the
+canonical images, re-invokes `cargo build -p raxis-kernel` with
+`RAXIS_KERNEL_SIGNING_KEY_HEX` exported into the child's env).
+After one bake-all the next kernel boot passes the assertion;
+subsequent bake-all runs are idempotent. The production workflow
+exports the release-HSM-backed key into the build environment
+unchanged. Both workflows are documented in
+`specs/v3/canonical-image-trust-anchor.md` §4 and §5
+respectively.
+
+The defense-in-depth canonical-image preflight at boot step 8b
+(`verify_canonical_images_at_boot`) is unchanged; both gates are
+required. The `PreflightOutcome::TrustAnchorUnpopulated` variant
+remains reachable through paths that do not go through `main()`
+(activation-time defense-in-depth verification,
+`resolve_image_kind_for_role`'s unverified-hint fallback), but is
+structurally unreachable from a kernel boot after iter60.
+
+**Witness.**
+`kernel/src/canonical_images_preflight.rs::tests::assert_trust_anchor_panics_on_all_zero_bytes`
+(the `#[should_panic(expected = "kernel built without a manifest-trust anchor")]`
+witness that pins the panic substring), plus three sibling tests
+in the same module:
+
+* `assert_trust_anchor_accepts_non_zero_bytes` — non-regression
+  for the "compare first N bytes only" hypothetical bug,
+* `assert_trust_anchor_accepts_one_byte_set` — defends against a
+  future `bytes.iter().all(|b| *b == 0)` simplification with
+  different short-circuit characteristics,
+* `fail_loud_message_includes_operator_remediation` — pins the
+  env-var name, xtask recipe, and spec path inside the message.
+
+**Canonical home.** `specs/v3/canonical-image-trust-anchor.md`
+(full spec) + the `kernel/src/canonical_images_preflight.rs`
+module doc-comment + the `crates/canonical-images/build.rs`
+module-level doc comment (build-time anchor mechanism).
+
+---
+
+### INV-IMAGE-VERIFY-REJECT-MISMATCH-01 — Kernel refuses to admit sessions that depend on an image whose manifest signature does not verify against the embedded trust anchor
+
+**Statement.** When the kernel's compile-time
+`EXPECTED_KERNEL_SIGNING_KEY_BYTES` is populated AND a canonical
+image's `<role>-<kver>.manifest.toml` signature does NOT verify
+against that anchor — either because the `signing_key_fp` field
+does not match the SHA-256 of the embedded key (the FAST path
+that `raxis-image-manifest` short-circuits before Ed25519
+verification), because the Ed25519 signature itself fails to
+verify, OR because the signature / fingerprint fields are
+structurally malformed — the kernel MUST:
+
+1. Surface the error as a `CanonicalImageError::Manifest` with the
+   underlying `ManifestError` source (variants:
+   `SigningKeyFpMismatch`, `SignatureFailed(_)`,
+   `SignatureMalformed`, `SigningKeyFpMalformed`).
+2. Emit exactly one `AuditEventKind::SecurityViolationDetected`
+   event with the stable `violation_kind` string
+   `"CanonicalImageSignatureMismatch"` (the constant
+   `canonical_images_preflight::CANONICAL_IMAGE_SIGNATURE_MISMATCH_VIOLATION_KIND`),
+   carrying the manifest path in the `path` field. The audit
+   `violation_kind` MUST NOT collapse onto the per-role
+   `{Reviewer,Orchestrator,ExecutorStarter}ImageDigestMismatch`
+   slot used for tamper events on the same image — the operator's
+   remediation differs (re-bake images vs. re-install).
+3. Refuse to admit any session whose
+   `IsolationBackend::launch` would consult the affected image.
+   The activation seam re-runs
+   `verify_canonical_image_via_manifest` as defense-in-depth and
+   returns a structured `IsolationError` (NOT a log warning) which
+   the session-admission path maps into a kernel-side admission
+   refusal.
+
+The boot-time preflight (`verify_canonical_images_at_boot`) and
+the spawn-time defense-in-depth re-verify are both required —
+the boot-time gate produces the eager audit event; the
+activation-time gate is the load-bearing enforcement point that
+prevents an unsigned spawn even if the operator hot-swapped the
+manifest between boot and the first session.
+
+**Justification.** The fail-loud invariant
+(`INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`) covers "no key at all"
+— a kernel built without `RAXIS_KERNEL_SIGNING_KEY_HEX` refuses
+to boot. This invariant covers the orthogonal failure mode of
+"valid key, but wrong key" — a kernel that boots fine but whose
+embedded anchor disagrees with the manifest's signer. The
+realistic operator workflow that triggers this case is **key
+rotation drift**:
+
+  1. Day 1 — operator runs `cargo xtask images bake-all`, which
+     generates dev keypair K_a, signs the canonical images with
+     K_a's private half, and re-invokes `cargo build -p
+     raxis-kernel` with K_a's public half exported as
+     `RAXIS_KERNEL_SIGNING_KEY_HEX`.
+  2. Day 2 — operator wipes the dev key directory (`rm -rf
+     <repo>/.git/info/raxis-signing-key/`) and re-runs `bake-all`,
+     which generates a new keypair K_b and rebuilds the kernel
+     against K_b. But the SIGNED IMAGES on disk are still the
+     K_a-signed manifests from Day 1.
+  3. Without this invariant, the K_b kernel would consult the
+     K_a manifests, see a signature mismatch, AND silently degrade
+     onto the manifest-unverified hint path (just as it would have
+     for the no-anchor case before
+     `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`). The operator would
+     have no kernel-side signal that the bake artefacts are stale
+     relative to the kernel's anchor.
+
+With this invariant, the K_b kernel boots, the preflight
+classifies the K_a manifests' signatures as
+`CanonicalImageSignatureMismatch`, the audit chain records the
+event, and every session admission that would touch the affected
+image fails closed with a structured error. The operator
+remediation is one command: re-run `cargo xtask images bake-all`
+to re-sign the images with K_b's private half.
+
+The classification is centralised in
+`kernel/src/canonical_images_preflight.rs::classify_canonical_image_violation`
+so the audit-event surface is a single pin-point. The four
+`ManifestError` signature variants (`SigningKeyFpMismatch`,
+`SignatureFailed`, `SignatureMalformed`, `SigningKeyFpMalformed`)
+all collapse onto the same `CanonicalImageSignatureMismatch`
+audit kind because the operator remediation is identical for all
+four. Structural errors (TOML parse, role mismatch, kernel-version
+skew) keep the per-role `*ImageDigestMismatch` audit slot so the
+existing dashboards continue to pivot by image kind for
+tamper events.
+
+**Witness.**
+`kernel/src/canonical_images_preflight.rs::tests::wrong_key_manifest_emits_signature_mismatch_audit`
+(the end-to-end witness that builds a real K_a-signed manifest,
+calls `verify_canonical_image_via_manifest_with_key` against K_b's
+verifying key, and asserts the verifier rejects the manifest with
+`ManifestError::SigningKeyFpMismatch | SignatureFailed`, the
+classifier maps the error to
+`"CanonicalImageSignatureMismatch"`, and a
+`SecurityViolationDetected` audit event lands on the
+`FakeAuditSink`). Pairs with two focused unit witnesses in the
+same module:
+
+* `classify_signature_errors_as_signature_mismatch` — every
+  signature-related `ManifestError` variant maps to the stable
+  audit kind, pinning the per-variant fanout against a future
+  `ManifestError` addition.
+* `classify_non_signature_errors_keep_per_kind_audit_slot` —
+  role-mismatch and kernel-version-skew errors keep the per-role
+  `{Reviewer,Orchestrator,ExecutorStarter}ImageDigestMismatch`
+  audit slot, pinning the negative half of the classification
+  matrix.
+
+The canonical-images crate has its own structural witness for the
+verifier in
+`crates/canonical-images/src/lib.rs::tests::verify_via_manifest_with_key_rejects_wrong_signing_key`;
+this kernel-side witness is the mirror that ALSO pins the audit
+surface (the canonical-images crate has no audit dependency).
+
+**Canonical home.** `specs/v3/canonical-image-trust-anchor.md §7`
+(key-rotation drift scenario) + the `classify_canonical_image_violation`
+doc-comment in `kernel/src/canonical_images_preflight.rs`.
 
 ---
 

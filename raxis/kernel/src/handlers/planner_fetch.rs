@@ -237,6 +237,13 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         Ok(fr) => fr.status_code.map(|c| c as i64).unwrap_or(0),
         Err(_) => 0,
     };
+    let outcome_label: &str = match &result {
+        Ok(fr) => match fr.status_code {
+            Some(code) if (200..400).contains(&code) => "ok",
+            _ => "error",
+        },
+        Err(_) => "error",
+    };
     crate::observability::record_gateway_fetch(
         &ctx.observability,
         &provider_label,
@@ -246,6 +253,52 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         false,
         None,
         None,
+    );
+
+    // INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01 — every kernel-
+    // mediated planner Inference round-trip emits one
+    // `raxis.planner.inference.{duration,tokens}` observation,
+    // success AND error. The kernel layer cannot resolve the
+    // upstream `model` field (the planner-side SDK opaque-serialises
+    // the body bytes; the kernel never parses them — see this
+    // module's header comment), so we tag with `model = "unknown"`
+    // and emit zero token counters. The richer per-model / per-tier
+    // observation point lives planner-side; iter61+ will route those
+    // observations back through a future `PlannerObservationReport`
+    // IPC frame and the histogram pivots will gain real `model`
+    // labels at that point. Until then the kernel-side
+    // `provider+outcome` pivot is the operator's primary
+    // bottleneck-localisation signal.
+    if matches!(req.fetch_kind, PlannerFetchKind::Inference) {
+        crate::observability::record_planner_inference(
+            &ctx.observability,
+            &provider_label,
+            "unknown",
+            outcome_label,
+            false,
+            latency_ms as i64,
+            0,
+            0,
+        );
+    }
+
+    // INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02 — record the
+    // gateway's reported upstream RTT (distinct from the kernel-
+    // measured end-to-end `record_gateway_fetch`). Uses
+    // `fr.latency_ms` on the success arm and the kernel-measured
+    // value on every failure arm where the gateway never produced a
+    // structured response. Both arms emit so success and error
+    // observations stay paired and a regression in one is visible
+    // against the other.
+    let gateway_upstream_ms = match &result {
+        Ok(fr) => fr.latency_ms as i64,
+        Err(_) => latency_ms as i64,
+    };
+    crate::observability::record_gateway_upstream(
+        &ctx.observability,
+        &provider_label,
+        outcome_label,
+        gateway_upstream_ms,
     );
 
     match result {

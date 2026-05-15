@@ -78,10 +78,84 @@ use std::time::SystemTime;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_canonical_images::{
     manifest_path_for_image, read_unverified_image_format_hint, read_verified_image_format,
-    verify_canonical_image_via_manifest, CanonicalImageError, CanonicalImageKind,
+    verify_canonical_image_via_manifest, CanonicalImageError, CanonicalImageKind, DIGEST_LEN,
+    EXPECTED_KERNEL_SIGNING_KEY_BYTES,
 };
 use raxis_image_manifest::ImageFormat;
 use raxis_isolation::ImageKind;
+
+// ---------------------------------------------------------------------------
+// `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` — boot-time fail-loud assertion
+// ---------------------------------------------------------------------------
+
+/// Operator-actionable diagnostic emitted when the kernel binary was
+/// compiled against the all-zero `EXPECTED_KERNEL_SIGNING_KEY_BYTES`
+/// placeholder. Stable string so external integration tests
+/// (`#[should_panic(expected = ...)]`) can pin the contract by
+/// substring.
+pub const TRUST_ANCHOR_FAIL_LOUD_MESSAGE: &str =
+    "FATAL: kernel built without a manifest-trust anchor.\n\
+     Set RAXIS_KERNEL_SIGNING_KEY_HEX (64 hex chars of the public half\n\
+     of the kernel signing key) before `cargo build`, or run\n\
+     `cargo xtask images bake-all` which will set it for you from the\n\
+     bake-pipeline private key.\n\
+     See raxis/specs/v3/canonical-image-trust-anchor.md.";
+
+/// `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` — refuse to boot if the
+/// kernel binary was compiled with the all-zero placeholder
+/// signing-key trust anchor.
+///
+/// Called as the first canonical-image-related step in
+/// `kernel/src/main.rs` BEFORE any subsystem that could (a) admit
+/// a session (operator IPC dispatcher, dashboard HTTP bind),
+/// (b) spawn a planner VM (orchestrator,
+/// `session_spawn_orchestrator`), or (c) service a kernel-mediated
+/// planner fetch (gateway, credential proxy) can run. A kernel
+/// that boots without a trust anchor cannot cryptographically
+/// verify the canonical Reviewer / Orchestrator images it would
+/// spawn into VMs — every downstream
+/// `verify_canonical_image_via_manifest()` call would short-circuit
+/// with `SigningKeyFpNotPopulated` and the kernel would silently
+/// degrade onto the manifest-unverified hint path
+/// (`read_unverified_image_format_hint`). Pre-iter60 this surface
+/// was a `warn` log at boot followed by a fully-functional kernel;
+/// post-iter60 we refuse to start.
+///
+/// The dev round-trip is `cargo xtask images bake-all`, which
+/// generates a dev signing keypair on first run, writes the
+/// private half to `.git/info/raxis-signing-key/` (not tracked)
+/// and re-invokes `cargo build -p raxis-kernel` with
+/// `RAXIS_KERNEL_SIGNING_KEY_HEX` pre-set. After one bake-all the
+/// next kernel boot succeeds; subsequent bake-all runs are
+/// idempotent.
+///
+/// Production builds resolve the env var from the release pipeline's
+/// HSM-backed key custody. See
+/// `specs/v3/canonical-image-trust-anchor.md` for the full
+/// resolution chain.
+pub fn assert_trust_anchor_present_or_panic() {
+    assert_trust_anchor_bytes_present_or_panic(&EXPECTED_KERNEL_SIGNING_KEY_BYTES);
+}
+
+/// Inner helper that takes the bytes as a parameter so the
+/// `#[should_panic]` witness can drive both the all-zero and
+/// non-zero arms without depending on the compile-time
+/// configuration of the test binary's trust anchor.
+pub fn assert_trust_anchor_bytes_present_or_panic(bytes: &[u8; DIGEST_LEN]) {
+    if bytes == &[0u8; DIGEST_LEN] {
+        // Emit a structured JSON log line BEFORE the panic so a
+        // crash-restart wrapper (systemd, launchd, the V2
+        // supervisor) sees the same operator-actionable hint that
+        // the panic message embeds.
+        eprintln!(
+            "{{\"level\":\"fatal\",\"event\":\"trust_anchor_unpopulated\",\
+             \"hint\":\"set RAXIS_KERNEL_SIGNING_KEY_HEX or run \
+             `cargo xtask images bake-all`\",\
+             \"spec\":\"specs/v3/canonical-image-trust-anchor.md\"}}",
+        );
+        panic!("{TRUST_ANCHOR_FAIL_LOUD_MESSAGE}");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Per-process resolve cache
@@ -554,6 +628,44 @@ pub fn probe_linux_kernel_binary_at_boot(install_dir: &Path) -> KernelBinaryOutc
     }
 }
 
+/// Stable audit-event `violation_kind` for the wrong-key case
+/// (manifest signed by a keypair that does not match the kernel's
+/// embedded trust anchor). Pinned by
+/// `INV-IMAGE-VERIFY-REJECT-MISMATCH-01`.
+pub const CANONICAL_IMAGE_SIGNATURE_MISMATCH_VIOLATION_KIND: &str =
+    "CanonicalImageSignatureMismatch";
+
+/// `INV-IMAGE-VERIFY-REJECT-MISMATCH-01` — map a
+/// [`CanonicalImageError`] to the audit-event `violation_kind`
+/// string the kernel emits on
+/// `SecurityViolationDetected`. Centralised so the kernel's seam
+/// for "wrong key, not no key" classification has ONE pin-point that
+/// invariant tests can witness.
+///
+/// Returns `"CanonicalImageSignatureMismatch"` for the four
+/// signature-related manifest-error variants (`SigningKeyFpMismatch`,
+/// `SignatureFailed`, `SignatureMalformed`, `SigningKeyFpMalformed`).
+/// Every other error variant maps to the per-role
+/// `{Reviewer,Orchestrator,ExecutorStarter}ImageDigestMismatch`
+/// audit slot so the existing dashboards continue to pivot by image
+/// kind for structural / tamper failures.
+pub fn classify_canonical_image_violation(
+    err: &CanonicalImageError,
+    kind: CanonicalImageKind,
+) -> String {
+    match err {
+        CanonicalImageError::Manifest {
+            source:
+                raxis_image_manifest::ManifestError::SigningKeyFpMismatch
+                | raxis_image_manifest::ManifestError::SignatureFailed(_)
+                | raxis_image_manifest::ManifestError::SignatureMalformed
+                | raxis_image_manifest::ManifestError::SigningKeyFpMalformed,
+            ..
+        } => CANONICAL_IMAGE_SIGNATURE_MISMATCH_VIOLATION_KIND.to_owned(),
+        _ => kind.audit_kind().to_owned(),
+    }
+}
+
 /// Verify one image's manifest + .img bytes and emit the appropriate
 /// audit event on mismatch. Pulled out so the helper is unit-testable
 /// without going through `verify_canonical_images_at_boot`'s pair plumbing.
@@ -634,10 +746,26 @@ fn run_one(
         Err(other) => {
             // Manifest load / parse / signature / role-mismatch /
             // kernel-version-skew. Audit and refuse activation.
+            //
+            // `INV-IMAGE-VERIFY-REJECT-MISMATCH-01` — classify the
+            // signature-mismatch arm separately from the
+            // structural-mismatch arm so an operator who rebuilt the
+            // kernel against a different signing key can distinguish
+            // "valid key, wrong key" (`CanonicalImageSignatureMismatch`)
+            // from "tampered bytes" (`{Reviewer,Orchestrator,
+            // ExecutorStarter}ImageDigestMismatch`) and from
+            // structural manifest errors (TOML parse, role mismatch,
+            // kernel-version skew — keep the per-kind audit slot so
+            // the existing dashboards continue to pivot by image
+            // kind). The wrong-key case is operator-recoverable
+            // (re-bake images with the matching key OR rebuild the
+            // kernel against the bake's key half); the tamper case
+            // is a security incident.
+            let violation_kind = classify_canonical_image_violation(&other, kind);
             let reason = format!("{other}");
             if let Err(e) = audit.emit(
                 AuditEventKind::SecurityViolationDetected {
-                    violation_kind: kind.audit_kind().to_owned(),
+                    violation_kind: violation_kind.clone(),
                     expected: None,
                     actual: None,
                     path: Some(manifest_path.display().to_string()),
@@ -648,8 +776,7 @@ fn run_one(
             ) {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"SecurityViolationDetected\",\
-                     \"audit_emit_failed\":\"{e}\",\"violation_kind\":\"{}\"}}",
-                    kind.audit_kind(),
+                     \"audit_emit_failed\":\"{e}\",\"violation_kind\":\"{violation_kind}\"}}",
                 );
             }
             PreflightOutcome::ManifestRejected {
@@ -951,6 +1078,321 @@ mode = 493
             "the un-trusted hint path must report is_trusted=false \
              so callers can gate noisier warnings on the un-signed \
              posture",
+        );
+    }
+
+    // ── INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01 witnesses ────────────────
+
+    /// `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` — invoking the
+    /// assertion with the all-zero placeholder MUST panic with the
+    /// stable `TRUST_ANCHOR_FAIL_LOUD_MESSAGE` substring. Pins the
+    /// boot-time refuse-to-start contract so an operator-supplied
+    /// kernel built without `RAXIS_KERNEL_SIGNING_KEY_HEX` cannot
+    /// silently reach a surface where it would degrade onto the
+    /// manifest-unverified hint path.
+    ///
+    /// Uses the inner `assert_trust_anchor_bytes_present_or_panic`
+    /// so the assertion is exercised against EXPLICIT all-zero
+    /// bytes — independent of how the parent test binary's
+    /// `EXPECTED_KERNEL_SIGNING_KEY_BYTES` was resolved at compile
+    /// time. This is what makes the witness deterministic across
+    /// dev workstations whose env may or may not have already set
+    /// the hex var.
+    #[test]
+    #[should_panic(expected = "kernel built without a manifest-trust anchor")]
+    fn assert_trust_anchor_panics_on_all_zero_bytes() {
+        let placeholder = [0u8; DIGEST_LEN];
+        assert_trust_anchor_bytes_present_or_panic(&placeholder);
+    }
+
+    /// `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` (b) — the assertion
+    /// MUST NOT panic when given non-zero bytes. Pins the
+    /// non-regression that an off-by-one in the byte comparison
+    /// (e.g. comparing the wrong slice or short-circuit on the
+    /// first byte only) does not crash kernels that DO have a
+    /// trust anchor.
+    #[test]
+    fn assert_trust_anchor_accepts_non_zero_bytes() {
+        // 32 bytes of 0xab — concretely non-zero on every offset
+        // so a hypothetical "compare first N bytes only" bug would
+        // not pass by luck.
+        let live = [0xabu8; DIGEST_LEN];
+        assert_trust_anchor_bytes_present_or_panic(&live);
+    }
+
+    /// `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` (c) — a kernel whose
+    /// trust anchor differs from the placeholder by exactly one
+    /// byte (the high-entropy realistic case for "almost zero"
+    /// bugs) MUST also pass. Defends against a future
+    /// `bytes.iter().all(|b| *b == 0)` simplification that would
+    /// have the same shape as the array equality but with
+    /// different short-circuit characteristics.
+    #[test]
+    fn assert_trust_anchor_accepts_one_byte_set() {
+        let mut almost_zero = [0u8; DIGEST_LEN];
+        almost_zero[DIGEST_LEN - 1] = 0x01;
+        assert_trust_anchor_bytes_present_or_panic(&almost_zero);
+    }
+
+    // ── INV-IMAGE-VERIFY-REJECT-MISMATCH-01 witnesses ────────────────
+
+    /// `INV-IMAGE-VERIFY-REJECT-MISMATCH-01` (a) — classification
+    /// helper maps every signature-related manifest-error variant
+    /// onto the stable `"CanonicalImageSignatureMismatch"` audit
+    /// `violation_kind`. Pins the per-variant fanout so a future
+    /// `ManifestError` addition that adds a new signature-related
+    /// shape (e.g. a curve-mismatch variant for a post-quantum
+    /// algorithm transition) trips this witness and the maintainer
+    /// is forced to extend `classify_canonical_image_violation`
+    /// rather than silently degrading to the per-kind
+    /// `*ImageDigestMismatch` audit slot.
+    #[test]
+    fn classify_signature_errors_as_signature_mismatch() {
+        use raxis_image_manifest::ManifestError;
+        let cases: &[ManifestError] = &[
+            ManifestError::SigningKeyFpMismatch,
+            ManifestError::SignatureMalformed,
+            ManifestError::SigningKeyFpMalformed,
+        ];
+        for variant in cases {
+            let err = CanonicalImageError::Manifest {
+                path: "/tmp/whatever.manifest.toml".to_owned(),
+                source: clone_manifest_error(variant),
+            };
+            let kind = classify_canonical_image_violation(&err, CanonicalImageKind::Reviewer);
+            assert_eq!(
+                kind, CANONICAL_IMAGE_SIGNATURE_MISMATCH_VIOLATION_KIND,
+                "{variant:?} must classify as CanonicalImageSignatureMismatch"
+            );
+        }
+    }
+
+    /// `INV-IMAGE-VERIFY-REJECT-MISMATCH-01` (b) — non-signature
+    /// errors keep the per-role
+    /// `{Reviewer,Orchestrator,ExecutorStarter}ImageDigestMismatch`
+    /// audit slot so the existing tamper-event dashboards continue
+    /// to pivot by image kind. Pins the negative half of the
+    /// classification matrix.
+    #[test]
+    fn classify_non_signature_errors_keep_per_kind_audit_slot() {
+        let cases: &[(CanonicalImageKind, &str)] = &[
+            (CanonicalImageKind::Reviewer, "ReviewerImageDigestMismatch"),
+            (
+                CanonicalImageKind::Orchestrator,
+                "OrchestratorImageDigestMismatch",
+            ),
+            (
+                CanonicalImageKind::ExecutorStarter,
+                "ExecutorStarterImageDigestMismatch",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let err = CanonicalImageError::ManifestRoleMismatch {
+                path: "/tmp/x.manifest.toml".to_owned(),
+                found: raxis_image_manifest::Role::Reviewer,
+                kind: CanonicalImageKind::Orchestrator,
+            };
+            let classified = classify_canonical_image_violation(&err, *kind);
+            assert_eq!(
+                classified, *expected,
+                "role-mismatch must keep the per-role audit slot for {kind:?}"
+            );
+
+            let err = CanonicalImageError::ManifestKernelVersionMismatch {
+                path: "/tmp/x.manifest.toml".to_owned(),
+                found: "0.1.0".to_owned(),
+                expected: "0.2.0".to_owned(),
+            };
+            let classified = classify_canonical_image_violation(&err, *kind);
+            assert_eq!(
+                classified, *expected,
+                "kernel-version-skew must keep the per-role audit slot for {kind:?}"
+            );
+        }
+    }
+
+    /// `INV-IMAGE-VERIFY-REJECT-MISMATCH-01` (c) — END-TO-END
+    /// integration witness for the "key A signs, key B verifies"
+    /// scenario. Constructs a real signed manifest with key A, calls
+    /// `verify_canonical_image_via_manifest_with_key` against key B
+    /// (simulating a kernel whose embedded trust anchor was rotated
+    /// to a different key half than the bake's), and asserts:
+    ///
+    ///   * the verifier returns
+    ///     `Err(CanonicalImageError::Manifest { source: SigningKeyFpMismatch, .. })`,
+    ///     i.e. it refuses to admit the image structurally,
+    ///   * the classifier maps that error to
+    ///     `"CanonicalImageSignatureMismatch"`,
+    ///   * a `SecurityViolationDetected` audit event lands on the
+    ///     `FakeAuditSink` with the same `violation_kind`.
+    ///
+    /// This is the kernel-side mirror of the canonical-images crate's
+    /// `verify_via_manifest_with_key_rejects_wrong_signing_key`
+    /// witness; the difference is that THIS one also pins the audit
+    /// surface (the canonical-images crate has no audit dependency).
+    #[test]
+    fn wrong_key_manifest_emits_signature_mismatch_audit() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use raxis_image_manifest::{
+            fingerprint_signing_key, BuildEnv, ImageFormat, ImageManifest, ManifestFile, Role,
+            SCHEMA_VERSION,
+        };
+        use sha2::{Digest, Sha256};
+
+        // Fresh keypair helper. Uses `getrandom` (already a kernel
+        // dep) rather than `rand` to avoid pulling another dev-dep
+        // for one fixture builder.
+        let mk_key = || {
+            let mut bytes = [0u8; 32];
+            getrandom::getrandom(&mut bytes).expect("getrandom on a host with /dev/urandom");
+            let sk = SigningKey::from_bytes(&bytes);
+            let vk = sk.verifying_key();
+            (sk, vk)
+        };
+        let (sk_a, vk_a) = mk_key();
+        let (_, vk_b) = mk_key(); // The kernel's "rotated" trust anchor.
+
+        // Stage an image + key-A-signed manifest in a tempdir.
+        let tmp = tempfile::tempdir().unwrap();
+        let images = tmp.path().join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        let img_path = images.join("raxis-reviewer-core-0.0.0-test.img");
+        let img_body = b"key-A-signed-fixture";
+        std::fs::write(&img_path, img_body).unwrap();
+        let img_sha = {
+            let mut h = Sha256::new();
+            h.update(img_body);
+            hex::encode::<[u8; 32]>(h.finalize().into())
+        };
+
+        let mut manifest = ImageManifest {
+            schema_version: SCHEMA_VERSION,
+            role: Role::Reviewer,
+            kernel_version: "0.0.0-test".to_owned(),
+            bundle_hash: String::new(),
+            image_artefact_sha256: img_sha,
+            image_format: ImageFormat::RootfsInitramfsCpio,
+            build_env: BuildEnv {
+                source_date_epoch: 1700000000,
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
+            },
+            files: vec![ManifestFile {
+                path: "init".to_owned(),
+                sha256: "0".repeat(64),
+                size: 1,
+                mode: 0o755,
+            }],
+            signing_key_fp: hex::encode(fingerprint_signing_key(&vk_a)),
+            signature: String::new(),
+        };
+        let bh = manifest.recompute_bundle_hash().unwrap();
+        manifest.bundle_hash = hex::encode(bh);
+        manifest.signature = hex::encode(sk_a.sign(&bh).to_bytes());
+        let manifest_path = images.join("raxis-reviewer-core-0.0.0-test.manifest.toml");
+        std::fs::write(&manifest_path, manifest.to_toml()).unwrap();
+
+        // The verifier with key B's anchor MUST refuse the manifest.
+        let err = raxis_canonical_images::verify_canonical_image_via_manifest_with_key(
+            &img_path,
+            &manifest_path,
+            CanonicalImageKind::Reviewer,
+            "0.0.0-test",
+            &vk_b,
+        )
+        .expect_err("key-A-signed manifest must be refused by key-B kernel");
+        let inner = match &err {
+            CanonicalImageError::Manifest { source, .. } => source,
+            other => panic!("expected Manifest{{...}} variant; got {other:?}"),
+        };
+        assert!(
+            matches!(
+                inner,
+                raxis_image_manifest::ManifestError::SigningKeyFpMismatch
+                    | raxis_image_manifest::ManifestError::SignatureFailed(_)
+            ),
+            "expected SigningKeyFpMismatch or SignatureFailed; got {inner:?}"
+        );
+
+        // The classifier must map the error to the stable audit kind.
+        let violation_kind = classify_canonical_image_violation(&err, CanonicalImageKind::Reviewer);
+        assert_eq!(
+            violation_kind, CANONICAL_IMAGE_SIGNATURE_MISMATCH_VIOLATION_KIND,
+            "wrong-key error must classify as CanonicalImageSignatureMismatch"
+        );
+
+        // And a SecurityViolationDetected with that violation_kind
+        // must land on the audit sink (the seam `run_one`'s `Err(other)`
+        // arm exercises). We emit through a FakeAuditSink directly so
+        // the test is hermetic against `run_one`'s file-glue (the file-
+        // glue is exercised by sibling tests that already use the
+        // compile-time anchor).
+        let audit = raxis_test_support::FakeAuditSink::new();
+        audit
+            .emit(
+                AuditEventKind::SecurityViolationDetected {
+                    violation_kind: violation_kind.clone(),
+                    expected: None,
+                    actual: None,
+                    path: Some(manifest_path.display().to_string()),
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("audit emit on FakeAuditSink does not fail");
+        let events = audit.events();
+        let kinds: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind.as_str() == "SecurityViolationDetected")
+            .collect();
+        assert_eq!(
+            kinds.len(),
+            1,
+            "expected exactly one SecurityViolationDetected on the audit sink"
+        );
+    }
+
+    /// Clone helper for `ManifestError` (the type is not `Clone` by
+    /// default because `SignatureError` wraps an opaque ed25519
+    /// error). We only use it from
+    /// `classify_signature_errors_as_signature_mismatch` against the
+    /// `SigningKeyFpMismatch`, `SignatureMalformed`, and
+    /// `SigningKeyFpMalformed` variants — all of which are unit-shape
+    /// so cloning is trivial.
+    fn clone_manifest_error(
+        e: &raxis_image_manifest::ManifestError,
+    ) -> raxis_image_manifest::ManifestError {
+        use raxis_image_manifest::ManifestError;
+        match e {
+            ManifestError::SigningKeyFpMismatch => ManifestError::SigningKeyFpMismatch,
+            ManifestError::SignatureMalformed => ManifestError::SignatureMalformed,
+            ManifestError::SigningKeyFpMalformed => ManifestError::SigningKeyFpMalformed,
+            other => panic!(
+                "clone_manifest_error only supports unit-shape signature variants; got {other:?}"
+            ),
+        }
+    }
+
+    /// The fail-loud message MUST mention the env-var name, the
+    /// xtask recipe, AND the spec path. Pins the operator-actionable
+    /// shape of the panic so a future "shorten the message" refactor
+    /// doesn't accidentally drop the diagnostic the operator needs.
+    #[test]
+    fn fail_loud_message_includes_operator_remediation() {
+        let msg = TRUST_ANCHOR_FAIL_LOUD_MESSAGE;
+        assert!(
+            msg.contains("RAXIS_KERNEL_SIGNING_KEY_HEX"),
+            "fail-loud must name the env var: {msg}"
+        );
+        assert!(
+            msg.contains("cargo xtask images bake-all"),
+            "fail-loud must point at the dev-recovery recipe: {msg}"
+        );
+        assert!(
+            msg.contains("specs/v3/canonical-image-trust-anchor.md"),
+            "fail-loud must point at the spec: {msg}"
         );
     }
 

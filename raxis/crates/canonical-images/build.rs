@@ -137,6 +137,18 @@ fn main() {
 /// a mistyped value never silently degrades to the placeholder
 /// branch — the boot-path verifier would then accept "no trust anchor"
 /// in a build that the operator believed was signed.
+///
+/// `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` (iter60) — the placeholder
+/// arm is the kernel-boot trip wire. The kernel's canonical-image
+/// registry init refuses to proceed when the embedded trust anchor
+/// is the all-zero placeholder; it panics with a clear, actionable
+/// message before the dashboard binds or the orchestrator can spawn
+/// a planner VM. See `kernel/src/canonical_images_preflight.rs` for
+/// the panic site and `specs/v3/canonical-image-trust-anchor.md` for
+/// the full operator workflow (TL;DR: run `cargo xtask images
+/// bake-all`, which auto-generates a dev keypair on first run and
+/// exports `RAXIS_KERNEL_SIGNING_KEY_HEX` into the kernel rebuild
+/// step).
 fn resolve_trust_anchor_bytes() -> [u8; TRUST_ANCHOR_LEN_BYTES] {
     if let Ok(hex_input) = env::var(TRUST_ANCHOR_HEX_VAR) {
         let trimmed = hex_input.trim();
@@ -154,8 +166,9 @@ fn resolve_trust_anchor_bytes() -> [u8; TRUST_ANCHOR_LEN_BYTES] {
     }
 
     // Placeholder. lib.rs `EXPECTED_KERNEL_SIGNING_KEY_BYTES` doc
-    // explains how this is detected at runtime
-    // (`SigningKeyFpNotPopulated`); developer builds rely on this.
+    // explains how this is detected at runtime; the kernel boot
+    // path panics fail-loud (see `kernel/src/main.rs::main` →
+    // `canonical_images_preflight::assert_trust_anchor_present`).
     [0u8; TRUST_ANCHOR_LEN_BYTES]
 }
 
