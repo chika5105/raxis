@@ -1,6 +1,6 @@
 # RAXIS V2 — VM Network Isolation Architecture
 
-> **Status:** V2 Specified
+> **Status:** V2 Specified — Tier1Tproxy deletion applied (`EgressTier::Tier1Tproxy` removed from the codebase; the only non-`None` tier shipped in V2 is `EgressTier::Mediated`, the Path A3 universal-airgap shape). Several mechanism sections in this spec describe the **pre-deletion** Tier1Tproxy shape and are marked **DEPRECATED — describes legacy mechanism** below; the canonical post-deletion contract lives in `airgap-architecture.md`. The Tier-1 admission policy (SNI hostname enforcement, allowlist semantics, audit-event surface) is unchanged and remains canonical here.
 > **Role in V2 unified egress:** This spec is the canonical home for **Tier 1 — Public / Unauthenticated egress**. Together with `credential-proxy.md` (Tier 2 — Authenticated egress), it replaces the previous `kernel-mediated-egress.md` (deprecated; preserved historically only).
 >
 > **Cross-references:**
@@ -13,6 +13,27 @@
 > - `planner-harness.md §7` — V2 unified egress overview (this spec + `credential-proxy.md`)
 > - `custom-tools.md` — operator-defined custom tools. A custom-tool subprocess shares the planner VM's network namespace and is therefore subject to the same Tier 1 (tproxy SNI allowlist) and Tier 2 (credential proxy URL/method allowlist) enforcement as any other in-VM process. Custom tools introduce **no new authority surface** at the network layer; an HTTP call from a custom-tool script reaches the same tproxy / credential-proxy checks a `bash`-invoked HTTP call would.
 > - `extensibility-traits.md §3` — `IsolationBackend` trait. This spec describes the Tier-1 networking contract every conformant isolation backend MUST satisfy: VM with no virtio-net interface to the host, all egress routed through `raxis-tproxy` running on a kernel-side network namespace, SNI inspection enforced. The V2 default `FirecrackerIsolation` and `AppleVirtualizationIsolation` impls both meet this; future enclave-based isolation impls (TDX/SEV-SNP) MUST too, verified by the `IsolationBackend` conformance kit's network-isolation test fixture.
+
+---
+
+## 0. Deprecated Designs At A Glance
+
+The following designs are **DEPRECATED** in V2. Each is preserved in this document for historical context and to keep cross-references resolvable, but new code, new specs, and new diagrams MUST NOT depend on them. Sections that describe a deprecated mechanism carry a **DEPRECATED — describes legacy mechanism** banner at the top.
+
+| # | Deprecated design | Status | Replacement | Locator |
+|---|---|---|---|---|
+| D1 | `EgressTier::Tier1Tproxy` (NAT-attached virtio-net + iptables REDIRECT to in-VM tproxy on a real NIC) | Removed from codebase. Enum variant deleted from `crates/isolation/src/lib.rs`; no production code path constructs it. | `EgressTier::Mediated` (no NIC, in-VM tproxy routes admission + tunnel over AF_VSOCK to a kernel-side handler). | `airgap-architecture.md` (canonical post-deletion contract); §3.1 Path A3 substitution callout. |
+| D2 | OUTPUT-DROP iptables policy + per-port (`80/443/5432/3306/1433/27017/6379`) REDIRECT rules as published in the §3.1 bash block | Moot under `EgressTier::Mediated`: with no NIC, OUTPUT has no device to drop on. The actual A3 rule shape redirects every dport indiscriminately into `raxis-tproxy`, which forwards admission decisions to the kernel over vsock; per-port admission policy is applied kernel-side, not at the iptables layer. | A3 rule shape in `airgap-architecture.md §4` (single-rule REDIRECT + DNS UDP/53 stub forwarder rule). | §3.1 bash block; §6 step 4; §8 checklist iptables items. |
+| D3 | "via iptables REDIRECT" framing in the §3.2 agent ↔ tproxy ↔ kernel-host data-flow diagram | The iptables REDIRECT still exists under A3 but it is no longer the architecturally interesting hop: under `Mediated` the load-bearing path is `agent → in-VM tproxy → AF_VSOCK → kernel-side admission handler → upstream`. The diagram's "Kernel Host" column collapses into the kernel-side vsock handler. | A3 data-flow diagram in `airgap-architecture.md`. | §3.2 ASCII diagram. |
+| D4 | iptables-rule-as-network-level-enforcer prose for DB bypass detection in §5 | The §13.9 security policy (database direct-connection bypass detection + `FAIL_PROXY_TARGET_BYPASS` + `SecurityViolationDetected`) is preserved unchanged. Only the network-level enforcer differs: under A3 every outbound TCP — including direct DB-host connection attempts — already lands in `raxis-tproxy` because there is no NIC, so the dport-specific REDIRECT rules are redundant; the kernel applies the bypass-target check on the vsock admission path. | Same security policy, A3 enforcer. See `airgap-architecture.md §4` + `credential-proxy.md §13.9`. | §5 prose. |
+| D5 | "Kernel installs iptables rules in VM network namespace" boot-sequence step (§6 step 4) | Step still runs but installs the A3 rule shape (single-rule REDIRECT + DNS stub forwarder rule), not the per-port set published in §3.1. | A3 boot sequence in `airgap-architecture.md`. | §6 step 4. |
+| D6 | "External HTTP — intercepted by iptables → raxis-tproxy → Kernel admission" comment in the §7 dev-server example | Conceptually directionally right; the misleading framing is the implication of a NIC-bound iptables hop. Under A3 the redirect happens in-VM with no NIC; the load-bearing hop is the AF_VSOCK admission. | Same example with A3-correct comment; tracked in §0 D6. | §7 example comment. |
+| D7 | §8 implementation-checklist items implementing the legacy iptables rule shape | Superseded by the A3 rule shape. The checklist's tproxy-binary, vsock-admission, and audit-event items remain valid. | A3-correct rule shape in `airgap-architecture.md §4`. | §8 checklist `Kernel: install iptables rules…` bullet + nested per-port bullet. |
+| D8 | `kernel-mediated-egress.md` (whole spec) | Already deprecated. Preserved historically only. | This spec (Tier 1) + `credential-proxy.md` (Tier 2). | Cross-reference list above; `kernel-mediated-egress.md` itself. |
+| D9 | `IntentKind::EgressRequest` + `[[tasks.allowed_egress]] require_intent = true` + `INV-EGRESS-INTENT-01` | Already deprecated and noted in §4 amendment + §4.4. Variant removed from `IntentKind`; `require_intent` parsed for back-compat and ignored at runtime; invariant deprecated. | Two-tier egress: SNI on Tier 1, HTTP-granular on Tier 2 (credential proxy). | §4 amendment callout; §4.4. |
+| D10 | `environment-access-control.md §4` `EgressRequest` admission-order narrative | Already noted as V1-flavored / needs amendment; cross-reference is preserved but the source spec has not been updated. | Pending amendment in `environment-access-control.md §4`. | Cross-reference list above. |
+
+> **How to read the rest of this spec.** Sections describing a deprecated mechanism carry a **DEPRECATED — describes legacy mechanism** banner. The Tier-1 *policy contract* (SNI-only enforcement, allowlist semantics, `TransparentProxyAdmitted`/`TransparentProxyDenied` audit events, `DefaultProviderEgressApplied` post-commit emit, `SessionEgressStallDetected` sliding-window detector) is **canonical and unchanged** in V2 and is NOT marked deprecated. The transport mechanism that delivers traffic into the policy gate has changed (NIC-attached iptables → no-NIC AF_VSOCK), and that is what the deprecation banners flag.
 
 ---
 
@@ -101,16 +122,7 @@ owned by `root`, not executable by the agent user).
 
 ### 3.1 — iptables Rules (Installed by Kernel at VM Boot)
 
-> **Path A3 substitution.** The VM has no NIC at all under
-> `EgressTier::Mediated` (the only non-`None` tier shipped in V2 after the
-> Tier1Tproxy deletion), so the `OUTPUT DROP` default policy is moot —
-> there is no device for packets to egress. The REDIRECT rules still
-> install (now catching every dport indiscriminately, since the tproxy
-> talks to the kernel over vsock and the kernel can apply the per-port
-> admission policy itself) and a new
-> `-p udp --dport 53 -j REDIRECT --to-port 53` rule routes DNS queries
-> through the in-guest stub forwarder. See `airgap-architecture.md §4`
-> for the A3 rule shape.
+> **DEPRECATED — describes legacy mechanism (D2 in §0).** The bash block below publishes the pre-Tier1Tproxy-deletion rule shape. Under `EgressTier::Mediated` (the only non-`None` tier shipped in V2) the VM has no NIC at all, so the `OUTPUT DROP` default policy is moot — there is no device for packets to egress. The REDIRECT rules still install but now catch every dport indiscriminately because the tproxy talks to the kernel over vsock and per-port admission policy is applied kernel-side. A `-p udp --dport 53 -j REDIRECT --to-port 53` rule routes DNS queries through the in-guest stub forwarder. The canonical post-deletion A3 rule shape lives in `airgap-architecture.md §4`. The block below is retained for historical context.
 
 ```bash
 # Drop all outbound traffic by default (VM has no direct internet)
@@ -139,6 +151,8 @@ tries to connect to a *non-localhost* address on port 5432 does it hit `raxis-tp
 — which is the proxy bypass scenario detected in §13.9.
 
 ### 3.2 — What raxis-tproxy Does
+
+> **DEPRECATED framing — describes legacy mechanism (D3 in §0).** The diagram's "Kernel Host" column and "via iptables REDIRECT" header reflect the pre-Tier1Tproxy-deletion shape, where iptables on a NIC-attached VM was the architecturally interesting redirect hop. Under `EgressTier::Mediated` the iptables REDIRECT still happens but it is in-VM only (no NIC); the load-bearing path is `agent → in-VM tproxy → AF_VSOCK → kernel-side admission handler → upstream`, with the kernel-side handler being the component that opens the upstream socket. The control-flow (admission request, Admit/Deny verdict, CONNECT-style tunnel) is unchanged. The canonical A3 data-flow diagram lives in `airgap-architecture.md`.
 
 ```text
 Agent process                raxis-tproxy (localhost:3129)        Kernel Host
@@ -329,6 +343,8 @@ See `credential-proxy.md` for the full credential proxy declaration schema.
 
 ## 5. Database Bypass Detection via Transparent Proxy
 
+> **DEPRECATED framing — describes legacy mechanism (D4 in §0).** The §13.9 security policy (direct-DB-host connection bypass detection, `FAIL_PROXY_TARGET_BYPASS`, `SecurityViolationDetected`, strike-counter wiring) is **canonical and unchanged** in V2. The deprecated piece is the iptables-rule-as-network-level-enforcer prose: under `EgressTier::Mediated` every outbound TCP — including a direct DB-host connection attempt on port 5432 — already lands in `raxis-tproxy` because there is no NIC, so the dport-specific `! -d 127.0.0.1` REDIRECT rule from §3.1 is redundant. The kernel applies the bypass-target check on the vsock admission path. The walkthrough below is preserved for control-flow clarity; substitute "iptables: NOT localhost → REDIRECT → raxis-tproxy:3129" with "no NIC → in-VM tproxy is the only egress path → vsock admission to kernel" when reading under V2.
+
 When the agent tries to connect directly to a real database host (bypassing the
 credential proxy), the iptables rule for port 5432 (excluding localhost) redirects
 to `raxis-tproxy`:
@@ -354,6 +370,8 @@ security violation, no audit event, no strike counter.
 
 ## 6. VM Boot Sequence (Updated)
 
+> **DEPRECATED framing on step 4 — describes legacy mechanism (D5 in §0).** Step 4 still runs but installs the A3 rule shape (single-rule REDIRECT into `raxis-tproxy` + DNS `udp/53` stub-forwarder rule), not the per-port set published in §3.1. Steps 1–3 and 5–10 are unchanged under `EgressTier::Mediated`. The canonical A3 boot-sequence walkthrough lives in `airgap-architecture.md`.
+
 ```text
 1. Kernel allocates VM, assigns session_id
 2. Kernel starts all credential proxies declared in [[tasks.credentials]]:
@@ -373,6 +391,8 @@ security violation, no audit event, no strike counter.
 ---
 
 ## 7. What the Agent's Dev Server Actually Calls
+
+> **DEPRECATED comment in the snippet — describes legacy mechanism (D6 in §0).** The "External HTTP — intercepted by iptables → raxis-tproxy → Kernel admission" inline comment reflects the pre-Tier1Tproxy-deletion shape. Under `EgressTier::Mediated` the comment should read "External HTTP — in-VM iptables redirects to raxis-tproxy → AF_VSOCK to kernel-side admission handler → upstream". The agent code itself is unchanged; only the inline comment is misleading.
 
 The dev server and its test suite require NO changes to use RAXIS. Standard library
 calls work as-is because:
@@ -408,10 +428,11 @@ the routing transparently.
       - Direct proxy mode for HTTP (read Host header, proxy request)
       - ECONNREFUSED on denial
 - [ ] Kernel: install raxis-tproxy binary into VM rootfs at boot
-- [ ] Kernel: install iptables rules in VM network namespace at boot (§3.1)
-      - Port 80/443 redirect for HTTP/HTTPS
-      - Port 5432/3306/1433/27017/6379 redirect for DB bypass detection
-      - Accept loopback, drop everything else outbound
+- [ ] Kernel: install iptables rules in VM network namespace at boot — **DEPRECATED rule shape (D7 in §0); implement the A3 rule shape from `airgap-architecture.md §4` instead.** The legacy per-port rule set below is preserved for historical context only:
+      - ~~Port 80/443 redirect for HTTP/HTTPS~~ → A3: single-rule REDIRECT into `raxis-tproxy`, kernel applies per-port admission policy
+      - ~~Port 5432/3306/1433/27017/6379 redirect for DB bypass detection~~ → A3: redundant (no NIC ⇒ every outbound TCP already lands in tproxy); bypass-target check moves to the kernel-side vsock admission handler
+      - ~~Accept loopback, drop everything else outbound~~ → A3: `OUTPUT DROP` is moot (no NIC); loopback ACCEPT preserved for intra-VM dev-server calls
+      - A3 addition: `-p udp --dport 53 -j REDIRECT --to-port 53` for the in-guest DNS stub forwarder
 - [ ] Kernel: handle ProxyAdmission vsock message:
       - Hostname check against policy egress_hosts AND task's allowed_egress
       - If host matches credential proxy real_target → FAIL_PROXY_TARGET_BYPASS + SecurityViolationDetected
