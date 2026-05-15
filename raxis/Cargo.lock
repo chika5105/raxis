@@ -3125,6 +3125,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "raxis-genesis-tools",
+ "raxis-observability",
  "raxis-types",
  "serde",
  "serde_json",

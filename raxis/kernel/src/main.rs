@@ -499,7 +499,15 @@ async fn main() {
     //            Stored on `HandlerContext` so every IPC handler emits
     //            through the wrapped sink without remembering to call
     //            `notifications::dispatch` themselves.
-    let inner_audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(writer));
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-02 — keep an explicit
+    // `Arc<FileAuditSink>` clone in scope so the kernel can wire
+    // the observability hub onto the inner `AuditWriter` after the
+    // hub is constructed (one-shot, idempotent). The dyn-AuditSink
+    // upcast below is what every kernel handler holds; the
+    // concrete-type clone is only used for the post-hub-init
+    // wire-up.
+    let file_audit_sink: Arc<FileAuditSink> = Arc::new(FileAuditSink::new(writer));
+    let inner_audit: Arc<dyn AuditSink> = file_audit_sink.clone();
     // V2_GAPS §C4 — the per-kernel `SidecarRegistry` lives here so the
     // notification dispatcher and `HandlerContext` share the same
     // per-channel state (concurrency caps, circuit breakers, drop
@@ -596,6 +604,13 @@ async fn main() {
     // move; we re-derive the literal here from the same `env!` macro.
     let observability_hub: Arc<raxis_observability::ObservabilityHub> =
         observability_boot::build_obs_hub(&policy, &data_dir, env!("CARGO_PKG_VERSION"));
+
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-02 — now that the hub
+    // exists, wire it onto the audit writer so each `emit` records
+    // per-stage histograms (`hash` / `persist` / `verify`) under
+    // `raxis.audit.chain.stage.duration`. Idempotent — safe to
+    // call exactly once at boot.
+    file_audit_sink.set_observability_hub(Arc::clone(&observability_hub));
 
     // Chain the streaming-audit bridge on top of the notifying
     // decorator so:

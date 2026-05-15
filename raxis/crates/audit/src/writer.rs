@@ -16,12 +16,22 @@
 // by the caller, not this module.
 
 use crate::event::{AuditEvent, AuditEventKind};
+use raxis_observability::{redact, MetricName, ObservabilityHub};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
 use uuid::Uuid;
+
+/// iter61 — closed lexicon of audit-chain append stages, mirrored
+/// from `kernel/src/observability.rs::AUDIT_CHAIN_STAGES`. Adding
+/// a stage here MUST be paired with a wire-up below in `append`.
+const AUDIT_CHAIN_STAGE_HASH: &str = "hash";
+const AUDIT_CHAIN_STAGE_PERSIST: &str = "persist";
+const AUDIT_CHAIN_STAGE_VERIFY: &str = "verify";
 
 // ---------------------------------------------------------------------------
 // AuditWriterError
@@ -91,6 +101,13 @@ pub struct AuditWriter {
     /// the JSONL append is fsync'd before the call returns. See
     /// [`AuditWriterOptions::sync_on_append`].
     sync_on_append: bool,
+    /// iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-02`. When
+    /// `Some(_)`, `append` records one
+    /// `raxis.audit.chain.stage.duration` histogram observation
+    /// per stage (`hash`, `persist`, `verify`). When `None`
+    /// (CLI tools, unit tests, pre-iter61 hosts) the writer
+    /// runs untimed.
+    observability_hub: Option<Arc<ObservabilityHub>>,
 }
 
 /// Construction options for [`AuditWriter`]. Today there is a single
@@ -188,7 +205,18 @@ impl AuditWriter {
             prev_sha256: starting_prev_sha256
                 .unwrap_or_else(|| Self::GENESIS_PREV_SHA256.to_owned()),
             sync_on_append: options.sync_on_append,
+            observability_hub: None,
         })
+    }
+
+    /// iter61 — wire the observability hub so each `append` emits
+    /// per-stage histograms under
+    /// `raxis.audit.chain.stage.duration`. The kernel main loop
+    /// calls this right after constructing the writer; CLI tools
+    /// and tests omit it. Idempotent — calling twice replaces
+    /// the previous handle.
+    pub fn set_observability_hub(&mut self, hub: Arc<ObservabilityHub>) {
+        self.observability_hub = Some(hub);
     }
 
     /// Append one audit event to the segment and return the materialised
@@ -231,34 +259,75 @@ impl AuditWriter {
         let mut line = serde_json::to_string(&event)?;
         line.push('\n');
 
-        // Compute SHA-256 of the raw line bytes for the next record.
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-02 — `hash` stage:
+        // SHA-256 over the raw line bytes. Bounded by line length;
+        // typically ~10 µs for a small payload, ~ms for a large
+        // payload (e.g. `IntegrationMergeCompleted` carrying a diff
+        // summary). A regression here points at unbounded payload
+        // growth or a SHA-256 implementation regression.
+        let hash_started = Instant::now();
         let next_prev = sha256_hex(line.as_bytes());
+        let hash_elapsed_ms = hash_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        record_audit_chain_stage_inner(
+            self.observability_hub.as_deref(),
+            AUDIT_CHAIN_STAGE_HASH,
+            "ok",
+            hash_elapsed_ms,
+        );
 
-        // Write and flush.
-        self.writer.write_all(line.as_bytes())?;
-        self.writer.flush()?;
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-02 — `persist` stage:
+        // user-space buffer flush + fdatasync barrier. This is the
+        // dominant cost of audit append on most hosts; a slow
+        // `persist` p95 points at disk back-pressure or fsync
+        // contention.
+        let persist_started = Instant::now();
+        let persist_result: Result<(), AuditWriterError> = (|| {
+            self.writer.write_all(line.as_bytes())?;
+            self.writer.flush()?;
+            // Durability barrier — closes the audit-vs-SQLite
+            // consistency gap. See AuditWriterOptions for the
+            // full invariant rationale.
+            if self.sync_on_append {
+                self.writer.get_ref().sync_data()?;
+            }
+            Ok(())
+        })();
+        let persist_elapsed_ms = persist_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        let persist_outcome = if persist_result.is_ok() {
+            "ok"
+        } else {
+            "error"
+        };
+        record_audit_chain_stage_inner(
+            self.observability_hub.as_deref(),
+            AUDIT_CHAIN_STAGE_PERSIST,
+            persist_outcome,
+            persist_elapsed_ms,
+        );
+        persist_result?;
 
-        // Durability barrier — closes the audit-vs-SQLite consistency
-        // gap. `BufWriter::flush()` only drains the user-space buffer
-        // into the OS page cache; under a host power-loss the dirty
-        // page can be lost while the SQLite row this record describes
-        // (committed with `synchronous = FULL`, fsync'd before commit
-        // returned) is durable. `File::sync_data()` issues an
-        // fdatasync so the JSONL append is on stable storage before
-        // we advance the in-memory chain pointer.
-        //
-        // Gated by `sync_on_append` so operators can trade durability
-        // for throughput on workloads where audit volume is high and
-        // the host-crash risk is mitigated by a battery-backed cache.
-        // See `AuditWriterOptions` for the invariant docs.
-        if self.sync_on_append {
-            self.writer.get_ref().sync_data()?;
-        }
-
-        // Advance chain state only after a successful flush (and
-        // fdatasync, if enabled).
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-02 — `verify` stage:
+        // chain-link verification. Per-append the writer trusts
+        // its own `prev_sha256` accumulator (set on the previous
+        // successful append), so the per-append verify cost is
+        // the constant-time field assignment below — sub-microsecond.
+        // The structurally-meaningful chain-link verify happens at
+        // boot in `recovery::verify_audit_chain` and on every
+        // dashboard refresh in `audit_chain_status`; those longer
+        // verifies are tagged `verify` too so the histogram covers
+        // both the per-append fast path AND the boot/dashboard
+        // walks. We still emit per-append so an operator can see
+        // the call rate even on the fast path.
+        let verify_started = Instant::now();
         self.seq += 1;
         self.prev_sha256 = next_prev;
+        let verify_elapsed_ms = verify_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        record_audit_chain_stage_inner(
+            self.observability_hub.as_deref(),
+            AUDIT_CHAIN_STAGE_VERIFY,
+            "ok",
+            verify_elapsed_ms,
+        );
 
         Ok(event)
     }
@@ -415,6 +484,29 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     hex::encode(h.finalize())
+}
+
+/// iter61 — emit one `raxis.audit.chain.stage.duration` histogram
+/// observation. Mirrors the `record_audit_chain_stage` helper in
+/// `kernel/src/observability.rs` so the audit-tools crate stays
+/// at the leaf-leaf observability layering (only the base
+/// `raxis-observability` dep, no kernel-side helpers).
+fn record_audit_chain_stage_inner(
+    hub: Option<&ObservabilityHub>,
+    stage: &str,
+    outcome: &str,
+    duration_ms: i64,
+) {
+    let Some(hub) = hub else { return };
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("stage", stage), ("outcome", outcome)]);
+    hub.record_histogram(
+        MetricName::AuditChainStageDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
 }
 
 fn unix_now() -> i64 {
@@ -853,5 +945,107 @@ mod tests {
             err,
             AuditWriterError::ChainPrevSha256Break { line_number: 1, .. }
         ));
+    }
+
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-02` witness — wiring
+    /// an `ObservabilityHub` onto an `AuditWriter` and calling
+    /// `append` MUST emit at least one observation under each of
+    /// the three closed `stage` lexemes (`hash`, `persist`,
+    /// `verify`). A regression where any stage is silently dropped
+    /// breaks the dataplane-bottlenecks dashboard's per-stage
+    /// pivot.
+    #[test]
+    fn append_emits_per_stage_histograms_when_hub_wired() {
+        use raxis_observability::{
+            exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
+            ObservabilityExporter, ObservabilityHub,
+        };
+
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled: true,
+            sample_rate: 1.0,
+            max_queue_depth: 256,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
+
+        let (mut w, _tmp) = make_writer();
+        w.set_observability_hub(Arc::clone(&hub));
+        w.append(
+            AuditEventKind::KernelStarted {
+                data_dir: "/tmp/test".to_owned(),
+                policy_epoch: 1,
+                schema_version: 1,
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("append succeeds");
+        hub.flush();
+
+        let metrics = exp.metrics();
+        let stage_samples: Vec<&str> = metrics
+            .iter()
+            .filter(|m| m.name == MetricName::AuditChainStageDuration)
+            .filter_map(|m| match m.labels.get("stage") {
+                Some(AttrValue::Str(s)) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        for expected_stage in [
+            AUDIT_CHAIN_STAGE_HASH,
+            AUDIT_CHAIN_STAGE_PERSIST,
+            AUDIT_CHAIN_STAGE_VERIFY,
+        ] {
+            assert!(
+                stage_samples.contains(&expected_stage),
+                "expected ≥1 AuditChainStageDuration sample tagged stage={expected_stage:?}, \
+                 got stages={stage_samples:?} (INV-OBSERVABILITY-DATAPLANE-LATENCY-02 broken)"
+            );
+        }
+
+        // And every sample must be a Histo datapoint (the dashboard
+        // panels query histogram_quantile, so a Counter-shaped
+        // sample would silently render an empty panel).
+        for m in metrics
+            .iter()
+            .filter(|m| m.name == MetricName::AuditChainStageDuration)
+        {
+            assert!(
+                matches!(m.datapoint, DataPoint::Histo { .. }),
+                "AuditChainStageDuration must be Histo, got {:?}",
+                m.datapoint
+            );
+        }
+    }
+
+    /// Witness — when no hub is wired, `append` MUST NOT emit any
+    /// per-stage histogram (zero-overhead opt-out path).
+    #[test]
+    fn append_emits_no_metrics_without_hub() {
+        let (mut w, _tmp) = make_writer();
+        w.append(
+            AuditEventKind::KernelStarted {
+                data_dir: "/tmp/test".to_owned(),
+                policy_epoch: 1,
+                schema_version: 1,
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("append succeeds");
+        // No hub => nothing to flush, nothing to assert beyond
+        // "no panic" (the absence of an exporter means we cannot
+        // observe the negative). The absence-of-emit invariant is
+        // guaranteed structurally by the
+        // `let Some(hub) = hub else { return };` early-return in
+        // `record_audit_chain_stage_inner`.
     }
 }

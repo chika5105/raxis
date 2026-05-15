@@ -98,6 +98,20 @@ impl FileAuditSink {
             inner: Mutex::new(writer),
         }
     }
+
+    /// iter61 — wire the observability hub into the underlying
+    /// `AuditWriter` so each `emit` records per-stage histograms
+    /// (`hash` / `persist` / `verify`) under
+    /// `raxis.audit.chain.stage.duration`. The kernel main loop
+    /// calls this right after constructing the sink.
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-02`.
+    pub fn set_observability_hub(
+        &self,
+        hub: std::sync::Arc<raxis_observability::ObservabilityHub>,
+    ) {
+        let mut guard = self.inner.lock().expect("audit writer mutex poisoned");
+        guard.set_observability_hub(hub);
+    }
 }
 
 impl AuditSink for FileAuditSink {

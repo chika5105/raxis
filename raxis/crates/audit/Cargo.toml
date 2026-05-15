@@ -16,6 +16,12 @@ raxis-types = { workspace = true }
 # `genesis::write_genesis_segment` calls `render_genesis_audit_record`
 # from this crate; no other audit-tools module touches it.
 raxis-genesis-tools = { workspace = true }
+# iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-02`. The audit
+# writer times its three stages (hash / persist / verify) and
+# emits one `raxis.audit.chain.stage.duration` histogram sample
+# per stage when an `ObservabilityHub` is wired. Optional handle;
+# AuditWriter remains usable without a hub (CLI tools, tests).
+raxis-observability = { workspace = true }
 
 [dev-dependencies]
 tempfile    = "3"
