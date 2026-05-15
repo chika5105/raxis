@@ -8,10 +8,14 @@ const nextConfig = {
   reactStrictMode: true,
   // Pin the workspace root so Next does not climb up to a parent lockfile.
   outputFileTracingRoot: __dirname,
-  // The docs loader reads markdown files from the local filesystem at build time
-  // (when `RAXIS_REPO_PATH` is set) or from the bundled mirror under
-  // `vendor/raxis-docs`. No runtime filesystem access — so this site builds and
-  // ships statically on Vercel.
+  // Bundle the vendored docs mirror into the Vercel deployment so that the
+  // filesystem backend is available as a fallback when the GitHub API is down.
+  // sync-docs.mjs populates vendor/raxis-docs/ during `prebuild`.
+  experimental: {
+    outputFileTracingIncludes: {
+      "/(.*)/": ["./vendor/raxis-docs/**/*"],
+    },
+  },
   typedRoutes: false,
 };
 

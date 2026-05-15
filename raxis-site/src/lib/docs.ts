@@ -371,19 +371,40 @@ async function getScenarioTomlFilesFromGitHub(meta: DocMeta): Promise<TomlFile[]
 // ─── Public API (always async) ────────────────────────────────────────────────
 
 export async function getAllDocs(): Promise<DocMeta[]> {
-  if (USE_GITHUB) return getAllDocsFromGitHub();
+  if (USE_GITHUB) {
+    try {
+      return await getAllDocsFromGitHub();
+    } catch (err) {
+      console.warn("[docs] GitHub API unavailable, falling back to bundled filesystem copy:", err);
+      return getAllDocsFromFS();
+    }
+  }
   return getAllDocsFromFS();
 }
 
 export async function getDocBySlug(
   slug: string[]
 ): Promise<{ meta: DocMeta; raw: string } | null> {
-  if (USE_GITHUB) return getDocBySlugFromGitHub(slug);
+  if (USE_GITHUB) {
+    try {
+      return await getDocBySlugFromGitHub(slug);
+    } catch (err) {
+      console.warn("[docs] GitHub API unavailable, falling back to filesystem:", err);
+      return getDocBySlugFromFS(slug);
+    }
+  }
   return getDocBySlugFromFS(slug);
 }
 
 export async function getScenarioTomlFiles(meta: DocMeta): Promise<TomlFile[]> {
-  if (USE_GITHUB) return getScenarioTomlFilesFromGitHub(meta);
+  if (USE_GITHUB) {
+    try {
+      return await getScenarioTomlFilesFromGitHub(meta);
+    } catch (err) {
+      console.warn("[docs] GitHub API unavailable, falling back to filesystem:", err);
+      return getScenarioTomlFilesFromFS(meta);
+    }
+  }
   return getScenarioTomlFilesFromFS(meta);
 }
 
