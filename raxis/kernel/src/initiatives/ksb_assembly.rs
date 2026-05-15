@@ -1246,6 +1246,18 @@ mod tests {
         // assertion is on the projection's read path, not the
         // upstream writers.
         let conn = store.lock_sync();
+        // SQLite's `PRAGMA foreign_keys=ON` (set by `Store::open`)
+        // requires the parent initiative row to exist before we can
+        // insert the task / edge rows below. Mirrors the seeder in
+        // `dag_aggregate_in_realistic_two_executor_plan_is_pending_until_runner_completes`.
+        conn.execute(
+            "INSERT INTO initiatives (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'Executing', '{}', 'sha-test', 0)",
+            rusqlite::params![init],
+        )
+        .expect("insert initiative");
         let exec_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         for (tid, role, verdict) in &[
             (exec, "Executor", None::<&str>),
@@ -1430,6 +1442,17 @@ mod tests {
         );
 
         let conn = store.lock_sync();
+        // SQLite's `PRAGMA foreign_keys=ON` (set by `Store::open`)
+        // requires the parent initiative row to exist before we can
+        // insert task / edge rows below.
+        conn.execute(
+            "INSERT INTO initiatives (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'Executing', '{}', 'sha-test', 0)",
+            rusqlite::params![init],
+        )
+        .expect("insert initiative");
         let exec_sha = "cafebabecafebabecafebabecafebabecafebabe";
         // Reviewer A has voted Rejected; Reviewer B has NOT voted
         // (review_verdict is NULL). This is the exact wire shape

@@ -470,11 +470,12 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
         max_turns_scaling: scaling,
     });
     let orch_json = serde_json::to_value(&orch_caps).expect("orchestrator serialise");
-    let orch_obj = orch_json
-        .get("Orchestrator")
-        .or_else(|| orch_json.get("orchestrator"))
-        .expect("orchestrator wire variant present");
-    let orch_mts = orch_obj
+    assert_eq!(
+        orch_json.get("role").and_then(|v| v.as_str()),
+        Some("orchestrator"),
+        "orchestrator envelope MUST be internally-tagged with role=\"orchestrator\"; got: {orch_json}"
+    );
+    let orch_mts = orch_json
         .get("max_turns_scaling")
         .expect("orchestrator envelope MUST carry `max_turns_scaling`");
     assert_eq!(
@@ -510,12 +511,13 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
         max_turns_scaling: scaling,
     });
     let exec_json = serde_json::to_value(&exec_caps).expect("executor serialise");
-    let exec_obj = exec_json
-        .get("Executor")
-        .or_else(|| exec_json.get("executor"))
-        .expect("executor wire variant present");
+    assert_eq!(
+        exec_json.get("role").and_then(|v| v.as_str()),
+        Some("executor"),
+        "executor envelope MUST be internally-tagged with role=\"executor\"; got: {exec_json}"
+    );
     assert!(
-        exec_obj.get("max_turns_scaling").is_some(),
+        exec_json.get("max_turns_scaling").is_some(),
         "executor envelope MUST carry `max_turns_scaling`; got: {exec_json}"
     );
 
@@ -532,12 +534,13 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
         artifact_task_id: "task-pr".to_owned(),
     });
     let rev_json = serde_json::to_value(&rev_caps).expect("reviewer serialise");
-    let rev_obj = rev_json
-        .get("Reviewer")
-        .or_else(|| rev_json.get("reviewer"))
-        .expect("reviewer wire variant present");
+    assert_eq!(
+        rev_json.get("role").and_then(|v| v.as_str()),
+        Some("reviewer"),
+        "reviewer envelope MUST be internally-tagged with role=\"reviewer\"; got: {rev_json}"
+    );
     assert!(
-        rev_obj.get("max_turns_scaling").is_none(),
+        rev_json.get("max_turns_scaling").is_none(),
         "reviewer envelope MUST NOT carry `max_turns_scaling` \
          (role-scoping rule per INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01); \
          got: {rev_json}"

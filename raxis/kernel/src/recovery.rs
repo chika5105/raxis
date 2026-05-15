@@ -3320,11 +3320,31 @@ mod supervisor_auto_resume_witness {
         // INV check 5: emitted audit events — one per Resumed,
         // ZERO for Skipped (operator-quarantined + pre-existing-BRP
         // skip silently per the invariant statement).
+        //
+        // We filter the sink to `TaskAutoResumedAfterSupervisorRestart`
+        // events only because INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01
+        // also requires a paired `TaskStateChanged` per resumed task
+        // (so the dashboard's push protocol surfaces the FSM
+        // transition); both events are intentionally emitted per
+        // resume but only the supervisor-specific one is the
+        // forensic invariant under test here.
         let events = sink.events();
+        let auto_resumed: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.kind,
+                    AuditEventKind::TaskAutoResumedAfterSupervisorRestart { .. }
+                )
+            })
+            .collect();
         assert_eq!(
-            events.len(),
+            auto_resumed.len(),
             4,
-            "skipped tasks must NOT emit TaskAutoResumed*; resumed tasks emit exactly one each"
+            "skipped tasks must NOT emit TaskAutoResumed*; resumed tasks emit exactly one each \
+             (got {} TaskAutoResumed* of {} total events)",
+            auto_resumed.len(),
+            events.len(),
         );
 
         // INV check 6: every event carries a faithful prior_state +
@@ -3353,6 +3373,12 @@ mod supervisor_auto_resume_witness {
                         ),
                     );
                 }
+                // INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 paired event;
+                // the auto-resume helper deliberately emits the generic
+                // `TaskStateChanged` so the dashboard reflects the FSM
+                // transition even though the supervisor-specific event
+                // is what the operator-facing audit chain anchors on.
+                AuditEventKind::TaskStateChanged { .. } => {}
                 other => panic!("unexpected event in auto-resume sweep: {other:?}"),
             }
         }

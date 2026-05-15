@@ -1175,7 +1175,13 @@ mod tests {
             (
                 TASK_LINT_RUNNER_RUST,
                 "out/lint/check-rust.txt",
-                &["out/lint/", "rust-crate/"],
+                // `Cargo.lock` is admitted alongside `rust-crate/`
+                // because the workspace cargo invocations rewrite the
+                // lockfile at the worktree root on every `cargo fmt
+                // --check` / `cargo clippy` invocation; the fixture
+                // (search "Cargo.lock MUST be in this allowlist")
+                // documents the rationale.
+                &["out/lint/", "rust-crate/", "Cargo.lock"],
                 &[TASK_REVIEW_LINT_RUST],
             ),
             (

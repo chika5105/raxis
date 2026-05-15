@@ -361,6 +361,19 @@ mod tests {
             );
             return;
         }
+        // `ensure_stack_up` runs `docker compose ps` before the
+        // opt-out branch resolves, so a stopped daemon surfaces
+        // `ProbeFailed` instead of the `AutoBringupDisabled` outcome
+        // this test exists to pin. Skip silently in that environment
+        // (matches the live-infra exclusion policy: tests gated on a
+        // running Docker daemon must not fail on a laptop without it).
+        if !docker_daemon_reachable() {
+            eprintln!(
+                "[docker-stack-test] docker daemon not reachable; skipping \
+                 opt_out_against_missing_project_surfaces_stack_down_token"
+            );
+            return;
+        }
         let _guard = SetEnvGuard::set(ENV_NO_AUTO_DOCKER, "1");
         let project_name = format!("raxis-live-e2e-nonexistent-{}", std::process::id(),);
         let r = ensure_stack_up(
@@ -432,6 +445,23 @@ mod tests {
     fn docker_binary_present() -> bool {
         Command::new("docker")
             .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// `docker info` exits 0 only when the daemon socket is reachable.
+    /// `--version` (used by `docker_binary_present`) does NOT need
+    /// the daemon, so the binary can be installed while the daemon is
+    /// stopped (the common case on a developer laptop without
+    /// Docker Desktop running). Tests that depend on the daemon
+    /// must skip when this returns `false` so `cargo test` stays
+    /// green in that environment.
+    fn docker_daemon_reachable() -> bool {
+        Command::new("docker")
+            .arg("info")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

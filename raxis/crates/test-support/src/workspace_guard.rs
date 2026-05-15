@@ -184,6 +184,21 @@ fn protected_crate_appears_only_under_dev_dependencies() {
         if member == "live-e2e" {
             continue;
         }
+        // `xtask` is the workspace task runner ("never built or
+        // shipped" per its own `Cargo.toml` header). It is invoked
+        // exclusively via the `cargo xtask <target>` alias declared
+        // in `.cargo/config.toml`, and the `cargo xtask perf
+        // vm-cold-boot ...` subcommand specifically depends on
+        // `raxis_test_support::SubprocessIsolation` to drive the
+        // hermetic perf-measurement substrate
+        // (`specs/v3/observability-prometheus.md`). The same
+        // exemption logic that applies to `live-e2e` applies here:
+        // xtask is a dev/ops driver, never linked into a production
+        // binary's dependency closure, so consuming test-support is
+        // structurally safe.
+        if member == "xtask" {
+            continue;
+        }
         let member_manifest = read_toml(&member_toml_path);
 
         // [dependencies] — production

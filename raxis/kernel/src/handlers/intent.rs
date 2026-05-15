@@ -7065,9 +7065,21 @@ mod tests {
         let result = finalize_integration_merge_completion(disk.store(), id, id)
             .expect("cascade must not return raw SQLite error on Aborted initiative");
 
-        assert!(
-            result.is_none(),
-            "cascade must skip when initiative is no longer Executing"
+        // V2 contract: when the cascade skips, the function still
+        // returns `Some(outcome)` so the caller can drive the synthetic
+        // task's `TaskStateChanged` audit emission (Running → Completed
+        // on the coordinator task is FSM-legal even when the parent
+        // initiative is no longer Executing). The "skip" signal is
+        // `initiative_from == initiative_to`, NOT a `None` outcome.
+        let outcome =
+            result.expect("cascade must surface the partial outcome on a skipped cascade");
+        assert_eq!(
+            outcome.initiative_from, "Aborted",
+            "skipped cascade must report the unchanged initiative_from"
+        );
+        assert_eq!(
+            outcome.initiative_from, outcome.initiative_to,
+            "skipped cascade must leave initiative_from == initiative_to"
         );
         assert_eq!(
             read_initiative_state(&disk, id).as_deref(),

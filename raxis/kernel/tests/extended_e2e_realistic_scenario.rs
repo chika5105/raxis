@@ -795,10 +795,40 @@ fn synthetic_reviewer_chain(executor_task_id: &str) -> Vec<AuditEvent> {
     };
     vec![
         synthetic_intent_accepted(0, TASK_REVIEW_LINT_A, "SubmitReview"),
-        synthetic_vm_spawn(1, executor_task_id),
+        // The witness specifically anchors on
+        // `ExecutorRespawnFromReviewRejection`, NOT `SessionVmSpawned`,
+        // because round-1 spawns also fire `SessionVmSpawned` and the
+        // witness needs to disambiguate the retry-after-rejection
+        // path. See the comment on the
+        // `Some(AuditEventKind::ExecutorRespawnFromReviewRejection
+        // { .. })` arm in `ReviewerSubstantiveDisagreementWitness`.
+        synthetic_executor_respawn_from_review_rejection(1, executor_task_id),
         synthetic_intent_accepted(2, TASK_REVIEW_LINT_B, "SubmitReview"),
         synthetic_aggregation_pass(3, executor_task_id),
     ]
+}
+
+fn synthetic_executor_respawn_from_review_rejection(
+    seq: u64,
+    executor_task_id: &str,
+) -> AuditEvent {
+    let payload = AuditEventKind::ExecutorRespawnFromReviewRejection {
+        task_id: executor_task_id.to_owned(),
+        prior_activation_id: format!("act-{executor_task_id}-prior"),
+        new_activation_id: format!("act-{executor_task_id}-new"),
+        review_reject_count: 1,
+    };
+    AuditEvent {
+        seq,
+        event_id: uuid::Uuid::nil(),
+        event_kind: "ExecutorRespawnFromReviewRejection".to_owned(),
+        session_id: None,
+        task_id: Some(executor_task_id.to_owned()),
+        initiative_id: Some("init-primary".to_owned()),
+        payload: serde_json::to_value(&payload).unwrap(),
+        emitted_at: 1700000000 + seq as i64,
+        prev_sha256: "0".repeat(64),
+    }
 }
 
 fn synthetic_event(

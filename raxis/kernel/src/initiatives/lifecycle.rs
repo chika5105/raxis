@@ -7921,11 +7921,15 @@ target_ref = "refs/heads/raxis/feature"
         let (sk, _) = fixture_keypair();
 
         let plan = r#"
+            [plan.initiative]
+            description = "smoke initiative — fixture for lane-validation rejection"
+
             [workspace]
             lane_id = "ghost-lane"
 
             [[tasks]]
             task_id = "t1"
+            description = "smoke task — fixture for lane validation rejection"
         "#;
         // Use the raw seeder so our `[workspace] lane_id` override is
         // persisted verbatim (the lane-aware `seed_draft_initiative`
@@ -8002,11 +8006,15 @@ target_ref = "refs/heads/raxis/feature"
         let (sk, _) = fixture_keypair();
 
         let plan = r#"
+            [plan.initiative]
+            description = "smoke initiative — fixture for lane-validation happy path"
+
             [workspace]
             lane_id = "feature-work"
 
             [[tasks]]
             task_id = "t1"
+            description = "smoke task — fixture for lane validation happy path"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
