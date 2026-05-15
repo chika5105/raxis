@@ -153,7 +153,7 @@ For every query the agent sends:
 
 ## The Full Flow (Visual)
 
-```
+```text
 Agent (in microVM)
     │
     │  "SELECT * FROM users"

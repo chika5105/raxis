@@ -232,7 +232,7 @@ a uniform `SpawnOutcomeClass`.
 
 ### 3.2 Transient-retry flow
 
-```
+```text
 spawn_executor_for_task(...)
   ├─ attempt 0:  service.spawn_session(req)                ─┐
   │     ↳ Ok(handle)  → return handle                       │
@@ -265,7 +265,7 @@ operator post-mortem can replay the sequence.
 
 ### 3.3 Permanent-failure flow
 
-```
+```text
 spawn_executor_for_task(...)
   ├─ attempt 0: service.spawn_session(req)
   │     ↳ Err(e) → classify(e)
@@ -304,7 +304,7 @@ instead of the single-signal `vcpus *= 2` and `memory_mb *= 1.5`).
 
 ### 4.2 Scale-up event flow
 
-```
+```text
 ScalingDecisionEngine::tick()
   ├─ for each active session:
   │     ├─ collect signals (RSS, queue depth, timeout count, ...)
@@ -404,7 +404,7 @@ admission (the `ScalingDecisionEngine`). The kernel maintains a
 sliding 60-second window of `(timestamp, session_id)` pairs; on
 each new scaling decision:
 
-```
+```text
 if window.count_within(60.seconds) >= policy.max_per_minute {
     emit SessionVmScaleDeferred { session_id, reason: RateLimit, ... }
     return Skipped;

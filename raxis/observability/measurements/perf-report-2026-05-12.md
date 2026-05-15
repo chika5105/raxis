@@ -27,7 +27,7 @@ see the per-subcommand numbers without parsing this file.
 
 ## Section 1 — VM cold-boot (substrate=subprocess, n=500)
 
-```
+```text
 metric (ms)                   p50      p95      p99
 cold_boot                    0.11     0.17     0.28
 host_init                    0.00     0.00     0.00
@@ -61,7 +61,7 @@ The four-tier histogram emits per spawn through
 
 ## Section 2 — Audit append throughput (n=1000)
 
-```
+```text
 metric (us)                   p50      p95      p99
 append latency               4067     6132     7136
 throughput =     229.7 appends/s (wall-clock: 4.35s)

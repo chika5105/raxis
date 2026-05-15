@@ -35,7 +35,7 @@ The kernel is the authority core. It is the only process that reads the signed p
 
 Every subsystem is its own Rust module. This is not cosmetic — it enforces that each subsystem's internal state and functions are inaccessible to sibling subsystems unless explicitly re-exported. The `gates` module never imports `raxis-store` directly; each `gates/` submodule uses only the facades permitted by the boundary rule (see **`gates` subsystem boundary rule** below). This prevents accidental cross-subsystem coupling and keeps every submodule independently unit-testable.
 
-```
+```text
 kernel/
 ├── Cargo.toml
 └── src/
@@ -489,7 +489,7 @@ The IPC server is the kernel's public surface — the only interface through whi
 
 **`validate_approval_token` — canonical contract** (this is the normative spec; the `authority/approval.rs` section below is the implementation home and references this check sequence):
 
-```
+```rust
 pub fn validate_approval_token(
     token: &ApprovalToken,
     action: &ProposedAction,   // what the kernel is about to do
@@ -674,7 +674,7 @@ This note captures the VCS semantics required for the intended concurrent-agent 
 
 **Concurrent agent workflow**
 
-```
+```text
 main ─── A ─── B ─── C                    ← main
                │
                ├─── agent-1 ─── D ─── E   ← agent-1 worktree (base = C, head = E)
@@ -741,7 +741,7 @@ This part specifies the internal logic layer of the kernel: the six subsystems t
 Re-exports the public API surface of the authority subsystem. Internal sub-modules (`delegation`, `session`, `verifier_token`, `keys`, `approval`) are private to the subsystem; only the functions listed here are callable by other kernel modules.
 
 **Public API re-exported:**
-```
+```text
 pub use delegation::{check_capability, record_capability_use, list_delegations, mark_stale_on_epoch_advance};
 pub use session::{create_session, get_session, revoke_session, update_sequence_number};
 pub use verifier_token::{issue_verifier_token, validate_verifier_token, consume_verifier_token};
@@ -890,7 +890,7 @@ pub use approval::{validate_approval_token, revoke_approval};
 
 Re-exports the public admission API.
 
-```
+```text
 pub use admit::{admit_in_tx, PlanTask};
 pub use dag::{next_ready_tasks, mark_task_complete, transition_to_admitted};  // add_task/insert_edges_in/detect_cycle_in are public for in-tx callers
 pub use lane::{lane_config_for_row, get_lane_status};
@@ -1142,7 +1142,7 @@ pub use budget::{check_budget, current_budget};
 
 Re-exports the provider public API.
 
-```
+```text
 pub use allowlist::check as allowlist_check;
 pub use fetch::execute_fetch;
 pub use rate_limit::check_rate_limit;
@@ -1242,7 +1242,7 @@ pub use rate_limit::check_rate_limit;
 
 Re-exports the public prompt API.
 
-```
+```text
 pub use assembler::assemble;
 pub use epoch_binding::{session_prompt_valid, invalidate_session_prompts, mark_all_prompts_invalid};
 ```
@@ -1675,7 +1675,7 @@ If validation fails, the plan is rejected and the initiative stays in `Draft`.
 
 #### Successor release on task completion
 
-```
+```text
 task "task-auth-tests" → Completed
 
 store::dag::release_successors("task-auth-tests"):

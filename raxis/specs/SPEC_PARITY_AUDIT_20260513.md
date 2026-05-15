@@ -40,7 +40,7 @@ sweep documented around, not departed from.
 `git log --oneline c8a1e4c..origin/main` at sweep end (newest →
 oldest, excluding the revert range itself):
 
-```
+```text
 ad86d0d specs(observability-prometheus): document compose `name:` + `external_labels.cluster` consistency (9a2fbb3)
 dc9887f docs(kernel-store §2.5.8): single-tx cascade close on commit_task_completion
 6358c49 docs(v2-deep-spec): expand Step 12 rationale on hostile-planner-vs-executor-self-fail
@@ -140,7 +140,7 @@ spec-side fix.
 
 In chronological order:
 
-```
+```text
 312abbf  specs(invariants): promote INV-CRED-PROXY-VM-REACHABILITY-02 from credential-proxy.md §12a
 b97dd9b  specs(vsock-loopback): document `lo` bring-up + planner-executor activation and cross-link vm-network-isolation
 a1aac92  specs(v2-deep-spec §Step 5): document activation-FSM cascade rule (c986e6d + 09222b8)

@@ -142,7 +142,7 @@ against real subsystems (real listeners, real wire bytes, real audit
 chain, real credential backend). All 17 pass on
 `cargo run -p raxis-live-e2e -- all`:
 
-```
+```text
 gateway-anthropic, egress-enforcement, session-spawn,
 postgres-proxy, postgres-proxy-restrictions,
 postgres-proxy-table-allowlists,

@@ -48,7 +48,7 @@ This split is the single most important architectural commitment of this spec. S
 
 ### 2.1 Component diagram
 
-```
+```text
 ┌───────────────────────────┐
 │   Planner (in microVM)    │
 │                           │
@@ -198,7 +198,7 @@ A single-model alias (like `executor` above) is the canonical way to express "no
 
 When the planner submits `InferenceRequest { model: "alias:architect", ... }`, the kernel resolves the alias to a concrete model by walking the chain in order:
 
-```
+```rust
 fn resolve_alias(plan: &Plan, alias: &str, breaker: &CircuitState) -> Resolution {
     let chain = plan.provider_aliases.get(alias)?.models;
     let mut all_open    = true;
@@ -535,7 +535,7 @@ This matches the `halt_admit` philosophy from `host-capacity.md §15.1`: predict
 
 Per `INV-PROVIDER-03`, the Kernel owns the retry loop. The full state machine for one `InferenceRequest`:
 
-```
+```sql
 state RequestProcessing:
     request_id  ← new UUID
     attempts    ← []
@@ -774,7 +774,7 @@ revoked credential to the provider in the meantime.
 The fix uses a Unix-domain-socket primitive that's already on the
 critical path: `shutdown(fd, SHUT_WR)`.
 
-```
+```yaml
 Normal in-flight:
   Kernel ──── GatewayInvoke ────►  Worker ──── HTTP request ────►  Provider
   Kernel ◄─── GatewayInvokeResult  Worker ◄─── HTTP response  ◄── Provider
@@ -923,7 +923,7 @@ mid-invocation."
 
 Standard exponential backoff with jitter:
 
-```
+```text
 backoff_ms = clamp(
     base_backoff_ms × 2^(attempts_for_model - 1) × (1 + uniform(-jitter_fraction, jitter_fraction)),
     base_backoff_ms,
@@ -950,7 +950,7 @@ The `total_retry_budget_ms` (default 60s) caps the total wait time across all at
 
 State per `(provider, model)` pair, stored in `provider_circuit_state`:
 
-```
+```text
             ┌─────────────────────────────────────────┐
             │                                         │
             │   record_success → reset failures = 0   │
@@ -1197,7 +1197,7 @@ There is no third case. Partial JSON, partial tool calls, half-streamed tokens �
 
 The Gateway worker reads the streaming response into an in-memory buffer:
 
-```
+```text
 buffer = Vec<u8>::with_capacity(64 KiB)
 loop:
     chunk = read_chunk(http_stream).await?
@@ -1345,7 +1345,7 @@ Some providers (OpenAI's beta stream resumability) allow re-attaching to a parti
 
 When the Kernel admits an `InferenceRequest`, it reserves enough budget to cover the worst-case path through the alias chain. For `alias:architect = [opus, sonnet]` with `max_attempts_per_model = 3` and `max_total_attempts = 6`:
 
-```
+```text
 worst_case_attempts = min(
     max_total_attempts,                              // 6
     sum(max_attempts_per_model for each in chain)    // 3 + 3 = 6
@@ -1461,7 +1461,7 @@ The Gateway is deployed as `worker_pool_size` (default 4) identical worker proce
 - Reads credentials from the immutable artifact store on each invocation (cached in-memory per worker, invalidated on key revocation events from the kernel).
 - Holds NO retry, breaker, session, alias, or budget state.
 
-```
+```text
             ┌─────────────────────────────┐
             │ raxis-gateway-supervisor    │
             │ (forks workers; restarts on │

@@ -180,7 +180,7 @@ invariant audit. Rationale:
 Iter-13's first auto-bake invocation on an `aarch64-apple-darwin`
 host (Apple Silicon dev workstation) failed at stage `[3/9]` with:
 
-```
+```text
 #6 0.256 curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt
 #6 0.268 E: Unable to locate package nodejs
 ERROR: failed to build: process "/bin/sh -c curl -fsSL
@@ -309,7 +309,7 @@ After iter-13 / iter-14 made the bake succeed, iter-15 produced a
 
 The live-e2e harness's cpio preflight nonetheless panicked with:
 
-```
+```text
 canonical executor-starter image is a stub — missing 1 required
 binary from .../raxis-executor-starter-0.1.0.img:
   - bin/bash
@@ -386,7 +386,7 @@ other and re-break iter-15 in reverse.
 No additional latent issues recorded as of this audit window. Future
 entries should follow the L-1 template:
 
-```
+```text
 ## L-N. Short title
 
 * **Class:**     P0 / P1 / P2 / P3

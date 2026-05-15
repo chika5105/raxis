@@ -66,7 +66,7 @@ This is the most important RAXIS property: **the verifier does not trust the att
 
 Every admitted intent traces back through a verifiable chain:
 
-```
+```text
 Operator Ed25519 private key
     ↓ signs
 policy.toml + plan.toml (operator-signed artifacts)

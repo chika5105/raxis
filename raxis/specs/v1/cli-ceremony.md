@@ -79,7 +79,7 @@
 
 ### Global flags
 
-```
+```bash
 raxis [--data-dir <path>] [--socket <path>] <subcommand>
 ```
 
@@ -94,7 +94,7 @@ All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKE
 
 When the operator types a subcommand the dispatcher does not recognise — at any level (top-level, or inside a parent like `cert`, `plan`, `initiative`, `operator`, `task`, `session`, `delegation`, `escalation`, `epoch`, `audit`, `policy`) — the CLI MUST print to **stderr** (and exit non-zero — `1`, the standard `CliError::Usage` exit) a single line of the shape:
 
-```
+```text
 error: usage: unknown <kind>: "<typo>"[. Did you mean ...?]
 ```
 
@@ -378,7 +378,7 @@ The semantic distinction lets operators express *intent*:
   reason) so the audit chain reflects intent rather than abandonment."
 
 **Usage:**
-```
+```bash
 raxis-cli initiative cancel <initiative_id>
     [--reason <text>]
     [--grace-seconds <N>]      # default 600 (10 min)
@@ -597,7 +597,7 @@ silent over-relaxation across rotations is impossible.
 
 **Wire format (operator → kernel):**
 
-```
+```yaml
 Operator → Kernel: DenyEscalation {
   op_token:       "<operator session token>",
   escalation_id:  "<uuid>",

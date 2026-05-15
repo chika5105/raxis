@@ -113,7 +113,7 @@ The kernel's per-task egress allowlist defaults to deny-by-default for Executor 
 
 The `executor-starter` image (`raxis/images/executor-starter/Containerfile`) installs the same pinned Python client libraries the host-side `requirements.txt` lists:
 
-```
+```text
 psycopg2-binary==2.9.10
 pymongo==4.10.1
 redis==5.2.1

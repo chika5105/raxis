@@ -39,7 +39,7 @@ The single filesystem boundary the kernel never crosses: `disk_root/audit/` file
 
 ### 2.1 Component diagram
 
-```
+```text
 ┌─────────────────────────────────┐
 │            Kernel               │
 │                                 │
@@ -297,7 +297,7 @@ CREATE INDEX idx_audit_chain_truncations_segment ON audit_chain_truncations (seg
 
 V3 organizes the audit log as a two-level Merkle tree:
 
-```
+```text
                             ┌──────────────────────────────┐
                             │  Inter-segment Merkle root   │
                             │  (signed in witnesses)        │
@@ -355,7 +355,7 @@ The leaf hash is computed deterministically and is the input to the within-segme
 
 When the active segment reaches `audit_segment_size_mb` (per `host-capacity.md §6.3`), the kernel runs the V3 finalization protocol:
 
-```
+```text
 state ActiveSegment(N):
     on event_appended(E):
         E.leaf_hash = compute_leaf_hash(E)
@@ -410,7 +410,7 @@ The recovery is designed to be idempotent: re-running the whole protocol produce
 
 The migration tool `raxis admin audit-migrate-to-v3` is run with the kernel offline:
 
-```
+```text
 1. Validate the V2 linear chain end-to-end (full re-hash from segment 1 to current).
 2. For each V2 segment {N}.log:
    a. Re-read events; compute V3 leaf hashes from event payloads.
@@ -435,7 +435,7 @@ Migration is one-way (V3 segments cannot be re-hashed back into V2 linear chain 
 
 A segment progresses through five states:
 
-```
+```text
    Active ──finalize──► Finalized ──archiver_notify──► PendingArchive
                                                             │
                                                             │ archiver ACKs
@@ -461,7 +461,7 @@ A segment progresses through five states:
 
 A segment becomes eligible for local deletion only when both:
 
-```
+```text
 finalized_at_ms + local_retention_days × 86_400_000 <= now_ms
 AND
 archive_verification_at_ms IS NOT NULL
@@ -591,7 +591,7 @@ The kernel never blocks segment finalization on archiver throughput. Notificatio
 
 When an `AuditSegmentArchived` ACK arrives, the kernel verifies:
 
-```
+```text
 ack.archive_sha256 == row.local_sha256
 ```
 
@@ -823,7 +823,7 @@ If a redaction would inadvertently expose the redacted PII through reference (e.
 
 ### 9.3 The redaction protocol
 
-```
+```sql
 1. Pre-flight checks:
    - redaction_enabled == true in policy.toml; else FAIL_REDACTION_DISABLED.
    - redaction_signing_key_ref valid in immutable artifact store; key trust state == Trusted.
@@ -926,7 +926,7 @@ Inclusion proofs for events in non-redacted segments work normally. For events i
 
 The CLI explicitly surfaces this in proof output:
 
-```
+```text
 Inclusion proof for event 7c9e3f1d-5678:
   Segment 4242 was redacted on 2026-04-15 (truncation_id 17).
   Pre-truncation root: a3f9b2c1...

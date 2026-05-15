@@ -60,7 +60,7 @@ evaluation. Phases A and C are sync and run inside
 (`raxis_store::Store::lock_sync`) does not block the tokio runtime.
 Phase B is async (it spawns verifier subprocesses).
 
-```
+```text
                 ┌─ accept_planner_loop (kernel/src/ipc/server.rs) ─┐
                 │   read frame; auth via session token             │
                 │   evaluate_dispatch (intent_kind × role)         │

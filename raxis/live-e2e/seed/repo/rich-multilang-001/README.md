@@ -42,7 +42,7 @@ first; the resulting `HEAD` sha matches the first run byte-for-byte.
 
 ## Layout
 
-```
+```text
 rich-multilang-001/
 ├── README.md                  (this file)
 ├── README.template.md         (becomes README.md in the seeded repo)

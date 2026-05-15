@@ -3,7 +3,7 @@
 This directory holds the static assets the V2 release pipeline
 consumes. **Normative reference:** `raxis/specs/v2/release-and-distribution.md`.
 
-```
+```text
 release/
 ├── README.md                       — this file
 ├── raxis.entitlements              — macOS Virtualization.framework

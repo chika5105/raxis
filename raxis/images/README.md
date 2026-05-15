@@ -28,7 +28,7 @@ Each directory contains:
 The builder is hermetic; it never invokes a package manager or makes
 a network call. To build a manifest from a populated `rootfs/`:
 
-```
+```bash
 $ export RAXIS_IMAGE_SIGNING_KEY=/path/to/raxis-image-signing-key.hex   # 0o600 file
 $ cargo run -p raxis-image-builder -- build reviewer
 $ cargo run -p raxis-image-builder -- build orchestrator
@@ -41,7 +41,7 @@ binding the bundle hash to the kernel signing key.
 
 To verify a manifest:
 
-```
+```bash
 $ cargo run -p raxis-image-builder -- verify out/reviewer-core.manifest.toml \
     --public-key /path/to/raxis-image-signing-key.pub
 ```

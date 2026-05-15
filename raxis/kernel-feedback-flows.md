@@ -56,7 +56,7 @@ On **`Accepted`**, **`warn_delegation_stale: bool`** may be true when the kernel
 
 ### Egress restriction — step by step
 
-```
+```text
 Agent sends:   FetchRequest { fetch_request_id: X, url: "https://docs.example.com/api" }
 
 Kernel:
@@ -84,7 +84,7 @@ What the agent does **not** learn from the kernel: allowlist membership beyond t
 
 ### Claim restriction — step by step
 
-```
+```yaml
 Agent pushes commits touching src/auth/session.rs, src/auth/token.rs
 Agent sends:   IntentRequest {
                  intent_kind: "SingleCommit",
@@ -107,7 +107,7 @@ Kernel sends:  IntentResponse::Rejected { error_code: FAIL_MISSING_WITNESS, ... 
 
 Escalation for missing **capability** (not a free-form egress URL pattern) uses the normative request shape:
 
-```
+```yaml
 EscalationRequest {
     class: EscalationClass::CapabilityUpgrade,
     requested_scope: RequestedEscalationScope::CapabilityUpgrade {
@@ -125,7 +125,7 @@ EscalationRequest {
 
 ### Budget ceiling — step by step
 
-```
+```text
 Agent sends:   IntentRequest (would exceed lane / session admission budget)
 
 Kernel:
@@ -174,7 +174,7 @@ Optional **`idempotency_key`** on **`IntentRequest`** duplicates the same **`Int
 
 ### Timeline sketch — multi-gate task (conceptual)
 
-```
+```text
 Planner                Kernel                         Verifiers
   |                       |                                |
   |-- SingleCommit -----> |                                |

@@ -376,7 +376,7 @@ Yes. Applying INV-POLICY-01 to environment gates:
 
 Every `EgressRequest` passes these checks in order. Failure at any step stops processing.
 
-```
+```text
 EgressRequest { url, method, headers, body } arrives at Kernel
 
 Step 1 — Policy egress_hosts (hostname check):
@@ -667,7 +667,7 @@ that would make rename refactors a security risk.
 
 When `write_requires_approval = true` fires (Step 4 of admission):
 
-```
+```text
 1. Agent submits:
    EgressRequest { url: "https://k8s-api.prod.company.com/apis/.../pods",
                    method: "POST", ... }
@@ -999,7 +999,7 @@ promotion itself):**
 
 ### approve_plan Check Order (Updated with Environment Checks)
 
-```
+```text
 1. Verify Ed25519 plan signature
 2. Verify policy bundle epoch
 3. For each task:
@@ -1071,7 +1071,7 @@ is always empty and they always record as Neutral.
 
 For the specific case of "agent creates k8s resource in staging, blocked from prod":
 
-```
+```text
 Prod cluster protection depth:
   Layer 1 (Cloud RBAC):       Staging service account has no prod cluster RBAC
   Layer 2 (Credentials):      Kernel injects only k8s-staging credential into VM
@@ -1235,7 +1235,7 @@ Pseudocode for the per-task check (runs once per task at
 `approve_plan`, after Layer-1 / Layer-2 / Layer-3 individual checks
 have passed):
 
-```
+```rust
 fn compute_task_envs(task: &PlanTask, policy: &PolicyBundle) -> Result<TaskEnvBinding> {
     let mut envs: BTreeSet<EnvLabel> = BTreeSet::new();
     let mut sources: Vec<(EnvLabel, EnvSource)> = Vec::new();
@@ -1296,7 +1296,7 @@ When a single egress URL prefix matches two or more environment gates
 (the `§3 Tension T1` same-cluster scenario), the algorithm hands off
 to the same-cluster handler:
 
-```
+```rust
 fn handle_same_cluster_conflation(
     task: &PlanTask,
     egress: &EgressDecl,
@@ -1513,7 +1513,7 @@ environment binding is meaningless for it.
 CLI rendering (per the `operator-ergonomics.md §20` failure-code
 display contract):
 
-```
+```yaml
 ✗ FAIL_TASK_ENVIRONMENT_INCONSISTENT
    task: promote_artifact
    environments: beta, production

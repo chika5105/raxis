@@ -121,7 +121,7 @@ this split.
 
 **Where each source's failure code routes:**
 
-```
+```text
                          CompleteTask admission                    IntegrationMerge admission
                          ─────────────────────                     ──────────────────────────
 Policy claim-gate fail → FAIL_INSUFFICIENT_WITNESS                       n/a
@@ -462,7 +462,7 @@ After a task's per-task verifiers have all completed (every verifier
 declared in `[[plan.tasks.X.verifiers]]` has a witness row with a
 non-NULL `final_status`):
 
-```
+```yaml
 let block_review_failures = task.verifiers.iter()
     .filter(|v| v.on_failure == "block_review" && v.final_status != "passed")
     .collect::<Vec<_>>();
@@ -500,7 +500,7 @@ After all matching pre-merge verifiers for an `IntegrationMerge`
 attempt have completed, the algorithm runs at `integration-merge.md
 §4 Check 5d` admission:
 
-```
+```yaml
 let block_merge_failures = pre_merge_verifiers.iter()
     .filter(|v| applies_to_matches(v, current_merge))
     .filter(|v| v.on_failure == "block_merge" && v.final_status != "passed")
@@ -735,7 +735,7 @@ Reviewer has already acted; the Orchestrator sees them.
 
 Rendering shape (pseudo):
 
-```
+```text
 Verifier Witnesses (for evaluation_sha = abc123def...):
 
   ✓ rust_build (passed in 47.4s)            [policy_claim_gate]
@@ -784,7 +784,7 @@ than a vigilance question.
 
 ### 9.1 Per-Task Sequence
 
-```
+```text
 Executor commits (CompleteTask submitted)
   │
   ▼
@@ -806,7 +806,7 @@ Reviewer activation gating (§5.2)
 
 ### 9.2 Pre-Merge Sequence
 
-```
+```text
 Orchestrator submits IntegrationMerge { commit_sha, merged_task_ids }
   │
   ▼
@@ -1504,7 +1504,7 @@ Per `integration-merge.md §4 Check 5d.2`:
    same git operations the Orchestrator's `git merge` invocation
    would use, but produced as an **orphan commit** in the kernel's
    verifier-staging area:
-   ```
+   ```text
    $RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/
    ```
    This is a separate worktree, NOT on main, NOT on any task
@@ -1526,7 +1526,7 @@ For each `[[plan.integration_merge_verifiers]]` and
 `[[integration_merge_verifiers]]` declared (the union of plan-author
 and operator-global):
 
-```
+```rust
 fn matches_current_merge(verifier, merge) -> bool {
     match verifier.applies_to {
         "all" => true,

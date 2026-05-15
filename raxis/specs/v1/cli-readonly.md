@@ -195,7 +195,7 @@ already does similar reads; new reads should land here).
 
 ### §5.4.1 — Module structure
 
-```
+```text
 crates/store/src/views/
 ├── mod.rs            // re-exports + RoConn type
 ├── kernel_meta.rs    // schema_version, policy_epoch, KernelStarted lookup
@@ -290,7 +290,7 @@ stopped; `2` if liveness ambiguous (heartbeat fresh but pid file missing);
 
 **Output (human):**
 
-```
+```yaml
 RAXIS Kernel: RUNNING
   pid:                  47291
   uptime:               3h 17m 22s
@@ -355,7 +355,7 @@ extended with the per-lane table.
 
 **Output:** two tables.
 
-```
+```text
 READY (5):
   task_id              initiative_id        lane     intent_kind
   01J7…task-01         01J7…init-x          default  SingleCommit
@@ -399,7 +399,7 @@ returns the witnesses for task `t-1` accepted in the last hour.
 
 **Output (human):** one event per line with relative timestamp:
 
-```
+```text
 3h17m ago [InitiativeCreated]   init=01J7…init-x  signed_by=fp-7d2c…
 3h17m ago [PlanApproved]        init=01J7…init-x  task_count=4
 3h17m ago [TaskAdmitted]        task=01J7…task-01 lane=default
@@ -427,7 +427,7 @@ RAXIS does not meter LLM tokens in v1.
 
 **Output (human, default):**
 
-```
+```text
 lane_id     reservations  reserved_cost  budget_ceiling  utilization
 default     7             83             1000            8.3%
 ci-fast     12            340            500             68.0%
@@ -456,7 +456,7 @@ The `⚠` marker fires at >80%; the row is rendered red on a TTY.
 
 **Output (human):**
 
-```
+```yaml
 Task 01J7…task-01
   initiative:        01J7…init-x
   state:             Running
@@ -507,7 +507,7 @@ fields are emitted as `{"redacted": true, "len": 12}`.
 
 **Output (human):**
 
-```
+```yaml
 Initiative 01J7…init-x
   state:               Executing
   plan_sha256:         abc123…
@@ -525,7 +525,7 @@ Tasks (4): use --with-tasks to expand the per-task table
 
 With `--with-tasks`:
 
-```
+```text
 …
 Tasks (4):
   task_id                  state                    lane           transitioned_at  actor
@@ -553,7 +553,7 @@ When the initiative is quarantined, the `Quarantine: YES` block expands inline w
 
 **Invocation:**
 
-```
+```bash
 raxis initiative list [--state active|completed|quarantined|all] [--limit N] [--json]
 ```
 
@@ -574,7 +574,7 @@ raxis initiative list [--state active|completed|quarantined|all] [--limit N] [--
 
 **Output (human):**
 
-```
+```text
 Initiatives (state=active, 3 rows):
   initiative_id              state          [Q]  created (rel) plan_sha256
   01J8…init-x                Executing           12m           abc123…
@@ -629,7 +629,7 @@ The `[Q]` column surfaces the joined quarantine flag on **every** row (regardles
 
 **Output (human):**
 
-```
+```text
 PENDING (1):
   escalation_id        task          requested_capability  justification
   01J7…esc-a           01J7…task-04  WriteSecrets          "Need to rotate the auth bug fix"
@@ -651,7 +651,7 @@ DENIED (0):   use --state Denied to view
 
 **Output (human):**
 
-```
+```text
 ACTIVE (4):
   session_id        role      lineage             worktree_root           ttl_remaining
   01J7…sess-1       Planner   01J7…lineage-x      /home/op/worktrees/x    23h 17m
@@ -673,7 +673,7 @@ pairs each running verifier is associated with.
 
 **Output (human):**
 
-```
+```yaml
 RUNNING (2 / 8 cap):
   verifier_run_id      task          gate_type   issued_at      ttl_remaining
   01J7…run-x           01J7…task-12  tests       1h 12m ago     17m
@@ -839,7 +839,7 @@ Decision tree:
      justification.
 4. Task state is `GatesPending` → show the gate witness matrix:
 
-```
+```text
 Gates required: [tests, lints, coverage, security]
   tests     → witness recorded 12m ago (Pass)
   lints     → witness recorded 12m ago (Pass)
@@ -860,7 +860,7 @@ this moving" is the single most common operator question.
 
 **Checks (each emits a row):**
 
-```
+```text
 [OK]   schema_version: kernel.db=3, raxis-cli expects 3
 [OK]   audit chain: 4,217 records, no breaks, no gaps
 [OK]   policy.sig: signature VALID against [meta].signed_by
@@ -932,7 +932,7 @@ JSONL records here; this command is the operator's view into them.
 
 **Output (human):**
 
-```
+```text
 ID                 KIND      TARGET                                STATUS    LAST PROBE
 shell              Shell     <data_dir>/notifications/inbox.jsonl  Healthy   2026-05-06T13:02:11Z
 audit-mirror       File      /var/log/raxis-notifications.jsonl    Healthy   2026-05-06T13:02:11Z
@@ -955,7 +955,7 @@ and by `raxis notify channel probe` (`cli-ceremony.md §4.1`).
 
 **Output (human):**
 
-```
+```text
 EVENT KIND                    CHANNELS
 EscalationSubmitted           shell, audit-mirror, ops-email
 EscalationApproved            shell

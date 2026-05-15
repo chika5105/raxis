@@ -394,7 +394,7 @@ Pausing during escalation is essential: an escalation that legitimately takes 6 
 
 The kernel does NOT use real-time timers. Instead, on every intent admission for the task, the kernel computes:
 
-```
+```text
 unblocked_elapsed_ms = (now() - task.last_resumed_at) + task.accumulated_unblocked_ms
 ```
 
@@ -454,7 +454,7 @@ If an initiative has no Orchestrator role declared (single-Executor initiative),
 Two new `IntentKind` variants, restricted to Orchestrator sessions per `R-DISPATCH`:
 
 **`IntentKind::ResolveSubEscalation`**:
-```
+```yaml
 {
     escalation_id: Uuid,
     resolution: {
@@ -480,7 +480,7 @@ The kernel admits this intent if and only if:
 This preserves `R-4` (Authority Hierarchy): Orchestrator-issued resolutions are bounded by the Orchestrator's own delegated authority, which is itself bounded by the operator-signed plan, which is bounded by the operator-signed policy.
 
 **`IntentKind::EscalateUpward`**:
-```
+```yaml
 {
     escalation_id: Uuid,
     orchestrator_notes: String,             // bounded length; operator-readable
@@ -567,7 +567,7 @@ Defaults: `abandoned_commits_retention = "30d"`, `salvage_window = "7d"`. These 
 
 ### 7.2 The lifecycle states
 
-```
+```text
                               ┌────────────────────────────────────────┐
                               │  Task transitions to Failed            │
                               │  (any reason: disagreement, abandon,   │

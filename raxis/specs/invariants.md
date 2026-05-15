@@ -7588,7 +7588,7 @@ implementation logged the four lines below and returned
 `None`, leaving the dashboard server in JSON-only mode for the
 entire 65 min run:
 
-```
+```bash
 [dashboard-bundle] dashboard-fe/dist/index.html missing — running `npm run build` in /private/tmp/raxis-iter52-fixloop/raxis/raxis/dashboard-fe (opt out via RAXIS_E2E_SKIP_DASHBOARD_BUILD=1)
 
 > raxis-dashboard-fe@0.1.0 build

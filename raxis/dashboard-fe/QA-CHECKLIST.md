@@ -508,7 +508,7 @@ rebase onto `813b912` activated `common::dashboard` and the
 realistic test now prints (verbatim, copy-pasted from
 `/tmp/raxis-e2e-realistic.log`):
 
-```
+```text
 [realism-e2e] kernel daemon up, accepting operator IPC
 [realism-e2e] dashboard manual-fallback (paste into /login if autologin fails):
 [realism-e2e]   1. CLI command   : raxis auth sign 11d9cfb3c472bc6c2f2cd19056a43f00bee60d59eddaba3ee07e90cc96c25dd3

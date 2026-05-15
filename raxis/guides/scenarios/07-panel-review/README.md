@@ -67,7 +67,7 @@ raxis initiative show "$INIT_ID" --with-tasks
 
 ## What "success" looks like
 
-```
+```yaml
 implementer:        Completed
 correctness_review: Completed
 style_review:       Completed

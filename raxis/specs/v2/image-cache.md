@@ -97,7 +97,7 @@ Out of scope:
 `v2-deep-spec.md §Distribution` already specifies the high-level
 flow at session activation:
 
-```
+```text
 1. Read task.vm_image → resolve oci_digest (recorded at approve_plan time)
 2. Check local OCI cache: image with this digest already present?
    Yes → use cached layers
@@ -115,7 +115,7 @@ a concrete subsystem, leaving steps 1, 3–6 unchanged.
 
 ## §4 — On-disk cache layout
 
-```
+```text
 $RAXIS_DATA_DIR/oci-cache/
 ├── blobs/
 │   └── sha256/

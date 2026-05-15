@@ -20,7 +20,7 @@ read at compile time.
 
 1. Create the file `target/codegen/build_meta.txt` with EXACTLY
    the following content (single trailing newline):
-   ```
+   ```text
    rich-multilang-001
    ```
 2. `git add -f target/codegen/build_meta.txt`

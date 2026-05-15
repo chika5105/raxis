@@ -83,7 +83,7 @@ This is the single rule that makes the rest of the spec coherent. Every design d
 
 ### §3.1 Three-process model
 
-```
+```text
 ┌────────────────────────────┐
 │        raxis-kernel        │
 │                            │
@@ -186,7 +186,7 @@ These are derived from §2.3 and are non-negotiable:
 
 ### §4.1 Filesystem layout
 
-```
+```text
 <data_dir>/observability/
 ├── spans/
 │   ├── 0001.jsonl         # active segment (kernel writes; pusher reads)
@@ -794,7 +794,7 @@ pub static ATTR_DENYLIST: &[&str] = &[
 
 ### §10.4 Compile-time CI lint
 
-```
+```text
 xtask/src/otel_attribute_check.rs
 ```
 
@@ -891,7 +891,7 @@ The pusher reads `policy.toml` (read-only) and consumes ONLY the `[observability
 
 ### §12.3 Main loop
 
-```
+```rust
 loop {
     // 1. Open cursor.toml; resume position.
     let cursor = Cursor::load_or_init(&data_dir)?;

@@ -23,7 +23,7 @@ You will need:
      feature was removed alongside the Tier1Tproxy variant; a
      plain release build is all you need:
 
-     ```
+     ```bash
      cargo build --release -p raxis-kernel
      ```
 
@@ -51,7 +51,7 @@ the last `policy_epoch_history` advance. For a typical workload
 that talks to one LLM provider and the package registries the
 agent fetches dependencies from, you usually want:
 
-```
+```toml
 [egress]
 domains = [
   # LLM upstream (or accept the implicit-provider grant from
@@ -87,7 +87,7 @@ single `pip install` invocation.
 
 No special env vars are required. Boot the kernel as usual:
 
-```
+```bash
 raxis kernel run \
     --data-dir /var/lib/raxis \
     --policy /etc/raxis/policy.toml

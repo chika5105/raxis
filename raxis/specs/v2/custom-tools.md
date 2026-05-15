@@ -309,7 +309,7 @@ Custom tools MAY NOT use any name reserved by base tools or by the
 kernel-mediated intent surface. The reserved list is deterministic and
 versioned with the kernel binary:
 
-```
+```text
 read_file, write_file, edit_file, glob_search, grep_search,
 bash, TodoWrite, SubmitReview,
 ActivateSubTask, CompleteTask, SingleCommit, IntegrationMerge,
@@ -405,7 +405,7 @@ the first `stdout_max_bytes - 256` bytes plus the *last* 256 bytes
 (the tail often contains the most informative output — error messages,
 final result lines), separated by a clearly-marked truncation sentinel:
 
-```
+```text
 …[CUSTOM_TOOL_STDOUT_TRUNCATED: original=N_bytes, kept_head=M, kept_tail=256]…
 ```
 
@@ -426,7 +426,7 @@ If the operator sets `expose_stderr = true` on a tool declaration,
 the harness appends stderr to the LLM-facing `tool_result` content
 after stdout, separated by a sentinel:
 
-```
+```text
 {stdout content}
 …[CUSTOM_TOOL_STDERR_BEGIN]…
 {stderr content (truncated to stderr_max_bytes if needed)}
@@ -628,7 +628,7 @@ Inheritance chains are acyclic; cycles are rejected at admission with
 Custom tools are merged **additively** through the inheritance chain.
 The effective custom-tool set for profile `P` is:
 
-```
+```text
 effective(P) =
     union(custom_tools_declared_directly_on(P),
           effective(parent_of(P)))
@@ -962,7 +962,7 @@ This payload archival follows the same lifecycle as
 
 The `raxis log` CLI gains a custom-tool view:
 
-```
+```bash
 $ raxis log --filter kind=CustomToolInvoked --task <id>
 
 T+12.4s  query_telemetry  ok  92ms  in=63B out=1.2KiB

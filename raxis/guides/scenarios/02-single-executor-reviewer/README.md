@@ -73,7 +73,7 @@ Expected progression:
 
 ## What "success" looks like
 
-```
+```yaml
 greeter:    Completed
 reviewer:   Completed
 ```

@@ -105,7 +105,7 @@ context            = """
   - Are there any unwrap() calls on payment-critical paths?
   Approve if the code is maintainable and follows project conventions.
 """
-```
+```text
 
 ---
 
@@ -131,7 +131,7 @@ KernelPush::ReviewFailed { executor_task_id: "payments_implementer" }
 tasks.last_critique aggregates all critiques:
   "[correctness_reviewer]: refund() doesn't handle partial refunds"
   (security and style had no critique — not included)
-```
+```text
 
 The Orchestrator retries the Executor. The retry VM's system prompt is prepended with
 the aggregated critique. On the next round, all three Reviewers activate again.
@@ -155,7 +155,7 @@ Kernel fast-forwards main. Done.
 
 Total wall-clock: ~20 minutes.
 Sequential equivalent: 12 + 8 + 8 + 10 = 38 minutes.
-```
+```text
 
 ---
 

@@ -206,7 +206,7 @@ appears in the main repo's history. A format-patch pipeline breaks this chain.
 **Decision (Step 3 / Step 9):** When an Executor submits `CompleteTask { head_sha }`:
 
 1. The Kernel runs (host-side, outside any VM):
-   ```
+   ```bash
    git -C $RAXIS_DATA_DIR/worktrees/<executor_uuid>/ \
        bundle create \
        $RAXIS_DATA_DIR/worktrees/<orchestrator_uuid>/.raxis/bundles/<task_id>.bundle \
@@ -222,7 +222,7 @@ appears in the main repo's history. A format-patch pipeline breaks this chain.
    Orchestrator over VSock.
 
 4. The Orchestrator (inside its VM) runs:
-   ```
+   ```bash
    git fetch /workspace/.raxis/bundles/<task_id>.bundle \
        refs/raxis/subtasks/<task_id>:refs/raxis/subtasks/<task_id>
    ```
@@ -641,7 +641,7 @@ initiatives). Repeating them in every audit event bloats the JSONL chain and vio
 audit log's principle of recording decisions, not data.
 
 **Decision (Step 7):** The `SessionCreated` audit event carries a 4-field attribution chain:
-```
+```yaml
 {
   session_id:         "...",   // this session
   initiative_id:      "...",   // the initiative this session belongs to
@@ -905,7 +905,7 @@ having per-task scopes. An Orchestrator with no path restrictions can merge in a
 file changes beyond what the plan authorized.
 
 **Decision (Step 11):** A hybrid allowlist:
-```
+```text
 hybrid_effective_allow =
     UNION(all subtask path_allowlists)
     ∪ cross_cutting_artifacts
@@ -1875,7 +1875,7 @@ The kernel:
 
 The Reviewer VM, on boot, finds:
 
-```
+```text
 /workspace/                    # read-only; checked-out worktree at evaluation_sha
   src/...
   Cargo.toml
@@ -2005,7 +2005,7 @@ and persists for the full initiative duration.
 
 The Orchestrator VM, on boot at initiative admission, finds:
 
-```
+```text
 /workspace/                          # read-write; cloned from base_sha
   src/...                            # initiative's base state
   .git/                              # writable git directory; the Orchestrator's HEAD will advance
@@ -2194,7 +2194,7 @@ before that batch was fully ready.
 
 The Orchestrator's non-negotiable system prompt includes the merge duty verbatim:
 
-```
+```text
 MERGE DUTY
 Upon receiving KernelPush::SubTaskCompleted { task_id, newly_activatable }:
 
@@ -2309,7 +2309,7 @@ does not affect 3-way tree traversal.
 **Auto-configuration for sparse Executor/Reviewer clones:**
 When `clone_strategy = sparse`, the Kernel auto-configures the sparse-checkout paths from
 the sub-task's `path_allowlist`:
-```
+```bash
 git sparse-checkout set $(cat .raxis/allowlist_paths.txt)
 ```
 The operator does not need to duplicate the allowlist in two places. The Kernel derives the
@@ -2520,7 +2520,7 @@ three malformed shapes:
 | `single_lane_propagation`   | At least one `[[tasks]]` block sets `lane_id = "..."`. V2 forbids per-task overrides.                       |
 
 Worked example (`single_lane_propagation`):
-```
+```yaml
 { rule: "single_lane_propagation",
   offending_task: "<task_id>",
   suggestion: "Remove `lane_id` from `[[tasks]]` blocks. V2 declares the lane
@@ -2614,7 +2614,7 @@ Three pinned-name unit tests anchor the contract:
 inference loop. The operator resolves the conflict via one of two paths:
 
 **Path 1 — Guided LLM Resolution (hint):** Operator runs:
-```
+```bash
 raxis escalate resolve <escalation_id> --message "Accept incoming from security_reviewer,
     keep the import from HEAD in auth.rs."
 ```
@@ -2625,7 +2625,7 @@ wakes, reads the hint, reattempts the merge, and produces a new commit SHA. It t
 **Path 2 — Manual Host Intervention (override):** Operator opens a host terminal, navigates
 to `$RAXIS_DATA_DIR/worktrees/<orchestrator_uuid>/`, resolves the conflict manually, and runs
 `git commit`. Operator then runs:
-```
+```bash
 raxis escalate resolve <escalation_id> --message "Resolved manually and committed. Proceed."
 ```
 The Orchestrator wakes, runs `git status` (clean working directory, merge commit present),
@@ -2667,7 +2667,7 @@ When `resolved_via_escalation: Some(id)` is present, the Kernel:
    escalation_id: <id>`.
 
 The complete audit chain for Path 2:
-```
+```text
 EscalationRequested { class: MergeConflict, session_id: <orchestrator> }
   → EscalationConsumed { resolved_by: operator_alice, type: ManualGitCommit }
     → IntegrationMerge { commit_sha: xyz789, operator_assisted: true, escalation_id: esc-42 }
@@ -3163,7 +3163,7 @@ referencing an unpermitted image is rejected at approval time, not at runtime.
 
 **Kernel provisioning flow at session activation:**
 
-```
+```text
 1. Read task.vm_image → resolve oci_digest (recorded at approve_plan time)
 2. Check local OCI cache: image with this digest already present?
    Yes → use cached layers    No → pull from registry, verify digest, cache
@@ -3249,7 +3249,7 @@ deterministic rule, without needing to understand evaluation order or priority s
 
 **Concrete example** — given the plan fragment above, the `auth_implementer` task's
 `/raxis/session.env` would contain:
-```
+```bash
 RAXIS_SESSION_TOKEN=<kernel-issued>
 RAXIS_TASK_ID=auth_implementer
 RAXIS_INITIATIVE_ID=<kernel-issued>
@@ -3270,7 +3270,7 @@ process environment before launching the agent loop.
 
 **`RAXIS_` prefix is reserved:** Any key whose name begins with `RAXIS_` (case-
 insensitive) is rejected at `approve_plan` time with:
-```
+```text
 { rule: "reserved_env_key", key: "RAXIS_MY_KEY",
   suggestion: "The RAXIS_ prefix is reserved for Kernel-issued values. Rename the key." }
 ```

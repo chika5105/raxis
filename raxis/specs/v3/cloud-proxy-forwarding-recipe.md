@@ -122,7 +122,7 @@ The operator stores **different bytes** for V2 vs V3.
 
 V2 (long-lived IAM key, env-style or JSON):
 
-```
+```bash
 AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
 ```
@@ -130,7 +130,7 @@ AWS_SECRET_ACCESS_KEY=...
 V3 (same shape — V3 reads the long-lived key, signs SigV4, and dials
 STS):
 
-```
+```bash
 AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
 ```
@@ -170,14 +170,14 @@ service-accounts keys create` emits):
 
 V2 (long-lived bearer token):
 
-```
+```bash
 AZURE_ACCESS_TOKEN=eyJ0eXAi...
 ```
 
 V3 (service-principal client credential — env-style or JSON,
 `az ad sp create-for-rbac` shape):
 
-```
+```bash
 AZURE_TENANT_ID=tttt-tttt-tttt-tttt
 AZURE_CLIENT_ID=cccc-cccc-cccc-cccc
 AZURE_CLIENT_SECRET=opaque-secret-bytes

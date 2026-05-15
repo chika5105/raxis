@@ -588,7 +588,7 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 The recommended approach for environment isolation (staging, production,
 etc.) is **one kernel per environment**:
 
-```
+```text
 staging-kernel (policy: permissive, staging creds)
     └── staging sessions
 

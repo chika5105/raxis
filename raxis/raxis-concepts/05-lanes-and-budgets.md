@@ -81,7 +81,7 @@ This runs **atomically in one transaction** (fixing the TOCTOU bug from kernel-s
 
 The kernel computes the cost of each intent (the agent cannot influence this):
 
-```
+```text
 base_cost = policy.base_cost_for_intent_kind("SingleCommit")
 path_cost = touched_paths.len() × policy.cost_per_touched_path()
 raw       = base_cost + path_cost
@@ -120,7 +120,7 @@ if new_micros > ceiling {
 
 ## The Budget Flow (Visual)
 
-```
+```text
 Intent passes gate evaluation
         │
         ▼
@@ -188,7 +188,7 @@ The PK is `(lane_id, task_id)`. `INSERT OR IGNORE` means the second reservation 
 
 Per Step 28: all tasks in one initiative carry the same `lane_id`. The lane ceiling bounds the **sum across all sessions**:
 
-```
+```yaml
 Orchestrator: 40 units  ✅ (sum = 40)
 Executor 1:   30 units  ✅ (sum = 70)
 Executor 2:   20 units  ✅ (sum = 90)

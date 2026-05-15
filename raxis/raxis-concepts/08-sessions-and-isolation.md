@@ -34,7 +34,7 @@ An agent cannot act without a session. A session cannot be created by the agent.
 
 ## Session Lifecycle
 
-```
+```text
 Kernel receives plan with tasks
         │
         ▼
@@ -127,7 +127,7 @@ The session specifies how the agent is isolated. The kernel supports multiple is
 
 ### What the agent can see:
 
-```
+```text
 / (read-only root filesystem)
 ├── /work/            ← VirtioFS mount of the git worktree (read-write)
 ├── /raxis/session.env ← Session metadata (session_id, task_id, ports)

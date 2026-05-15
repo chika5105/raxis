@@ -58,7 +58,7 @@ After a green run, `git status` will show the diff under
 fix landed in the same iter. Recommended commit-message
 convention:
 
-```
+```text
 live-e2e(examples): refresh from <iter_label> (initiative <primary_id_8> + <sibling_id_8>)
 ```
 

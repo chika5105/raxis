@@ -32,7 +32,7 @@ Part 2.5 provides the normative specifications that are referenced throughout Pa
 
 The kernel owns a single data directory: **`$RAXIS_DATA_DIR`**, which defaults to `~/.raxis/` on the kernel host if the environment variable is not set. This directory is created at first startup by `bootstrap.rs` with permissions `0700` (owner read/write/execute only). Its layout is:
 
-```
+```text
 ~/.raxis/
 ├── kernel.db             # single SQLite database (all persistent kernel state)
 ├── policy/               # signed policy artifacts, loaded at startup and on epoch advance
@@ -1740,7 +1740,7 @@ In addition to the audit chain (the persistent record) and CLI render layers (th
 
 #### On-disk layout
 
-```
+```text
 <data_dir>/plans/<initiative_id>/
     plan.toml        # the human-readable plan artifact
     plan.sig         # the detached signature file
@@ -1752,7 +1752,7 @@ Both files are written by `raxis-cli plan sign`. The kernel reads both **once**,
 
 The signature covers the **exact bytes of `plan.toml` as read from disk** — no normalization, no canonicalization, no whitespace stripping, no BOM handling. The signing input is a **domain-prefixed** SHA-256 digest, and the Ed25519 signature is over that digest (not over the raw bytes directly, for auditability and cross-protocol replay defence).
 
-```
+```text
 canonical_input = "RAXIS-V1-PLAN" || 0x00 || file_bytes(plan.toml)
 signing_input   = SHA-256(canonical_input)            -- 32 bytes
 signature_hex   = Ed25519Sign(operator_private_key, signing_input)
@@ -1788,7 +1788,7 @@ The **operator's Ed25519 private key** (registered in the policy artifact under 
 
 #### IPC path — `create_initiative`
 
-```
+```text
 Operator → raxis-cli plan submit <initiative_id> <plan_dir>
     → kernel IPC: CreateInitiative { initiative_id, plan_toml_path, plan_sig_path }
     → kernel reads plan.toml bytes, plan.sig
@@ -1868,7 +1868,7 @@ All four must load successfully or the kernel exits before binding any socket.
 
 #### Key files format
 
-```
+```text
 authority_keypair.pem    — PKCS#8 PEM, Ed25519 private key (includes public key)
 operator_<fp>.pub        — raw 32-byte Ed25519 public key, hex-encoded, one file per operator
 quality_keypair.pem      — PKCS#8 PEM, Ed25519 private key (includes public key)
@@ -1948,7 +1948,7 @@ The operator socket is bound with `mode 0600` and owned by the kernel OS user �
 
 On every new connection to the operator socket:
 
-```
+```text
 Kernel → Operator:  ChallengeEnvelope { challenge_bytes: [u8; 32], issued_at: u64 }
 Operator → Kernel:  ChallengeResponse { signed_by: <fingerprint>, signature: <64-byte hex> }
 ```
@@ -2010,7 +2010,7 @@ Beyond those two checks the kernel is namespace-blind: any UUID v4 the operator 
 
 `ApproveEscalation` is the most security-sensitive operator operation. Wire format:
 
-```
+```yaml
 Operator → Kernel: ApproveEscalation {
   op_token:          "<operator session token>",
   escalation_id:     "<uuid>",
@@ -2034,7 +2034,7 @@ The `operator_sig` is required even though the connection is already authenticat
 
 **Wire format:**
 
-```
+```yaml
 Operator → Kernel: GrantDelegation {
   op_token:            "<operator session token>",
   session_id:          "<uuid>",
@@ -2050,7 +2050,7 @@ Operator → Kernel: GrantDelegation {
 
 The operator signs the SHA-256 digest of the canonical concatenation of all six functional fields, in the exact order below, with `0x00` as the field separator and length prefixes as noted. The `op_token` is **not** part of the signing domain (it authenticates the connection, not the artifact). This mirrors the §2.5.3 plan-signing pattern (Ed25519 over the SHA-256 digest, not the raw bytes — for auditability and constant-size signing input).
 
-```
+```text
 canonical_bytes = "RAXIS-V1-DELEGATION-GRANT" || 0x00
                || session_id (UTF-8 bytes of UUID hyphenated form, 36 bytes) || 0x00
                || capability_class (UTF-8 bytes of enum variant name, no quoting) || 0x00
@@ -2347,7 +2347,7 @@ path_scope_override = false
 
 **Topology check — runs before diff computation:**
 
-```
+```bash
 git -C <worktree_root> rev-list <base_sha>..<head_sha> --min-parents=2 --count
 ```
 
@@ -2357,7 +2357,7 @@ git -C <worktree_root> rev-list <base_sha>..<head_sha> --min-parents=2 --count
 
 **Diff command (normative):**
 
-```
+```bash
 git -C <worktree_root> diff <base_sha> <head_sha> --name-status --no-renames
 ```
 
@@ -2404,7 +2404,7 @@ git -C <worktree_root> diff <base_sha> <head_sha> --name-status --no-renames
 
 Computed at every intent admission and at `CompleteTask`. **Never cached between intents.** Predecessor completion between intents can widen the set — recomputation is required on every enforcement call.
 
-```
+```rust
 fn effective_allow(task_id, store) -> GlobSet:
     task = store.get_task(task_id)
 
@@ -2471,7 +2471,7 @@ fn matches_allow(path, E: AllowSet) -> bool:
 > `FAIL_PATH_POLICY_VIOLATION` on the wire (fail-closed).
 
 **Path coverage enforcement:**
-```
+```rust
 fn check_paths(touched_paths, task_id, store) -> Result<(), PathPolicyViolation>:
     allow = effective_allow(task_id, store)
     violations = touched_paths.filter(|p| !matches_allow(p, allow))
@@ -2488,7 +2488,7 @@ fn check_paths(touched_paths, task_id, store) -> Result<(), PathPolicyViolation>
 The following steps are added to the intent admission flow in `handlers/intent.rs`, **after the ancestor check and before `touched_paths` computation.** Topology runs before diff — no diff is computed for a range that fails the topology check. No state mutation occurs before all checks complete.
 
 **Revised step ordering (full flow):**
-```
+```text
 1. Auth (INV-01)
 2. Ancestor check: is_ancestor(base_sha, head_sha) → HandlerError::InvalidShaRange
    2A. [NEW] Topology check: rev-list base..head --min-parents=2 --count
@@ -2570,7 +2570,7 @@ If `SQLITE_CONSTRAINT_PRIMARYKEY` (same `head_sha` already accepted for this tas
 8. On success: proceed with normal `CompleteTask` branch flow (gate check, `Running → Completed` transition).
 
 **Export snapshot — computed inside the `Running → Completed` transaction:**
-```
+```text
 if task.path_export_to_successors:
     exported = full_touched_paths  // already computed in steps 3–4
     if task.path_export_globs is not empty:
@@ -2708,7 +2708,7 @@ The snapshot insert is part of the same store transaction as the `tasks.status =
 
 **INV-08 is fully preserved for path policy rejections.** The IPC response for a path policy violation is:
 
-```
+```text
 IntentResponse::Rejected { reason: PlannerErrorCode::FAIL_PATH_POLICY_VIOLATION }
 -- (for both regular intent admission and CompleteTask branch)
 ```
@@ -2721,7 +2721,7 @@ The planner does not need the kernel to reveal which paths are out of scope. The
 
 The remediation strategy is delivered as a **machine-readable API spec included in the planner's system prompt** at session initialization. This spec teaches the planner how to interpret each rejection code and what corrective action to take, without referencing any specific policy value:
 
-```
+```yaml
 FAIL_PATH_POLICY_VIOLATION (intent admission):
   The kernel's VCS-derived diff of your last committed range contained
   one or more paths not covered by your task's effective path scope.
@@ -2811,7 +2811,7 @@ FAIL_INVALID_COMMIT_TOPOLOGY:
 
 **Diff semantics for integration merge:**
 
-```
+```bash
 git -C <session.worktree_root> diff <base_sha> <head_sha> --name-status --no-renames
 ```
 

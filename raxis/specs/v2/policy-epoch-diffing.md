@@ -285,7 +285,7 @@ Byte-level diff is rejected because it would flag cosmetic changes (whitespace, 
 reordering, field reordering within a section) as substantive. Struct-level diff compares
 semantic values.
 
-```
+```text
 advance_epoch(new_bundle_bytes):
   1. Verify Ed25519 signature on new_bundle_bytes → reject if invalid
   2. Deserialize new_bundle_bytes → new_bundle: PolicyBundle

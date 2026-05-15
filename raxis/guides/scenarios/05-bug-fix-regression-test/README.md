@@ -79,7 +79,7 @@ Expected progression:
 
 ## What "success" looks like
 
-```
+```yaml
 regression_test: Completed
 fixer:           Completed
 ```

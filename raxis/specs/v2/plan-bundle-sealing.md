@@ -118,7 +118,7 @@ named opaque byte array with a per-artifact SHA-256. The first artifact
 is always `plan.toml` (the artifact name is fixed; the original on-disk
 filename is irrelevant once bundled).
 
-```
+```yaml
 PlanBundle {
     schema_version: u16,                  // = 1 for V2
     created_at_unix_secs: u64,            // CLI clock at bundling time (informational)
@@ -154,7 +154,7 @@ The hash that the operator signs is taken over a **canonical
 serialization** of the bundle. RAXIS uses a length-prefixed binary
 encoding (the same approach the kernel uses for audit-chain hashing):
 
-```
+```text
 canonical_input =
     "RAXIS-V2-PLAN-BUNDLE\0"                          // 21-byte ASCII domain prefix + 0x00
  || u16_be(schema_version)                            // = 2 for V2.1; legacy 1 for V2.0
@@ -307,7 +307,7 @@ them to disk.
 
 ### 4.1 Invocation
 
-```
+```bash
 raxis-cli submit plan <plan.toml> [--initiative-id <id>] [--dry-run]
 ```
 
@@ -339,7 +339,7 @@ canonical specification of the dry-run flow.
 
 ### 4.2 Phases (all in-process, no external state)
 
-```
+```text
 1. parse:        Read plan.toml bytes from disk; parse as TOML.
 2. resolve:      Walk the parsed plan; collect every host-side path
                  reference (a future-extension hook; see §5.4).
@@ -472,7 +472,7 @@ For each host-side path reference `p` in the parsed plan:
 
 ### 5.3 Worked examples
 
-```
+```text
 plan_root = /home/op/work/myplan
 plan.toml references                    →  resolved                                 →  outcome
 "./prompts/ext.md"                      →  /home/op/work/myplan/prompts/ext.md     →  OK; bundle name "prompts/ext.md"
@@ -683,7 +683,7 @@ database write; the freshness, replay, and admission decision (steps
 concurrent re-submission of the same bundle cannot race past the
 nonce check.
 
-```
+```sql
 1. Decode the IPC envelope; reject malformed wire bytes with
    FAIL_PLAN_BUNDLE_DECODE_FAILED.
 2. Recompute SHA-256(plan_bundle); reject mismatch with

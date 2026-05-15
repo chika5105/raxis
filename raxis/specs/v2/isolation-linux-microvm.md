@@ -76,7 +76,7 @@ The substrate reports `CapabilityKind::BootLatencyMs = 50` (median observed on a
 
 The substrate stamps the following cmdline by default (see `crates/raxis-isolation-firecracker/src/lib.rs::drive_boot`):
 
-```
+```text
 console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd \
   quiet loglevel=0 tsc=reliable clocksource=tsc 8250.nr_uarts=0 \
   random.trust_cpu=on

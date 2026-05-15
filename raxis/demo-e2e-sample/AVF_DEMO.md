@@ -101,7 +101,7 @@ cargo build --release -p raxis-kernel -p raxis-cli -p raxis-gateway
 
 The three binaries land at:
 
-```
+```text
 target/release/raxis-kernel
 target/release/raxis        # operator CLI; crate name `raxis-cli`
 target/release/raxis-gateway
@@ -203,7 +203,7 @@ silently the moment `unpack_to_rootfs` finishes (AVF reports
 emitting a single byte, and every `connect_vsock` from the host
 returns `ECONNRESET`). The substrate's symptom suite is:
 
-```
+```text
 {"event":"avf_vm_started","vcpu":1,"mem_mib":1024}
 {"event":"avf_console_pump_eof","path":"…/console.log"}
 isolation spawn failed: transport fault: apple-vz-14.x: vsock CONNECT 1024: \

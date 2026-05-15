@@ -178,7 +178,7 @@ The kernel itself is single-threaded for its main intent dispatch loop (per the 
 
 Memory budget breaks into three categories:
 
-```
+```text
 Total host memory >= max_aggregate_vm_memory_mb        // VM workload (per host-capacity.md §5)
                   + kernel_reserved_memory_mb           // kernel + SQLite + audit buffers (default 1 GB)
                   + os_and_system_overhead              // OS, system services, monitoring, etc.
@@ -267,7 +267,7 @@ All major Linux filesystems (ext4, XFS, Btrfs, ZFS) and macOS APFS satisfy these
 
 The kernel uses these paths (all under `disk_root`):
 
-```
+```text
 /var/lib/raxis/                           # disk_root
 ├── state.db                               # SQLite kernel state
 ├── state.db-wal
@@ -540,7 +540,7 @@ The build process is documented in detail in `docs/building.md` (separate from t
 
 ### 10.1 Single-host single-user (developer workstation)
 
-```
+```text
 [ Operator's laptop or workstation ]
   ├── raxis-kernel (--daemon, user mode)
   ├── raxis-gateway (worker pool, default 4 workers)
@@ -554,7 +554,7 @@ Suitable for: developer evaluation, personal-use AI agent workflows, single-tena
 
 ### 10.2 Single-host multi-user (small team server)
 
-```
+```text
 [ Dedicated Linux server ]
   ├── raxis-kernel (--daemon --system, runs as 'raxis' user)
   ├── raxis-gateway (worker pool)
@@ -571,7 +571,7 @@ Suitable for: small teams (5–25 operators) sharing a dedicated AI agent contro
 
 ### 10.3 Single-host air-gapped
 
-```
+```text
 [ Air-gapped server, no internet egress ]
   ├── raxis-kernel
   ├── raxis-gateway → on-prem LLM endpoint (e.g., self-hosted vLLM, Llama.cpp server)
@@ -629,7 +629,7 @@ Categories:
 
 ### 11.2 Sample output
 
-```
+```bash
 $ raxis doctor
 RAXIS preflight check (raxis 2.0.0)
 ====================================
@@ -769,7 +769,7 @@ For production deployments, also review:
 
 A failure (e.g., no `/dev/kvm`) produces:
 
-```
+```yaml
 ✗ /dev/kvm does not exist
   RAXIS requires KVM hardware virtualization on Linux.
   Mitigations:
@@ -785,7 +785,7 @@ RAXIS cannot run on this host. Resolve the failure above.
 
 Other planner-harness-specific failures and their actionable forms:
 
-```
+```yaml
 ✗ raxis/legacy-rust:1 (Executor) ships Linux kernel 5.10.0 (required: 5.14+)
   This image cannot host a planner VM because INV-PLANNER-HARNESS-03 (cgroup.kill
   for atomic process-tree teardown) requires Linux 5.14+. Plans referencing this
@@ -798,7 +798,7 @@ Other planner-harness-specific failures and their actionable forms:
   See: specs/v2/system-requirements.md §2.5; planner-harness.md §10.2
 ```
 
-```
+```yaml
 ✗ raxis-reviewer-core-2.0.0.img digest mismatch
   Expected: sha256:e3b0c44298fc1c149afbf4c8996fb924...
   Observed: sha256:c057a3e7ea75c2aef3c1cd95fa1aac84...
@@ -817,7 +817,7 @@ Other planner-harness-specific failures and their actionable forms:
   See: specs/v2/planner-harness.md §4.5
 ```
 
-```
+```yaml
 ✗ raxis-reviewer-core-2.0.0.img content sanity: /bin/sh present
   The canonical Reviewer image MUST NOT contain any shell (per INV-PLANNER-HARNESS-01,
   three-layer image enforcement). Presence indicates either (a) the on-disk image
@@ -830,7 +830,7 @@ Other planner-harness-specific failures and their actionable forms:
   See: specs/v2/planner-harness.md §4.5, §10.4
 ```
 
-```
+```yaml
 ✗ raxis-orchestrator-core-2.0.0.img digest mismatch
   Expected: sha256:7c1b3e2f8a4d9c6e1b7a5f3d8c2e9a4b...
   Observed: sha256:9d4a7c2e8f1b3d5a6c8e2f4b9d7a1c5e...
@@ -849,7 +849,7 @@ Other planner-harness-specific failures and their actionable forms:
   See: specs/v2/planner-harness.md §4.7
 ```
 
-```
+```yaml
 ✗ raxis-orchestrator-core-2.0.0.img content sanity: /usr/bin/python3 present
   The canonical Orchestrator image MUST NOT contain language runtimes (per
   planner-harness.md §10.5). Presence indicates either (a) the on-disk image has
@@ -862,7 +862,7 @@ Other planner-harness-specific failures and their actionable forms:
   See: specs/v2/planner-harness.md §4.7, §10.5
 ```
 
-```
+```yaml
 ✗ raxis-verifier-symbol-index-2.0.0.img digest mismatch
   Expected: sha256:4e8b1c7d3f9a2c5e8b1d4f7a9c2e5b8d...
   Observed: sha256:1a2c5e8b9d4f7a2c1e5b8d3f4a9c1e2b...
@@ -888,7 +888,7 @@ Other planner-harness-specific failures and their actionable forms:
   See: specs/v2/verifier-processes.md §14
 ```
 
-```
+```yaml
 ✗ raxis-verifier-rust-starter-2.0.0.img digest mismatch (during in-flight verifier session)
   Expected (per policy [[vm_images]] oci_digest): sha256:8d3a5c7e1b9f2d4a6c8e1b3d5f7a9c2e...
   Observed (on disk): sha256:2a4c6e8b1d3f5a7c9e1b2d4f6a8c1e3b...

@@ -47,7 +47,7 @@ Clobbering IS conditional on Handshake passing **CID match**: the connecting CID
 
 Every frame on the VSock connection follows this layout:
 
-```
+```text
 +-----------+------+----------------+
 | 4 bytes   | 1B   | N bytes        |
 | length LE | tag  | bincode body   |
