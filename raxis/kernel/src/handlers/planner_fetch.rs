@@ -201,6 +201,27 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // takes ownership of `req.url`).
     let url_for_stall_detection = req.url.clone();
 
+    // iter62 — `INV-DASHBOARD-LLM-TURN-CAPTURED-01`. Resolve the
+    // executor / reviewer task_id bound to this session before
+    // the gateway fetch so the dispatch pump's `LlmTurnObserver`
+    // guard `(Some(obs), Some(tid))` (gateway/client.rs:508)
+    // can fire and the substrate's
+    // `dashboard-kernel/src/task_llm_capture.rs` ring receives
+    // one record per round-trip.
+    //
+    // Pre-iter62 this was hardcoded to `None`, defeating the
+    // observer entirely — the iter62 forensics work-dir's
+    // `llm-turns/` directory was empty across 22+ planner
+    // sessions because every kernel-mediated fetch dropped
+    // task_id on the floor.
+    //
+    // The lookup is best-effort: a missing Active row (e.g.
+    // orchestrator-only session, or a transient gap during
+    // session activation) downgrades to `None` so the fetch
+    // still succeeds — capture is best-effort by contract,
+    // never a load-bearing gate on the planner's egress.
+    let task_id_for_observer = lookup_active_task_id_for_session(ctx, &session.session_id).await;
+
     let result = ctx
         .gateway
         .fetch(
@@ -212,13 +233,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
             req.body_bytes,
             timeout_ms,
             session_uuid,
-            // V2 GA: SessionRow does not carry `task_id` (the planner
-            // socket auth is per-session, not per-task). The gateway
-            // logs only session id for kernel-mediated fetches; the
-            // per-task scoping lives on the gateway's own audit row
-            // when the operator's [[tasks.allowed_egress]] schema
-            // ships in V3.
-            None,
+            task_id_for_observer,
         )
         .await;
 
@@ -457,6 +472,56 @@ async fn resolve_session(
         .flatten()
 }
 
+/// Resolve the executor / reviewer task_id bound to this session's
+/// **Active** subtask activation row.
+///
+/// `subtask_activations` carries a CHECK constraint
+/// (kernel-store.md §2.5.1 Table 6) that pins exactly one row per
+/// `session_id` in `activation_state = 'Active'`, so the lookup
+/// is a single-row primary-key-indexed read. Returns `None`
+/// when:
+///   * the session has no Active activation row yet (transient
+///     gap during session activation, or an orchestrator-only
+///     session that the orchestrator has not yet routed to a
+///     specific subtask),
+///   * the SQL fails (best-effort capture must NEVER block egress).
+///
+/// Powering invariant: `INV-DASHBOARD-LLM-TURN-CAPTURED-01`. The
+/// gateway pump's observer guard (`gateway/client.rs:508`) only
+/// fans `LlmTurnObserver::observe(...)` when the inflight slot
+/// carries a `Some(task_id)`; threading the resolved task_id here
+/// is the load-bearing wiring that closes the iter62 silent-drop.
+async fn lookup_active_task_id_for_session(
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+) -> Option<String> {
+    let store = Arc::clone(&ctx.store);
+    let session_owned = session_id.to_owned();
+    tokio::task::spawn_blocking(move || lookup_active_task_id_for_session_sync(&store, &session_owned))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Sync core of [`lookup_active_task_id_for_session`] — extracted so
+/// the C5 witness test can drive it without the full
+/// `HandlerContext` / tokio-runtime scaffold.
+fn lookup_active_task_id_for_session_sync(
+    store: &raxis_store::Store,
+    session_id: &str,
+) -> Option<String> {
+    let conn = store.lock_sync();
+    conn.query_row(
+        "SELECT task_id FROM subtask_activations \
+              WHERE session_id = ?1 \
+                AND activation_state = 'Active' \
+              LIMIT 1",
+        rusqlite::params![session_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +635,120 @@ mod tests {
         assert_eq!(u32::try_from(u128::MAX).unwrap_or(u32::MAX), u32::MAX);
         assert_eq!(u32::try_from(0u128).unwrap_or(u32::MAX), 0);
         assert_eq!(u32::try_from(120_000u128).unwrap_or(u32::MAX), 120_000);
+    }
+
+    // ─── iter62 — INV-DASHBOARD-LLM-TURN-CAPTURED-01 ───────────────
+
+    /// Helper: build an in-memory `Store`, seed an
+    /// initiative + task + session + an Active subtask_activation
+    /// row, and return the store. Mirrors the schema invariants in
+    /// `crates/store/src/migration.rs` §1070 (`subtask_activations`
+    /// CHECK pins `session_id NOT NULL` for Active rows).
+    fn seed_active_activation(
+        task_id: &str,
+        session_id: &str,
+    ) -> raxis_store::Store {
+        let store = raxis_store::Store::open_in_memory().unwrap();
+        let conn = store.lock_sync();
+        conn.execute_batch(&format!(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-c5', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, actual_cost) \
+             VALUES ('{task_id}', 'init-c5', 'default', 'Running', \
+                     'kernel', 1, 1, 1, 0); \
+             INSERT INTO sessions \
+                (session_id, planner_pubkey, planner_kind, \
+                 admission_token, capability_url, capability_signature, \
+                 monotonic_uuid, created_at, expires_at, revoked, \
+                 session_agent_type, can_delegate) \
+             VALUES ('{session_id}', 'pk', 'rust-test', \
+                     'tok', 'urn:c5', 'sig', \
+                     '00000000-0000-4000-8000-000000000001', \
+                     1, 9999999999, 0, 'Executor', 0); \
+             INSERT INTO subtask_activations \
+                (activation_id, task_id, initiative_id, \
+                 activation_state, session_id, created_at, activated_at) \
+             VALUES ('act-c5', '{task_id}', 'init-c5', 'Active', \
+                     '{session_id}', 1, 2);"
+        ))
+        .unwrap();
+        drop(conn);
+        store
+    }
+
+    /// Happy path: a session with one Active subtask_activation
+    /// row resolves to that row's `task_id`. This is the load-
+    /// bearing wiring for `INV-DASHBOARD-LLM-TURN-CAPTURED-01`
+    /// — the gateway pump's observer guard
+    /// (`gateway/client.rs:508`) requires a Some(task_id) on
+    /// the inflight slot to fire.
+    #[test]
+    fn lookup_active_task_id_for_session_returns_active_row() {
+        let store = seed_active_activation("task-c5-happy", "sess-c5-happy");
+        let resolved = lookup_active_task_id_for_session_sync(&store, "sess-c5-happy");
+        assert_eq!(resolved.as_deref(), Some("task-c5-happy"));
+    }
+
+    /// Negative path: a session with no matching Active row falls
+    /// back to None. The handler MUST NOT block on this — capture
+    /// is best-effort.
+    #[test]
+    fn lookup_active_task_id_for_session_returns_none_when_no_active_row() {
+        let store = seed_active_activation("task-c5-none", "sess-c5-none");
+        // Different session_id → no row → None.
+        let resolved = lookup_active_task_id_for_session_sync(&store, "sess-c5-other");
+        assert!(resolved.is_none());
+    }
+
+    /// PendingActivation rows must NOT match — the observer is
+    /// scoped to live executor / reviewer rounds; a row that has
+    /// not yet been bound to a session has `session_id = NULL`
+    /// per the table CHECK (kernel-store.md §2.5.1 Table 6) and
+    /// therefore cannot be matched anyway. This test pins the
+    /// `activation_state = 'Active'` filter in the SQL so a future
+    /// refactor cannot accidentally widen it.
+    #[test]
+    fn lookup_active_task_id_for_session_ignores_completed_rows() {
+        let store = raxis_store::Store::open_in_memory().unwrap();
+        let conn = store.lock_sync();
+        conn.execute_batch(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-c5b', 'Executing', '{}', 'deadbeef', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, actual_cost) \
+             VALUES ('task-completed', 'init-c5b', 'default', \
+                     'Completed', 'kernel', 1, 1, 2, 0); \
+             INSERT INTO sessions \
+                (session_id, planner_pubkey, planner_kind, \
+                 admission_token, capability_url, capability_signature, \
+                 monotonic_uuid, created_at, expires_at, revoked, \
+                 session_agent_type, can_delegate) \
+             VALUES ('sess-c5b', 'pk', 'rust-test', \
+                     'tok', 'urn:c5b', 'sig', \
+                     '00000000-0000-4000-8000-000000000002', \
+                     1, 9999999999, 0, 'Executor', 0); \
+             INSERT INTO subtask_activations \
+                (activation_id, task_id, initiative_id, \
+                 activation_state, session_id, created_at, \
+                 activated_at, terminated_at) \
+             VALUES ('act-c5b', 'task-completed', 'init-c5b', \
+                     'Completed', 'sess-c5b', 1, 2, 3);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let resolved = lookup_active_task_id_for_session_sync(&store, "sess-c5b");
+        assert!(
+            resolved.is_none(),
+            "Completed activation rows must not match the Active filter"
+        );
     }
 
     /// A real call to `elapsed_ms_clamped` on a freshly-minted
