@@ -506,6 +506,29 @@ pub enum AuditEventKind {
         /// classes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         backend_error: Option<String>,
+        /// iter62 — kernel-side enrichment for planner self-exit
+        /// emissions. `Some("complete_task")` /
+        /// `"submit_review"` / `"report_failure"` / etc. when the
+        /// kernel parsed the most-recent `step:planner-completed`
+        /// line from `guests/<sid>/console.log` to identify the
+        /// terminal tool the planner used before disconnecting.
+        /// `None` for substrate-emitted exits (the substrate does
+        /// not have visibility into terminal-tool semantics) and
+        /// for kernel-emitted exits when the console log is
+        /// missing or unparseable. Forensic-replay-only — the
+        /// kernel does not key behaviour off this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_tool: Option<String>,
+        /// iter62 — absolute path to the per-session console-log
+        /// file the kernel post-exit hook scraped for
+        /// `terminal_tool`. Operators correlating this audit row
+        /// to on-disk forensic artefacts use this directly. `None`
+        /// when the kernel has no `data_dir` configured (test
+        /// fixtures) or when the substrate (not the kernel) is the
+        /// emitter (`terminate_session` does not have access to
+        /// the per-session console-log path).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        console_log_path: Option<String>,
     },
 
     /// V2 `elastic-vm-scaling.md §3.2` — per-attempt record of a

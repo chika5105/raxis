@@ -7848,6 +7848,8 @@ channels   = []
                 signal_class: "x".into(),
                 exit_code: 0,
                 backend_error: None,
+                terminal_tool: None,
+                console_log_path: None,
             }
             .as_str(),
             // V2 elastic-vm-scaling.md §3.2, §4 — bounded retry +

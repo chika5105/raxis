@@ -11760,6 +11760,350 @@ sessions — the worst kind of post-mortem signal pollution.
 — appends to three distinct session ids (including ones
 that differ only by punctuation) keep their tails disjoint.
 
+### INV-AUDIT-SESSION-SELF-EXIT-PAIRED-WRITE-01 — Planner self-exit revoke is paired with `SessionRevoked`
+
+**Statement.** Every `planner_session_revoked_on_exit`
+structured-log line emitted by `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`
+post-exit hook MUST be paired with exactly one
+`AuditEventKind::SessionRevoked` audit row whose
+`revoked_by` field starts with the string `kernel://`.
+The kernel-internal URN for the planner-self-disconnect
+path is `kernel://planner_self_exit`. Operator-driven
+revoke paths (interactive `OperatorRequest::RevokeSession`,
+orchestrator-driven `RetrySubTask` cascade in
+`kernel/src/handlers/intent.rs:6076`) emit `SessionRevoked`
+with `revoked_by = <operator_session_id>` and are NOT
+covered by this invariant — those paths predate iter62 and
+keep their existing forensic discriminator.
+
+**Why structural.** Pre-iter62 the `UPDATE sessions SET
+revoked = 1` SQL committed without an audit-chain anchor on
+the clean-self-exit path; a forensic replay reconstructing
+"why was this session revoked?" had to fall back on
+joining `sessions.revoked_at` against the absence of a
+matching `SessionRevoked` row, which is fragile under
+audit-segment rotation. Pairing the SQL commit with an
+audit emit closes the chain hole and lets dashboards
+filter `jq 'select(.revoked_by | startswith("kernel://"))'`
+to count clean self-exits as a leading indicator of planner
+health.
+
+**Witness.** `kernel/src/session_spawn_orchestrator.rs`
+unit tests assert both events appear with the expected
+`kernel://planner_self_exit` marker after the revoke commit,
+AND that an operator-initiated revoke on a different
+session keeps using the operator marker (separate code
+path proof at `kernel/src/handlers/intent.rs:6076`).
+
+### INV-AUDIT-SESSION-VM-EXITED-EMITTED-01 — Every successful self-exit revoke emits `SessionVmExited`
+
+**Statement.** When `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`'s
+post-exit hook lands the `revoked = 1` UPDATE (rows-affected
+count > 0), the kernel MUST emit exactly one
+`AuditEventKind::SessionVmExited` audit row carrying:
+  * `signal_class = "GracefulExit"` — the planner
+    self-disconnect path is by construction a clean exit;
+  * `exit_code = 0`;
+  * `backend_error = None`;
+  * `terminal_tool = Some(<tool>)` if the kernel parsed a
+    `step:planner-completed` line out of the per-session
+    `<data_dir>/guests/<session_id>/console.log`, else
+    `None`;
+  * `console_log_path = Some(<absolute path>)` always (the
+    kernel records the path it tried, regardless of read
+    success).
+
+The substrate's existing `SessionVmExited` emission from
+`raxis-session-spawn::SessionSpawnService::terminate_session`
+(`crates/session-spawn/src/lib.rs:875`) carries
+`terminal_tool = None` and `console_log_path = None` — those
+fields are kernel-side enrichments populated only on the
+planner-self-exit emit site.
+
+**Why structural.** Before iter62 the audit chain had a
+`SessionVmSpawned` with no matching `SessionVmExited` for
+clean-self-exit sessions: `terminate_session` is the
+canonical emit site but the planner-PID-1-power-off path
+does not route through it. The chain hole was reproducibly
+visible in iter62 forensics
+(`/var/folders/.../audit/segment-000.jsonl` had spawns
+without paired exits for every `planner_session_revoked_on_exit`
+line). The new emission closes the pairing while preserving
+the `audit-paired-writes.md §4` either/or rule — a session
+that lands a `SessionVmFailedFinal` never emits this
+`SessionVmExited` because the failure short-circuits before
+`drive_planner_stream` is reached.
+
+**Witness.** Same fixture as
+`INV-AUDIT-SESSION-SELF-EXIT-PAIRED-WRITE-01`; the test
+asserts `signal_class == "GracefulExit"` and a populated
+`console_log_path` on the kernel-side emission, and
+asserts `terminal_tool == None` plus `console_log_path == None`
+on the substrate-side emission produced by an explicit
+`terminate_session` call from the same fixture.
+
+### INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01 — `CompleteTask` folds cache_* token deltas into per-task SQLite columns
+
+**Statement.** Every `IntentKind::CompleteTask` admission
+that carries a `tokens_used: Some(TokensReport)` payload
+MUST persist the report's `cache_creation_tokens` and
+`cache_read_tokens` fields onto the executor's `tasks` row
+via `cumulative_cache_creation_tokens` and
+`cumulative_cache_read_tokens`. The columns are
+monotonically non-decreasing per-task (the planner's
+`TokensReport` is itself cumulative across the session by
+construction; iter62 schema enforces `INTEGER NOT NULL
+DEFAULT 0`).
+
+**Why structural.** Pre-iter62 the SQL UPDATE in
+`kernel/src/handlers/intent.rs::pre_gate_evaluate_for_envelope`
+bumped only the `cumulative_input_tokens` /
+`cumulative_output_tokens` / `cumulative_token_cost_micros`
+columns, silently dropping the cache_* counters even when
+the planner reported them. Cost reconciliation against the
+provider's billed `cache_creation_input_tokens` /
+`cache_read_input_tokens` was then impossible without
+re-parsing the audit chain — the operator-facing
+"why is this task expensive?" surface had no cache-aware
+breakdown. Persisting the deltas closes the loop and lets
+the dashboard surface cache-hit ratio as a per-task
+forensic field.
+
+**Witness.** `crates/store/src/migration.rs` migration-21
+test asserts both columns exist post-migration with
+`DEFAULT 0`. `kernel/src/handlers/intent.rs` mod tests
+assert that an `IntentRequest` with non-zero
+`cache_creation_tokens` / `cache_read_tokens` deltas is
+reflected in the post-admission `tasks` row read.
+
+### INV-DASHBOARD-LLM-TURN-CAPTURED-01 — Every planner inference round-trip persists at least one `llm-turns` entry
+
+**Statement.** Every successful `IpcMessage::PlannerFetchRequest`
+the kernel forwards to the gateway with
+`fetch_kind == PlannerFetchKind::Inference` MUST cause the
+kernel-installed `LlmTurnObserver` to receive an
+`observe(...)` call within 1 s of the gateway's
+`FetchResponse` arrival, AND the observer MUST persist at
+least one record to
+`<data_dir>/llm-turns/<task_id>.jsonl`.
+
+**Why structural.** Pre-iter62 the kernel's
+`handlers/planner_fetch.rs::handle` resolved the session
+row but passed `task_id: None` into `ctx.gateway.fetch(...)`,
+short-circuiting the gateway pump's observer guard
+(`(Some(obs), Some(tid))` in
+`kernel/src/gateway/client.rs:508`). The result: the
+substrate's `crates/dashboard-kernel/src/task_llm_capture.rs`
+file ring received zero records across 22+ planner sessions
+in iter62, and the dashboard's
+`GET /api/tasks/:task_id/llm-turns` endpoint returned 404.
+Iter62 fix: the kernel resolves the bound task_id from
+`subtask_activations` keyed on the just-validated session_id
+before the fetch call, so every kernel-mediated Inference
+fetch carries a non-`None` task_id into the pump and the
+observer guard fires.
+
+**Witness.** `kernel/src/handlers/planner_fetch.rs` unit
+test synthesises a fake `PlannerFetchRequest` against a
+seeded `subtask_activations` row, asserts the recording
+observer received N chunks tagged with the expected
+task_id, AND asserts a fresh request with no matching
+`Active` activation row falls back gracefully (observer
+not invoked, fetch still succeeds — the capture is
+best-effort).
+
+### INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01 — `review_reject_count` is non-decreasing across activation_id sequence
+
+**Statement.** For any single `task_id`, the
+`subtask_activations.review_reject_count` column on
+successive activation rows ordered by `activation_id`
+MUST be non-decreasing AND increment by exactly 1 on each
+Reject-driven retry (`prior verdict
+== ReviewerVerdict::AtLeastOneRejected`). Crash-driven
+retries (`prior_state == 'Failed'`) carry the prior row's
+value forward unchanged. Pre-iter62 the column stayed at
+1 across N reviewer-rejection-driven retries because the
+RetrySubTask handler did not bump it on the
+review-rejection branch.
+
+**Why structural.** Without per-activation monotonicity
+the `max_review_rejections` ceiling was effectively
+unbounded — every reject-driven respawn carried
+`review_reject_count = 1`, the ceiling check
+`review_reject_count >= max_review_rejections` (default 2)
+never fired, and the LLM kept burning `max_turns` budget
+on a task whose reviewer panel had already issued 5+
+rejections. Iter62 forensics showed `lint-runner-python`
+and `lint-runner-js` both stuck at
+`review_reject_count = 1` across 5 retries; the
+`max_review_rejections` ceiling was the load-bearing
+budget and went unenforced.
+
+**Witness.** `kernel/src/handlers/intent.rs` mod tests
+seed N=3 reviewer rejections + RetrySubTask cycles and
+assert `review_reject_count` strictly monotonic
+(`[1, 2, 3]`) across the activation rows. A negative
+witness asserts a crash-driven retry interleaved with
+review-rejection retries does NOT reset or skip the
+counter.
+
+### INV-RETRY-REVIEWER-PANEL-REACTIVATED-01 — Reviewer panel re-activates on every executor retry
+
+**Statement.** For an executor task with M reviewer
+successors, after K rejection-driven retries the reviewer
+panel MUST have at least K+1 `subtask_activations` rows
+for each reviewer task (one per executor round), OR the
+executor must have hit `max_review_rejections` and be
+in `tasks.state = Failed`. Reviewers are NOT one-shot
+terminal — every fresh executor `head_sha` re-activates
+every downstream reviewer.
+
+**Why structural.** Pre-iter62 the orchestrator's plan-
+graph traversal treated reviewers as one-shot, leaving
+both `review-lint-defect-A` / `-B` with a single
+activation row even after the executor retried 5 times.
+The reviewer panel could not vote on rounds 2-5; the
+orchestrator was operating against a stale verdict
+verdict aggregated from round 1 only. The remediation:
+when an executor retry produces a new `head_sha`, the
+kernel marks every downstream reviewer task as needing
+fresh activation (resets `tasks.state = Admitted`,
+inserts a new `subtask_activations` row in
+`PendingActivation`).
+
+**Witness.** `kernel/src/handlers/intent.rs` mod tests
+seed an executor with 2 reviewers and force K=3
+reject-driven retries; the test asserts each reviewer
+task has 4 activation rows (round 0..3) by the end and
+each carries the expected `head_sha`.
+
+### INV-ORCHESTRATOR-NO-STALE-PENDING-ACTIVATION-01 — No `PendingActivation` row stays > 120 s with predecessors complete
+
+**Statement.** A `subtask_activations` row in
+`PendingActivation` whose predecessors (per
+`task_dag_edges`) are all `Completed` MUST be
+`ActivateSubTask`-fired within 120 s of the predecessors'
+last completion timestamp. The orchestrator's "next-action"
+loop (or the kernel's autonomous sweep, whichever is
+authoritative for the deployment) MUST NOT skip a row
+because it was created in a prior orchestrator turn —
+ANY stale PendingActivation row is fair game for the next
+firing.
+
+**Why structural.** Iter62 forensics showed
+`review-lint-defect-rust` stuck in `PendingActivation` for
+67+ minutes after `lint-runner-rust` completed; the
+orchestrator was firing `ActivateSubTask` only for rows
+it had freshly created in its current turn, ignoring rows
+from prior turns. A 120 s ceiling gives the orchestrator
+healthy slack for normal scheduling jitter while ruling
+out the unbounded-stall failure mode.
+
+**Witness.** Scripted fixture in
+`kernel/src/handlers/intent.rs` mod tests inserts a
+`PendingActivation` row directly (bypassing the
+orchestrator), advances the simulated clock by 121 s with
+all predecessors Completed, and asserts the kernel sweep
+fires `ActivateSubTask` (or the orchestrator-side change
+this invariant escalates to is observed). When the kernel
+side cannot enforce alone, the witness in this worker is
+the kernel-side timeout-fired emit; the
+planner-orchestrator-side fix is tracked separately.
+
+### INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01 — `FailInvalidDiff` increments `validation_reject_count`, not `crash_retry_count`
+
+**Statement.** When the kernel rejects an
+`IntentKind::CompleteTask` with `error_code =
+PlannerErrorCode::FailInvalidDiff` (empty diff, unchanged
+`head_sha`, malformed format, path-scope violation), the
+post-rejection `subtask_activations` row MUST bump the new
+`validation_reject_count` column (NOT `crash_retry_count`)
+and MUST emit an `AuditEventKind::IntentValidationRejected`
+audit anchor carrying the kernel's structured rejection
+reason.
+
+**Why structural.** Pre-iter62 the FailInvalidDiff path
+emitted `TaskFailedOnWorkerPrematureExit` and bumped
+`crash_retry_count`, treating a malformed-diff submission
+as a substrate-level crash. Two consequences fell out:
+(a) the wrong budget (`crash_retry_count`) was charged —
+a worker that submitted 3 bad diffs in a row was treated
+as "crashed 3 times" and the `max_crash_retries=3`
+ceiling fired the initiative as Failed even though the
+worker had plenty of `max_turns` left; (b) the wrong
+remediation fired —
+`PlannerMaxTurnsProgressivelyScaled` 60→90→120 piled more
+turn budget on a worker that didn't need it. The new
+counter (default ceiling
+`max_validation_rejections = 2`) gives validation
+rejection a separate, properly-scoped budget.
+
+**Witness.** `kernel/src/handlers/intent.rs` mod tests
+seed an executor with a known-bad diff and submit
+`CompleteTask`; the test asserts:
+  * No `TaskFailedOnWorkerPrematureExit` audit row.
+  * `validation_reject_count` bumped from 0 to 1; new
+    `crash_retry_count` unchanged at 0.
+  * `IntentValidationRejected` audit row present with
+    structured `validator_reason` /
+    `validator_detail` fields.
+
+### INV-INTENT-VALIDATION-REJECTED-NO-MAX-TURNS-SCALE-01 — `FailInvalidDiff` does NOT trigger `PlannerMaxTurnsProgressivelyScaled`
+
+**Statement.** A retry admitted on the back of a
+`FailInvalidDiff` rejection MUST NOT trigger the
+`PlannerMaxTurnsProgressivelyScaled` resolver — the
+worker had plenty of turns, it produced a bad diff. The
+attempt-counter that the resolver consults
+(`subtask_activations.crash_retry_count`) stays at 0 by
+construction (per
+`INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`), so the
+resolver short-circuits to the base ceiling. The
+`validation_reject_count`-driven retries reuse the same
+`max_turns` as round 1.
+
+**Why structural.** See
+`INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01` (b).
+
+**Witness.** Same fixture as
+`INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`; assert no
+`PlannerMaxTurnsProgressivelyScaled` audit row in the
+chain after N=3 FailInvalidDiff retries, and the
+respawned executor session's `RAXIS_PLANNER_MAX_TURNS`
+env stamp equals the round-1 value verbatim.
+
+### INV-RETRY-LAST-CRITIQUE-IN-KSB-01 — `last_critique` is rendered into KSB on every retry
+
+**Statement.** Every executor retry past round 1 MUST
+have a non-NULL `last_critique` field rendered into
+`<worktree>/meta/ksb.json` if and only if the prior
+round's verdict was Reviewer-Rejected
+(`review_reject_count > 0`) OR validation-rejected
+(`validation_reject_count > 0`). Crash-driven retries
+have `last_critique = None` (no critique to surface —
+the worker died before the reviewer could vote).
+
+**Why structural.** Iter62 forensics showed
+`tasks.last_critique` was correctly populated by
+`handle_submit_review` but the retried executor did NOT
+see it: the KSB renderer only surfaces per-Reviewer
+extracted segments via the `reviewer_verdicts` field,
+not the FULL aggregated critique. Operators investigating
+"why does the executor keep producing the same wrong diff"
+saw an empty critique surface in the executor's prompt.
+The remediation: surface the full
+`tasks.last_critique` text on the KSB so the executor's
+NNSP system prompt can prepend it verbatim.
+
+**Witness.** `kernel/src/initiatives/ksb_assembly.rs` mod
+tests seed a task with `last_critique = "fix this bug
+properly"` and `review_reject_count = 1`; the test
+asserts the rendered KSB JSON contains
+`"last_critique":"fix this bug properly"`. A negative
+witness with `review_reject_count = 0` and
+`validation_reject_count = 0` (i.e. round 1) asserts the
+field is absent / `None`.
+
 ---
 
 ## §13 — When this file is wrong
