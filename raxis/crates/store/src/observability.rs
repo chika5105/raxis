@@ -72,8 +72,38 @@ pub const QUERY_CLASS_TASK_UPDATE: &str = "task_update";
 
 /// Escalations: read pending list (dashboard inbox).
 pub const QUERY_CLASS_ESCALATION_LIST: &str = "escalation_list";
+/// Escalations: read one (dashboard escalation detail).
+pub const QUERY_CLASS_ESCALATION_GET: &str = "escalation_get";
 /// Escalations: count pending (health endpoint summary).
 pub const QUERY_CLASS_ESCALATION_COUNT: &str = "escalation_count";
+
+/// Audit chain: walk segment files for the dashboard audit list /
+/// chain-status endpoints. Distinct from `audit_append` (write
+/// path) and `audit_tip` (single-row read for the chain-length
+/// gauge); `audit_chain_walk` covers the bounded ring-buffer
+/// walk in `KernelDashboardData::list_audit` and the optional
+/// reverify scan in `audit_chain_status`.
+pub const QUERY_CLASS_AUDIT_CHAIN_WALK: &str = "audit_chain_walk";
+
+/// Notifications inbox: read the JSONL inbox for the dashboard's
+/// `/api/notifications/inbox` route + `mark_read` mutations.
+pub const QUERY_CLASS_NOTIFICATIONS_INBOX: &str = "notifications_inbox";
+
+/// Policy: read the active `policy.toml` snapshot for the
+/// dashboard's `/api/policy/snapshot` route.
+pub const QUERY_CLASS_POLICY_SNAPSHOT: &str = "policy_snapshot";
+
+/// Worktree: bounded `git log` / `git diff` / file-tree reads
+/// behind the dashboard's per-worktree forensic surface.
+/// Distinct class so a slow gitoxide walk over a large repo
+/// doesn't get hidden inside a generic store-query bucket.
+pub const QUERY_CLASS_WORKTREE_READ: &str = "worktree_read";
+
+/// Credentials: read the per-initiative or per-system credential
+/// metadata + reveal endpoints. Tagged separately because the
+/// reveal path is rate-limited and an op can directly correlate
+/// `credential_read` latency with the rate-limiter's window.
+pub const QUERY_CLASS_CREDENTIAL_READ: &str = "credential_read";
 
 /// Plan bundles: insert a fresh signed plan artifact.
 pub const QUERY_CLASS_PLAN_BUNDLE_INSERT: &str = "plan_bundle_insert";
@@ -119,7 +149,13 @@ pub const QUERY_CLASSES: &[&str] = &[
     QUERY_CLASS_TASK_GET,
     QUERY_CLASS_TASK_UPDATE,
     QUERY_CLASS_ESCALATION_LIST,
+    QUERY_CLASS_ESCALATION_GET,
     QUERY_CLASS_ESCALATION_COUNT,
+    QUERY_CLASS_AUDIT_CHAIN_WALK,
+    QUERY_CLASS_NOTIFICATIONS_INBOX,
+    QUERY_CLASS_POLICY_SNAPSHOT,
+    QUERY_CLASS_WORKTREE_READ,
+    QUERY_CLASS_CREDENTIAL_READ,
     QUERY_CLASS_PLAN_BUNDLE_INSERT,
     QUERY_CLASS_PLAN_BUNDLE_GET,
     QUERY_CLASS_OPERATOR_CERT_LOOKUP,
@@ -290,6 +326,77 @@ mod tests {
             any_error,
             "expected an error-tagged StoreQueryDuration sample"
         );
+    }
+
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-07` — pin the
+    /// dashboard-kernel handler-coverage expansion. The newly
+    /// wired handler set adds five lexicon entries
+    /// (`escalation_get`, `audit_chain_walk`,
+    /// `notifications_inbox`, `policy_snapshot`,
+    /// `worktree_read`, `credential_read`) to the closed
+    /// `QUERY_CLASSES` set. A typo or missing entry would let a
+    /// dashboard-kernel call site pass an unknown literal that
+    /// silently collapses to the `unknown` series — this witness
+    /// trips that case at compile-adjacent test time.
+    #[test]
+    fn iter61_handler_coverage_lexicon_entries_are_present() {
+        for lexeme in [
+            QUERY_CLASS_ESCALATION_GET,
+            QUERY_CLASS_AUDIT_CHAIN_WALK,
+            QUERY_CLASS_NOTIFICATIONS_INBOX,
+            QUERY_CLASS_POLICY_SNAPSHOT,
+            QUERY_CLASS_WORKTREE_READ,
+            QUERY_CLASS_CREDENTIAL_READ,
+        ] {
+            assert!(
+                QUERY_CLASSES.contains(&lexeme),
+                "iter61 handler-coverage lexeme {lexeme:?} missing from QUERY_CLASSES — the dashboard-kernel handler that uses it would silently collapse to `unknown`",
+            );
+        }
+    }
+
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-07` — happy-path
+    /// witness that every new iter61 handler-coverage lexicon
+    /// entry round-trips through `time_query` and lands one
+    /// `StoreQueryDuration` sample tagged with its class. Same
+    /// shape as `time_query_lands_observed_sample`, expanded to
+    /// cover the iter61 expansion uniformly so a future helper
+    /// refactor that drops a label silently fails here.
+    #[test]
+    fn iter61_handler_coverage_classes_each_emit_one_sample() {
+        let (hub, exp) = enabled_hub();
+        for lexeme in [
+            QUERY_CLASS_ESCALATION_GET,
+            QUERY_CLASS_AUDIT_CHAIN_WALK,
+            QUERY_CLASS_NOTIFICATIONS_INBOX,
+            QUERY_CLASS_POLICY_SNAPSHOT,
+            QUERY_CLASS_WORKTREE_READ,
+            QUERY_CLASS_CREDENTIAL_READ,
+        ] {
+            time_query(Some(&hub), lexeme, || ());
+        }
+        hub.flush();
+        let metrics = exp.metrics();
+        for lexeme in [
+            QUERY_CLASS_ESCALATION_GET,
+            QUERY_CLASS_AUDIT_CHAIN_WALK,
+            QUERY_CLASS_NOTIFICATIONS_INBOX,
+            QUERY_CLASS_POLICY_SNAPSHOT,
+            QUERY_CLASS_WORKTREE_READ,
+            QUERY_CLASS_CREDENTIAL_READ,
+        ] {
+            let any = metrics.iter().any(|m| {
+                m.name == MetricName::StoreQueryDuration
+                    && matches!(
+                        m.labels.get("query_class"),
+                        Some(raxis_observability::AttrValue::Str(s)) if s == lexeme,
+                    )
+            });
+            assert!(
+                any,
+                "expected a StoreQueryDuration sample tagged query_class={lexeme:?}",
+            );
+        }
     }
 
     /// Witness #5: hub-disabled fast path. When the caller passes

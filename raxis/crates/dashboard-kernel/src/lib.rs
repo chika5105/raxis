@@ -798,13 +798,18 @@ impl DashboardData for KernelDashboardData {
 
     fn get_initiative(&self, id: &str) -> Result<InitiativeView, ApiError> {
         let conn = self.open_ro()?;
-        let row = raxis_store::views::initiatives::by_id(&conn, id)
-            .map_err(|e| ApiError::Internal {
-                log_only: format!("initiatives::by_id: {e}"),
-            })?
-            .ok_or(ApiError::NotFound {
-                kind: "initiative".into(),
-            })?;
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07.
+        let row = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_INITIATIVE_GET,
+            || raxis_store::views::initiatives::by_id(&conn, id),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("initiatives::by_id: {e}"),
+        })?
+        .ok_or(ApiError::NotFound {
+            kind: "initiative".into(),
+        })?;
         let bundle = self.policy.load_full();
         let task_rows =
             raxis_store::views::tasks::list_by_initiative(&conn, id, 500).map_err(|e| {
@@ -912,13 +917,22 @@ impl DashboardData for KernelDashboardData {
             })?;
 
         // Step 2 — original submitted TOML (V1 + V2.1 fallback).
-        let raw = raxis_store::views::plan_fields::submitted_toml_for_initiative(&conn, id)
-            .map_err(|e| ApiError::Internal {
-                log_only: format!("plan_fields::submitted_toml_for_initiative: {e}"),
-            })?
-            .ok_or(ApiError::Gone {
-                kind: "plan".into(),
-            })?;
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — the plan
+        // bundle materialisation is the dominant SQLite read on
+        // the plan-detail surface; tag it with `plan_bundle_get`
+        // so a slow plan TOML walk lights up here independently
+        // of the cheap existence check above.
+        let raw = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_PLAN_BUNDLE_GET,
+            || raxis_store::views::plan_fields::submitted_toml_for_initiative(&conn, id),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("plan_fields::submitted_toml_for_initiative: {e}"),
+        })?
+        .ok_or(ApiError::Gone {
+            kind: "plan".into(),
+        })?;
 
         // The DDL pins both `signed_plan_artifacts.plan_bytes` and
         // `plan_bundle_artifacts.artifact_bytes` to BLOB; every
@@ -1005,13 +1019,18 @@ impl DashboardData for KernelDashboardData {
 
     fn get_task(&self, task_id: &str) -> Result<TaskView, ApiError> {
         let conn = self.open_ro()?;
-        let row = raxis_store::views::tasks::by_id(&conn, task_id)
-            .map_err(|e| ApiError::Internal {
-                log_only: format!("tasks::by_id: {e}"),
-            })?
-            .ok_or(ApiError::NotFound {
-                kind: "task".into(),
-            })?;
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07.
+        let row = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_TASK_GET,
+            || raxis_store::views::tasks::by_id(&conn, task_id),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("tasks::by_id: {e}"),
+        })?
+        .ok_or(ApiError::NotFound {
+            kind: "task".into(),
+        })?;
         Ok(task_row_to_view(&conn, &row))
     }
 
@@ -1147,13 +1166,18 @@ impl DashboardData for KernelDashboardData {
         // terminal classification (`Revoked`, `Expired`, `Active`)
         // so the FE can render the appropriate badge.
         let conn = self.open_ro()?;
-        let s = raxis_store::views::sessions::by_id(&conn, session_id)
-            .map_err(|e| ApiError::Internal {
-                log_only: format!("sessions::by_id: {e}"),
-            })?
-            .ok_or(ApiError::NotFound {
-                kind: "session".into(),
-            })?;
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07.
+        let s = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_SESSION_GET,
+            || raxis_store::views::sessions::by_id(&conn, session_id),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("sessions::by_id: {e}"),
+        })?
+        .ok_or(ApiError::NotFound {
+            kind: "session".into(),
+        })?;
         let state = session_row_state(&s);
         Ok(SessionView {
             session_id: s.session_id,
@@ -1212,10 +1236,21 @@ impl DashboardData for KernelDashboardData {
 
     fn get_escalation(&self, id: &str) -> Result<EscalationView, ApiError> {
         let conn = self.open_ro()?;
-        let rows = raxis_store::views::escalations::list(
-            &conn,
-            raxis_store::views::escalations::EscalationStatusFilter::All,
-            500,
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — the detail
+        // page walks `escalations::list(All, 500)` and filters
+        // for the matching id; tag the read so a slow
+        // escalation table surfaces under the dedicated
+        // `escalation_get` series.
+        let rows = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_ESCALATION_GET,
+            || {
+                raxis_store::views::escalations::list(
+                    &conn,
+                    raxis_store::views::escalations::EscalationStatusFilter::All,
+                    500,
+                )
+            },
         )
         .map_err(|e| ApiError::Internal {
             log_only: format!("escalations::list: {e}"),
@@ -1260,81 +1295,96 @@ impl DashboardData for KernelDashboardData {
         // operators may hit `/api/audit` concurrently.
         const MAX_AUDIT_WALK_RECORDS: usize = 200_000;
 
-        let reader = ChainReader::open(&self.audit_dir).map_err(|e| ApiError::Internal {
-            log_only: format!("ChainReader::open: {e}"),
-        })?;
-        let cap = limit.min(500) as usize;
-        if cap == 0 {
-            return Ok(Vec::new());
-        }
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — the audit
+        // walk is bounded but not free; the dashboard's audit
+        // page can fan out to a 200k-record scan on a long-
+        // lived chain. Tag the entire walk under
+        // `audit_chain_walk` so a slow chain lights up its own
+        // series rather than being hidden inside the generic
+        // `dashboard_http_request` duration histogram.
+        let hub_for_walk = self.observability_hub.clone();
+        raxis_store::observability::time_query_result(
+            hub_for_walk.as_ref(),
+            raxis_store::observability::QUERY_CLASS_AUDIT_CHAIN_WALK,
+            || -> Result<Vec<AuditEntryView>, ApiError> {
+                let reader =
+                    ChainReader::open(&self.audit_dir).map_err(|e| ApiError::Internal {
+                        log_only: format!("ChainReader::open: {e}"),
+                    })?;
+                let cap = limit.min(500) as usize;
+                if cap == 0 {
+                    return Ok(Vec::new());
+                }
 
-        // Bounded sliding window of "newest matched records seen
-        // so far that are strictly older than the cursor".
-        let mut tail: std::collections::VecDeque<AuditEntryView> =
-            std::collections::VecDeque::with_capacity(cap);
-        let mut walked: usize = 0;
-        for rec in reader.records() {
-            walked += 1;
-            if walked > MAX_AUDIT_WALK_RECORDS {
-                // Hard cap: stop walking. The caller still gets
-                // the newest matching records seen so far. The
-                // structured warn line lets ops know the chain
-                // grew past the per-request budget so they can
-                // rotate / archive.
-                eprintln!(
-                    "{{\"level\":\"warn\",\
+                // Bounded sliding window of "newest matched records seen
+                // so far that are strictly older than the cursor".
+                let mut tail: std::collections::VecDeque<AuditEntryView> =
+                    std::collections::VecDeque::with_capacity(cap);
+                let mut walked: usize = 0;
+                for rec in reader.records() {
+                    walked += 1;
+                    if walked > MAX_AUDIT_WALK_RECORDS {
+                        // Hard cap: stop walking. The caller still gets
+                        // the newest matching records seen so far. The
+                        // structured warn line lets ops know the chain
+                        // grew past the per-request budget so they can
+                        // rotate / archive.
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
                       \"event\":\"dashboard_audit_walk_capped\",\
                       \"limit_records\":{MAX_AUDIT_WALK_RECORDS}}}"
-                );
-                break;
-            }
-            let rec = match rec {
-                Ok(r) => r,
-                Err(_) => continue, // tolerate one malformed line per spec
-            };
-            if let Some(want) = initiative_id {
-                if rec.initiative_id.as_deref() != Some(want) {
-                    continue;
+                        );
+                        break;
+                    }
+                    let rec = match rec {
+                        Ok(r) => r,
+                        Err(_) => continue, // tolerate one malformed line per spec
+                    };
+                    if let Some(want) = initiative_id {
+                        if rec.initiative_id.as_deref() != Some(want) {
+                            continue;
+                        }
+                    }
+                    // Cursor filter: caller already saw everything ≥ cursor.
+                    if let Some(c) = cursor_seq {
+                        if rec.seq >= c {
+                            continue;
+                        }
+                    }
+                    let payload = rec
+                        .parsed_value
+                        .as_ref()
+                        .and_then(|v| v.get("payload").cloned())
+                        .unwrap_or(serde_json::Value::Null);
+                    let entry = AuditEntryView {
+                        seq: rec.seq,
+                        event_id: rec
+                            .parsed_value
+                            .as_ref()
+                            .and_then(|v| v.get("event_id"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        event_kind: rec.event_kind,
+                        initiative_id: rec.initiative_id,
+                        task_id: rec.task_id,
+                        session_id: rec.session_id,
+                        at: rec.emitted_at.unwrap_or(0).max(0) as u64,
+                        payload,
+                    };
+                    if tail.len() == cap {
+                        // Drop the oldest matched record we've buffered;
+                        // it falls outside the page-of-newest we'll return.
+                        tail.pop_front();
+                    }
+                    tail.push_back(entry);
                 }
-            }
-            // Cursor filter: caller already saw everything ≥ cursor.
-            if let Some(c) = cursor_seq {
-                if rec.seq >= c {
-                    continue;
-                }
-            }
-            let payload = rec
-                .parsed_value
-                .as_ref()
-                .and_then(|v| v.get("payload").cloned())
-                .unwrap_or(serde_json::Value::Null);
-            let entry = AuditEntryView {
-                seq: rec.seq,
-                event_id: rec
-                    .parsed_value
-                    .as_ref()
-                    .and_then(|v| v.get("event_id"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_owned(),
-                event_kind: rec.event_kind,
-                initiative_id: rec.initiative_id,
-                task_id: rec.task_id,
-                session_id: rec.session_id,
-                at: rec.emitted_at.unwrap_or(0).max(0) as u64,
-                payload,
-            };
-            if tail.len() == cap {
-                // Drop the oldest matched record we've buffered;
-                // it falls outside the page-of-newest we'll return.
-                tail.pop_front();
-            }
-            tail.push_back(entry);
-        }
-        // Newest first.
-        let mut matched: Vec<AuditEntryView> = tail.into_iter().collect();
-        matched.reverse();
-        Ok(matched)
+                // Newest first.
+                let mut matched: Vec<AuditEntryView> = tail.into_iter().collect();
+                matched.reverse();
+                Ok(matched)
+            },
+        )
     }
 
     fn audit_chain_status(&self, reverify: bool) -> Result<(bool, ChainStatusView), ApiError> {
@@ -1359,7 +1409,18 @@ impl DashboardData for KernelDashboardData {
         // Drive the kernel-owned walker — never a FE re-
         // implementation. Audit-tools is the single source of
         // truth for chain integrity.
-        let view = match raxis_audit_tools::verify_chain_from(&self.audit_dir, 0) {
+        //
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — tag the
+        // verify walk under the same `audit_chain_walk` series
+        // the paginated `list_audit` uses; both paths walk the
+        // same bytes and pivoting on outcome separates ok-walks
+        // (cache miss → fresh walk) from broken-chain walks.
+        let verify_outcome = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_AUDIT_CHAIN_WALK,
+            || raxis_audit_tools::verify_chain_from(&self.audit_dir, 0),
+        );
+        let view = match verify_outcome {
             Ok(stats) => ChainStatusView {
                 status: "ok".into(),
                 last_verified_seq: stats.last_seq,
@@ -1439,31 +1500,45 @@ impl DashboardData for KernelDashboardData {
     }
 
     fn policy_snapshot(&self) -> Result<PolicySnapshotView, ApiError> {
-        let bundle = self.policy.load_full();
-        let operators = bundle
-            .operators()
-            .iter()
-            .map(|o| PolicyOperatorView {
-                fingerprint: o.pubkey_fingerprint.clone(),
-                display_name: o.display_name.clone(),
-                permitted_ops: o.permitted_ops.clone(),
-            })
-            .collect();
-        let mut routes = std::collections::HashMap::new();
-        for ch in bundle.notification_channels() {
-            routes
-                .entry("default".to_owned())
-                .or_insert_with(Vec::new)
-                .push(ch.id.clone());
-        }
-        Ok(PolicySnapshotView {
-            epoch: bundle.epoch(),
-            policy_sha256: bundle.policy_sha256().to_owned(),
-            signed_by: bundle.signed_by().to_owned(),
-            signed_at: bundle.signed_at(),
-            operators,
-            notification_routes: routes,
-        })
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — the policy
+        // snapshot is the dashboard's policy-tab read path. Even
+        // though the bundle lives in an `ArcSwap` (cheap clone),
+        // the operator + notification-channel projection grows
+        // with the operator count; tag the assembly under
+        // `policy_snapshot` so a regression in either pivot
+        // (operator count or channel fan-out) lights up here
+        // independently of any SQLite read.
+        raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_POLICY_SNAPSHOT,
+            || -> Result<PolicySnapshotView, ApiError> {
+                let bundle = self.policy.load_full();
+                let operators = bundle
+                    .operators()
+                    .iter()
+                    .map(|o| PolicyOperatorView {
+                        fingerprint: o.pubkey_fingerprint.clone(),
+                        display_name: o.display_name.clone(),
+                        permitted_ops: o.permitted_ops.clone(),
+                    })
+                    .collect();
+                let mut routes = std::collections::HashMap::new();
+                for ch in bundle.notification_channels() {
+                    routes
+                        .entry("default".to_owned())
+                        .or_insert_with(Vec::new)
+                        .push(ch.id.clone());
+                }
+                Ok(PolicySnapshotView {
+                    epoch: bundle.epoch(),
+                    policy_sha256: bundle.policy_sha256().to_owned(),
+                    signed_by: bundle.signed_by().to_owned(),
+                    signed_at: bundle.signed_at(),
+                    operators,
+                    notification_routes: routes,
+                })
+            },
+        )
     }
 
     fn policy_toml_bytes(&self) -> Result<String, ApiError> {
@@ -1806,11 +1881,18 @@ impl DashboardData for KernelDashboardData {
     ) -> Result<Vec<NotificationView>, ApiError> {
         let conn = self.open_ro()?;
         let cap = limit.min(200) as usize;
-        let rows = if unread_only {
-            raxis_store::views::notifications::list_unread(&conn, cap)
-        } else {
-            raxis_store::views::notifications::list_all(&conn, cap, initiative_id)
-        }
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07.
+        let rows = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_NOTIFICATIONS_INBOX,
+            || {
+                if unread_only {
+                    raxis_store::views::notifications::list_unread(&conn, cap)
+                } else {
+                    raxis_store::views::notifications::list_all(&conn, cap, initiative_id)
+                }
+            },
+        )
         .map_err(|e| ApiError::Internal {
             log_only: format!("notification list: {e}"),
         })?;
@@ -1854,7 +1936,13 @@ impl DashboardData for KernelDashboardData {
 
     fn notification_count_unread(&self) -> Result<u64, ApiError> {
         let conn = self.open_ro()?;
-        raxis_store::views::notifications::unread_count(&conn).map_err(|e| ApiError::Internal {
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-07.
+        raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_NOTIFICATIONS_INBOX,
+            || raxis_store::views::notifications::unread_count(&conn),
+        )
+        .map_err(|e| ApiError::Internal {
             log_only: format!("notification unread count: {e}"),
         })
     }

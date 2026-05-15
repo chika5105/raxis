@@ -100,8 +100,8 @@
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
 | Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
-| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05, INV-OBSERVABILITY-DATAPLANE-LATENCY-06 | 4 |
-| **Total** | | **141** |
+| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05, INV-OBSERVABILITY-DATAPLANE-LATENCY-06, INV-OBSERVABILITY-DATAPLANE-LATENCY-07 | 5 |
+| **Total** | | **142** |
 
 ---
 
@@ -9978,6 +9978,78 @@ witness pattern).
 
 **Canonical home.** `v3/otel-observability.md §8` row
 `GatewayStageDuration` + Prometheus inventory in
+`v3/observability-prometheus.md §3` (iter61 expansion).
+
+---
+
+### INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — Dashboard-API handler coverage: every store-bound `KernelDashboardData` read funnels through `time_query` with a closed `query_class` lexicon
+
+**Statement.** Every read method on
+`KernelDashboardData` (`crates/dashboard-kernel/src/lib.rs`) that
+issues a `raxis_store::views::*` call OR walks the on-disk
+audit chain MUST funnel that work through
+`raxis_store::observability::time_query` /
+`time_query_result` tagged with a constant from
+`raxis_store::observability::QUERY_CLASS_*`. The iter61 expansion
+adds six new lexicon entries to the closed `QUERY_CLASSES` set
+(`escalation_get`, `audit_chain_walk`, `notifications_inbox`,
+`policy_snapshot`, `worktree_read`, `credential_read`) and wires
+the following dashboard handlers — beyond the five wired in
+`63b04ae` — to the existing or new lexemes:
+
+* `get_initiative` → `initiative_get`
+* `get_initiative_plan` → `plan_bundle_get`
+* `get_task` → `task_get`
+* `get_session` → `session_get`
+* `get_escalation` → `escalation_get` (new)
+* `list_audit` → `audit_chain_walk` (new — wraps the bounded
+  ring-buffer walk over the on-disk JSONL)
+* `audit_chain_status` → `audit_chain_walk` (same series — the
+  verify pass walks the same bytes; outcome label disambiguates
+  ok-walks from broken-chain walks)
+* `list_notifications` → `notifications_inbox` (new)
+* `notification_count_unread` → `notifications_inbox` (same)
+* `policy_snapshot` → `policy_snapshot` (new — covers the in-
+  memory bundle projection so a slow operator/channel fan-out
+  lights up here independently of any SQLite read)
+
+The remaining `worktree_read` and `credential_read` lexicon
+entries are pre-allocated for the worktree-tree / credential-
+reveal handler families which the dashboard router exposes;
+follow-up commits will wire them as those handlers stabilise
+(both surfaces today are dominated by filesystem operations
+rather than store reads, so a separate seam in
+`raxis_store::observability` is the cleanest landing point).
+
+**Justification.** Pre-iter61 a slow dashboard refresh
+surfaced as one undifferentiated `dashboard_http_request`
+duration spike — operators saw "page is slow" but not which
+underlying SQLite read or audit-chain walk was the culprit.
+The five handlers wired in `63b04ae` covered the highest-
+traffic list/health surfaces; this expansion covers the
+detail / forensic surfaces an operator clicks INTO from those
+list pages. Without it the per-route HTTP histogram is the
+operator's only signal for a slow `GET
+/api/initiatives/:id/plan`, which collapses every sub-stage
+(SQLite read, plan-bundle assembly, store-side TOML
+materialisation) into one bucket.
+
+**Witness.** `crates/store/src/observability.rs::tests`:
+* `iter61_handler_coverage_lexicon_entries_are_present` — pins
+  every new lexeme into the closed `QUERY_CLASSES` set so a
+  dashboard-kernel call site cannot pass an unknown literal.
+* `iter61_handler_coverage_classes_each_emit_one_sample` —
+  per-class round-trip witness through `time_query` confirming
+  one `StoreQueryDuration` sample lands per class with the
+  matching `query_class` label.
+
+The pre-existing `every_class_lexeme_is_unique` and
+`every_class_lexeme_fits_redactor_cap` witnesses cover the new
+lexemes uniformly (no duplicates, none exceed the redactor's
+32-byte cap).
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`StoreQueryDuration` + Prometheus inventory in
 `v3/observability-prometheus.md §3` (iter61 expansion).
 
 ---
