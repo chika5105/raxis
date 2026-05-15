@@ -1,6 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { Section } from "@/components/Section";
+import { LinkedInBadge } from "@/components/LinkedInBadge";
 
 export default function HomePage() {
   return (
@@ -429,7 +430,7 @@ function CreatorSection() {
     <section className="border-t border-[var(--rule)] bg-[var(--accent-soft)]">
       <div className="mx-auto max-w-5xl px-4 sm:px-6 py-16 sm:py-20">
         <div className="grid gap-10 lg:grid-cols-[280px_minmax(0,1fr)] items-center">
-          <div className="flex justify-center lg:justify-start">
+          <div className="flex flex-col items-center lg:items-start gap-4">
             <div className="relative w-52 h-52 sm:w-64 sm:h-64 rounded-2xl overflow-hidden border border-[var(--rule)] shadow-lg">
               <Image
                 src="/images/chika-jinanwa.png"
@@ -439,6 +440,7 @@ function CreatorSection() {
                 sizes="(max-width: 640px) 208px, 256px"
               />
             </div>
+            <LinkedInBadge />
           </div>
           <div>
             <p className="eyebrow mb-4">The person behind Raxis</p>
@@ -453,7 +455,7 @@ function CreatorSection() {
                 rel="noopener noreferrer"
                 className="text-accent hover:underline underline-offset-4"
               >
-              Aegis
+                Aegis
               </a>{" "}
               and asking coding agents to operate at the speed that required.
               The architecture that emerged became a paradigm. The paradigm
@@ -468,12 +470,6 @@ function CreatorSection() {
               >
                 Connect on LinkedIn
               </a>
-              <Link
-                href="/about"
-                className="text-base text-[var(--fg)] hover:text-accent underline underline-offset-4 decoration-[var(--rule)] hover:decoration-accent transition"
-              >
-                Learn more about me →
-              </Link>
             </div>
             <div className="mt-6 flex flex-wrap items-center gap-6 text-sm">
               <a

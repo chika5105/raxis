@@ -10,6 +10,7 @@ const NAV_LINKS: Array<{ href: string; label: string }> = [
   { href: "/conformance", label: "Conformance" },
   { href: "/docs", label: "Docs" },
   { href: "/about", label: "About" },
+  { href: "/investors", label: "Investors" },
 ];
 
 export function SiteNav() {
@@ -35,7 +36,9 @@ export function SiteNav() {
         </nav>
         <div className="flex items-center gap-4">
           <a
-            href="mailto:hello@raxis.io"
+          href="https://docs.google.com/forms/d/e/1FAIpQLScnVmQUI-PEX-eykhXFdmcLPgxjfqGsKai4N6BRmSnozr--Vw/viewform?usp=publish-editor"
+            target="_blank"
+            rel="noopener noreferrer"
             className="hidden sm:inline-flex items-center text-sm text-[var(--muted)] hover:text-[var(--fg)] transition"
           >
             Contact
@@ -75,7 +78,9 @@ export function SiteNav() {
           ))}
           <li className="shrink-0">
             <a
-              href="mailto:hello@raxis.io"
+              href="https://docs.google.com/forms/d/e/1FAIpQLScnVmQUI-PEX-eykhXFdmcLPgxjfqGsKai4N6BRmSnozr--Vw/viewform?usp=publish-editor"
+              target="_blank"
+              rel="noopener noreferrer"
               className="text-[var(--muted)] hover:text-[var(--fg)]"
             >
               Contact
