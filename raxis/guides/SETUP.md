@@ -210,7 +210,7 @@ raxis-kernel
 
 You should see JSON-formatted log lines like:
 
-```
+```json
 {"level":"info","event":"PolicyLoaded","epoch_id":1}
 {"level":"info","event":"KeyRegistryLoaded"}
 {"level":"info","event":"AuditChainGenesis"}

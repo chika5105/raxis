@@ -124,7 +124,7 @@ dimensions, not just token limits.
 
 ### 2.1 — Full KSB Format
 
-```
+```text
 # === ALERTS (rendered ONLY when present; ordered: BackgroundProcessExited,
 #     EscalationRequestStatus, TokenLimitApproaching; see §4.4) ===
 #
@@ -293,7 +293,7 @@ The DB state IS the reconstruction source.
 For deployments that want to store the raw KSB bytes externally (consistent with
 `log_content = true` in `[inference_audit]`):
 
-```
+```text
 $RAXIS_DATA_DIR/artifacts/ksb/
   <sha256>.txt    ← raw KSB string for this call (≤ ~1KB per file)
 ```
@@ -329,7 +329,7 @@ and immutable. Sections marked [PLAN] are extracted from the signed `plan.toml`.
 
 ### 3.1 — Executor NNSP
 
-```
+```python
 [KERNEL: IDENTITY]
 You are a RAXIS Executor agent. Your session ID is <session_uuid>.
 You are implementing task: <task_id> — <task_description>
@@ -503,7 +503,7 @@ non-empty effective custom-tool set)
 >   Orchestrator profile exists per `INV-PLANNER-HARNESS-06.1` and §4.4
 >   — custom tools are an Executor-only feature in V2).
 
-```
+```text
 [KERNEL: IDENTITY]
 You are the RAXIS Orchestrator. Your session ID is <session_uuid>.
 You are kernel-managed invisible infrastructure: the operator did not
@@ -656,7 +656,7 @@ the operator)
 > outcomes. The NNSP below reflects this. It is materially different from
 > V1's git-bundle-based Reviewer protocol.
 
-```
+```text
 [KERNEL: IDENTITY]
 You are a RAXIS Reviewer agent. Your session ID is <session_uuid>.
 You are reviewing task: <task_id> — <task_description>
@@ -794,7 +794,7 @@ across all roles and maintained centrally here.
 
 ### 4.1 — KSB Legend (Injected in All NNSPs)
 
-```
+```text
 ## Kernel State Block (KSB)
 
 Every inference call's system prompt begins with a [RAXIS:KERNEL_STATE] block.
@@ -866,7 +866,7 @@ Escalation state in escl field:
 
 ### 4.2 — Token Limit Error Code Reference (Injected in All NNSPs)
 
-```
+```text
 ## Token Limit Error Codes
 
 FAIL_TOKEN_LIMIT_PER_REQUEST { limit_type: "input" }
@@ -900,7 +900,7 @@ Escalation context for token limit (all 4 fields required):
 > `bash` is foreground-only; this block is rendered into Executor
 > NNSPs only.
 
-```
+```text
 ## Local Development Servers
 
 You may start local processes (dev servers, test servers, mock servers, message
@@ -973,7 +973,7 @@ the egress allowlist. If an external call is blocked (TLS reset for tproxy hosts
 
 ### 4.4 — KSB Alert Classes (Injected in All NNSPs)
 
-```
+```text
 ## KSB Alert Classes
 
 When the kernel needs to push asynchronous information into your KSB that should
@@ -1061,7 +1061,7 @@ taxonomy generalize to new classes by reading the class name and the body.
 > rendered into Executor NNSPs only. The Reviewer NNSP excludes the
 > entire `bash` tool per `INV-PLANNER-HARNESS-01`.
 
-```
+```text
 ## Background Process Tools (bash bg_*)
 
 V2 adds backgrounded shell execution for long-lived processes (dev servers,
@@ -1127,7 +1127,7 @@ bash invocations (audited as part of normal `bash` activity).
 > surface on which custom tools could be declared. This block is
 > rendered into Executor NNSPs only.
 
-```
+```text
 ## Operator-Defined Custom Tools
 
 Your task's profile declares the following custom tools. They appear in

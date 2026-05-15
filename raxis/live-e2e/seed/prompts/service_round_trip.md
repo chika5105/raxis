@@ -57,7 +57,7 @@ The test driver pre-seeded 5 rows whose `id` values are
 one row per line, sorted ASCENDING by `id`, in pipe-delimited
 form:
 
-```
+```text
 pg_seed_row_1|service-evidence-name-1|7919
 pg_seed_row_2|service-evidence-name-2|15838
 pg_seed_row_3|service-evidence-name-3|23757
@@ -79,7 +79,7 @@ The seed collection is `service_evidence_mongo` in database
 `find` all five, sort ASCENDING by `doc_id`, and write one
 canonical JSON object per line:
 
-```
+```json
 {"doc_id":"mongo_seed_doc_1","label":"service-evidence-label-1","magic":1000003}
 {"doc_id":"mongo_seed_doc_2","label":"service-evidence-label-2","magic":2000006}
 {"doc_id":"mongo_seed_doc_3","label":"service-evidence-label-3","magic":3000009}
@@ -98,7 +98,7 @@ The driver pre-seeded 5 keys under the prefix
 `service-evidence:`. SCAN every key under that prefix, GET each
 value, and write `<key>=<value>` lines sorted ASCENDING by key:
 
-```
+```text
 service-evidence:redis_seed_key_1=redis_seed_value_1
 service-evidence:redis_seed_key_2=redis_seed_value_2
 service-evidence:redis_seed_key_3=redis_seed_value_3
@@ -127,7 +127,7 @@ After the proxy replies `250 2.0.0 Ok`, write the local
 `from:`, `to:`, `subject:`, `body:` — lowercase keys, one field
 per line, no quoting):
 
-```
+```yaml
 from: sender@live-e2e.test
 to: raxis-tenant@live-e2e.test
 subject: smtp_seed_subject_1

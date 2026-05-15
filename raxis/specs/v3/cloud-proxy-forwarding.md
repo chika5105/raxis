@@ -127,7 +127,7 @@ FIRST in the same commit train and the change justified.
 **Wire shape (request).** `POST /` with
 `Content-Type: application/x-www-form-urlencoded`, body:
 
-```
+```text
 Action=AssumeRole
 &Version=2011-06-15
 &RoleArn=<urlencoded role_arn>
@@ -179,7 +179,7 @@ the same shape regardless of V2 or V3 mode.
 **Wire shape (request).** `POST /` with
 `Content-Type: application/x-www-form-urlencoded`, body:
 
-```
+```text
 grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
 &assertion=<signed JWT>
 ```
@@ -207,7 +207,7 @@ byte-identically.
 
 **Wire shape (request).** `POST` to the endpoint above, body:
 
-```
+```text
 grant_type=client_credentials
 &client_id=<urlencoded client_id>
 &client_secret=<urlencoded client_secret>
@@ -289,7 +289,7 @@ The cache is keyed by `(provider, exchange_key)` where
 
 Each cache entry stores:
 
-```
+```yaml
 CachedToken {
     token: String,           // SecretBox-wrapped, redacted on Debug
     expires_at_unix: u64,    // absolute, from upstream Expiration / expires_in
@@ -351,7 +351,7 @@ shape.
 Emitted on every SUCCESSFUL synchronous OR background-refresh
 exchange.
 
-```
+```yaml
 CloudCredentialForwarded {
     session_id:       String,
     credential_name:  String,
@@ -371,7 +371,7 @@ CloudCredentialForwarded {
 Emitted on every FAILED exchange (synchronous OR background).
 The `reason` is a closed-enum stable wire string.
 
-```
+```yaml
 CloudCredentialForwardingDenied {
     session_id:      String,
     credential_name: String,
@@ -410,7 +410,7 @@ cache. The synchronous-serve path during an aging-window
 background refresh ALSO emits this (not a refresh event — the
 refresh emits its own when it completes).
 
-```
+```yaml
 CloudCredentialCacheHit {
     session_id:       String,
     credential_name:  String,
@@ -427,7 +427,7 @@ Emitted when a background refresh successfully replaces a
 cache entry. Pairs with the `CloudCredentialForwarded` event
 the same exchange wrote.
 
-```
+```yaml
 CloudCredentialCacheRefreshed {
     session_id:       String,
     credential_name:  String,
@@ -487,7 +487,7 @@ auth failures) with the XML body unchanged. The `<Code>` value
 is asserted to be in the closed enum the
 `slice_aws_proxy_real_endpoint` witness pinned:
 
-```
+```text
 MissingAuthenticationToken | InvalidClientTokenId
 | SignatureDoesNotMatch    | AccessDenied
 ```
@@ -495,7 +495,7 @@ MissingAuthenticationToken | InvalidClientTokenId
 Plus the V3-additional values that may appear when forwarding
 real (mis-)configured AssumeRole calls:
 
-```
+```text
 AccessDenied | ExpiredToken | ValidationError
 | MalformedPolicyDocument
 ```
@@ -522,7 +522,7 @@ The proxy returns HTTP 400 with the JSON body unchanged. The
 `error` field is asserted to be in the RFC 6749 §5.2 closed
 enum the `slice_gcp_proxy_real_endpoint` witness pinned:
 
-```
+```text
 invalid_request | invalid_client | invalid_grant
 | unauthorized_client | unsupported_grant_type | invalid_scope
 ```

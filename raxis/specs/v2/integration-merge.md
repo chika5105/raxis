@@ -148,14 +148,14 @@ returns the error code and stops processing with no state change.
 ### Check 2 — `commit_sha` Reachability
 `commit_sha` must exist in the Kernel's mirror of the Orchestrator's worktree, reachable
 from `HEAD`. The Kernel verifies by running:
-```
+```bash
 git -C $RAXIS_DATA_DIR/worktrees/<orchestrator_uuid> cat-file -t <commit_sha>
 ```
 Result must be `commit`. Failure: `FAIL_COMMIT_NOT_FOUND`.
 
 ### Check 3 — Ancestry Verification
 `commit_sha` must be a descendant of the initiative's current `base_sha`:
-```
+```bash
 git -C <worktree> merge-base --is-ancestor <base_sha> <commit_sha>
 ```
 If `commit_sha` is not a descendant of `base_sha`, the Orchestrator is attempting to
@@ -205,7 +205,7 @@ let touched_paths: Vec<&str> = touched
 The `GitAdapter` impl wraps `gix::diff_tree_to_tree(base_tree, head_tree)`, returning each touched path as a `path:///`-prefixed URI; the kernel strips the prefix here for the allowlist comparison so the rest of this Check stays SE-flavoured. Non-SE adapters return their own URI scheme and the allowlist matcher in `policy.toml` is reframed as URI-prefix matching (`extensibility-traits.md §2.6` files-to-change for `kernel/src/scheduler/admit.rs`).
 
 The set of touched paths is checked against the hybrid allowlist:
-```
+```text
 hybrid_effective_allow =
     UNION(task.path_allowlist for task in merged_task_ids)
     ∪ orchestrator.cross_cutting_artifacts
@@ -389,7 +389,7 @@ git operations the Orchestrator's `git merge` invocation would use,
 but produced as an **orphan commit** in the kernel's
 verifier-staging area at:
 
-```
+```text
 $RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/
 ```
 
@@ -579,7 +579,7 @@ UPDATE subtask_activations
 
 **Phases 2 and 3** (dispatched after Phase 1 commits, NOT in this Check): see §11.2.
 
-```
+```sql
 # Phase 2 (idempotent domain commit — delegated to DomainAdapter)
 ctx.domain.commit(
     &Snapshot { content_hash: commit_sha_to_content_hash(commit_sha), ... },
@@ -592,7 +592,7 @@ UPDATE initiatives SET git_apply_pending = 0 WHERE id = :initiative_id;
 ```
 
 `GitAdapter::commit` (the V2 reference impl in `crates/raxis-domain-git/src/commit.rs`) executes:
-```
+```bash
 git -C <main_repo> fetch <orchestrator_worktree> <commit_sha>
 git -C <main_repo> update-ref refs/heads/main <commit_sha>
 ```
@@ -612,7 +612,7 @@ The simplest case: all sub-tasks complete before the Orchestrator submits any me
 Orchestrator waits for `AllReviewersPassed` for every sub-task, then merges all branches
 in a single `git merge` chain and submits one `IntegrationMerge` covering all sub-tasks.
 
-```
+```text
 [A: Complete] [B: Complete] [C: Complete]
                                  │
                     Orchestrator merges A, B, C
@@ -627,7 +627,7 @@ in a single `git merge` chain and submits one `IntegrationMerge` covering all su
 In a multi-wave initiative where some sub-tasks depend on others, the Orchestrator may
 submit `IntegrationMerge` between waves:
 
-```
+```text
 Wave 1: [A: Complete] [B: Complete]
   → IntegrationMerge { merged_task_ids: [A, B], commit_sha: "sha1" }
   → main → sha1
@@ -751,7 +751,7 @@ The Orchestrator's non-negotiable system prompt includes this procedure verbatim
 the mechanical sequence the Orchestrator must follow when it receives
 `KernelPush::AllReviewersPassed { task_id }`:
 
-```
+```yaml
 1. Confirm all expected sub-tasks for this wave have sent AllReviewersPassed.
    (Do not merge a partial wave — wait for all expected tasks.)
 
@@ -853,7 +853,7 @@ initiative's first `IntegrationMerge`, the ancestry check (Check 3) will fail:
 has advanced beyond `initial_sha`.
 
 **Resolution:** The Orchestrator must rebase or merge main into its clone:
-```
+```bash
 git fetch origin main
 git merge origin/main
 ```
@@ -941,7 +941,7 @@ In all cases except #1, the `git_apply_pending = 1` flag in SQLite is the durabl
 
 After policy load and after `key-revocation.md §5.3` reconciliation, before accepting new IPC connections, `kernel/src/startup.rs` runs the merge-consistency recovery pass:
 
-```
+```text
 SELECT id, current_sha, main_repo_path
   FROM initiatives
  WHERE git_apply_pending = 1;
@@ -1129,7 +1129,7 @@ strictly earlier phase of the pipeline.
 
 #### 11.10.2 Ordering relative to §11.1
 
-```
+```sql
 Phase 0 (V2 — Check 5d):
   - INSERT into integration_merge_attempts (state = 'AwaitingPreMergeVerifiers',
                                              candidate_merge_sha = <orphan>)
@@ -1564,7 +1564,7 @@ changes require a new signed bundle (`raxis policy push`), which goes through
 
 ### The Operator Approval Flow
 
-```
+```text
 1. Orchestrator merges sub-task branches → produces commit_sha
    (sub-task diff touches src/payments/)
 
@@ -1800,7 +1800,7 @@ is opt-in per initiative by the operator at plan-signing time.
 
 ### The Gate Flow
 
-```
+```text
 1. Final IntegrationMerge admitted
    → main updated to final_sha
    → Kernel emits InitiativeCompleted
@@ -1883,7 +1883,7 @@ IntegrationMerge before the push executes, bypassing the gate for the new conten
 
 Adds a new state to the Initiative FSM:
 
-```
+```text
 InProgress
     ↓ (all sub-tasks complete, IntegrationMerge admitted)
 Completed

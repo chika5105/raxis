@@ -320,7 +320,7 @@ or the verifier-token TTL elapses (whereupon the task transitions to
 
 ## The full pipeline (visual)
 
-```
+```text
                      ┌──── IntentRequest arrives ────┐
                      │  kernel/src/handlers/intent.rs │
                      └────────────────┬───────────────┘

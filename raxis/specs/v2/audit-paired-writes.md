@@ -29,7 +29,7 @@ The operative phrase is **"MUST NOT depend on continued operation of the authori
 
 The V1 audit-emit ordering (`v1/kernel-store.md §2.5.2`):
 
-```
+```text
 Phase A (pre-tx)        — parse intent, run policy gates
                           (no state mutation; no audit emission)
 Phase B (state mutation)— BEGIN IMMEDIATE
@@ -223,7 +223,7 @@ These fields are added **once per variant** in `crates/audit/src/event.rs`. The 
 
 For any state-mutating intent, operator IPC write, background sweep, or witness submission:
 
-```
+```text
 Phase A (pre-tx)        — parse intent, run policy gates
                           (no state mutation; no audit emission)
 
@@ -282,7 +282,7 @@ This binds the row to the pending event whose `pending_seq` was just announced. 
 
 Every table in `crates/store/migrations/` whose rows describe state the kernel mutates inside Phase B1. The exhaustive V2.1 list (cross-checked against `kernel-store.md`):
 
-```
+```text
 sessions
 initiatives
 plan_bundles                      -- v2 plan bundle sealing
@@ -307,7 +307,7 @@ policy_epoch                      -- v1 kernel-store
 
 **Tables explicitly EXCLUDED** (no `last_committing_event_seq` column):
 
-```
+```text
 audit_chain                       -- the chain itself (would be circular)
 sqlite_sequence                   -- SQLite-managed
 maintenance_run_history           -- pure observability
@@ -376,7 +376,7 @@ Not every audit event participates in the paired protocol. The full classificati
 
 The exhaustive list of state-mutating event kinds that gain the three new mandatory fields and participate in the protocol:
 
-```
+```text
 Session lifecycle:
   SessionCreated, SessionStateChanged, SessionRevoked, SessionExpired,
   SessionTokenInvalidated
@@ -878,7 +878,7 @@ transitive dependency closure begins with `raxis-` other than
 
 #### §5.4.2 CLI surface
 
-```
+```text
 raxis-audit-verify
     --chain   <PATH-OR-GLOB>...     One or more JSONL segment files.
                                     Glob patterns expanded; multiple
@@ -1388,7 +1388,7 @@ On a typical NVMe with `synchronous=FULL`, each fsync costs ~1–10ms (median ~2
 
 A future optimisation: amortise the pending fsync over a small batch of pendings (e.g., up to 16 or 5ms timeout). This trades a small amount of first-in-batch latency for higher steady-state throughput. The pattern:
 
-```
+```text
 T0: collect intent A's pending (not yet fsync'd)
 T0+1ms: collect intent B's pending (not yet fsync'd)
 T0+2ms: collect intent C's pending
@@ -1517,7 +1517,7 @@ V2.1 ships D′ as the structural baseline; V2.2 adds G as an additional layer. 
 
 The strict R-7 reading would also be satisfied by **audit-last** ordering with a pending-on-failure marker:
 
-```
+```text
 1. BEGIN IMMEDIATE; mutate; COMMIT
 2. Try emit confirmed; on failure write to a "pending_audit_replay" SQLite table
 3. Background sweep replays the table to JSONL on next opportunity

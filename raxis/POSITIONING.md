@@ -135,7 +135,7 @@ are useful. They give the comparison without inheriting the wrong mental model a
 
 The single most useful diagram for explaining RAXIS to a technical audience.
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────┐
 │  Agent Frameworks                                                │
 │  LangChain · AutoGen · MetaGPT · OpenAI Agents SDK ·             │

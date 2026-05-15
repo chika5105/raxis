@@ -111,7 +111,7 @@ For each `(os, arch)` row in the build matrix
 (`darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64`),
 one tarball:
 
-```
+```text
 raxis-<version>-<os>-<arch>.tar.gz
   bin/raxis-kernel
   bin/raxis-cli
@@ -144,7 +144,7 @@ raxis-<version>-<os>-<arch>.tar.gz
 
 Three archives, one per role per release (kernel-version-locked):
 
-```
+```text
 raxis-reviewer-core-<version>.tar.gz
   reviewer-core.img
   reviewer-core.manifest.toml
@@ -387,7 +387,7 @@ operator laptops run.
 The trust anchor (the public half of the kernel signing keypair) is
 fed into the build via `RAXIS_KERNEL_SIGNING_KEY_HEX`. Sequence:
 
-```
+```text
 GitHub Secret (32-byte hex)
    │
    ▼  (workflow `env:`)
@@ -608,7 +608,7 @@ downloads the platform-appropriate `raxis-<version>-<os>-<arch>.tar.gz`,
 the three image archives (`raxis-{reviewer-core,orchestrator-core,executor-starter}-<version>.tar.gz`),
 verifies every `sha256`, and lays out:
 
-```
+```text
 $HOMEBREW_PREFIX/bin/raxis-kernel
 $HOMEBREW_PREFIX/bin/raxis-cli
 $HOMEBREW_PREFIX/bin/raxis-orchestrator

@@ -26,7 +26,7 @@ dir.
 
 ## Default
 
-```
+```text
 ~/.raxis    # i.e., $HOME/.raxis
 ```
 

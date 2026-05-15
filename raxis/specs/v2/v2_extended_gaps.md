@@ -1094,7 +1094,7 @@ identity only.
    token. The CLI outputs the Ed25519 signature and public key.
    The operator pastes **only the signature and public key**
    (both non-secret) back into the browser:
-   ```
+   ```text
    POST /api/auth/verify
    {
      "challenge": "<the-challenge>",
@@ -1340,7 +1340,7 @@ the security rationale — there is no in-browser signing
 code anywhere in the bundle.
 
 **Build artifact.**
-```
+```text
 dist/
 ├── index.html
 ├── raxis-logo.svg
@@ -1425,7 +1425,7 @@ detached signature into the editor.
 
 **Wire shape.**
 
-```
+```http
 PUT /api/policy/toml
 Authorization: Bearer <jwt>
 Content-Type: application/json

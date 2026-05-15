@@ -32,7 +32,7 @@ This is **opt-in defaulting**: the operator omits a field; `plan prepare` propos
 
 The 10-minute new-operator path looks like:
 
-```
+```bash
 $ raxis-cli setup wizard          # generates keys, minimum policy, smoke-tests kernel
 $ raxis-cli plan init -t feature  # scaffolds plan.toml with sensible structure
 $ vim plan.toml                   # operator edits to describe their work
@@ -97,7 +97,7 @@ The decisions below are normative. Section labels (D1–D9) preserve cross-refer
 
 ### 4.1 The pipeline
 
-```
+```text
 operator-authored plan.toml
             |
             v
@@ -205,7 +205,7 @@ The annotation is **not parsed by the kernel**. It is stripped from no byte stre
 
 The `vX.Y.Z` in the annotation is the CLI version that wrote the annotation. The kernel never validates it. The CLI uses it during `plan prepare` re-runs:
 
-```
+```text
 For each annotated field in the parsed plan:
   let stamped_version = parse "@raxis-default vX.Y.Z" comment
   let current_default = kernel.resolve_default(field_path, current_policy)
@@ -308,7 +308,7 @@ If the operator runs `plan prepare` again *without* editing the template,
 the marker block is preserved verbatim and `plan prepare` exits zero with
 a non-fatal warning:
 
-```
+```text
 WARN: 1 task still has the @raxis-required template for path_allowlist:
   - implement_oauth2
 Submit plan will fail until you uncomment and customize the template.
@@ -367,7 +367,7 @@ The kernel never silently mutates an operator-signed plan.
 
 `plan prepare` surfaces the issue pre-signing as a hard refusal:
 
-```
+```text
 FAIL: 1 Reviewer task declares path_allowlist:
   - oauth2_review (path_allowlist = ["src/"])
 Reviewer's /workspace mount is read-only and the harness has no
@@ -388,7 +388,7 @@ When the operator runs `plan prepare` from inside a git worktree, the
 CLI augments the §4.5.3 template with deterministic top-level-directory
 suggestions sourced from the worktree at HEAD:
 
-```
+```bash
 $ cd ~/work/myproject
 $ raxis-cli plan prepare plan.toml
 INFO: detected git worktree at ~/work/myproject
@@ -435,7 +435,7 @@ policy or plan field. The CLI:
 Operators can override the auto-detected worktree with
 `--suggest-from <path>`:
 
-```
+```bash
 $ raxis-cli plan prepare plan.toml --suggest-from ~/work/myproject
 ```
 
@@ -476,7 +476,7 @@ violate the boundary between authoring and admission).
 
 ### 5.1 Invocation
 
-```
+```bash
 raxis-cli plan prepare <plan.toml> [--upgrade-defaults] [--keep-original]
                                     [--dry-run] [--suggest-from <path>]
                                     [--no-suggest]
@@ -493,7 +493,7 @@ raxis-cli plan prepare <plan.toml> [--upgrade-defaults] [--keep-original]
 
 ### 5.2 Phases
 
-```
+```text
 1. parse:      Read plan.toml bytes from disk; parse as TOML, retaining
                comments and field positions.
 
@@ -747,7 +747,7 @@ failure produces `FAIL_PREPARE_KERNEL_UNREACHABLE`, exit code 4,
 and the original `plan.toml` is preserved. The CLI's stderr
 message is:
 
-```
+```text
 error: kernel daemon unreachable on socket /var/run/raxis/operator.sock
        (connection refused: errno=111)
 
@@ -794,7 +794,7 @@ If `--offline` is passed against a `plan.toml` that has NO
 partial-prepare marker AND no §4.5 template insertions are
 needed (phase 2 produces no changes), the CLI emits:
 
-```
+```text
 warning: --offline was passed but plan.toml has no pending
          §4.5 template work; phase 2 is a no-op. The kernel
          was NOT contacted; defaultable fields per §4.2 were
@@ -816,7 +816,7 @@ Scaffold a new `plan.toml` from a built-in template. Templates ship with the CLI
 
 ### 6.2 Invocation
 
-```
+```bash
 raxis-cli plan init [--template <name>] [--output <path>] [--initiative-name <text>]
 ```
 
@@ -863,7 +863,7 @@ Local-only static validation of a `plan.toml` without IPC and without an operato
 
 ### 7.2 Invocation
 
-```
+```bash
 raxis-cli plan validate <plan.toml> [--with-kernel] [--explain-environment]
 ```
 
@@ -890,7 +890,7 @@ Local-only (no `--with-kernel`) checks:
 
 ### 7.4 Output
 
-```
+```bash
 $ raxis-cli plan validate ./plan.toml
 plan.toml: 4 tasks, 1 profile, 0 custom tools
   ✓ TOML schema
@@ -969,7 +969,7 @@ Show the diff between the operator's raw plan and what `plan prepare` would prod
 
 ### 8.2 Invocation
 
-```
+```bash
 raxis-cli plan diff <plan.toml> [--format unified|json]
 ```
 
@@ -1001,13 +1001,13 @@ Render the plan in plain English: ASCII DAG diagram, per-task summary, and a fin
 
 ### 9.2 Invocation
 
-```
+```bash
 raxis-cli plan explain <plan.toml> [--task <id>] [--format text|markdown|html]
 ```
 
 ### 9.3 Output structure
 
-```
+```text
 INITIATIVE: <plan.initiative.description>
 SUBMITTING OPERATOR: (resolved at submit time, not plan time)
 
@@ -1059,7 +1059,7 @@ Canonicalize a `plan.toml` file's formatting: indentation, field ordering within
 
 ### 10.2 Invocation
 
-```
+```bash
 raxis-cli plan fmt <plan.toml> [--check] [--stdout]
 ```
 
@@ -1092,7 +1092,7 @@ Pre-submission projection of token usage and provider cost. Decision support bef
 
 ### 11.2 Invocation
 
-```
+```bash
 raxis-cli plan cost-estimate <plan.toml> [--scenario typical|worst-case]
 ```
 
@@ -1110,7 +1110,7 @@ Calls a new IPC `OperatorRequest::EstimateCost { plan_bytes }`; the kernel:
 
 Output:
 
-```
+```text
 Initiative: <plan.initiative.description>
 
 Per-task projection (typical scenario):
@@ -1138,7 +1138,7 @@ Run the full admission check chain (`plan-bundle-sealing.md §8.1` + `policy-pla
 
 ### 12.2 Invocation
 
-```
+```bash
 raxis-cli submit plan <plan.toml> --dry-run [--initiative-id <id>]
 ```
 
@@ -1154,7 +1154,7 @@ The bundle is still signed with the operator key (so the kernel can verify the o
 
 On success:
 
-```
+```text
 ✓ Admission check passed.
   Bundle SHA-256:     abcd1234...
   Resolved DAG:       3 tasks, 2 edges
@@ -1180,7 +1180,7 @@ Live tail of an initiative. Operator's pane of glass for active work.
 
 ### 13.2 Invocation
 
-```
+```bash
 raxis-cli initiative watch <initiative_id> [--follow] [--task <id>] [--format pretty|json]
 ```
 
@@ -1192,7 +1192,7 @@ raxis-cli initiative watch <initiative_id> [--follow] [--task <id>] [--format pr
 
 ### 13.3 Pretty output
 
-```
+```text
 Initiative: <id>  ─  Status: Executing  ─  Started: 12 minutes ago
 
 DAG STATUS:
@@ -1225,13 +1225,13 @@ Single command to resume a paused initiative. The pause cause (token-limit excee
 
 ### 14.2 Invocation
 
-```
+```bash
 raxis-cli initiative resume <initiative_id> [--reason <text>]
 ```
 
 ### 14.3 Behavior
 
-```
+```text
 1. Open operator socket.
 2. Send OperatorRequest::DescribeInitiativePause { initiative_id }.
 3. Kernel responds with the pause cause (TokenBudgetExceeded, EscalationPending,
@@ -1264,7 +1264,7 @@ Operator overview of in-flight and recent work. The **v1 baseline** ships a four
 
 ### 15.2 Invocation
 
-```
+```bash
 raxis-cli initiative list [--state <s>] [--mine] [--limit <n>] [--since <duration>] [--format table|json] [--json]
 ```
 
@@ -1281,7 +1281,7 @@ raxis-cli initiative list [--state <s>] [--mine] [--limit <n>] [--since <duratio
 
 **v1 baseline** (the `cli-readonly.md §5.5.6b` table; ships today):
 
-```
+```text
 Initiatives (state=active, 3 rows):
   initiative_id              state          [Q]  created (rel) plan_sha256
   01J8…init-x                Executing           12m           abc123…
@@ -1291,7 +1291,7 @@ Initiatives (state=active, 3 rows):
 
 **v2 extension** (adds `OPERATOR`, `TASKS`, `DESCRIPTION` columns; the `[Q]` flag remains):
 
-```
+```text
 ID                                    STATE       OPERATOR        AGE     TASKS    DESCRIPTION
 01H8Q7K2J9...                         Executing   alice:f3a2...   12m     2/4      Add dark mode toggle
 01H8P4R3M1...                         Completed   bob:91cd...     2h      4/4      Bump axum to 0.7
@@ -1321,7 +1321,7 @@ Interactive first-run setup. Generates the operator's keypair, walks through a m
 
 ### 16.2 Invocation
 
-```
+```bash
 raxis-cli setup wizard [--non-interactive --config <path>]
 ```
 
@@ -1329,7 +1329,7 @@ raxis-cli setup wizard [--non-interactive --config <path>]
 
 ### 16.3 Phases
 
-```
+```yaml
 1. Greeting + sanity checks:
    - Verify the kernel daemon is reachable on the operator socket.
    - Verify the data directory is writable.
@@ -1540,7 +1540,7 @@ Re-running the wizard on an already-set-up deployment offers to skip phases that
 
 ### 17.3 Invocation
 
-```
+```bash
 raxis-cli doctor [<category>] [--all] [--json]
 ```
 
@@ -1550,7 +1550,7 @@ raxis-cli doctor [<category>] [--all] [--json]
 
 Updated category covers the V2 set:
 
-```
+```bash
 $ raxis-cli doctor canonical-images
 Reviewer image:           ✓ raxis-reviewer-core@sha256:abcd... (matches manifest)
 Orchestrator image:       ✓ raxis-orchestrator-core@sha256:efgh... (matches manifest)

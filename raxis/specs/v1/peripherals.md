@@ -59,7 +59,7 @@ The planner system prompt is assembled by the kernel (`prompt/assembler.rs`) and
 
 ### Session lifecycle
 
-```
+```text
 1. Kernel spawns planner subprocess (or planner connects to planner.sock)
 2. Kernel calls create_session(Role::Planner, worktree_root, ...) → session_token
 3. Kernel assembles system prompt via prompt::assemble(session_id) → injects into planner context
@@ -445,7 +445,7 @@ The gateway communicates with the kernel exclusively over the gateway UDS (`<dat
 
 ### Spawn model
 
-```
+```text
 kernel main.rs step 9 →
     spawn_gateway(gateway_binary_path, gateway_process_token, gateway_socket_path, data_dir)
         → env: RAXIS_GATEWAY_TOKEN=<64-char hex>, RAXIS_GATEWAY_SOCKET=<absolute path>,

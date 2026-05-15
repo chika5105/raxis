@@ -72,7 +72,7 @@ V2 does **not** ship alternative impls in the other six trait families (Vault, H
 
 The twelve `R-*` invariants — `R-1` (domain separation), `R-4` (authority derivation), `R-7` (cryptographic audit chain), `R-9` (attributable intent), `R-11` (mediated coordination), and the rest — never mention git, commits, branches, or worktrees. The reference implementation in this repository uses git because its target *domain* is autonomous software engineering. A different deployment of RAXIS — autonomous trading, clinical-decision support, robotics, claims adjudication — needs the same paradigm primitives but very different state-management primitives.
 
-```
+```text
 Paradigm        (R-11)      "State must be transferred via authority mediation."
 Implementation  (V2-SE)     "We use git bundles, transferred by the Kernel via VirtioFS."
 ```
@@ -420,7 +420,7 @@ Documented here so reviewers can sanity-check that the seam is wide enough to ad
 - `kernel/src/scheduler/admit.rs` — gate-13 (touched-paths ⊆ allowlist) consumes `TouchedResources` rather than `Vec<PathBuf>`. The allowlist comparison becomes `policy.allowlist.matches(&resource.uri)` so SE keeps `path://`-prefix matching while non-SE domains use their own URI scheme.
 - `kernel/src/vcs/` — DELETED. All callers now go through `ctx.domain`. Audit chain emits `domain.commit_receipt` + `domain.snapshot.content_hash` instead of `commit_sha` + `tree_sha`.
 - `crates/store/migrations/0008_domain_handles.sql` (NEW) — adds `workspace_handles` table:
-  ```
+  ```text
   workspace_handles(
       session_id TEXT PRIMARY KEY,
       host_path  TEXT NOT NULL,
@@ -867,7 +867,7 @@ The framing is **identical** in every row above (bincode-encoded `IpcMessage` pe
 
 `DomainAdapter` (§2) and `IsolationBackend` (§3) are **orthogonal axes**. The kernel composes them at boot independently:
 
-```
+```text
                 ┌─── domain axis ────────────────────────────────┐
                 │ GitAdapter   TradingAdapter   HealthcareAdapter │
                 ├────────────────────────────────────────────────┤
@@ -1700,7 +1700,7 @@ The kernel has exactly **one** boot site that constructs every trait impl: `kern
 
 ### §9.1 Construction order (matters)
 
-```
+```text
 1. Load policy.toml + verify operator signature (concrete)
 2. Open store (kernel.db) (concrete)
 3. Construct AuditSink (§5)                              ← needed by every later step
@@ -1808,7 +1808,7 @@ Instead, the kernel ships a built-in `HttpSidecarRouter` impl of
 operator runs alongside the kernel. The kernel communicates with
 it over localhost HTTP using a fixed, RAXIS-defined JSON schema.
 
-```
+```text
                 RAXIS protocol              Provider API
                 (fixed schema)              (their format)
 ┌──────────┐   ──────────────►  ┌─────────┐  ──────────►  ┌──────────┐
@@ -1980,7 +1980,7 @@ Same code path as
 **End-of-stream HMAC binding.** The terminal `complete` event's
 `data` is signed with HMAC-SHA256 over
 
-```
+```text
 <request_id> ":" <timestamp_ms> ":" <serde_json::to_vec(response)>
 ```
 
@@ -2082,7 +2082,7 @@ sidecar_hmac_secret = "a3f1...64-hex-chars..."
 
 **Boot-time handshake (challenge-response):**
 
-```
+```text
 1. Kernel generates a random 32-byte nonce.
 2. Kernel sends POST /auth/challenge { nonce: "<hex>" }
    with header X-Raxis-HMAC: HMAC-SHA256(secret, nonce)
@@ -2100,7 +2100,7 @@ If step 3 or 5 fails → `BootError::SidecarAuthFailed` (fail-closed).
 
 Every `POST /v1/complete` request carries:
 
-```
+```yaml
 X-Raxis-Request-Id: <uuid>
 X-Raxis-Timestamp: <unix-epoch-ms>
 X-Raxis-HMAC: HMAC-SHA256(secret, request_id || timestamp || body)
@@ -2112,7 +2112,7 @@ The sidecar MUST reject any request where:
 
 The sidecar's response carries the same triple:
 
-```
+```yaml
 X-Raxis-Request-Id: <same uuid>
 X-Raxis-Timestamp: <unix-epoch-ms>
 X-Raxis-HMAC: HMAC-SHA256(secret, request_id || timestamp || body)
@@ -2299,7 +2299,7 @@ These specs are updated to reference `extensibility-traits.md` at the relevant i
 
 For every trait, the conformance kit is a re-runnable `cargo test`-style suite that asserts the contract regardless of the impl. Layout:
 
-```
+```text
 crates/raxis-<trait>/
   src/
     lib.rs           ← trait definition + error types

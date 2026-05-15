@@ -742,7 +742,7 @@ the exact same `FallbackModelClient` chain, `RetryingModelClient`
 wrapper, `CircuitBreaker`, and half-open probe as every built-in
 provider. The sidecar is just another `Arc<dyn ModelClient>`:
 
-```
+```text
 FallbackModelClient [
   RetryingModelClient(CircuitBreaker(AnthropicClient)),   ← built-in
   RetryingModelClient(CircuitBreaker(SidecarModelClient)), ← sidecar
@@ -1009,7 +1009,7 @@ This prevents a permanently-hanging sidecar from consuming even
 the `max_in_flight` permit slots — after the first 5 failures
 hit the timeout, the circuit opens and the kernel stops trying.
 
-```
+```text
 Normal:   event → semaphore.acquire → POST → 2xx → release
 Backpressure: event → semaphore full → drop (audit: Backpressure)
 Circuit open: event → circuit check → drop (audit: CircuitOpen)
@@ -2078,7 +2078,7 @@ the simple query path.
 
 ### Postgres: SimpleQuery vs Extended Query Protocol
 
-```
+```text
 SimpleQuery protocol (what the proxy handles today):
   Client → Q("SELECT * FROM users")
   Server → RowDescription + DataRow* + CommandComplete + ReadyForQuery
@@ -2100,7 +2100,7 @@ does not understand.
 
 ### MySQL: `COM_QUERY` vs `COM_STMT_*`
 
-```
+```text
 Simple path (what the proxy handles today):
   Client → COM_QUERY("SELECT * FROM users")
   Server → ResultSetHeader + ColumnDef* + EOF + Row* + EOF
@@ -2128,7 +2128,7 @@ returns empty results.
 
 For Postgres (~300 lines):
 
-```
+```text
 Parse    → extract SQL text, classify, check restrictions → forward
 Bind     → forward (parameter values don't change the restriction check)
 Describe → forward, relay RowDescription back to client
@@ -2144,7 +2144,7 @@ restriction model without changes.
 
 For MySQL (~200 lines):
 
-```
+```text
 COM_STMT_PREPARE  → extract SQL, classify, check restrictions → forward
 COM_STMT_EXECUTE  → forward, relay binary result set
 COM_STMT_CLOSE    → forward

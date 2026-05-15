@@ -29,7 +29,7 @@ This is the highest-probability path to shipping neither safely.
 
 **The correct model:** architect for v2, but gate each phase behind a formal release check.
 
-```
+```text
 Phase A  ─  v1 hard core
             Kernel/planner process split, provider gateway, verifier runner,
             signed structured plans, witness-based gates, audit chain,
@@ -178,7 +178,7 @@ The Rust compiler enforces the dependency graph. If `raxis-planner` does not dec
 
 The dependency graph must be designed so that the crates the planner depends on contain *only* what a proposer needs: type definitions, IPC client code, and its own working-cache logic. Nothing else.
 
-```
+```text
 raxis/                          # repository root (standalone clone or nested subtree)
 │
 ├── Cargo.toml                    # workspace root; defines member crates and shared deps
@@ -743,7 +743,7 @@ The crate's continued existence is the regression net for both of these — any 
 The following diagram shows which crates may depend on which.
 An arrow means "may depend on." Absence of an arrow means the compiler prevents the dependency.
 
-```
+```text
 raxis-types        ←──────────── all crates depend on this
 
 raxis-crypto       ←─── kernel, cli, audit-tools, policy

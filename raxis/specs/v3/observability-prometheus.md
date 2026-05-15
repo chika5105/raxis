@@ -11,7 +11,7 @@ documents the live-e2e + perf-harness wiring.
 
 ## 1. Pipeline
 
-```
+```text
 raxis-kernel              (in-process)
   |
   |  ObservabilityHub.record_*   (ring file JSONL frames)

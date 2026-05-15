@@ -179,7 +179,7 @@ decision — not a mistake that was waved through.
 
 ### Warning Output Format
 
-```
+```bash
 raxis plan approve plan.toml
 
 Validating plan against policy bundle (epoch 7)...
@@ -206,7 +206,7 @@ Policy epoch:  7
 ```
 
 **With `--no-strict`:**
-```
+```bash
 raxis plan approve --no-strict plan.toml
 
 Validating plan against policy bundle (epoch 7)...
@@ -2051,7 +2051,7 @@ begins; steps 1–onwards run on `OperatorRequest::ApprovePlan` (which
 in V2 may be coalesced with `CreateInitiative` for single-step
 admission, but conceptually they remain distinct gates):
 
-```
+```text
 0. Policy load (runs at `epoch advance`, not `approve_plan` per se, but
    gates every subsequent `approve_plan`):
    - Any [[vm_images]] entry's role_restriction contains "Reviewer"?

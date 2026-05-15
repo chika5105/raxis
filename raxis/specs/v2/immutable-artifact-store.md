@@ -38,7 +38,7 @@ object database.
 
 **Every policy bundle ever active is preserved.**
 
-```
+```text
 $RAXIS_DATA_DIR/artifacts/policy/
   <sha256-a>.toml          ← policy bundle active at epochs 1–5
   <sha256-b>.toml          ← policy bundle active at epochs 6–9
@@ -67,7 +67,7 @@ Direct filesystem reads by operators for auditing go through `raxis policy histo
 
 **Every approved plan is preserved with its Ed25519 signature.**
 
-```
+```text
 $RAXIS_DATA_DIR/artifacts/plans/
   <sha256-of-plan>.toml    ← plan bytes (as submitted)
   <sha256-of-plan>.sig     ← Ed25519 signature over the plan bytes
@@ -95,7 +95,7 @@ new `InitiativeCreated` event with the same `plan_sha256` but the new `policy_ep
 
 **Key rotation preserves all historical public keys.**
 
-```
+```text
 $RAXIS_DATA_DIR/artifacts/keys/
   <fingerprint-a>.pem      ← operator public key A (may be superseded)
   <fingerprint-b>.pem      ← operator public key B (current)
@@ -181,7 +181,7 @@ retrieving the two artifacts by SHA-256 and running `diff`).
 
 ## 4. Storage Layout (Complete)
 
-```
+```text
 $RAXIS_DATA_DIR/
   artifacts/
     policy/
@@ -333,7 +333,7 @@ the Kernel checks that `policy_bundles` and `plans` are also set to `Days(M)` wh
 `M ≤ N`. If any plan or policy artifact would outlive the key used to sign it, the push
 is rejected:
 
-```
+```text
 ERROR: artifact_retention.keys = 365 (days) is shorter than artifact_retention.plans = "forever".
 Plans retained longer than the key used to sign them cannot be re-verified.
 Set keys = "forever" or reduce plans retention to ≤ 365 days.
@@ -355,7 +355,7 @@ what will be deleted before any file is touched.
 
 ### GC Flow
 
-```
+```text
 1. Operator: raxis gc --dry-run
    → Kernel computes expiry candidates (no files touched)
    → Kernel runs safety checks on the full candidate set
@@ -378,7 +378,7 @@ what will be deleted before any file is touched.
 
 An artifact is an expiry candidate when:
 
-```
+```text
 now() - artifact.written_at > retention_window.days()
 ```
 
@@ -480,7 +480,7 @@ deleted?" — even after the file is gone.
 
 ### What the `--dry-run` Report Looks Like
 
-```
+```text
 raxis gc --dry-run
 
 Retention policy (epoch 12):

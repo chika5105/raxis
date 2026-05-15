@@ -375,7 +375,7 @@ shifts only some of the load rather than all of it.
 
 ### 5.2 Wizard logic
 
-```
+```rust
 fn auto_diversify(configured_providers: &[ProviderId]) -> AliasDefaults {
     match configured_providers.len() {
         0 => panic!("setup wizard requires at least one provider"),
@@ -570,7 +570,7 @@ reject at admission.
 
 Per `operator-ergonomics.md §5`:
 
-```
+```text
 For each [provider_aliases_defaults.<role>] in policy:
     Does plan.toml declare [provider_aliases.<role>]?
         Yes → leave alone (operator-explicit).
@@ -653,7 +653,7 @@ None of them touch System 2.
 
 ### 8.2 The full resolution path
 
-```
+```yaml
 Step 1 — Operator declares the alias chain.
   Plan.toml or policy.toml:
     [provider_aliases.reviewer]
@@ -753,7 +753,7 @@ provider-and-model phases of the wizard.
 
 ### 9.1 Phase 2 — Provider credential entry
 
-```
+```text
 ═════════════════════════════════════════════════════════════════
   Provider credentials
 ═════════════════════════════════════════════════════════════════
@@ -798,7 +798,7 @@ created.
 
 ### 9.2 Phase 3 — Permitted models
 
-```
+```text
 ═════════════════════════════════════════════════════════════════
   Permitted models
 ═════════════════════════════════════════════════════════════════
@@ -843,7 +843,7 @@ diversification default in phase 2. The wizard runs the §5.2
 `auto_diversify` algorithm against the configured providers and
 writes the resulting chains to `policy.toml`.
 
-```
+```text
 ═════════════════════════════════════════════════════════════════
   Per-role inference chains (auto-generated)
 ═════════════════════════════════════════════════════════════════
@@ -881,7 +881,7 @@ hand.
 When only one provider is configured, phase 4 generates the §4.1
 single-element chains:
 
-```
+```text
 ═════════════════════════════════════════════════════════════════
   Per-role inference chains (single-provider)
 ═════════════════════════════════════════════════════════════════
@@ -907,7 +907,7 @@ single-element chains:
 
 ### 9.5 Re-running the wizard for a provider addition
 
-```
+```bash
 $ raxis-cli setup wizard --add-provider openai
 ```
 

@@ -293,7 +293,7 @@ The auto-resume sweep MUST run AFTER the
 `KernelRestart{Initiated,Completed}` pair so the audit chain
 reads left-to-right:
 
-```
+```text
 KernelDeadlockDetected? → KernelStarted → KernelRestartInitiated →
 KernelRestartCompleted → TaskAutoResumedAfterSupervisorRestart{N}
 ```
@@ -356,7 +356,7 @@ is forensic loss only.
 
 New crate `raxis/crates/supervisor/`:
 
-```
+```text
 crates/supervisor/
 ├── Cargo.toml                   # raxis-supervisor binary + lib
 ├── src/
@@ -809,7 +809,7 @@ reaches for after a suspected dashboard compromise — without
 having to wait for every JWT to expire (1h default TTL) or to
 delete the secret file and restart the kernel by hand.
 
-```
+```bash
 $ raxis dashboard rotate-jwt-secret
 ✓ rotated dashboard JWT signing secret
 generation:  2
@@ -874,7 +874,7 @@ operator's perspective:
 
 The boot-time stderr log surfaces the outcome explicitly:
 
-```
+```text
 raxis-kernel: dashboard JWT secret reloaded (generation=1) —
   operator JWTs from prior boot remain valid
   (INV-SUPERVISOR-OPERATOR-CONTINUITY-01)
@@ -882,7 +882,7 @@ raxis-kernel: dashboard JWT secret reloaded (generation=1) —
 
 (or, on first boot of a fresh data_dir):
 
-```
+```text
 raxis-kernel: dashboard JWT secret minted (generation=1) at
   <data_dir>/auth/dashboard_jwt.secret
 ```

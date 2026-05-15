@@ -168,7 +168,7 @@ On success the operator handler returns
 
 ## Step 3: Delegation lifecycle FSM
 
-```
+```text
             ┌──────────── Active ──────────────┐
             │  TTL countdown running           │
             │  (revoked_at IS NULL)            │

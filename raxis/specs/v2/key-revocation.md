@@ -251,7 +251,7 @@ Sequence:
    ```
 4. For each session row, run the following decision tree against the **current** policy epoch:
 
-   ```
+   ```sql
    trust_now = SELECT state, revoked_at, revocation_reference
                  FROM key_trust_state
                 WHERE policy_epoch = current_policy_epoch
@@ -308,7 +308,7 @@ The exception: any intent that re-references the plan content (e.g., a future `R
 
 All four validation paths (§5.1, §5.2, §5.3, and §8 audit replay) call into a single helper that consults emergency revocations FIRST, then falls back to policy-derived state:
 
-```
+```rust
 fn key_trust_now(key_id, fingerprint, current_epoch) -> KeyTrustState:
     // Emergency revocations always win because they are always more
     // restrictive than policy state (always reason=compromise, never rotation).
@@ -380,7 +380,7 @@ fingerprint_sha256    = "..."
 
 ### 6.4 The `raxis emergency-revoke` CLI
 
-```
+```bash
 $ raxis emergency-revoke --key-id ops-2025-q4 --reference INC-2026-04-15
 ```
 

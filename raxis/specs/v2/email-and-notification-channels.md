@@ -287,7 +287,7 @@ Holds `Arc<dyn CredentialBackend>` (resolves the SMTP cred at deliver-time, not 
 **Render path:**
 
 1. Build RFC 5322 headers:
-   ```
+   ```yaml
    From:        <channel.from_address>
    To:          <channel.to_addresses, comma-joined>
    Subject:     [RAXIS:{severity}] {event_kind}: {short_summary}
@@ -525,7 +525,7 @@ The kernel allocates a port from the credential-proxy reserved range (`credentia
 
 ### §3.5 Wire flow
 
-```
+```text
 Agent (in VM)                    SMTP proxy (kernel-side)              Real upstream relay
   -- TCP connect localhost:2525 --→
                                     (open upstream conn)               
@@ -642,7 +642,7 @@ Both counters use a sliding-window-with-bucket implementation (10 buckets per wi
 
 `kernel-mechanics-prompt.md §3` gains an SMTP block when the task has an `[[tasks.credentials]]` entry with `proxy_type = "smtp"`:
 
-```
+```python
 ## SMTP Proxy
 
 You have access to an SMTP relay at $SMTP_URL (e.g., smtp://localhost:2525).
@@ -686,7 +686,7 @@ These commands wrap edits to `policy.toml` and call the existing `policy sign` c
 
 #### §4.1.1 Channel management
 
-```
+```text
 # List channels (read-only; reads active PolicyBundle).
 raxis notify channel list [--kind email|webhook|shell|file] [--json]
 
@@ -720,7 +720,7 @@ raxis notify test --channel <channel-id> [--severity Operational|Security|Critic
 
 #### §4.1.2 Route management
 
-```
+```bash
 raxis notify route list [--event-kind <kind>] [--channel <channel-id>] [--json]
 
 raxis notify route add \
@@ -736,7 +736,7 @@ raxis notify route delete \
 
 These manage the SMTP / webhook credentials the *kernel itself* uses to talk to upstream channels. Stored in `<data_dir>/credentials/<cred-ref>.notify-cred` (mode `0600`, kernel-readable only).
 
-```
+```text
 # Add an SMTP credential. Password read from STDIN, never argv.
 raxis notify credential add <cred-ref> \
     --kind smtp-plain \
@@ -767,7 +767,7 @@ raxis notify credential rotate <cred-ref>           # prompts for new secret on 
 
 These reuse the existing `raxis credential add` flow — the credential itself looks like any other Tier-2 credential and is managed identically. The only thing that's new is the schema validator for `proxy_type = "smtp"` and the per-credential SMTP config block.
 
-```
+```text
 # Add an SMTP credential the proxy will use to authenticate upstream.
 # Password read from STDIN.
 raxis credential add smtp-ops-relay --proxy-type smtp \
@@ -790,7 +790,7 @@ The existing `raxis credential list`, `raxis credential delete`, `raxis credenti
 
 The seven-trait composition order becomes:
 
-```
+```text
 1. Load policy.toml + verify operator signature              (concrete)
 2. Open store (kernel.db)                                    (concrete)
 3. Construct AuditSink (§5)                                  ← needed by every later step

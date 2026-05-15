@@ -140,7 +140,7 @@ tries to connect to a *non-localhost* address on port 5432 does it hit `raxis-tp
 
 ### 3.2 — What raxis-tproxy Does
 
-```
+```text
 Agent process                raxis-tproxy (localhost:3129)        Kernel Host
                              via iptables REDIRECT
     |                               |                                |
@@ -171,7 +171,7 @@ end-to-end between the agent and the real server.
 For HTTPS, the TPROXY reads the SNI (Server Name Indication) from the ClientHello
 TLS handshake — this is sent in plaintext before encryption begins:
 
-```
+```text
 Client → raxis-tproxy: [TLS ClientHello with SNI extension: stripe.com]
 raxis-tproxy: extract SNI = "stripe.com"
 raxis-tproxy → Kernel: ProxyAdmission { host: "stripe.com", port: 443, protocol: "https" }
@@ -333,7 +333,7 @@ When the agent tries to connect directly to a real database host (bypassing the
 credential proxy), the iptables rule for port 5432 (excluding localhost) redirects
 to `raxis-tproxy`:
 
-```
+```text
 Agent: psycopg2.connect("postgresql://user:real_pass@postgres-staging.company.internal:5432/mydb")
   → TCP connect to postgres-staging.company.internal:5432
   → iptables: NOT localhost → REDIRECT → raxis-tproxy:3129
@@ -354,7 +354,7 @@ security violation, no audit event, no strike counter.
 
 ## 6. VM Boot Sequence (Updated)
 
-```
+```text
 1. Kernel allocates VM, assigns session_id
 2. Kernel starts all credential proxies declared in [[tasks.credentials]]:
    - PostgresProxy → localhost:5432

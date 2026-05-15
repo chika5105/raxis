@@ -43,6 +43,12 @@ raxis-initramfs-builder  = { workspace = true }
 libc          = { workspace = true }
 
 tokio         = { workspace = true }
+# `cargo xtask images bake` serialises the per-role integrity
+# manifest as JSON; serde's `derive` feature gives us the struct
+# annotations the bake driver uses to round-trip a `BakeManifest`
+# through `serde_json::{to_vec_pretty, from_slice}`. Workspace-pinned
+# so xtask resolves to the same serde the rest of the tree uses.
+serde         = { workspace = true }
 serde_json    = { workspace = true }
 chrono        = { version = "0.4", default-features = false, features = ["clock"] }
 raxis-isolation         = { path = "../crates/isolation" }
@@ -57,6 +63,14 @@ rusqlite     = { workspace = true }
 tempfile     = "3"
 
 [dev-dependencies]
+# `flate2` is used in the `images.rs` cpio multi-archive witnesses
+# (`inv_image_cpio_multi_archive_preserved_01_*`) to gunzip the
+# `pack_initramfs` output back to raw cpio so the test can count
+# `TRAILER!!!` occurrences. `raxis-initramfs-builder` already pulls
+# `flate2` as a workspace transitive dep, so this declaration just
+# exposes it to the xtask test crate (no new transitive dep).
+flate2       = "1"
+
 # `filetime` is used in the `images.rs` stale-cache-guard witnesses
 # (`inv_image_bake_no_stale_cache_01_*`) to set deterministic mtimes
 # on test scaffold files. The witnesses need to inject ordering

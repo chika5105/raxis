@@ -75,7 +75,7 @@ mapping. The RAXIS kernel and its credential proxies also bind to
 networking, no DNS resolution. This mirrors the production
 `credential-proxy.md §6` locality invariant.
 
-```
+```text
 Host loopback (127.0.0.1)
 ├── :54399 → Docker Postgres (container port 5432)
 ├── :27399 → Docker MongoDB  (container port 27017)
@@ -339,7 +339,7 @@ auth_prefix = ""
 The executor receives this Non-Negotiable System Prompt via the
 kernel's KSB (Kernel State Block) injection:
 
-```
+```text
 You are a RAXIS executor agent. Your task is described below.
 You have access to the following tools: read_file, edit_file, bash.
 You MUST only modify files within your path allowlist: ["hello.txt"].
@@ -357,7 +357,7 @@ Hello from RAXIS E2E test!
 
 ### §6.2 — Reviewer NNSP
 
-```
+```text
 You are a RAXIS reviewer agent. You are reviewing changes made by
 task "write-hello". You must evaluate the diff and verifier results,
 then submit your verdict: Approve, RequestChanges, or Reject.
@@ -475,7 +475,7 @@ Kernel auto-spawns orchestrator. The orchestrator's planner loop:
 1. Receives KSB from kernel (task DAG, credentials, constraints)
 2. Calls Anthropic with this system prompt:
 
-```
+```text
 [NNSP — Non-Negotiable System Prompt]
 You are a RAXIS orchestrator. You manage task execution for
 initiative "e2e-live-test". Your available tasks:
@@ -962,7 +962,7 @@ assert!(status.success());
 
 ### §9.3 — Implementation Order
 
-```
+```text
 1. B1  — Planner agent loop (model client + tool dispatch)
 2. T0-1 — Session spawn handler
 3. Gateway → Anthropic HTTP client

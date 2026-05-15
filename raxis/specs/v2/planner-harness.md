@@ -559,7 +559,7 @@ the Reviewer image.
 
 **Schema enforcement at `approve_plan` time.**
 
-```
+```yaml
 FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED
   task_id:           "security_reviewer"
   session_agent_type: "Reviewer"
@@ -583,7 +583,7 @@ escalation would just delay the inevitable rejection.
 
 **Digest mismatch at activation time.**
 
-```
+```yaml
 FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH
   expected_digest:    sha256:e3b0c44298fc1c149afbf4c8996fb924...
   observed_digest:    sha256:c057a3e7ea75c2aef3c1cd95fa1aac84...
@@ -1026,7 +1026,7 @@ surfacing in the KSB.
 
 Five operations on the existing `bash` tool, four of them new:
 
-```
+```yaml
 bash run {
     command:           string,
     run_in_background: bool = false,
@@ -1209,7 +1209,7 @@ bg state changes in the KSB *proactively*, not on demand.
 
 **Mechanism.** The harness maintains per-bg state records:
 
-```
+```yaml
 {
     bg_id:                  string,
     name:                   string?,
@@ -1240,7 +1240,7 @@ Between every inference call (i.e., between every LLM turn), the harness:
 The KSB rendering for the bg block becomes (when at least one record
 exists):
 
-```
+```text
 Background Processes:
 
   ⚠️ State Changes Since Last Turn:
@@ -1804,7 +1804,7 @@ unified-egress decision (§7); its functionality is subsumed under
 All alert classes share the same rendering envelope so the LLM can
 recognize them as a category:
 
-```
+```text
 [ALERT: <ClassName>]
 <one-line summary>
 <optional structured detail block>
@@ -1812,7 +1812,7 @@ recognize them as a category:
 
 For example:
 
-```
+```text
 [ALERT: BackgroundProcessExited]
 bg_2 (dev_server) EXITED with code 1 at T+12.4s
 last 512 bytes of stderr:
@@ -1976,7 +1976,7 @@ Distribution path:
 
 The image is a minimal OCI bundle containing:
 
-```
+```text
 /                   (rootfs)
 ├── /sbin/init      → /raxis-planner   (symlink, raxis-planner is PID 1)
 ├── /raxis-planner  (statically-linked binary, with bash module
@@ -2017,7 +2017,7 @@ Distribution path:
 
 The image is a minimal OCI bundle containing:
 
-```
+```text
 /                   (rootfs)
 ├── /sbin/init      → /raxis-planner   (symlink, raxis-planner is PID 1)
 ├── /raxis-planner  (statically-linked binary, Orchestrator build
@@ -2092,7 +2092,7 @@ Orchestrator images (~2 GiB compressed) because its job is to support
 the breadth of work an Executor can do, not the narrow surface of
 static review or merge:
 
-```
+```text
 /                   (rootfs)
 ├── /sbin/init      → /raxis-planner   (symlink, raxis-planner is PID 1)
 ├── /raxis-planner  (statically-linked binary, Executor build target —
@@ -2327,7 +2327,7 @@ unified `raxis-verifier` PID-1 binary. It carries no language
 toolchains, no shells beyond a minimal `/bin/sh` for `command`
 execution, and no network utilities:
 
-```
+```text
 /                   (rootfs — Alpine Linux base)
 ├── /sbin/init      → /raxis-verifier   (symlink, raxis-verifier is PID 1)
 ├── /raxis-verifier (statically-linked binary, the unified verifier
@@ -2369,7 +2369,7 @@ Notably absent (deliberately):
 **Canonical command.** The verifier's command is fixed by the kernel
 (operators do not declare it):
 
-```
+```text
 /usr/local/bin/raxis-symbol-index --workspace /workspace --out /raxis/symbol_index.json
 ```
 
@@ -3045,7 +3045,7 @@ layer that changed:
    `raxis-initramfs-builder`, and calls `raxis-image-builder` to
    emit the signed manifest with `image_format =
    RootfsInitramfsCpio`. Drops:
-   ```
+   ```text
    $RAXIS_INSTALL_DIR/images/raxis-<role>-core-<kver>.img
    $RAXIS_INSTALL_DIR/images/raxis-<role>-core-<kver>.manifest.toml
    ```

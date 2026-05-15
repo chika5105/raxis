@@ -467,7 +467,7 @@ different things.
 
 **If token-proportional (proposed):** Admission_units for InferenceRequest become:
 
-```
+```text
 actual_units = (tokens_input × input_cost_per_k + tokens_output × output_cost_per_k)
                ÷ cost_per_unit
 ```
@@ -507,7 +507,7 @@ concurrent `admit_inference` calls in the same lane each see
 reserved yet), both pass, and the post-completion reconciliation
 permanently puts the lane over its ceiling.
 
-```
+```text
 admit_inference(InferenceRequest, session, plan, policy):
   estimated_units  = estimate_units(request, policy)
   estimated_input  = estimate_input_tokens(request)
@@ -721,7 +721,7 @@ resource consumption. The two systems govern different things and must both exis
 **If token-proportional (proposed enhancement):** Admission_units for `InferenceRequest`
 become a financial proxy:
 
-```
+```text
 actual_units = (tokens_input × input_cost_per_k + tokens_output × output_cost_per_k)
                ÷ cost_per_unit
 ```
@@ -776,7 +776,7 @@ admit past the lane ceiling. The post-completion update of
 `BEGIN IMMEDIATE` transaction that reconciles the reservation
 against actual provider-reported usage.
 
-```
+```text
 InferenceRequest arrives at Kernel
 
   → see §10.5 for the canonical atomic procedure (single
@@ -916,7 +916,7 @@ Each attempt consumes budget on a refusal and moves the session no closer to com
 The following section is added to every Executor and Orchestrator non-negotiable system
 prompt when any `[tasks.token_policy]` limits are declared in the plan:
 
-```
+```text
 ## Token Limit Protocol
 
 Your inference calls are subject to token limits. You will receive structured error
@@ -1035,7 +1035,7 @@ The KSB is prepended as the first section of the system prompt. The model is
 instructed in the non-negotiable prompt to read but never modify this section.
 
 **Normal state (no limit approaching):**
-```
+```text
 [RAXIS:KERNEL_STATE v=1]
 session  = <session_uuid_short>     # first 8 chars of UUID
 tokens   = in:12450 out:8230 tot:20680
@@ -1046,7 +1046,7 @@ status   = OK
 ```
 
 **Approaching state (≥ 80% of any limit consumed):**
-```
+```text
 [RAXIS:KERNEL_STATE v=1]
 session  = <session_uuid_short>
 tokens   = in:162000 out:18200 tot:180200
@@ -1058,7 +1058,7 @@ warn     = total_tokens at 90.1% — begin wrapping up; commit completed work be
 ```
 
 **Limit exhausted (session paused, escalation pending):**
-```
+```text
 [RAXIS:KERNEL_STATE v=1]
 session  = <session_uuid_short>
 tokens   = in:198000 out:19500 tot:217500  # over limit — final state
@@ -1095,7 +1095,7 @@ when setting limits.
 
 Added to the non-negotiable system prompt for all agent roles:
 
-```
+```text
 ## Kernel State Block
 
 At the start of every system prompt you will find a [RAXIS:KERNEL_STATE] block.

@@ -50,7 +50,7 @@ exporter + Prometheus + Grafana legs are healthy.
 | Grafana dashboards | `GET /api/search?type=dash-db` | 10 / 10 dashboards present (all 10 expected UIDs returned) |
 
 Compose project: `raxis-live-e2e-test`. Container statuses:
-```
+```text
 raxis-e2e-grafana       Up About an hour (healthy)
 raxis-e2e-prom          Up About an hour (healthy)
 raxis-e2e-otel          Up About an hour (healthy)
@@ -145,7 +145,7 @@ included:
 
 Result:
 
-```
+```yaml
 OTLP push: HTTP 200 -> {"partialSuccess":{}}
 After ~25s scrape:
   raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket: 17 series  (16 explicit + +Inf)
@@ -362,7 +362,7 @@ match exactly:
 
 Validation harness lives in `/tmp/observability-validator/`:
 
-```
+```text
 panels.tsv          — panel target inventory (61 rows)
 panel-results.tsv   — full per-target results with classification
 panel-matrix.md     — compact per-dashboard summary

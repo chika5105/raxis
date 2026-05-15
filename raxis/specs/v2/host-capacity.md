@@ -110,7 +110,7 @@ The cap is strict: V2 does not support overcommit, even opt-in. See §15.4 for t
 
 Before spawning a VM (`approve_plan` for the root Orchestrator session, or `ActivateSubTask` for sub-tasks), the kernel checks:
 
-```
+```text
 if running_vm_count >= max_concurrent_vms:
     return AdmissionDeferred { reason: VmCountAtCap }
 if running_vm_memory_mb_total + plan.vm_memory_mb > max_aggregate_vm_memory_mb:
@@ -180,7 +180,7 @@ Wire reference: `kernel/src/session_spawn_orchestrator.rs::ExecutorSpawnContext:
 
 `disk_root` (default `/var/lib/raxis`) contains:
 
-```
+```text
 /var/lib/raxis/
 ├── state.db              SQLite kernel state (sessions, escalations, key_trust_state, pending_pushes, etc.)
 ├── state.db-wal          WAL for state.db
@@ -252,7 +252,7 @@ Operators with tight disk budgets should shorten the retention defaults rather t
 
 A dedicated tokio task runs every 5 seconds:
 
-```
+```text
 free_mb = statvfs(disk_root).f_bavail * f_frsize / (1024 * 1024)
 if free_mb < min_free_disk_mb:
     transition to DiskFullState
@@ -464,7 +464,7 @@ If initiative A has 50 sub-tasks and initiative B has 1, and `max_concurrent_vms
 
 When a VM slot frees and the admission queue has multiple initiatives waiting, the kernel allocates to the initiative that has waited longest since its last activation. Concretely:
 
-```
+```sql
 candidates = SELECT initiative_id, MAX(activation_time) AS last_activation
                FROM sessions
               WHERE state IN ('Active', 'Paused', 'AwaitingEscalation')

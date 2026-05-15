@@ -4287,6 +4287,438 @@ chain `dev-stage` per role.
 
 ---
 
+### INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01 — `cargo xtask images bake` MUST resolve every required input before producing any artefact
+
+**Statement.** The umbrella image-bake driver
+(`cargo xtask images bake`, defined in `xtask/src/images.rs::
+run_bake`) MUST run a complete preflight against every input the
+per-role bake will consume BEFORE invoking any subprocess that
+mutates the install dir or the staging tree. The preflight is
+read-only and covers:
+
+1. **Container-builder availability.** When any selected role
+   needs an OCI rootfs bake (`Role::needs_rootfs_bake() == true`
+   — today, only `executor-starter`), the preflight resolves a
+   container builder (`docker` → `podman` → `buildah` auto-detect
+   order, override via `--builder`) AND probes its daemon /
+   socket via `<builder> info`. A daemon-down state surfaces as
+   `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01` with the offending
+   builder named and a one-line remediation ("Start Docker
+   Desktop" on macOS; "`podman machine start`" on rootless Linux).
+2. **Per-role recipe presence.** For every role with
+   `needs_rootfs_bake()`, the per-role `Containerfile` at
+   `images/<role>/Containerfile` MUST exist. For every selected
+   role, the per-role `manifest.toml` fixture (the pinned
+   `BuildInputs`) MUST exist. A missing fixture trips the
+   invariant token before the bake reaches the OCI builder.
+3. **Containerfile graph acyclicity.** Every in-tree Containerfile
+   is parsed for `FROM` directives; no `FROM` operand may name
+   another in-tree role's bake tag (see
+   `INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01`).
+4. **Signing-key presence + parse.** The Ed25519 signing-key hex
+   file (`$HOME/.config/raxis/keys/raxis-dev-signing.key.hex` by
+   default; override via `--signing-key`) MUST exist and decode
+   to a valid 32-byte private scalar. A missing key surfaces the
+   `cargo xtask dev-keys init` remediation, NOT a confusing
+   crypto-internal panic.
+5. **Cross-compile target sanity.** On macOS the bake checks the
+   musl linker (`aarch64-linux-musl-gcc` or
+   `x86_64-linux-musl-gcc`) is on `$PATH` and fails closed with
+   the `brew install filosottile/musl-cross/musl-cross`
+   remediation when it isn't.
+6. **Guest-kernel binary (`vmlinux`) resolution.** The vmlinux
+   resolution order (`--kernel-from-file` → `$RAXIS_DEV_KERNEL_SOURCE`
+   → already-staged `<install_dir>/kernel/vmlinux` → canonical
+   `/usr/local/lib/raxis/kernel/vmlinux`) MUST surface a usable
+   source before any per-role bake begins. See
+   `INV-IMAGE-BAKE-VMLINUX-STAGED-01` for the staging contract
+   that follows.
+
+A preflight failure bails with an error whose message contains the
+literal token `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01` AND a
+remediation paragraph naming the missing input. The bake driver
+MUST NOT have mutated any filesystem entry by the time the bail
+fires — operators replaying the failure must observe no partial
+artefacts in the install dir.
+
+**Justification.** Every "bake produced a stub" symptom we've
+chased (iter12, iter15, iter44, iter46, iter57) was a missing
+input that surfaced two-to-thirty seconds into the run as a
+confusing downstream diagnostic — `BashTool: ENOENT` for the
+missing OS tooling, `vsock CONNECT: Connection reset by peer`
+for the missing prompt sidecar, `AVF VM start failed: Invalid
+virtual machine configuration. The boot loader is invalid.` for
+the missing vmlinux. The cost-per-iteration shape was the
+operator restarting the entire 4-minute live-e2e run only to hit
+the same root cause one layer deeper. Centralising input
+resolution in a read-only preflight that runs BEFORE any mutation
+collapses the cost: every missing-input failure surfaces in under
+a second with the offending file's path AND the remediation
+command in one diagnostic.
+
+The fail-closed shape is load-bearing because the alternative —
+"try the bake, see what fails, retry" — leaks partial artefacts
+into the install dir, and partial artefacts then trip the
+boot-time digest preflight with a less helpful error that
+operators have repeatedly mis-diagnosed as "AVF / Firecracker
+substrate bug" rather than "image-bake pipeline regression".
+
+**Witness.**
+[`xtask::images::tests::inv_image_bake_preflight_fail_closed_01_missing_signing_key_bails`](../xtask/src/images.rs):
+the preflight bails with the invariant token + the `dev-keys init`
+remediation when no signing key is present at the resolved path.
+Pairs with
+[`…::inv_image_bake_preflight_fail_closed_01_missing_inputs_manifest_bails`](../xtask/src/images.rs)
+(per-role fixture missing),
+[`…::inv_image_bake_preflight_fail_closed_01_binary_only_skips_builder_probe`](../xtask/src/images.rs)
+(a pure-orchestrator+reviewer preflight MUST NOT require docker —
+that's the on-ramp for operators on hosts that simply don't have
+a container builder),
+and [`…::inv_image_bake_preflight_fail_closed_01_role_needs_rootfs_bake_taxonomy`](../xtask/src/images.rs)
+(pins which roles need the OCI bake; lockstep with the harness's
+`role_needs_rootfs_bake` table).
+
+**Canonical home.** `v2/canonical-images.md §7` and
+`v2/planner-harness.md §14.4` (image-build pipeline).
+
+---
+
+### INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01 — Containerfile dependency graph MUST be acyclic
+
+**Statement.** Every in-tree `images/<role>/Containerfile` MUST
+declare its base layer (`FROM <image>`) as either (a) an upstream
+public registry image (`debian:bookworm-slim`, `scratch`, ...) or
+(b) a multi-stage local alias defined earlier in the SAME
+Containerfile (`FROM <stage> AS …`). A `FROM` operand whose value
+equals another in-tree role's bake tag —
+`raxis-rootfs-<role-subdir>:dev`, the tag the bake step emits per
+`bake_one_role` — is REJECTED at preflight time with the literal
+token `INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01 VIOLATED`, the
+offending Containerfile path + line number, and the operand
+itself.
+
+The check is conservative: any operand the parser does not
+recognise as an in-tree role's bake tag is accepted (a registry
+URL, a `--platform=$BUILDPLATFORM` prefix, a multi-stage local
+alias, a digest pin). Comments (`# …`) and blank lines are
+ignored. The `FROM` keyword is recognised case-insensitively
+(Containerfile grammar treats directives as case-insensitive).
+
+**Justification.** The pre-migration `aegis-ai` checkout shipped a
+set of `images/<role>/Containerfile.dev` files (untracked diffs;
+never landed to mainline) that chained one role's image into
+another's `FROM` base. On a fresh checkout the resulting
+`<builder> build` failed mid-pipeline because the upstream role's
+tag (`raxis-rootfs-orchestrator-core:dev`) did not exist until
+the operator had baked it first — and the operator had no way to
+know which order to bake the roles in without reading every
+Containerfile. The `chika5105/raxis` migration sweep removed the
+`Containerfile.dev` files, but a structural guard against the
+**shape** of the bug is the only way to keep it from creeping
+back under a different filename.
+
+A cyclic dependency graph also defeats the bake driver's
+parallelisation opportunity (today each role bakes sequentially,
+but the dep graph being acyclic is what makes future parallel
+baking safe). Pinning the contract now keeps the door open.
+
+**Scenario.** An operator writes a `reviewer-core/Containerfile`
+that starts:
+
+```dockerfile
+FROM raxis-rootfs-orchestrator-core:dev
+RUN apt-get update && apt-get install -y ripgrep
+```
+
+`cargo xtask images bake` runs the acyclicity check first and
+surfaces:
+
+```
+INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01 VIOLATED:
+images/reviewer-core/Containerfile line 1 declares
+`FROM raxis-rootfs-orchestrator-core:dev`, which is the bake tag
+the in-tree pipeline produces for role Orchestrator. ...
+Remediation: replace the `FROM` operand with a concrete upstream
+image (`debian:bookworm-slim`, `scratch`, …) and copy in the
+upstream binaries via `COPY --from=<stage>` from the upstream
+Containerfile if needed.
+```
+
+The bake fails before invoking `<builder> build`, so no partial
+artefact is produced and no docker layer cache is polluted.
+
+**Witness.**
+[`xtask::images::tests::inv_image_bake_no_circular_containerfile_01_rejects_in_tree_role_base`](../xtask/src/images.rs):
+synthesises a `reviewer-core/Containerfile` whose `FROM` operand
+matches `raxis-rootfs-orchestrator-core:dev` and asserts the
+check bails with the invariant token + line number + offending
+operand. Pairs with
+[`…::inv_image_bake_no_circular_containerfile_01_accepts_external_bases`](../xtask/src/images.rs)
+(the canonical-in-tree `debian:bookworm-slim` / `scratch` shape
+passes cleanly),
+[`…::inv_image_bake_no_circular_containerfile_01_ignores_comments_and_case`](../xtask/src/images.rs)
+(comments + uppercase `FROM` handled correctly),
+[`…::inv_image_bake_no_circular_containerfile_01_handles_platform_flag`](../xtask/src/images.rs)
+(`FROM --platform=$BUILDPLATFORM <image>` operand resolution),
+and [`…::inv_image_bake_no_circular_containerfile_01_skips_missing_files`](../xtask/src/images.rs)
+(a partial worktree without all three Containerfiles MUST NOT
+trip the check — release tarballs that ship only a subset).
+
+**Canonical home.** `v2/canonical-images.md §7`.
+
+---
+
+### INV-IMAGE-CPIO-MULTI-ARCHIVE-PRESERVED-01 — cpio.gz bake output MUST emit exactly one TRAILER per archive and survive multi-archive concatenation byte-for-byte
+
+**Statement.** The bake driver's `pack_initramfs` helper (in
+`xtask/src/images.rs`, wrapping
+`raxis_initramfs_builder::InitramfsBuilder::finalise_to_cpio_gz`)
+MUST emit a cpio.gz blob carrying exactly **one**
+`TRAILER!!!`-named cpio entry. A second TRAILER mid-stream would
+truncate the per-role rootfs at the kernel's initramfs unpacker
+(Linux's `init/initramfs.c` stops at the first TRAILER per
+archive), silently dropping every file that appears past it.
+
+Beyond the single-archive shape, byte-level concatenation of two
+or more independently-built `pack_initramfs` outputs MUST yield a
+buffer where each constituent archive's bytes survive
+byte-for-byte: the gzip multi-member shape (which the kernel's
+gunzip supports) carries each archive's TRAILER intact, and the
+unpacker reads them as separate roots. This is the contract that
+keeps a future early-initrd shape (microcode blob + primary
+rootfs concatenated) from silently corrupting the primary
+rootfs.
+
+**Justification.** Historical bake-pipeline iterations chained
+`mkfs.erofs` → `gzip` → `tar` pipelines that some tool in the
+middle silently truncated multi-archive cpio inputs to the first
+archive's bytes only (the failure mode was "the image is 50MB
+smaller than expected and the executor VM is missing /bin/bash
+even though the staging tree contained it"). The current
+pipeline does not consume cpio inputs — `pack_initramfs` walks
+a directory tree and emits a single archive — so the truncation
+shape is structurally unreachable for this code path. The
+invariant pins that structural property so a future change that
+adds an `--early-initrd <PATH>` flag (concatenate the operator's
+microcode/firmware cpio.gz with the role's rootfs) cannot
+regress into the truncation shape without tripping the witness
+tests.
+
+**Witness.**
+[`xtask::images::tests::inv_image_cpio_multi_archive_preserved_01_pack_emits_exactly_one_trailer`](../xtask/src/images.rs):
+gunzips the `pack_initramfs` output and asserts the raw cpio
+contains exactly one `TRAILER!!!` window. Pairs with
+[`…::inv_image_cpio_multi_archive_preserved_01_concat_two_streams_is_a_valid_initramfs`](../xtask/src/images.rs):
+concatenates two independently-built `pack_initramfs` outputs,
+gunzips via `MultiGzDecoder` (kernel-equivalent multi-member
+shape), asserts the decoded bytes contain TWO trailers AND that
+the raw concatenated stream's bytes equal `A ++ B` byte-for-byte.
+
+**Canonical home.** `v2/canonical-images.md §7`.
+
+---
+
+### INV-IMAGE-BAKE-VMLINUX-STAGED-01 — `cargo xtask images bake` MUST stage `vmlinux` at the canonical install path
+
+**Statement.** Immediately after a successful
+`cargo xtask images bake` invocation completes, the file at
+`<install_dir>/kernel/vmlinux` MUST exist, be a non-empty regular
+file, and have its SHA-256 recorded in every per-role `*.bake.json`
+integrity manifest. The bake driver resolves the source in this
+order, with the first present source winning:
+
+1. Explicit `--kernel-from-file <PATH>` on the bake CLI.
+2. `RAXIS_DEV_KERNEL_SOURCE` env var.
+3. An already-staged file at `<install_dir>/kernel/vmlinux`.
+4. The canonical host install at
+   `/usr/local/lib/raxis/kernel/vmlinux` (the same path the
+   `cargo xtask images dev-kernel` flow targets per
+   `system-requirements.md §11`).
+
+Sources (1) and (2) only overwrite an already-staged file when
+`--force` is passed; without `--force`, source (3) wins. Source
+(4) is the new-operator on-ramp: a fresh `RAXIS_INSTALL_DIR=$(mktemp -d)`
+install dir gets vmlinux copied from the system-level install
+without any explicit flag. None of the four sources resolving
+triggers `INV-IMAGE-BAKE-VMLINUX-STAGED-01 VIOLATED` with a
+remediation message naming `cargo xtask images dev-kernel`.
+
+The bake driver records the staged vmlinux's SHA-256 in every
+per-role `*.bake.json` under `inputs.vmlinux_sha256`. The
+per-role no-op shortcut (`bake_should_skip`) treats a vmlinux
+SHA divergence as an invalidating input change — rotating the
+guest kernel forces a full rebake of every role's image, which
+keeps the kernel↔image pairing trustable downstream
+(`canonical_images_preflight::verify_canonical_images_at_boot`
+relies on the assumption that the rootfs the manifest covers was
+built against the currently-staged kernel binary).
+
+**Justification.** Iter44 through iter57 repeatedly hit
+`AVF VM start failed: Invalid virtual machine configuration. The
+boot loader is invalid.` two seconds into the first
+session-spawn, every time caused by a missing vmlinux at the
+substrate-resolved path. The previous mitigation
+(`extended_e2e_support/kernel_driver.rs::ensure_canonical_kernel_binary_staged`)
+moved the resolution to the live-e2e harness layer, which solved
+the live-e2e symptom but left every other consumer (a manual
+`cargo run -p raxis-kernel` invocation, a separate
+integration-test harness, the dashboard's manual VM-spawn dev
+flow) susceptible to the same fatal-but-misnamed failure. Moving
+the resolution to the bake driver itself means **every** flow
+that produces canonical images for a given install dir ALSO
+produces a working vmlinux for that install dir — there is no
+code path that can produce one without the other.
+
+The harness's `ensure_canonical_kernel_binary_staged` workaround
+is collapsed to a single existence assertion that points at the
+new `bake` driver when vmlinux is missing — keeping the live-e2e
+diagnostic clean for operators who somehow ran the legacy 3-step
+pipeline (`bake-rootfs → dev-stage → build-all`, which does NOT
+stage vmlinux) instead of the new umbrella `bake`.
+
+**Witness.**
+[`xtask::images::tests::inv_image_bake_vmlinux_staged_01_bails_with_remediation_when_no_source`](../xtask/src/images.rs):
+empties every source (explicit, env, canonical) and asserts the
+resolver bails with the invariant token + the `dev-kernel`
+remediation. Pairs with
+[`…::inv_image_bake_vmlinux_staged_01_returns_copy_from_for_explicit_source`](../xtask/src/images.rs)
+(explicit-source happy path),
+[`…::inv_image_bake_vmlinux_staged_01_already_staged_when_in_place`](../xtask/src/images.rs)
+(re-running the bake reuses the already-staged binary; no
+clobber),
+[`…::inv_image_bake_vmlinux_staged_01_explicit_does_not_overwrite_without_force`](../xtask/src/images.rs)
+(safety: `--force` is required to replace a working kernel even
+when `--kernel-from-file` is passed),
+[`…::inv_image_bake_vmlinux_staged_01_rejects_empty_explicit_source`](../xtask/src/images.rs)
+(a zero-byte source MUST NOT pass — the bake refuses to stage a
+stub),
+and [`…::inv_image_bake_vmlinux_staged_01_apply_copy_writes_atomically`](../xtask/src/images.rs)
+(the actual copy step uses a `.vmlinux.tmp` + rename shape so a
+partial copy never replaces a working kernel).
+
+**Canonical home.** `v2/canonical-images.md §7` and
+`v2/system-requirements.md §11.2`.
+
+---
+
+### INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01 — `*.bake.json` records every input + output SHA, and re-runs on unchanged tree are no-ops
+
+**Statement.** For every role baked by `cargo xtask images bake`,
+the driver writes a per-role integrity manifest at
+`<install_dir>/images/<artefact_stem>-<kver>.bake.json` recording:
+
+* `schema_version` — pinned to a constant (`1` today). A future
+  version bump requires either a backwards-compatible additive
+  change (every new field carries `#[serde(default)]`) or a
+  migration. A reader that observes an unknown
+  `schema_version` MUST treat the manifest as "missing" — the
+  shortcut MUST NOT trust a newer manifest's decision.
+* `inputs.containerfile_sha256` — SHA-256 of the per-role
+  Containerfile (`None` when the role has no Containerfile).
+* `inputs.inputs_manifest_sha256` — SHA-256 of the in-tree
+  per-role `manifest.toml` fixture.
+* `inputs.staged_binary_sha256` — SHA-256 of the cross-compiled
+  planner binary in the staging tree.
+* `inputs.signing_key_fp_prefix` — first 16 hex chars of the
+  Ed25519 signing-key fingerprint (so a key rotation invalidates
+  the cache).
+* `inputs.vmlinux_sha256` — SHA-256 of
+  `<install_dir>/kernel/vmlinux` (so a guest-kernel rotation
+  invalidates the cache).
+* `outputs.img_sha256` + `outputs.manifest_toml_sha256` + their
+  sizes — the on-disk artefacts the bake produced.
+* `host.{os, arch, target_triple, container_builder}` — pure
+  metadata; NOT consulted by the no-op shortcut.
+* `built_at_unix` — cosmetic timestamp; NOT consulted.
+
+The bake driver's no-op shortcut (`bake_should_skip`) fires
+**only** when ALL of these are true:
+
+1. A prior manifest exists and parses with a recognised
+   `schema_version`.
+2. Every field under `prior.inputs` matches the just-computed
+   `inputs` byte-for-byte (the `BakeInputs` `PartialEq` derive is
+   the canonical comparison).
+3. The on-disk `.img` AND `.manifest.toml` both exist AND have
+   SHA-256s equal to what `prior.outputs` recorded.
+
+A failure of ANY of those tripwires triggers a full per-role
+rebake — there is no "partial" no-op. The shortcut is the
+mechanical embodiment of "re-running on an unchanged tree is a
+fast no-op; the moment ANYTHING changes, rebake": adding a
+freshness check on a single new field requires (a) adding it to
+`BakeInputs` and (b) folding it into the writer, with no third
+opt-in switch.
+
+**Justification.** Iter53's reviewer-skew root cause — stale
+binary + fresh manifest with matching SHAs — was a structural
+blind spot: nothing in the bake pipeline tied the cached cpio
+back to the input SHAs it was built from, so an unrelated input
+edit upstream couldn't invalidate the cache. The mtime-based
+freshness check (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`) caught one
+shape of this regression (mtime ordering between source tree and
+staged binary). The integrity manifest pinned here catches the
+adjacent shape: an operator who edits `Containerfile`, rotates
+the signing key, or swaps vmlinux MUST NOT have the prior cpio
+shipped past the cache; every recordable input change invalidates
+the cache mechanically.
+
+The `host` and `built_at_unix` fields are deliberately NOT in the
+freshness key — a bake on a different host (CI vs operator
+laptop) with identical observable inputs SHOULD short-circuit
+because the resulting cpio is byte-deterministic for identical
+inputs (`raxis-image-builder`'s build-and-sign determinism
+guarantee). Hashing host metadata would defeat the cache without
+adding any trust guarantee.
+
+**Scenario.** An operator runs `cargo xtask images bake` on a
+fresh checkout. The bake produces three `.img` + `.manifest.toml`
++ `.bake.json` triples under `<install_dir>/images/`. The
+operator then re-runs `cargo xtask images bake` without editing
+anything. The driver:
+
+* Computes `BakeInputs` for orchestrator-core → SHA-equals the
+  prior manifest → on-disk SHA-equals → emits
+  `bake_role_no_op { role: "raxis-planner-orchestrator", reason:
+  "inputs_unchanged_outputs_intact" }`, skips.
+* Same for reviewer-core.
+* Same for executor-starter.
+
+Total wall time: under a second. No container builder invocation,
+no cross-compile, no signing pass.
+
+A later edit to `crates/planner-core/src/driver.rs` causes the
+operator's next bake to see a different `staged_binary_sha256`
+(the freshness check + auto-rebake from
+`INV-IMAGE-BAKE-NO-STALE-CACHE-01` produces a fresh binary
+upstream of the integrity check), which trips
+`bake_should_skip → None`, which triggers the per-role rebake
+loop for every affected role.
+
+**Witness.**
+[`xtask::images::tests::inv_image_bake_manifest_integrity_01_no_op_shortcut_skips_unchanged_role`](../xtask/src/images.rs):
+writes a prior manifest with matching outputs, asserts the
+shortcut fires; mutates the staged binary; asserts the shortcut
+declines to short-circuit. Pairs with
+[`…::inv_image_bake_manifest_integrity_01_no_op_shortcut_rejects_tampered_img`](../xtask/src/images.rs)
+(a `.img` whose SHA disagrees with the cached value MUST trigger
+a rebake — the integrity manifest is the audit trail),
+[`…::inv_image_bake_manifest_integrity_01_inputs_round_trip_through_compute`](../xtask/src/images.rs)
+(every documented input field is populated),
+[`…::inv_image_bake_manifest_integrity_01_compute_detects_planner_binary_change`](../xtask/src/images.rs)
++ [`…::inv_image_bake_manifest_integrity_01_compute_detects_vmlinux_change`](../xtask/src/images.rs)
++ [`…::inv_image_bake_manifest_integrity_01_compute_detects_signing_key_rotation`](../xtask/src/images.rs)
+(each input mutation is mechanically observable),
+[`…::inv_image_bake_manifest_integrity_01_manifest_round_trips_through_json`](../xtask/src/images.rs)
+(serde round-trip pins the on-disk JSON shape),
+and [`…::inv_image_bake_manifest_integrity_01_unknown_schema_version_treated_as_missing`](../xtask/src/images.rs)
+(forward-compat shape: a newer manifest schema must NOT be
+trusted by an older xtask).
+
+**Canonical home.** `v2/canonical-images.md §7`.
+
+---
+
 ### INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01 — Canonical executor-starter image MUST ship a working `ruff` without task-time egress
 
 **Statement.** The kernel-built canonical executor-starter image
@@ -7588,7 +8020,7 @@ implementation logged the four lines below and returned
 `None`, leaving the dashboard server in JSON-only mode for the
 entire 65 min run:
 
-```
+```bash
 [dashboard-bundle] dashboard-fe/dist/index.html missing — running `npm run build` in /private/tmp/raxis-iter52-fixloop/raxis/raxis/dashboard-fe (opt out via RAXIS_E2E_SKIP_DASHBOARD_BUILD=1)
 
 > raxis-dashboard-fe@0.1.0 build

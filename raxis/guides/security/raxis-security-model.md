@@ -219,7 +219,7 @@ independently of the planner binary.
 
 **What "separate process" means structurally:**
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                    HOST MACHINE                          │
 │                                                          │
@@ -306,7 +306,7 @@ gateway is an unauthenticated credential-exercising endpoint.
 
 **Layer 1 — UDS socket file permissions:**
 The gateway's listening socket is created at `$RAXIS_DATA_DIR/gateway.sock`:
-```
+```text
 owner: raxis-kernel   mode: 0600
 ```
 The OS enforces this at `connect()` time. A process not running as `raxis-kernel` user
@@ -495,7 +495,7 @@ creation time. Tokens are never created by the planner, never derived from a sha
 and never reused across sessions.
 
 **Token structure:**
-```
+```text
 <session_id>:<hmac_sha256(session_id || initiative_id || created_at || kernel_secret)>
 ```
 
@@ -584,7 +584,7 @@ any state change is committed.
 Every intent submission passes through these checks in order. Failure at any step returns
 the corresponding error code and stops processing — later steps do not run.
 
-```
+```text
 1.  Frame deserialization     → FAIL_MALFORMED_FRAME
 2.  HMAC token validation     → FAIL_AUTH
 3.  Session lookup            → FAIL_SESSION_NOT_FOUND
@@ -821,7 +821,7 @@ bounded, well-defined artifact (a git commit), at a single enforcement point.
 The Orchestrator's `path_allowlist` must be a superset of the union of all its sub-tasks'
 allowlists. Validated at `approve_plan` time (shift-left check #4):
 
-```
+```text
 orchestrator.path_allowlist ⊇ UNION(task.path_allowlist for task in all_tasks)
 ```
 
@@ -914,7 +914,7 @@ or modification of event bytes causes a hash mismatch at the next event.
 Every session-scoped audit event carries four fields that together uniquely identify the
 human-authorized context for every action:
 
-```
+```text
 session_id       → which session submitted the intent
 initiative_id    → which initiative it belongs to
 plan_sha256      → SHA-256 of the exact plan.toml bytes the operator signed
@@ -1067,7 +1067,7 @@ minute of shift-left validation saves N minutes of runtime failure.
 ### Plan SHA in the Audit Chain
 
 At `approve_plan` success, the Kernel records:
-```
+```text
 initiatives.plan_artifact_sha256 = SHA-256(plan_bytes)
 ```
 
@@ -1117,7 +1117,7 @@ RAXIS_INITIATIVE_ID=<initiative_uuid>
 
 The inference workflow from the planner's perspective:
 
-```
+```text
 planner → InferenceRequest { messages, tools } → Kernel (via VSock)
 Kernel  → InferenceRequest → raxis-gateway (via UDS)
 gateway → provider API call (with credential from $RAXIS_DATA_DIR/credentials/)
@@ -1282,7 +1282,7 @@ directory before the VM boots. The planner reads this file at startup. It is rea
 (mounted on the read-only `/raxis` VirtioFS share).
 
 **Assembly order:**
-```
+```text
 [NON-NEGOTIABLE HEADER]           ← Kernel-generated, always first
 Role: <Executor|Orchestrator|Reviewer>
 Task ID: <task_id>
@@ -1369,7 +1369,7 @@ intervention. It enforces:
 
 ### Escalation States
 
-```
+```text
                      ┌─────────────────────────┐
                      │         Pending          │
                      │  (EscalationRequested)   │
@@ -1684,7 +1684,7 @@ result in a `PolicyEpochAdvanced` audit event — they cannot be made silently.
 
 ### The Approval Flow
 
-```
+```text
 Orchestrator submits IntegrationMerge { commit_sha: "abc", operator_approval_id: None }
   ↓
 Kernel Check 5b: diff touches src/payments/ → protected hit

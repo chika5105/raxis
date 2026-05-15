@@ -11,7 +11,7 @@ new host with the same state". Restore is rehearsed periodically.
 
 ## What's in the data directory
 
-```
+```text
 $RAXIS_DATA_DIR/
 ├── audit.jsonl                  # tamper-evident audit chain
 ├── kernel.db                    # SQLite: initiatives, tasks, sessions, etc.

@@ -92,7 +92,7 @@ context             = """
 
 ## How It Executes
 
-```
+```text
 approve_plan
   └── Kernel validates: DAG acyclicity, path subset, single Orchestrator ✓
 

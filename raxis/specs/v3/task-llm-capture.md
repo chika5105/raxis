@@ -43,7 +43,7 @@ debug unit directly.
 
 ## On-disk shape
 
-```
+```text
 <data_dir>/llm-turns/<task_id>.jsonl
 ```
 
@@ -80,7 +80,7 @@ cost flat.
 
 ## Wire path
 
-```
+```text
 planner VM ──HTTPS POST──▶ tproxy ──intra-VM redirect──▶ raxis-gateway
                                                               │
                                                               │  upstream completes
@@ -108,7 +108,7 @@ or FSM transition the dispatch loop drives in response.
 
 ## Dashboard route
 
-```
+```text
 GET /api/tasks/:id/llm-turns?limit=N
 ```
 

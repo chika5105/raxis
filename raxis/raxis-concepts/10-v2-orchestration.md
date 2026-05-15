@@ -68,7 +68,7 @@ When the Orchestrator submits `ActivateSubTask { task_id: "implement" }`:
 2. If not → `DEPENDENCY_NOT_MET` → the Orchestrator must wait
 3. If yes → the kernel spawns a session for the Executor
 
-```
+```text
 orchestrate ──→ implement ──→ review
    (orch)         (exec)       (rev)
 ```
@@ -131,7 +131,7 @@ Each retry creates a **new** `subtask_activations` row with a fresh `PendingActi
 
 ## The Full V2 Flow (Visual)
 
-```
+```text
 Operator submits plan with DAG
         │
         ▼

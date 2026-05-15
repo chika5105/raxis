@@ -80,7 +80,7 @@ into the unfixed Tier-1 posture.
 
 ## 2. The unified A3 model end-to-end
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────┐
 │ Guest VM (no virtio-net)                                       │
 │                                                                │
@@ -210,7 +210,7 @@ PID 1 inside every Linux executor guest unconditionally installs
 the egress chokepoint at boot — there is no `RAXIS_AIRGAP_A3` gate
 and no cargo feature flag any more. The chokepoint consists of:
 
-```
+```bash
 # Redirect all outbound TCP (except loopback) to raxis-tproxy
 iptables -t nat -A OUTPUT -p tcp ! -d 127.0.0.1/32 -j REDIRECT --to-port 3129
 

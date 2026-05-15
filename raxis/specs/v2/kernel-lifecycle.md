@@ -51,7 +51,7 @@ Per `INV-LIFECYCLE-03`, V2 does not implement a custom Rust-based daemon supervi
 
 ### 2.1 Component diagram
 
-```
+```text
                     ┌─────────────────────────────┐
                     │  raxis CLI                  │
                     │                             │
@@ -161,7 +161,7 @@ raxis kernel uninstall --system    # system mode; requires sudo
 
 ### 3.3 Status output format
 
-```
+```bash
 $ raxis kernel status
 Mode:               Daemon (user)
 Service:            ~/.config/systemd/user/raxis-kernel.service
@@ -190,7 +190,7 @@ Recent log lines (last 5):
 
 When the kernel is not running:
 
-```
+```bash
 $ raxis kernel status
 Mode:               Not running
 Service:            ~/.config/systemd/user/raxis-kernel.service (installed, disabled)
@@ -203,7 +203,7 @@ To start: raxis kernel start --daemon
 
 When the kernel is in foreground (started by current shell or another):
 
-```
+```bash
 $ raxis kernel status
 Mode:               Foreground
 PID:                94532
@@ -263,7 +263,7 @@ WantedBy=default.target
 
 The CLI then runs:
 
-```
+```bash
 systemctl --user daemon-reload
 systemctl --user enable raxis-kernel.service
 systemctl --user start raxis-kernel.service
@@ -318,7 +318,7 @@ System mode integrates with system-wide initialization: the kernel starts at mac
 
 Install steps:
 
-```
+```bash
 useradd --system --home-dir /var/lib/raxis --shell /usr/sbin/nologin raxis  # if missing
 install -d -o raxis -g raxis /var/lib/raxis /etc/raxis
 systemctl daemon-reload
@@ -341,7 +341,7 @@ Operators do not run `--foreground-supervised` directly; the CLI generates the u
 
 All logs go to journald and are accessible via:
 
-```
+```bash
 $ journalctl --user -u raxis-kernel             # user mode
 $ sudo journalctl -u raxis-kernel               # system mode
 
@@ -422,7 +422,7 @@ The kernel's audit log (per `host-capacity.md §6.3`) is separate and unaffected
 
 The CLI then runs:
 
-```
+```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.raxis.kernel.plist
 launchctl enable gui/$(id -u)/dev.raxis.kernel
 launchctl kickstart gui/$(id -u)/dev.raxis.kernel
@@ -499,7 +499,7 @@ launchctl print gui/$(id -u)/dev.raxis.kernel | head -20    # verify state
 
 Install steps:
 
-```
+```bash
 sudo dscl . -create /Users/_raxis UniqueID 281 PrimaryGroupID 281 \
     NFSHomeDirectory /var/lib/raxis UserShell /usr/bin/false  # if missing
 sudo install -d -o _raxis -g _raxis /var/lib/raxis /etc/raxis /var/log/raxis
@@ -521,7 +521,7 @@ There is no journald equivalent on macOS. Operators wanting structured log aggre
 
 The kernel does NOT rotate its own operational logs (this is supervisor territory). On Linux, journald's built-in rotation handles it. On macOS, the spec recommends operators configure `newsyslog` (Apple's bundled log rotator) via `/etc/newsyslog.d/raxis.conf`:
 
-```
+```text
 # /etc/newsyslog.d/raxis.conf
 /var/log/raxis/kernel.out  _raxis:_raxis  644  10  10240  *  J
 /var/log/raxis/kernel.err  _raxis:_raxis  644  10  10240  *  J
@@ -559,7 +559,7 @@ The kernel itself is always terminated `Graceful`. Per `key-revocation.md §7.2`
 
 `Graceful` shutdown for the kernel:
 
-```
+```text
 1. SIGTERM received.
 2. Reject new IPC connections (operator and gateway both); existing in-flight intents continue.
 3. For each Active session, send KernelPush::SessionPausing { reason: KernelShutdown };
@@ -735,7 +735,7 @@ The CLI's intent-submitting commands (`raxis approve-plan`, `raxis init`, etc.) 
 
 The service's lifecycle follows a small state machine that operators see via `raxis kernel status`:
 
-```
+```text
 ┌───────────────┐
 │  Not Installed│ ──install (writes service file; enables boot)──► ┌──────────────┐
 │  (no service  │ ◄──────────────uninstall─────────────────────────│  Stopped     │
@@ -965,7 +965,7 @@ runs if `now - last_run >= job_period`.
 
 Drives `git gc --prune=<retention>` against `<data_dir>/main_repo`.
 
-```
+```text
 1. Acquire an advisory lock on main_repo (gix/git2 file-locking).
    If contended (an in-flight IntegrationMerge phase 2 is running),
    skip this tick — the next 6h tick or the next disk-pressure tick

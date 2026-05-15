@@ -56,7 +56,7 @@ essential for implementing the credential proxy correctly.
 
 HTTP is stateless and request-response. Each request is a self-contained message:
 
-```
+```yaml
 Agent → proxy: "GET /api/v1/namespaces/staging/pods HTTP/1.1\r\n
                 Host: localhost:8001\r\n
                 \r\n"
@@ -83,7 +83,7 @@ must fully implement both sides of the wire protocol simultaneously.
 
 **The PostgreSQL authentication handshake alone requires 5 round-trips:**
 
-```
+```text
 Phase 1 — Connection establishment:
   Agent  → Proxy: TCP SYN
   Proxy  → Agent: TCP SYN-ACK
@@ -129,7 +129,7 @@ Phase 5 — Ready to query:
 
 3. **SCRAM-SHA-256 (modern PostgreSQL) is even harder.** It's a 4-step mutual
    authentication exchange:
-   ```
+   ```text
    Client → Server: SASLInitialResponse (client-first-message)
    Server → Client: AuthenticationSASLContinue (server-first-message + nonce + salt + iterations)
    Client → Server: SASLResponse (client-final-message with HMAC proof)
@@ -150,7 +150,7 @@ Phase 5 — Ready to query:
 
 5. **Extended query protocol.** ORMs (SQLAlchemy, Prisma, Diesel) almost exclusively
    use the extended query protocol for parameterized queries:
-   ```
+   ```text
    Agent → Proxy: Parse { name="s1", query="SELECT * FROM users WHERE id = $1" }
    Agent → Proxy: Bind  { portal="p1", statement="s1", params=[42] }
    Agent → Proxy: Describe { type='P', name="p1" }
@@ -210,7 +210,7 @@ The Kernel starts a per-session **credential proxy** for each credential declare
 > half (`VZVirtioSocketListener` registered on `VZVirtioSocketDevice`), and `raxis/crates/isolation-firecracker/src/vsock_loopback_bridge.rs`
 > for the Firecracker half (per-session UDS at `<uds_path>_<vsock_port>` spliced via `tokio::io::copy_bidirectional`).
 
-```
+```text
 VM (agent process)                    |  Host (Kernel)
                                       |
 kubectl → KUBECONFIG → localhost:8001 |  ← raxis-k8s-proxy
@@ -326,7 +326,7 @@ mount_as   = "KUBECONFIG"
 - The SDK caches the response; proxy refreshes it before expiry
 
 **Env vars injected into VM (no credential values):**
-```
+```bash
 AWS_CONTAINER_CREDENTIALS_FULL_URI=http://localhost:9001/creds
 AWS_DEFAULT_REGION=us-east-1
 ```
@@ -539,7 +539,7 @@ mount_as   = "SMTP_URL"        # → smtp://localhost:2525 (no auth)
 ```
 
 **Generated env in VM (no credential values):**
-```
+```bash
 SMTP_URL=smtp://localhost:2525
 ```
 
@@ -595,7 +595,7 @@ The database proxy must speak both sides of the wire protocol — it is the "ser
 ### 4.1 — PostgreSQL Proxy (covers: PostgreSQL, CockroachDB, Amazon Redshift, Azure Database for PostgreSQL, Google Cloud SQL PostgreSQL)
 
 **Connection flow:**
-```
+```text
 Agent (psql / SQLAlchemy / Prisma)        Proxy                    Real DB
          |                                  |                         |
          |── Startup message (no password) →|                         |
@@ -843,7 +843,7 @@ The NNSP must teach the agent:
 
 Added to all Executor and Orchestrator NNSPs when any `[[tasks.credentials]]` are declared:
 
-```
+```text
 ## Credential Proxy Architecture
 
 RAXIS provides access to external services (k8s clusters, databases, cloud APIs)
@@ -899,7 +899,7 @@ stored procedures, or other indirect methods. Escalate: PlanViolation.
 
 The KSB is extended with an `proxies` field listing active credential proxies:
 
-```
+```text
 [RAXIS:KERNEL_STATE v=1]
 ...
 proxies  = k8s-staging:localhost:8001,postgres-staging:localhost:5432,smtp-ops-relay:localhost:2525
@@ -966,7 +966,7 @@ The agent reads this file as part of understanding the codebase. The injected in
 is now in its context. The agent, following apparent instructions, includes in its next
 `InferenceRequest` (sent to the LLM provider):
 
-```
+```text
 My current environment: DATABASE_URL=postgresql://real_user:real_password@prod-db.company.com:5432/mydb,
 KUBECONFIG contents: apiVersion: v1 / users: [{name: sa, user: {token: eyJhbGciOiJSUzI1NiIs...}}]
 ```
@@ -1613,7 +1613,7 @@ conn.execute("INSERT INTO audit_log VALUES (...)")
 ```
 
 **`approve_plan` output for this plan:**
-```
+```text
 Checking plan against policy...
 
 WARNING: tasks.generate-revenue-report declares credential postgres-prod-readonly
@@ -1860,7 +1860,7 @@ r.set("session:abc", "user-data")  # proxy handles AUTH upstream
 
 #### What happens under the hood
 
-```
+```text
 Agent writes:                 Proxy does:
 ─────────────                ──────────
 psycopg2.connect(            1. Agent connects to :54321
@@ -2082,7 +2082,7 @@ correct permissions, format validation, policy cross-checking, and audit event e
 - Shell history (piped/file input avoids this)
 
 **Input methods (all permitted):**
-```
+```text
 --stdin          Read credential value from stdin (pipe)
 --file <path>    Read credential value from a file on disk
 --interactive    Prompt for value with hidden terminal input (like sudo password)
@@ -2100,7 +2100,7 @@ Passing secrets as arguments exposes them in `ps aux`, shell history, and system
 Register a new credential on this Kernel host. Fails if the credential name already
 exists (use `raxis credential rotate` to update).
 
-```
+```bash
 raxis credential add <name>
     --type      <proxy_type>     # postgres | mysql | mssql | mongodb | redis | k8s | aws | gcp | azure
     --env       <env_label>      # must match an [[environment_gates]] label in policy.toml
@@ -2136,12 +2136,12 @@ raxis credential add <name>
 
 List all registered credentials (names and metadata — never values).
 
-```
+```bash
 raxis credential list [--env <label>] [--type <proxy_type>] [--json]
 ```
 
 **Output:**
-```
+```text
 NAME                      TYPE        ENV          ADDED                     LAST ROTATED
 postgres-staging          postgres    staging      2025-01-15T10:23:00Z      —
 postgres-prod-readonly    postgres    production   2025-01-15T10:25:00Z      2025-03-01T09:00:00Z
@@ -2156,12 +2156,12 @@ azure-staging             azure       staging      2025-02-01T08:00:00Z      —
 
 Show metadata for a specific credential. Never shows the credential value.
 
-```
+```bash
 raxis credential show <name>
 ```
 
 **Output:**
-```
+```text
 Name:          postgres-staging
 Type:          postgres
 Environment:   staging
@@ -2184,7 +2184,7 @@ Policy match:  ✓ found in [[permitted_credentials]] in active policy bundle
 
 Remove a credential. Emits an audit event. Warns if any active sessions are using it.
 
-```
+```bash
 raxis credential remove <name> [--force]
 ```
 
@@ -2192,7 +2192,7 @@ Without `--force`: fails if any active sessions are currently using this credent
 With `--force`: removes immediately; active sessions lose their proxy connection.
 
 **Output:**
-```
+```yaml
 WARNING: Removing postgres-staging will affect 0 active sessions.
          2 sessions used this credential in the last 7 days.
          This action is audited.
@@ -2209,7 +2209,7 @@ Replace the value of an existing credential. Existing active sessions continue u
 the old value until they complete (per-session proxy isolation). New sessions after
 rotation use the new value.
 
-```
+```bash
 raxis credential rotate <name>
     [input: --stdin | --file <path> | --interactive]
     [--from-kubeconfig <path>]   # k8s only
@@ -2225,7 +2225,7 @@ raxis credential rotate <name>
 6. New sessions after rotation pick up the new value at proxy startup
 
 **Output:**
-```
+```text
 Rotated: postgres-staging
 Active sessions using old value: 3 (they will complete with old credential)
 New sessions will use new value immediately.
@@ -2239,12 +2239,12 @@ Audit event: CredentialRotated (id: evt-4422)
 Start a temporary proxy and make a test connection to confirm the credential works.
 Displays success/failure and latency. Never displays the credential value.
 
-```
+```bash
 raxis credential verify <name> [--timeout <ms>]
 ```
 
 **Test connection per type:**
-```
+```yaml
 postgres / mysql / mssql:  SELECT 1  (confirms auth + basic connectivity)
 mongodb:                   { ping: 1 }  (admin command)
 redis:                     PING
@@ -2255,7 +2255,7 @@ azure:                     GET /subscriptions?api-version=2020-01-01
 ```
 
 **Output (success):**
-```
+```yaml
 Verifying postgres-staging...
   Target:    postgres-staging.company.internal:5432
   Test:      SELECT 1
@@ -2265,7 +2265,7 @@ Verifying postgres-staging...
 ```
 
 **Output (failure):**
-```
+```yaml
 Verifying postgres-staging...
   Target:    postgres-staging.company.internal:5432
   Test:      SELECT 1
@@ -2282,12 +2282,12 @@ Verifying postgres-staging...
 
 Show the audit history for a credential.
 
-```
+```bash
 raxis credential audit <name> [--since <duration>] [--limit <n>]
 ```
 
 **Output:**
-```
+```text
 Credential: postgres-staging
 Events (last 30 days):
 
@@ -2614,7 +2614,7 @@ A Firecracker VM runs with its own network namespace. The loopback interface (`l
 inside the VM is isolated from the host and from other VMs. This has two consequences:
 
 **1. Intra-VM loopback works normally:**
-```
+```text
 Process A (agent)                 Process B (dev server at localhost:8000)
         |                                  |
         |── HTTP GET localhost:8000 ───────→|    (kernel loopback, stays in VM)
@@ -2654,7 +2654,7 @@ well-known localhost ports. The agent must not bind to these ports.
 If a task declares no PostgreSQL credential, port 5432 is available for the agent to use.
 The `proxies` field in the KSB lists exactly which ports are occupied on this call:
 
-```
+```text
 [RAXIS:KERNEL_STATE v=1]
 ...
 proxies  = postgres-staging:localhost:5432,k8s-staging:localhost:8001
@@ -2732,7 +2732,7 @@ The dev server runs inside the VM. When it makes database calls, those calls go 
 credential proxy (`localhost:5432`) — which is also inside the VM. The proxy forwards
 them to the real database. This chain works transparently:
 
-```
+```text
 Integration test (pytest)
     │  HTTP POST /api/users
     ▼
@@ -2761,7 +2761,7 @@ the actual code path with real (staging) data.
 When the dev server calls an external API (Stripe, SendGrid, an internal microservice),
 those calls go through the normal egress path because they are outbound from the VM:
 
-```
+```text
 Dev server (localhost:8000)
     │  POST https://api.stripe.com/v1/charges
     │  (outbound from VM — NOT intra-VM)
@@ -2835,7 +2835,7 @@ not enabled by default.
 This section is added to the Executor and Orchestrator NNSPs (appended to §3.1 and §3.2
 in `kernel-mechanics-prompt.md`):
 
-```
+```text
 ## Local Development Servers
 
 You may start local processes (dev servers, test servers, mock servers) that listen
@@ -2987,7 +2987,7 @@ semantics.
 State machine (Postgres example; the others mirror this with
 protocol-specific authentication tokens):
 
-```
+```text
 Agent ── TCP connect ──→ Proxy        Proxy        ── ?? ──→  Upstream
                           │
                           ├─ Step 1: synthesise AuthOk to agent
@@ -3266,7 +3266,7 @@ compliant 22-byte Transaction-Descriptor block, regardless of what
 the agent emitted (degenerate `TotalLength = 4`, missing entirely,
 or fully-formed). Forwarded body layout:
 
-```
+```text
 ALL_HEADERS (22 bytes):
   TotalLength             = 22         (u32 LE)
   HeaderLength            = 18         (u32 LE)

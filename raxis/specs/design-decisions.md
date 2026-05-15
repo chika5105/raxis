@@ -329,7 +329,7 @@ The `raxis-planner` binary is defined by what it *cannot* do, not by what it can
 
 **Agent loop structure — the planner's entire runtime is this loop:**
 
-```
+```text
 1. CONNECT    → IPC handshake with kernel; receive session_token
 2. PICK UP    → kernel.send(NextReadyTasks) → receive task list
 3. BIND       → kernel.send(IntentRequest { PickUpTask, task_id }) → task bound to session

@@ -137,7 +137,7 @@ kernel binary's own audit-tools crate.
 
 Wire shape:
 
-```
+```text
 {
   "fresh": true | false,
   "status": "ok" | "broken" | "unknown",
@@ -517,7 +517,7 @@ The kernel's test harness (`kernel/tests/common/dashboard.rs`)
 mints a fully-signed JWT during boot and prints a URL of the
 shape
 
-```
+```text
 http://127.0.0.1:<port>/login#autologin=1
     &token=<jwt>
     &operator_id=<fp>

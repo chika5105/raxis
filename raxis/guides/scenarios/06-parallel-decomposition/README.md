@@ -60,7 +60,7 @@ watch -n 1 "raxis initiative show $INIT_ID --with-tasks"
 
 ## What "success" looks like
 
-```
+```yaml
 auth_module:    Completed
 billing_module: Completed
 ```
