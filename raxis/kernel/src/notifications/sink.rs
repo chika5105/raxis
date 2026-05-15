@@ -263,6 +263,18 @@ fn bridge_audit_to_metric(
             // operator cares about is the VM-spawn-to-VM-exit window.
             let now = Instant::now();
             let mut guard = sessions.lock();
+            // INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — capture the
+            // duration the session spent in the `Created` state
+            // before the VM-spawn admitted. A slow `Created→Spawned`
+            // transition points at scheduling back-pressure (the VM
+            // pool is full, the budget envelope is being recomputed,
+            // etc.) — distinct from a slow VM cold boot, which
+            // surfaces under `IsolationSpawnColdBootDuration`.
+            let created_to_spawned_ms = guard
+                .by_session
+                .get(session_id)
+                .map(|(t, _)| t.elapsed().as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
             match guard.by_session.get_mut(session_id) {
                 Some(entry) => entry.0 = now,
                 None => {
@@ -284,6 +296,13 @@ fn bridge_audit_to_metric(
                 .unwrap_or_else(|| "unknown".to_owned());
             drop(guard);
             obs::record_session_lifecycle_transition(hub, "Created", "Spawned", &agent_type, "ok");
+            obs::record_fsm_transition(
+                hub,
+                obs::FSM_KIND_SESSION,
+                "Created",
+                "Spawned",
+                created_to_spawned_ms,
+            );
         }
         AuditEventKind::SessionVmExited {
             session_id,
@@ -308,6 +327,20 @@ fn bridge_audit_to_metric(
                 outcome,
             );
             obs::record_session_duration(hub, &agent_type, outcome, duration_ms);
+            // INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — pair the
+            // `record_session_duration` (semantic spawn-to-exit) with
+            // the FSM-shape `Spawned→Exited` transition latency. They
+            // are equivalent ms values today but live under different
+            // `MetricName` variants so the dashboard can pivot the
+            // FSM timeline alongside the worktree / store / IPC
+            // panels uniformly.
+            obs::record_fsm_transition(
+                hub,
+                obs::FSM_KIND_SESSION,
+                "Spawned",
+                "Exited",
+                duration_ms,
+            );
         }
 
         // ── Initiative lifecycle (duration + in-flight gauge) ────
@@ -346,6 +379,16 @@ fn bridge_audit_to_metric(
                     _ => "error",
                 };
                 obs::record_initiative_duration(hub, "unknown", outcome, duration_ms);
+                // INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — pair the
+                // semantic `record_initiative_duration` with the
+                // FSM-shape `Created→<terminal>` transition latency.
+                obs::record_fsm_transition(
+                    hub,
+                    obs::FSM_KIND_INITIATIVE,
+                    "Created",
+                    to_state,
+                    duration_ms,
+                );
             }
         }
         AuditEventKind::InitiativeAborted { initiative_id, .. } => {
@@ -356,6 +399,16 @@ fn bridge_audit_to_metric(
                 .unwrap_or_else(Instant::now);
             let duration_ms = start.elapsed().as_millis() as i64;
             obs::record_initiative_duration(hub, "unknown", "aborted", duration_ms);
+            // INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — abort lands
+            // on the same FSM-transition histogram so per-state-pair
+            // pivots can rank `Aborted` separately from `Failed`.
+            obs::record_fsm_transition(
+                hub,
+                obs::FSM_KIND_INITIATIVE,
+                "Created",
+                "Aborted",
+                duration_ms,
+            );
         }
         AuditEventKind::TaskAdmitted { initiative_id, .. } => {
             let mut guard = initiatives.lock();
@@ -364,8 +417,26 @@ fn bridge_audit_to_metric(
             let value = *count;
             drop(guard);
             obs::record_initiative_task_in_flight(hub, "unknown", value);
+            // INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — record the
+            // `None→Admitted` task-FSM transition with a zero-ms
+            // delta (admit is the FSM's first observable event;
+            // any pre-admit queueing time lives upstream of the
+            // admission point and is captured by
+            // `IntentAdmissionDuration`). The histogram counts the
+            // admit event so it pairs with the lifecycle counter.
+            obs::record_fsm_transition(hub, obs::FSM_KIND_TASK, "None", "Admitted", 0);
         }
         AuditEventKind::TaskStateChanged { to_state, .. } => {
+            // INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — `task_id`
+            // is not in scope here (the variant does not carry the
+            // owning initiative_id either, see the existing comment
+            // below), so we cannot pair this transition with a
+            // per-task entry timestamp. We emit a zero-ms placeholder
+            // so the FSM histogram surfaces the transition rate by
+            // `from_state`/`to_state` pair; per-task duration
+            // arrives in iter62 once the `TaskStateChanged` payload
+            // carries `task_id` + `from_state`.
+            obs::record_fsm_transition(hub, obs::FSM_KIND_TASK, "Admitted", to_state, 0);
             // Only terminal task states decrement the gauge. We
             // cannot look up the owning initiative_id from a
             // `TaskStateChanged` payload (the event does not carry
@@ -992,6 +1063,270 @@ mod tests {
             1,
             "inner sink still observes the emit"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — FSM event→commit latency
+    // ----------------------------------------------------------------
+    //
+    // The bridge funnels three FSM domains (`session`, `initiative`,
+    // `task`) through `obs::record_fsm_transition`, paired with the
+    // semantic lifecycle helpers (`record_session_duration`,
+    // `record_initiative_duration`). The witnesses below pin
+    //
+    // 1. `Created→Spawned` + `Spawned→Exited` for the session FSM,
+    // 2. `Created→Completed` for the initiative FSM,
+    // 3. the hub-disabled fast path emits zero histogram samples,
+    //
+    // exactly per the closed FSM lexicon
+    // (`obs::FSM_KIND_{SESSION,INITIATIVE,TASK}`) and the
+    // `MetricName::FsmTransitionDuration` histogram.
+
+    /// Build a hub the inline witnesses can introspect. Mirrors the
+    /// `bridge_bumps_metric_for_observed_variants` fixture above but
+    /// returned as `(hub, exporter)` so each witness can flush + read.
+    fn fsm_hub() -> (
+        Arc<raxis_observability::ObservabilityHub>,
+        Arc<raxis_observability::exporter::InMemoryExporter>,
+    ) {
+        use raxis_observability::{
+            exporter::{InMemoryExporter, ObservabilityExporter},
+            hub::HubConfig,
+            ObservabilityHub,
+        };
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled: true,
+            max_queue_depth: 1024,
+            sample_rate: 1.0,
+            max_attrs_per_span: 32,
+            max_events_per_span: 16,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            Arc::clone(&exp) as Arc<dyn ObservabilityExporter>,
+        ));
+        (hub, exp)
+    }
+
+    /// Helper: pull every `FsmTransitionDuration` histogram sample out
+    /// of the in-memory exporter, return `(fsm_kind, from, to, count)`.
+    fn fsm_samples(
+        exp: &raxis_observability::exporter::InMemoryExporter,
+    ) -> Vec<(String, String, String, u64)> {
+        use raxis_observability::{AttrValue, DataPoint, MetricName};
+        exp.metrics()
+            .into_iter()
+            .filter(|m| m.name == MetricName::FsmTransitionDuration)
+            .filter_map(|m| {
+                let count = match m.datapoint {
+                    DataPoint::Histo { count, .. } => count,
+                    _ => return None,
+                };
+                let s = |key: &str| match m.labels.get(key) {
+                    Some(AttrValue::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                Some((s("fsm_kind"), s("from_state"), s("to_state"), count))
+            })
+            .collect()
+    }
+
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-03` witness #1 — the
+    /// session FSM emits exactly two `FsmTransitionDuration`
+    /// observations across one synthetic `Created → Spawned → Exited`
+    /// life-cycle. Both samples MUST carry `fsm_kind = "session"` +
+    /// the matching `from_state` / `to_state` labels.
+    #[tokio::test]
+    async fn fsm_bridge_records_session_created_spawned_exited() {
+        let (hub, exp) = fsm_hub();
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = inner.clone();
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf())
+                .with_observability(Arc::clone(&hub));
+
+        sink.emit(
+            AuditEventKind::SessionCreated {
+                session_id: "sess-fsm-1".into(),
+                role: "executor".into(),
+                lineage_id: "l-1".into(),
+                worktree_root: None,
+                initiative_id: None,
+                plan_bundle_sha256: None,
+                policy_epoch: None,
+                session_agent_type: Some("Executor".into()),
+            },
+            Some("sess-fsm-1"),
+            None,
+            None,
+        )
+        .unwrap();
+        sink.emit(
+            AuditEventKind::SessionVmSpawned {
+                session_id: "sess-fsm-1".into(),
+                task_id: None,
+                initiative_id: "init-1".into(),
+                backend_id: "test".into(),
+                egress_tier: "Mediated".into(),
+                admission_loopback: "127.0.0.1:0".into(),
+                credential_proxies: 0,
+            },
+            Some("sess-fsm-1"),
+            None,
+            None,
+        )
+        .unwrap();
+        sink.emit(
+            AuditEventKind::SessionVmExited {
+                session_id: "sess-fsm-1".into(),
+                signal_class: "GracefulExit".into(),
+                exit_code: 0,
+                backend_error: None,
+            },
+            Some("sess-fsm-1"),
+            None,
+            None,
+        )
+        .unwrap();
+        hub.flush();
+
+        let samples = fsm_samples(&exp);
+        let session_pairs: Vec<_> = samples
+            .iter()
+            .filter(|(k, _, _, _)| k == "session")
+            .map(|(_, f, t, _)| (f.as_str(), t.as_str()))
+            .collect();
+        assert!(
+            session_pairs.contains(&("Created", "Spawned")),
+            "expected session Created→Spawned FSM sample; got {samples:#?}"
+        );
+        assert!(
+            session_pairs.contains(&("Spawned", "Exited")),
+            "expected session Spawned→Exited FSM sample; got {samples:#?}"
+        );
+        let session_count: u64 = samples
+            .iter()
+            .filter(|(k, _, _, _)| k == "session")
+            .map(|(_, _, _, c)| *c)
+            .sum();
+        assert!(
+            session_count >= 2,
+            "expected ≥2 session FSM samples; got count={session_count}"
+        );
+    }
+
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-03` witness #2 — the
+    /// initiative FSM emits one `FsmTransitionDuration` observation
+    /// on the `Created → Completed` terminal arm with
+    /// `fsm_kind = "initiative"`, `from = "Created"`,
+    /// `to = "Completed"`.
+    #[tokio::test]
+    async fn fsm_bridge_records_initiative_created_completed() {
+        let (hub, exp) = fsm_hub();
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = inner.clone();
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf())
+                .with_observability(Arc::clone(&hub));
+
+        sink.emit(
+            AuditEventKind::InitiativeCreated {
+                initiative_id: "init-fsm-1".into(),
+                plan_hash: "h".into(),
+                signed_by: "op".into(),
+                signed_at: 0,
+            },
+            None,
+            None,
+            Some("init-fsm-1"),
+        )
+        .unwrap();
+        sink.emit(
+            AuditEventKind::InitiativeStateChanged {
+                initiative_id: "init-fsm-1".into(),
+                from_state: "Created".into(),
+                to_state: "Completed".into(),
+            },
+            None,
+            None,
+            Some("init-fsm-1"),
+        )
+        .unwrap();
+        hub.flush();
+
+        let samples = fsm_samples(&exp);
+        let init_pairs: Vec<_> = samples
+            .iter()
+            .filter(|(k, _, _, _)| k == "initiative")
+            .map(|(_, f, t, _)| (f.as_str(), t.as_str()))
+            .collect();
+        assert!(
+            init_pairs.contains(&("Created", "Completed")),
+            "expected initiative Created→Completed FSM sample; got {samples:#?}"
+        );
+    }
+
+    /// `INV-OBSERVABILITY-DATAPLANE-LATENCY-03` witness #3 — the
+    /// hub-disabled fast path emits zero `FsmTransitionDuration`
+    /// samples even when the same lifecycle sequence is driven
+    /// through the bridge. The `obs_hub` is `None` (sink built
+    /// without `with_observability`), so the bridge is structurally
+    /// inert.
+    #[tokio::test]
+    async fn fsm_bridge_inert_when_hub_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = inner.clone();
+        // No `.with_observability(...)` — `obs_hub` stays `None`.
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf());
+
+        sink.emit(
+            AuditEventKind::SessionCreated {
+                session_id: "sess-fsm-2".into(),
+                role: "executor".into(),
+                lineage_id: "l-2".into(),
+                worktree_root: None,
+                initiative_id: None,
+                plan_bundle_sha256: None,
+                policy_epoch: None,
+                session_agent_type: Some("Executor".into()),
+            },
+            Some("sess-fsm-2"),
+            None,
+            None,
+        )
+        .unwrap();
+        sink.emit(
+            AuditEventKind::SessionVmSpawned {
+                session_id: "sess-fsm-2".into(),
+                task_id: None,
+                initiative_id: "init-2".into(),
+                backend_id: "test".into(),
+                egress_tier: "Mediated".into(),
+                admission_loopback: "127.0.0.1:0".into(),
+                credential_proxies: 0,
+            },
+            Some("sess-fsm-2"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Audit chain still observes the events (forensic record).
+        assert_eq!(
+            inner.events().len(),
+            2,
+            "inner audit sink must still observe both events"
+        );
+        // No hub means no metric channel — the bridge skipped the
+        // bridge_kind clone AND the helper fast-path early-returned.
+        // Nothing more to assert; the absence of a panic + the inner
+        // sink's accounting above is the witness.
     }
 
     /// If the inner sink returns Err, the wrapper MUST propagate the

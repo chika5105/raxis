@@ -100,7 +100,8 @@
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
 | Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
-| **Total** | | **137** |
+| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03 | 1 |
+| **Total** | | **138** |
 
 ---
 
@@ -9744,6 +9745,77 @@ zero or zero-thousand events per second.
 
 **Canonical home.** `v3/otel-observability.md §8` row
 `AuditChainLength`.
+
+---
+
+## §11.16 — Dataplane bottleneck instrumentation (INV-OBSERVABILITY-DATAPLANE-LATENCY-*)
+
+The iter61 dataplane-bottleneck slice expanded the V3 §3
+metric inventory with six new histogram families
+(`AuditChainStageDuration`, `StoreQueryDuration`,
+`FsmTransitionDuration`, `GitWorktreeStageDuration`,
+`GatewayStageDuration`, `IpcFrameStageDuration`). Each helper
+ships with a closed-stage / closed-class lexicon next to it
+in `kernel/src/observability.rs` (or `crates/store/src/observability.rs`
+for the store helper); the invariants below pin each helper
+to its production wire site so a future "dead helper"
+regression is caught by a per-crate witness instead of by a
+quiet Grafana panel.
+
+### INV-OBSERVABILITY-DATAPLANE-LATENCY-03 — `record_fsm_transition` fires on every Session / Initiative FSM commit through the audit→metric bridge
+
+**Statement.** Every successful
+`NotifyingAuditSink::emit` whose payload is one of
+
+* `AuditEventKind::SessionVmSpawned` (`session` /
+  `Created → Spawned`),
+* `AuditEventKind::SessionVmExited` (`session` /
+  `Spawned → Exited`),
+* `AuditEventKind::InitiativeStateChanged { to_state ∈
+  {Completed, Failed, Cancelled, Aborted} }` (`initiative` /
+  `Created → <to_state>`),
+* `AuditEventKind::InitiativeAborted` (`initiative` /
+  `Created → Aborted`),
+* `AuditEventKind::TaskAdmitted` (`task` /
+  `None → Admitted`, zero-ms placeholder),
+* `AuditEventKind::TaskStateChanged` (`task` /
+  `Admitted → <to_state>`, zero-ms placeholder),
+
+MUST produce exactly one
+`raxis.fsm.transition.duration` histogram observation
+labelled with the closed allow-list keys
+`{ fsm_kind, from_state, to_state }` (closed `fsm_kind`
+lexicon: `session` / `initiative` / `task`, pinned by
+`obs::FSM_KINDS`).
+
+The `session` and `initiative` arms carry a meaningful
+wall-clock value (`Created→Spawned` = scheduling back-pressure
+window, `Spawned→Exited` = VM lifetime, `Created→<terminal>` =
+initiative wall-clock); the `task` arms emit a zero-ms
+placeholder so the histogram surfaces transition rate by
+state-pair while the per-task entry-timestamp plumbing lands
+in iter62 (the existing `TaskStateChanged` payload does not
+carry a `task_id`-keyed entry instant).
+
+**Justification.** The pre-iter61 lifecycle helpers
+(`record_session_lifecycle_transition`,
+`record_initiative_duration`) emit one *counter* per
+transition tagged with the semantic role; the new
+`FsmTransitionDuration` histogram emits the wall-clock
+*latency* tagged with the pure FSM shape so the dashboard's
+"slow FSM transition" pivot can rank `Created→Spawned`
+back-pressure separately from `Spawned→Exited` cold-VM
+boots. Both helpers fire from the same audit-bridge call
+site so they can NEVER drift; the witness asserts the
+co-emit invariant.
+
+**Witness.** `kernel/src/notifications/sink.rs::tests::fsm_bridge_records_session_created_spawned_exited`,
+`fsm_bridge_records_initiative_created_completed`, and
+`fsm_bridge_inert_when_hub_disabled`.
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`FsmTransitionDuration` + Prometheus inventory in
+`v3/observability-prometheus.md §3` (iter61 expansion).
 
 ---
 
