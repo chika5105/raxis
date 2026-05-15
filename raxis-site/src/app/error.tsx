@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect } from "react";
 
 interface Props {
@@ -29,9 +30,9 @@ export default function Error({ error, reset }: Props) {
         >
           Try again
         </button>
-        <a href="/" className="btn btn-ghost">
+        <Link href="/" className="btn btn-ghost">
           Go home
-        </a>
+        </Link>
       </div>
       {error.digest && (
         <p className="mt-8 text-xs font-mono text-[var(--soft)]">

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import MiniSearch from "minisearch";
+import MiniSearch, { type AsPlainObject, type Options } from "minisearch";
 
 interface DocMeta {
   id: string;
@@ -13,7 +13,7 @@ interface DocMeta {
 }
 
 interface IndexFile {
-  index: any;
+  index: AsPlainObject;
   meta: DocMeta[];
   builtAt?: string;
   count?: number;
@@ -24,7 +24,7 @@ interface SearchResult extends DocMeta {
   matched: string[];
 }
 
-const MS_OPTS = {
+const MS_OPTS: Options<DocMeta> = {
   fields: ["title", "headings", "body", "slug"],
   storeFields: ["title", "category", "snippet", "slug", "headings"],
   searchOptions: {
@@ -56,7 +56,7 @@ export function SearchClient() {
           setCount(data.count ?? 0);
           return;
         }
-        const restored = MiniSearch.loadJS(data.index, MS_OPTS as any);
+        const restored = MiniSearch.loadJS<DocMeta>(data.index, MS_OPTS);
         setMs(restored);
         setCount(data.count ?? data.meta?.length ?? 0);
         setState("ready");
@@ -86,7 +86,7 @@ export function SearchClient() {
   const results: SearchResult[] = useMemo(() => {
     if (!ms || !q.trim()) return [];
     const raw = ms.search(q.trim());
-    return raw.slice(0, 30).map((r: any) => ({
+    return raw.slice(0, 30).map((r) => ({
       id: r.id,
       slug: r.slug,
       title: r.title,

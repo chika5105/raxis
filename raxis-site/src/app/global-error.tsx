@@ -73,6 +73,13 @@ export default function GlobalError({ error, reset }: Props) {
           >
             Try again
           </button>
+          {/*
+           * Intentional native <a>: global-error.tsx renders above the root
+           * layout when the app shell itself crashes. next/link relies on the
+           * client router being mounted, which is not guaranteed in this
+           * boundary — a hard navigation is the correct recovery affordance.
+           */}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- see comment above */}
           <a
             href="/"
             style={{

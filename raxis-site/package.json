@@ -8,7 +8,7 @@
     "prebuild": "node scripts/sync-docs.mjs && node scripts/build-search-index.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "sync-docs": "node scripts/sync-docs.mjs",
     "build-search": "node scripts/build-search-index.mjs"
@@ -33,10 +33,13 @@
     "unified": "^11.0.5"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.5",
     "@types/node": "^22.7.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "autoprefixer": "^10.4.20",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^15.5.18",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.6.3"
